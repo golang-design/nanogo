@@ -45,13 +45,27 @@ The costs are real and are accepted:
 1. **The format is not stable across Go releases.** nanogo targets one release at
    a time, pinned in the repository and asserted at startup. A mismatch is a
    clear error, never a misread.
-2. **It is undocumented outside its implementation.** The reader and writer are
-   ported from `cmd/compile/internal/typecheck` and `go/internal/gcimporter`, in
-   the manner of [012](012-type-checking.md).
-3. **Reading is easier than writing, and both are required.** A `gc`-compiled
-   package importing a nanogo-compiled one needs nanogo's output to be readable
-   by `gc`. Bring-up therefore starts with leaf packages, where only the reader
-   is exercised, and the writer is proved by moving up the graph.
+2. **It is undocumented outside its implementation, and it is not small.** The
+   modern format is the unified IR carried by `internal/pkgbits`. The sizes:
+
+   | Component | Lines | Role |
+   | --- | --- | --- |
+   | `internal/pkgbits` | 1,568 | the container: sections, indices, cross-references |
+   | `cmd/compile/internal/noder` writer, reader, linker | 8,097 | encoding and decoding declarations and bodies |
+   | `go/internal/gcimporter` | 1,259 | the types-only reader |
+
+   nanogo needs the container, a writer, and both readers: the types-only one for
+   ordinary imports and the full one for the bodies below. Call it 6,000 to
+   8,000 lines against [000](000-decisions.md) decision 10's budget. It is the
+   third-largest component in the compiler after the forked checker and the
+   backend, and sizing it by assertion would have been a mistake.
+3. **Both directions are required, and the writer comes first.** This is the
+   opposite of what it looks like. A leaf package has no imports, so compiling it
+   with nanogo exercises no reader at all — but its test binary is compiled by
+   `gc`, which then reads what nanogo *wrote*. So [051](051-build-integration.md)'s
+   first allowlist entry proves the **writer**. The reader is first exercised
+   when nanogo compiles a package that imports something, which is one step *up*
+   the graph, not down.
 
 ## Structure
 

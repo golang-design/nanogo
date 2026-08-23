@@ -57,6 +57,9 @@ Some decisions worth knowing before reading further:
   own. [`specs/012`](specs/012-type-checking.md)
 - **The compiler emits object files, not assembly text.** Two spikes decided
   this, and both are in [`spikes/`](spikes). [`specs/040`](specs/040-object-format.md)
+- **It is meant to fit 40,000 lines for v1**, and the accounting in
+  [`specs/000`](specs/000-decisions.md) says it currently does not, by five per
+  cent. That is recorded rather than adjusted.
 - **It is object-compatible with `gc`**, so `go build -toolexec=nanogo` can
   compile one package with nanogo while `gc` compiles the rest. That is how the
   compiler is brought up and how a failure gets one suspect.
@@ -67,7 +70,7 @@ Some decisions worth knowing before reading further:
 
 ## Specs
 
-[`specs/`](specs/) is the design deck: 33 specs, all `draft`, nothing built.
+[`specs/`](specs/) is the design deck: 41 specs, all `draft`, nothing built.
 Start with [`specs/000-decisions.md`](specs/000-decisions.md), which is normative,
 then [`specs/003-sequencing.md`](specs/003-sequencing.md) for the order of work.
 

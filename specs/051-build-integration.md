@@ -25,7 +25,13 @@ go build -toolexec=nanogo ./...
 ```
 
 The `go` command runs `nanogo <tool> <args...>` in place of each toolchain
-invocation. nanogo inspects the tool and the arguments and decides:
+invocation. [`spikes/toolexec`](../spikes/toolexec) measures this on a real
+build: 110 invocations for a two-package module, 59 of them `compile`, and a
+passthrough that logs and execs produces a working binary. Substitution is per
+invocation, which is what makes the allowlist below possible.
+
+The spike also produced the flag set [050](050-driver.md) tabulates, and the
+`-V=full` build-ID protocol that the caching claim below depends on. nanogo inspects the tool and the arguments and decides:
 
 ```mermaid
 flowchart TD
@@ -65,6 +71,11 @@ list because it is mechanical:
 The list is ordered by dependency depth, so early entries are leaves with no
 imports and no assembly. `runtime` is last, and reaching it is G3.
 
+Note which half of [015](015-export-data.md) each step proves. A leaf package
+reads no export data, but `gc` compiles its test binary and therefore reads what
+nanogo wrote — so the first entry proves the **writer**. The reader is first
+exercised one step up, at the first package with an import.
+
 ## Why this is better than a self-contained test suite
 
 A package's own tests are adversarial, maintained by someone else, and cover
@@ -88,8 +99,15 @@ topological order with one process per package.
 ## Caching
 
 nanogo does not implement a build cache. In hosted mode the `go` command's cache
-applies and is correct, because a package's inputs include the compiler's build
-ID, so switching a package between `gc` and nanogo invalidates it.
+applies and is correct **provided nanogo answers `-V=full` with its own
+identity**, per [050](050-driver.md). The `go` command derives the compiler's
+build ID from that one line and mixes it into every cache key, so a nanogo change
+invalidates the affected packages and switching a package between `gc` and nanogo
+invalidates it too.
+
+An implementation that echoed the real compiler's version string would build once
+and then silently reuse stale objects, which is the failure this paragraph exists
+to prevent.
 
 In whole-world mode, rebuilds are from scratch. [053](053-determinism.md) makes a
 cache possible later; nothing depends on it existing.

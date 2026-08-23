@@ -203,13 +203,60 @@ planned in this deck.
 The compiler is meant to be read end to end. That is a constraint with a number
 attached, and the number is enforced by review:
 
-**40,000 lines**, excluding the forked type checker, generated tables, and
+**40,000 lines for v1**, excluding the forked type checker, generated tables, and
 tests.
 
 For scale, `cmd/compile` is 632,726 lines and its SSA package alone is 150,654.
-nanogo is not attempting that and will be slower and will optimize less. When a
-spec proposes something that cannot fit the budget, the spec must say what it
-gives up instead of quietly spending the budget.
+nanogo is not attempting that and will be slower and will optimize less.
+
+#### The accounting
+
+A budget nobody sums is a slogan. Estimates below are against measured reference
+sizes where one exists.
+
+| Component | Spec | Reference | nanogo estimate |
+| --- | --- | --- | --- |
+| Positions, scanner, parser | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) | 7,522 (`syntax`) | 7,500 |
+| Type checker | [012](012-type-checking.md) | 23,222 (`types2`) | **excluded**, forked |
+| Package loader, G1 form | [014](014-package-loader.md) | — | 300 |
+| Export data | [015](015-export-data.md) | 1,568 + 8,097 + 1,259 | 7,000 |
+| Typed IR, escape, inlining | [020](020-ir.md), [023](023-escape-analysis.md), [024](024-inlining-and-devirtualization.md) | 10,216 + 3,601 (`ir`, `escape`) | 6,000 |
+| SSA and its passes | [021](021-ssa-construction.md), [022](022-optimization-passes.md) | 11,609 hand-written | 8,000 |
+| Lowering rules, one target | [025](025-lowering-and-rules.md) | 18,704 (`_gen`, all targets) | 3,000 |
+| Register allocation, liveness | [026](026-register-allocation.md), [027](027-liveness-and-stackmaps.md) | — | 3,000 |
+| ABI, runtime symbols, descriptors | [030](030-abi.md)–[032](032-type-descriptors-and-itabs.md) | 2,938 (`reflectdata`) | 2,500 |
+| Object writer | [040](040-object-format.md) | 1,559 (`goobj`) | 1,500 |
+| `arm64` encoder | [041](041-instruction-encoding.md) | 36,224 (`obj/arm64`, whole ISA) | 2,000 |
+| Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | — | 1,000 |
+| | | **v1 total** | **≈41,800** |
+
+**v1 does not fit, by about five per cent.** That is the honest answer and it is
+recorded rather than adjusted, because a budget that moves to accommodate the
+estimate is not a budget. Two specs are the places to recover it if it must be
+recovered: [022](022-optimization-passes.md), whose pass list is the most
+optional thing in the compiler, and [015](015-export-data.md), whose reader can
+be types-only until inlining across packages is wanted.
+
+#### Past v1
+
+The budget is scoped to v1 because the two largest remaining components serve
+gates that v1 does not reach:
+
+| Component | Spec | Gate | Reference | Estimate |
+| --- | --- | --- | --- | --- |
+| Linker | [045](045-linker.md) | G2 | 44,067 (`cmd/link`) | 10,000 |
+| Package loader, G2 form | [014](014-package-loader.md) | G2 | — | 1,500 |
+| Plan 9 assembler | [044](044-plan9-assembler.md) | G3 | — | 5,000 |
+| `amd64` backend | [043](043-amd64-backend.md) | — | 3,218 + rules | 5,000 |
+| DWARF | [046](046-debug-info.md) | G3 | — | 3,000 |
+
+A complete nanogo is therefore on the order of 65,000 lines, not 40,000. Saying
+so here is the point of the decision: the number is a design pressure with an
+audit attached, and the audit is run at every milestone in
+[003](003-sequencing.md), not at the end.
+
+When a spec proposes something that cannot fit, the spec must say what it gives
+up instead of quietly spending the budget.
 
 ### 11. nanogo is object-compatible with `gc`, and has two modes
 
@@ -222,6 +269,16 @@ compile invocation to nanogo, and nanogo compiles the packages it can and execs
 `gc` for the rest ([051](051-build-integration.md)). A milestone is then not "the
 compiler works" but "these 30 packages compile with nanogo and the binary still
 passes their tests", and a failure names one package.
+
+The mechanism is spiked, like decision 3's.
+[`spikes/toolexec`](../spikes/toolexec) substitutes a logging passthrough for the
+whole toolchain on a real build: 110 invocations, 59 of them `compile`, and a
+working binary at the end. It also measured the flag set the `go` command
+actually sends and the `-V=full` build-ID protocol, both of which
+[050](050-driver.md) had drafted wrongly from the help text. What is *not*
+spiked is the harder half — that nanogo's objects and export data will
+interoperate with `gc`'s — and that is not testable before there is a compiler.
+M3 in [003](003-sequencing.md) is where it is proved or the fallback is taken.
 
 Without this, the first milestone that runs real code requires the runtime, the
 whole standard library, and the linker at once, and a crash has five hundred

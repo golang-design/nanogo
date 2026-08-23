@@ -121,15 +121,14 @@ believed.
 
 | | |
 | --- | --- |
-| Done | The spec deck, and the two spikes in [`../spikes`](../spikes) that settle the backend seam |
+| Done | The spec deck, and the three spikes in [`../spikes`](../spikes) that settle the backend seam and the substitution mechanism |
 | Next | M0 in [003](003-sequencing.md): skeleton, driver, package layout |
 | Blocked on nothing | Every spec is drafted; none waits on another to begin |
 | Decided against | Assembly text as a build path, a from-scratch type checker, GC-shape stenciling with dictionaries |
 
-## The two spikes
+## The spikes
 
-Both are in [`../spikes`](../spikes) and both are cited by
-[000](000-decisions.md) decision 3.
+Three, in [`../spikes`](../spikes), each cited by a normative decision.
 
 [`stackmap`](../spikes/stackmap) shows that per-PC garbage collection stack maps
 are expressible in text assembly: a hand-written `FUNCDATA` symbol with two
@@ -139,7 +138,14 @@ bitmaps, selected by `PCDATA`, produced the two collection outcomes it declared.
 names containing a colon, and that the compiler's entire namespace — `type:`,
 `go:itab.`, `go:string.` — uses one.
 
-Together they are why nanogo writes object files and not assembly.
+Together those two are why nanogo writes object files and not assembly
+([000](000-decisions.md) decision 3).
+
+[`toolexec`](../spikes/toolexec) shows that a foreign compiler can be substituted
+per package by `go build -toolexec`, and measured what the `go` command actually
+sends — a larger flag set than the help text lists, plus the `-V=full` build-ID
+protocol. It is the evidence for [000](000-decisions.md) decision 11's mechanism,
+and [050](050-driver.md) records the two flags it corrected.
 
 ## Conventions
 

@@ -32,9 +32,14 @@ flowchart LR
 Driver, flag parsing, package layout, CI. The spikes that
 [000](000-decisions.md) decision 3 cites are run and kept.
 
-**Done when** `nanogo -V` prints a version, the package tree of
-[002](002-architecture.md) exists with doc comments, and both spikes run from a
-clean checkout.
+**Done when** `nanogo -V=full` answers the `go` command's build-ID protocol
+([050](050-driver.md)), a passthrough build with `-toolexec=nanogo` completes by
+execing `gc` for everything, the package tree of [002](002-architecture.md)
+exists with doc comments, and all three spikes run from a clean checkout.
+
+The passthrough build is the first real gate. It proves the driver, the flag
+parsing, and the `-V=full` protocol before any compilation exists, and
+[`spikes/toolexec`](../spikes/toolexec) is the reference implementation of it.
 
 ### M1 — parser
 
@@ -149,7 +154,7 @@ Risks are listed with the milestone that retires them, not with a probability.
 | GC metadata is wrong in a way that only shows under load | M4 | Allocation stress with `GOGC=1` and `GODEBUG=gccheckmark=1`, not a unit test. |
 | The forked type checker cannot be re-pointed at nanogo's syntax tree cheaply | M2 | [012](012-type-checking.md) names the interface it is re-pointed through. If the fork resists, the fallback is to keep `go/ast` under the checker and translate, at a cost stated in that spec. |
 | Generics instantiation is a rewrite rather than a port | M5 | Deferred deliberately: nanogo's own source uses generics, so M6 cannot be reached without it, and M5 is where it is confronted with the corpus available. |
-| The 40,000-line budget is spent by M4 | M4 | Counted at every milestone, not at the end. |
+| The v1 line budget is exceeded | M4 | [000](000-decisions.md) decision 10's accounting already puts v1 at about 41,800 against 40,000. Counted at every milestone, not at the end, and the two named recovery points are [022](022-optimization-passes.md) and [015](015-export-data.md). |
 | `//go:linkname` and `//go:nosplit` semantics are subtler than documented | M9 | The runtime is the only consumer that cares, and M9 is where it is compiled. |
 
 ## Deviations
