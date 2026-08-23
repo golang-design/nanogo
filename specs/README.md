@@ -143,6 +143,7 @@ Together they are why nanogo writes object files and not assembly.
 
 ## Conventions
 
-Frontmatter is `title`, `status`, `layer`, `gate`, and `depends_on`. `status` is
-`draft`, `in progress`, or `complete`. `gate` names which of
-[001](001-bootstrap-gates.md)'s gates the spec serves.
+Frontmatter is `title`, `status`, `layer`, `depends_on`, and, on every spec
+outside the foundation group, `gate`. `status` is `draft`, `in progress`, or
+`complete`. `gate` names which of [001](001-bootstrap-gates.md)'s gates the spec
+serves; the foundation specs serve all of them and omit it.
