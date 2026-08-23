@@ -44,7 +44,12 @@ nanogo compiles its own source, and the compiler that results is stable.
 
 Allowed at G1: `go tool link` produces the executable. `go list` resolves the
 import graph. `go/types` and any other standard-library package is in nanogo's
-own dependency set. Only `darwin/arm64` works.
+own dependency set. The build runs in **hosted mode**
+([000](000-decisions.md) decision 11), so `gc` still compiles the runtime and the
+packages nanogo has not reached. Only `darwin/arm64` works.
+
+The hosted-mode allowance is what separates G1 from G3. G1 asks whether nanogo
+can compile *nanogo*. It does not ask whether nanogo can compile *everything*.
 
 Not allowed at G1: any part of nanogo that `gc` can compile but nanogo cannot.
 
@@ -155,7 +160,7 @@ Each gate is defined by what is no longer present. This table is the checklist.
 | `gc` present | yes, seeds $N_1$ | seeds only | seeds only |
 | `go tool link` | used | **gone** ([045](045-linker.md)) | used or gone |
 | `go list` | used | **gone** ([014](014-package-loader.md)) | gone |
-| `go tool asm` | not needed | not needed | **gone** ([044](044-plan9-assembler.md)) |
+| `go tool asm` | used, via `gc` in hosted mode | used | **gone** ([044](044-plan9-assembler.md)) |
 | Targets | `darwin/arm64` | `darwin/arm64` | + `linux/amd64` |
 | `cgo` | no | no | no, by [000](000-decisions.md) decision 8 |
 | Language coverage | what nanogo's own source uses | same | all of it |

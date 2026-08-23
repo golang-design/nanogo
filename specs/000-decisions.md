@@ -127,7 +127,7 @@ listed here with the gate that removes it.
 | --- | --- | --- | --- |
 | `go tool link` | producing an executable | G2 | [045](045-linker.md) |
 | `go list` / `golang.org/x/tools/go/packages` | resolving the import graph | G2 | [014](014-package-loader.md) |
-| `go tool asm` | assembling hand-written `.s` files | G3 | [044](044-plan9-assembler.md) |
+| `go tool asm` | assembling hand-written `.s` files; in hosted mode `gc` and the `go` command do this | G3 | [044](044-plan9-assembler.md) |
 | `gc` | building stage 0 of the bootstrap | never | see [001](001-bootstrap-gates.md); a bootstrap needs a seed |
 | Go runtime source | the runtime itself | never | it is Go source; nanogo compiles it |
 
@@ -210,6 +210,42 @@ For scale, `cmd/compile` is 632,726 lines and its SSA package alone is 150,654.
 nanogo is not attempting that and will be slower and will optimize less. When a
 spec proposes something that cannot fit the budget, the spec must say what it
 gives up instead of quietly spending the budget.
+
+### 11. nanogo is object-compatible with `gc`, and has two modes
+
+nanogo's object files, export data, ABI, symbol names, and runtime data
+structures are `gc`'s. A package compiled by nanogo links against packages
+compiled by `gc`, and the reverse.
+
+This is what makes bring-up incremental. `go build -toolexec=nanogo` hands every
+compile invocation to nanogo, and nanogo compiles the packages it can and execs
+`gc` for the rest ([051](051-build-integration.md)). A milestone is then not "the
+compiler works" but "these 30 packages compile with nanogo and the binary still
+passes their tests", and a failure names one package.
+
+Without this, the first milestone that runs real code requires the runtime, the
+whole standard library, and the linker at once, and a crash has five hundred
+suspects.
+
+nanogo therefore has two modes, and they use the same formats:
+
+| Mode | Who compiles what | Serves |
+| --- | --- | --- |
+| **hosted** | nanogo compiles a subset, `gc` compiles the rest, `go build` drives | M3 through M6, and every regression hunt afterwards |
+| **whole-world** | nanogo compiles every package including the runtime | G2 and G3 |
+
+The costs, accepted:
+
+- nanogo is pinned to one Go release at a time. The object format, the export
+  data format, and the runtime's internal structures all change between
+  releases. The pin is asserted at startup and a mismatch is an error.
+- Several data layouts must match exactly, and a mistake in one is memory
+  corruption rather than a failed test. This is the risk that hosted mode's
+  per-package blame is there to contain.
+
+If compatibility proves unmaintainable, whole-world mode is a complete fallback:
+nanogo only has to agree with itself. The bring-up strategy is what would be
+lost, not the project.
 
 ## What is deliberately not decided here
 

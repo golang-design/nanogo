@@ -66,11 +66,17 @@ and round-trips export data for every standard library package.
 [042](042-arm64-backend.md). Enough of each to compile a program that uses
 integers, control flow, and function calls.
 
-**Done when** a program whose only output is `println` compiles, links with
-`go tool link`, runs, and prints the right thing.
+**Done when** a single leaf package, compiled by nanogo under
+`go build -toolexec=nanogo` while `gc` compiles everything else, links and runs
+with its tests passing.
+
+Hosted mode ([000](000-decisions.md) decision 11) is what makes this gate
+narrow. The runtime, the standard library, and the linker are all `gc`'s. The
+only new thing in the binary is one package's worth of nanogo code generation,
+so a crash has one suspect.
 
 This is the milestone where the object format decision is proved or disproved in
-practice, so it is deliberately early and deliberately narrow.
+practice, so it is deliberately early.
 
 ### M4 — runtime interface
 
@@ -86,6 +92,10 @@ change.
 **Done when** `fmt.Println` works, a program that allocates under a
 `GOGC=1` stress loop survives, `defer`/`panic`/`recover` behave, goroutines run
 and the stack grows, and the GC scans nanogo-generated frames precisely.
+
+The measure of progress inside M4 is the number of standard library packages
+that compile with nanogo in hosted mode and still pass their own tests. It
+starts at one and is tracked.
 
 ### M5 — full language
 
@@ -135,6 +145,7 @@ Risks are listed with the milestone that retires them, not with a probability.
 | Risk | Retired at | How it is retired |
 | --- | --- | --- |
 | The object format seam does not work | M3 | The first binary either runs or it does not. This is why M3 is narrow and early. |
+| `gc` object compatibility is unmaintainable across a release | M3 | Detected the first time the pin is bumped. The fallback is whole-world mode, stated in [000](000-decisions.md) decision 11. |
 | GC metadata is wrong in a way that only shows under load | M4 | Allocation stress with `GOGC=1` and `GODEBUG=gccheckmark=1`, not a unit test. |
 | The forked type checker cannot be re-pointed at nanogo's syntax tree cheaply | M2 | [012](012-type-checking.md) names the interface it is re-pointed through. If the fork resists, the fallback is to keep `go/ast` under the checker and translate, at a cost stated in that spec. |
 | Generics instantiation is a rewrite rather than a port | M5 | Deferred deliberately: nanogo's own source uses generics, so M6 cannot be reached without it, and M5 is where it is confronted with the corpus available. |
