@@ -10,6 +10,7 @@ Run a spike from its own directory with the `go` tool of the day.
 | --- | --- | --- |
 | [`stackmap`](stackmap) | Can text Plan 9 assembly express per-PC GC stack maps? | Yes. See [`specs/040-object-format.md`](../specs/040-object-format.md). |
 | [`symbolnames`](symbolnames) | Can text Plan 9 assembly define the symbol names the compiler and linker use? | No. Names that contain `:` are rejected. |
+| [`toolexec`](toolexec) | Can a foreign compiler be substituted per package by `go build -toolexec`, and with which flags? | Yes. See [`specs/051-build-integration.md`](../specs/051-build-integration.md); the flag set is larger than `-h` suggests. |
 
 ## stackmap
 
@@ -47,3 +48,19 @@ compiler and the linker both use that namespace: `type:*`, `go:itab.*`,
 `go:string.*`. A text-assembly emitter cannot write those names, so it cannot
 produce type descriptors, itabs, or string data that the linker will place in
 `runtime.typelinks` and `runtime.itablinks`.
+
+## toolexec
+
+A passthrough that logs `argv` and execs the real tool, so the build must still
+succeed. It does, and the log is the answer.
+
+```
+cd toolexec
+go build -o /tmp/passthrough .
+cd <any module>
+PT_LOG=/tmp/log.txt go build -a -toolexec=/tmp/passthrough .
+```
+
+The spike's own README has the measured flag set and the `-V=full` build-ID
+protocol, which is the part that has no documentation outside
+`cmd/go/internal/work/buildid.go`.
