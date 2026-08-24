@@ -97,14 +97,19 @@ golang.design/x/nanogo
 
 Two rules govern this layout, and they are the ones worth enforcing in review:
 
-**`ir` does not import `ssa`, and `ssa` does not import `ir`.** The SSA builder
-lives in `ssa` and takes the IR as input through an interface that `ssa`
-declares. If that gets inverted, the two representations have merged and
-decision 5 is gone.
+**The dependency runs one way: `ssa` may import `ir`, and `ir` may not import
+`ssa`.** An earlier version of this spec forbade both directions and had the
+SSA builder take the IR through an interface `ssa` declared. That is stricter
+than the design needs and it contradicted itself the moment anything in `ssa`
+had to name `*ir.Type`, `*ir.Object` or an `ir.Op`, which the builder, the
+address-taken decision and the verifier all do. What matters is that there is no
+cycle, so that the two representations stay distinct and decision 5 holds.
 
-**Nothing below `ssa` imports `types2`.** Types reach the backend as layout
-facts — size, alignment, pointer map — not as `types2.Type` values.
-[020](020-ir.md) defines the boundary type that carries them.
+**Nothing below `ir` imports `types2`.** This is the load-bearing rule. Types
+reach the backend as layout facts, size, alignment and pointer map, not as
+`types2.Type` values, and `*ir.Type` is the object that carries them.
+[020](020-ir.md) defines it. If `types2` were reachable from the backend, the
+boundary would exist only by convention.
 
 ## Data that crosses the whole pipeline
 
