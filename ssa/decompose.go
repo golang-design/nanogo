@@ -588,13 +588,41 @@ func (d *decomposer) equalityOK(u *Value) bool {
 		// out of the parts this admits.
 		return d.stringEqualOK(u)
 	}
-	if x.Type.Kind != y.Type.Kind || (x.Op != OpConstNil && y.Op != OpConstNil) {
+	if x.Type.Kind != y.Type.Kind {
 		return false
 	}
-	// A slice against nil is the data pointer, which expandSliceNil builds. A
-	// map and a function are the same question and never reach here, because
-	// both are one word and are compared whole.
-	return x.Type.Kind == ir.Interface || x.Type.Kind == ir.Slice
+	if x.Op == OpConstNil || y.Op == OpConstNil {
+		// A slice against nil is the data pointer, which expandSliceNil
+		// builds. An interface against nil is two zero words and nothing else
+		// is, so the part comparison expandEqual builds is the whole answer
+		// and it costs no call. A map and a function are the same question and
+		// never reach here, because both are one word and are compared whole.
+		return x.Type.Kind == ir.Interface || x.Type.Kind == ir.Slice
+	}
+	if x.Type.Kind == ir.Interface {
+		// The dynamic type's equality function, through the runtime, which
+		// expandIfaceEqual builds out of the parts this admits.
+		return d.ifaceEqualOK(u)
+	}
+	return false
+}
+
+// ifaceEqualOK reports whether the equality of two interfaces can be built
+// where it stands.
+//
+// The two operands must agree on which layout their first word has. Go allows
+// == between an empty interface and a non-empty one, because each is
+// assignable to the other, and the two are then a *_type on one side and an
+// *itab on the other: two words that never compare equal and two runtime
+// symbols that read them differently. The conversion that makes them one type
+// belongs above SSA, so a mixed comparison is refused here and lowering names
+// it rather than this pass guessing which side to believe.
+func (d *decomposer) ifaceEqualOK(u *Value) bool {
+	x, y := u.Args[0], u.Args[1]
+	if x.Type.EmptyIface != y.Type.EmptyIface {
+		return false
+	}
+	return d.someMem() != nil && d.memInsertSafe(u.Block, valueIndex(u.Block, u))
 }
 
 // orderOK reports whether < and <= over this type are a runtime call this
@@ -819,11 +847,13 @@ func (d *decomposer) rewrite() {
 				}
 			case OpEq, OpNeq:
 				if len(v.Args) == 2 && d.isSplit(v.Args[0]) {
-					switch v.Args[0].Type.Kind {
-					case ir.String:
+					switch k := v.Args[0].Type.Kind; {
+					case k == ir.String:
 						d.expandStringEqual(b, v, &out)
-					case ir.Slice:
+					case k == ir.Slice:
 						d.expandSliceNil(v)
+					case k == ir.Interface && v.Args[0].Op != OpConstNil && v.Args[1].Op != OpConstNil:
+						d.expandIfaceEqual(b, v, &out)
 					default:
 						d.expandEqual(b, v, &out)
 					}
@@ -1134,6 +1164,74 @@ func (d *decomposer) expandStringOrder(b *Block, v *Value, out *[]*Value) {
 	// v keeps its operation, so < stays < and <= stays <=, and nothing that
 	// reads the result is redirected.
 	setArgs(v, sign, zero)
+}
+
+// expandIfaceEqual builds general interface equality out of the parts of the
+// two interfaces, per specs/020-ir.md's row: the dynamic type's equality
+// function, reached through the runtime.
+//
+// The shape is
+//
+//	e = x.tab == y.tab
+//	t = x.tab AND -e
+//	r = e AND ifaceeq(t, x.data, y.data)
+//
+// and it is branchless, like string equality and for the same reason: a branch
+// needs a join with a phi that this pass has no machinery for.
+//
+// The mask is what makes the call safe to make unconditionally, and the
+// evidence for that is not visible from here, so it is named. runtime/alg.go
+// lines 318 and 334: both efaceeq and ifaceeq begin "if t == nil { return
+// true }" and touch neither data word before that. Passing a nil descriptor
+// therefore reads nothing and answers true, and the And with the descriptor
+// comparison is the whole answer when the two differ.
+//
+// That is also gc's answer, and it is the answer for a reason worth stating: a
+// comparison of two different dynamic types is false and must not panic, while
+// two matching uncomparable types must panic with "comparing uncomparable
+// type". Both fall out. The mask sends the mismatched case to the nil path,
+// which never reaches the missing equality function, and the matching case
+// passes the real descriptor and reaches the panic exactly as gc does.
+//
+// Which symbol is not a choice this pass may guess: the first word is an *itab
+// for an interface with methods and a *_type for one without, the two runtime
+// functions read that word differently, and calling the wrong one jumps
+// through a function pointer read at the wrong offset. ir.Type.EmptyIface is
+// the fact, and specs/020-ir.md records why it is below the IR boundary.
+func (d *decomposer) expandIfaceEqual(b *Block, v *Value, out *[]*Value) {
+	xs, ys := d.parts[v.Args[0].ID], d.parts[v.Args[1].ID]
+	sym := "runtime.ifaceeq"
+	if v.Args[0].Type.EmptyIface {
+		sym = "runtime.efaceeq"
+	}
+
+	tabEq := d.mk(b, v.Pos, OpEq, d.boolType(), xs[0], ys[0])
+	wide := d.mk(b, v.Pos, OpZeroExt, d.intType(), tabEq)
+	mask := d.mk(b, v.Pos, OpNeg, d.intType(), wide)
+	// The masked word keeps the pointer type of the word it came from. It is
+	// either that pointer or nil and never an address in between, so it is a
+	// word the collector can read at the call, which is what specs/031's third
+	// calling rule requires of a pointer argument.
+	tab := d.mk(b, v.Pos, OpAnd, xs[0].Type, xs[0], mask)
+	call := d.mk(b, v.Pos, OpStaticCall, MemType, tab, xs[1], ys[1], d.someMem())
+	call.Aux = RuntimeFunc(sym)
+	res := d.mk(b, v.Pos, OpSelectN, d.boolType(), call)
+	// The ABI states a bool result in the low byte and says nothing about the
+	// bits above it. Not is one bit flipped, so a value that is not exactly 0
+	// or 1 would negate to the wrong answer.
+	same := d.mk(b, v.Pos, OpZeroExt, d.boolType(), res)
+	*out = append(*out, tabEq, wide, mask, tab, call, res, same)
+	d.memAdded = true
+
+	if v.Op == OpEq {
+		v.Op = OpAnd
+		setArgs(v, tabEq, same)
+		return
+	}
+	both := d.mk(b, v.Pos, OpAnd, d.boolType(), tabEq, same)
+	*out = append(*out, both)
+	v.Op = OpNot
+	setArgs(v, both)
 }
 
 // stringEqualOK reports whether the equality of two strings can be built where

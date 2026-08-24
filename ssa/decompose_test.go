@@ -714,8 +714,11 @@ func TestDecomposeEquality(t *testing.T) {
 		// for a whole string and the field-wise walk has no place to put a
 		// call, so the struct stays whole.
 		{"struct holding a string", decNamed, false, ssa.OpEq, ssa.OpEq, false},
-		// Two general interfaces need the type's equality function.
-		{"interface", decIface, false, ssa.OpEq, ssa.OpEq, false},
+		// Two general interfaces need the dynamic type's equality function,
+		// which is the call to runtime.ifaceeq of specs/020's table, joined by
+		// And with the comparison of the two itabs.
+		{"interface", decIface, false, ssa.OpEq, ssa.OpAnd, true},
+		{"interface neq", decIface, false, ssa.OpNeq, ssa.OpNot, true},
 		// An interface against the literal nil is two zero words and nothing
 		// else, so the part comparison is the whole answer.
 		{"interface against nil", decIface, true, ssa.OpNeq, ssa.OpOr, true},
@@ -1859,5 +1862,163 @@ func TestDecomposeStringOrderIsNotPerPart(t *testing.T) {
 	ssa.Decompose(f)
 	if lt.Args[0].Type.Kind != ir.Int64 || lt.Args[1].Op != ssa.OpConstInt {
 		t.Fatalf("< compares %s", lt.LongString())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Interface equality, which is the dynamic type's equality function
+
+// decEface is an interface with no methods, whose first word is a *_type
+// rather than an *itab. It is the same size and the same pointer map as
+// decIface and a different runtime symbol, which is the whole reason
+// ir.Type.EmptyIface exists.
+var decEface = decLaid(&ir.Type{Kind: ir.Interface, Name: "any", EmptyIface: true})
+
+// TestDecomposeIfaceEqualForm asserts the whole expansion, so that a change to
+// it is reviewable.
+//
+// The masked descriptor is the part that is easy to get wrong and impossible
+// to see: it is the itab when the two agree and nil when they do not, and a
+// nil descriptor is what makes one unconditional call answer both cases.
+func TestDecomposeIfaceEqualForm(t *testing.T) {
+	p := newDecFn()
+	eq := p.v(ssa.OpEq, decBool, p.load(decIface), p.load(decIface))
+	f := p.ret(eq)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	decWantForm(t, f, `
+b0:
+    v0 = InitMem <mem>
+    v1 = Arg <*int> {p}
+    v8 = OffPtr <*unsafe.Pointer> [8] v1
+    v7 = Load <unsafe.Pointer> v1 v0
+    v9 = Load <unsafe.Pointer> v8 v0
+    v3 = Arg <*int> {p}
+    v11 = OffPtr <*unsafe.Pointer> [8] v3
+    v10 = Load <unsafe.Pointer> v3 v0
+    v12 = Load <unsafe.Pointer> v11 v0
+    v13 = Eq <bool> v7 v10
+    v14 = ZeroExt <int> v13
+    v15 = Neg <int> v14
+    v16 = And <unsafe.Pointer> v7 v15
+    v17 = StaticCall <mem> {runtime.ifaceeq} v16 v9 v12 v0
+    v18 = SelectN <bool> [0] v17
+    v19 = ZeroExt <bool> v18
+    v5 = And <bool> v13 v19
+    v6 = MakeResult <mem> v5 v17
+  Ret v6`)
+	if vs := ssa.CheckDecomposed(f); len(vs) != 0 {
+		t.Errorf("a value wider than a register survived: %v", vs)
+	}
+}
+
+// TestDecomposeIfaceEqualPicksTheSymbol is the one that would be a
+// corruption rather than a wrong answer.
+//
+// The first word of an interface with methods is an *itab and of one without
+// is a *_type. efaceeq reads Equal out of that word's type descriptor and
+// ifaceeq reads the descriptor out of the itab first. Calling the wrong one
+// reads a function pointer at the wrong offset and jumps through it.
+func TestDecomposeIfaceEqualPicksTheSymbol(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  *ir.Type
+		want string
+	}{
+		{"with methods", decIface, "runtime.ifaceeq"},
+		{"without methods", decEface, "runtime.efaceeq"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newDecFn()
+			f := p.ret(p.v(ssa.OpEq, decBool, p.load(tc.typ), p.load(tc.typ)))
+			ssa.Decompose(f)
+			decVerified(t, f)
+			var got string
+			for _, v := range p.b.Values {
+				if v.Op == ssa.OpStaticCall {
+					o, _ := v.Aux.(*ir.Object)
+					if o != nil {
+						got = o.Name
+					}
+				}
+			}
+			if got != tc.want {
+				t.Errorf("the call is to %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecomposeIfaceEqualMixedIsRefused covers the comparison of an empty
+// interface with a non-empty one.
+//
+// Go allows it, because each is assignable to the other, and the two first
+// words are then a *_type and an *itab: two words that never compare equal and
+// two symbols that read them differently. The conversion that makes them one
+// type belongs above SSA, so this pass refuses and lowering names it.
+func TestDecomposeIfaceEqualMixedIsRefused(t *testing.T) {
+	p := newDecFn()
+	eq := p.v(ssa.OpEq, decBool, p.load(decIface), p.load(decEface))
+	f := p.ret(eq)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if eq.Op != ssa.OpEq {
+		t.Errorf("a mixed comparison was expanded: %s", eq.LongString())
+	}
+	if len(ssa.CheckDecomposed(f)) == 0 {
+		t.Error("the operands were split for a comparison that was not built")
+	}
+}
+
+// TestDecomposeIfaceEqualLowers takes both spellings through selection.
+func TestDecomposeIfaceEqualLowers(t *testing.T) {
+	for _, op := range []ssa.Op{ssa.OpEq, ssa.OpNeq} {
+		p := newDecFn()
+		cmp := p.v(op, decBool, p.load(decIface), p.load(decIface))
+		f := p.ret(cmp)
+		ssa.Lower(f, rules.ARM64)
+		decVerified(t, f)
+		if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
+			t.Fatalf("%v: %v", op, vs)
+		}
+		calls := 0
+		for _, b := range f.Blocks {
+			for _, v := range b.Values {
+				if v.Op != ssa.OpARM64CALLstatic {
+					continue
+				}
+				calls++
+				// The masked descriptor, the two data words, and memory.
+				if len(v.Args) != 4 {
+					t.Errorf("%v: the call takes %d arguments, want 4: %s", op, len(v.Args), v.LongString())
+				}
+			}
+		}
+		if calls != 1 {
+			t.Errorf("%v: %d calls, want one", op, calls)
+		}
+	}
+}
+
+// TestDecomposeIfaceNilNeedsNoCall keeps the cheap answer cheap.
+//
+// The zero interface is two zero words and nothing else is, so a comparison
+// against the literal nil is the comparison of both parts and needs no runtime
+// call at all. Routing it through ifaceeq would be correct and would put a
+// call on the most common interface comparison there is.
+func TestDecomposeIfaceNilNeedsNoCall(t *testing.T) {
+	p := newDecFn()
+	eq := p.v(ssa.OpEq, decBool, p.load(decIface), p.v(ssa.OpConstNil, decIface))
+	f := p.ret(eq)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	for _, v := range p.b.Values {
+		if v.Op == ssa.OpStaticCall {
+			t.Fatalf("a comparison against nil called %v", v.Aux)
+		}
+	}
+	if eq.Op != ssa.OpAnd {
+		t.Errorf("the comparison became %s", eq.LongString())
 	}
 }
