@@ -58,6 +58,33 @@ the result useful rather than merely present:
    marking in the line table is what lets a debugger stop at a line once rather
    than several times.
 
+## The empty subprogram symbol, which is not optional
+
+Before any of the above, one DWARF symbol is mandatory at G1, and the reason is
+the linker rather than a debugger.
+
+`cmd/link/internal/ld.writedebugaddr` walks every text symbol of a compilation
+unit and reads the relocations of its `AuxDwarfInfo` symbol **without checking
+that there is one**; the two lines beside it check the range and the location
+symbol and this one does not. A text symbol with no such entry resolves to
+symbol 0, and the linker panics with `trying to get oreader for invalid sym 0`.
+
+The pass runs only under the `dwarf5` experiment, and `internal/buildcfg` puts
+that in the baseline for every target **except darwin, ios and aix**. So an
+object without the entry links on darwin and links nowhere else. A compilation
+unit is per package, and a package half compiled by `gc` is one unit, so the
+mixture that reaches the pass is the ordinary one.
+
+nanogo therefore emits an `SDWARFFCN` symbol named `go:info.<sym>` for every
+function, holding no bytes. A unit's function DIEs are the contents of these
+symbols concatenated, so an empty one contributes no DIE: the unit describes
+the functions `gc` compiled and not nanogo's. That is the honest state until
+this spec's own milestone, and a DIE invented earlier would be a wrong one
+rather than a missing one.
+
+`gc` omits the entry when its symbol is empty, so `gc` never produces this
+shape and the gap upstream was never reached.
+
 ## DWARF
 
 Version 4, which is what the Go tools emit and what `delve` reads.
@@ -82,6 +109,15 @@ other is required for a debugger to be pleasant.
 
 ## Testing
 
+- The link under the `dwarf5` experiment, forced on whatever the host is. Every
+  platform-divergent failure in this compiler so far has cost a continuous
+  integration round trip to find, and a linker pass one host skips is invisible
+  on it. `ssagen`'s `TestLinksUnderTheDwarf5Experiment` builds a standard
+  library with the experiment and links against it.
+- The structural check over a text symbol's auxiliary list: every entry
+  `cmd/link` reads without checking is written down with the failure its
+  omission causes, and asserted on each shape of function. This catches a
+  missing entry; only the link above catches a pass nobody has enumerated yet.
 - Panic in a deeply nested, partly inlined call chain; compare the printed stack
   against the same program built by `gc`. Function names and line numbers must
   match.
