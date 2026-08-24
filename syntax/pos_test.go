@@ -5,8 +5,10 @@
 package syntax
 
 import (
+	"fmt"
 	"go/token"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -363,5 +365,76 @@ func TestDirectiveColumnRulesMatchTheReferenceCompiler(t *testing.T) {
 	}
 	if got := f.Position(f.Pos(strings.Index(src, `"nope"`))); got.String() != "gen.go:101:13" {
 		t.Errorf("later line reports %q, want %q", got.String(), "gen.go:101:13")
+	}
+}
+
+// TestFileSetIsSafeForConcurrentUse is a regression test for a data race the
+// race detector found on CI and that no local run had exercised.
+//
+// The FileSet used to document that every file is added before any concurrent
+// work begins. That contract does not survive parsing files in parallel, which
+// is what a compiler does, and a contract enforced only by a comment is one
+// that gets violated. Adding a file and resolving a position are now safe to
+// interleave.
+func TestFileSetIsSafeForConcurrentUse(t *testing.T) {
+	const writers, readers, each = 4, 4, 200
+
+	fset := NewFileSet()
+	var wg sync.WaitGroup
+
+	// Seed one file so the readers have something to resolve from the start.
+	seed := fset.AddFile("seed.go", 16)
+	addLinesFor(seed, "package p\nvar x=1\n")
+
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				f := fset.AddFile(fmt.Sprintf("f%d_%d.go", w, i), 32)
+				f.AddLine(10)
+				// Resolve inside the writer too, which is the interleaving
+				// that produced the original race.
+				if got := fset.Position(f.Pos(12)); got.Line != 2 {
+					t.Errorf("writer %d: position %v", w, got)
+					return
+				}
+			}
+		}(w)
+	}
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				if got := fset.Position(seed.Pos(10)); got.Filename != "seed.go" {
+					t.Errorf("reader resolved the seed to %v", got)
+					return
+				}
+				if fset.SrcFile(NoPos) != nil {
+					t.Error("NoPos resolved to a file")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got, want := len(fset.snapshot()), 1+writers*each; got != want {
+		t.Errorf("the set holds %d files, want %d", got, want)
+	}
+}
+
+// TestZeroFileSetStillReservesNoPos guards the case where a FileSet is used as
+// a zero value rather than through NewFileSet. NoPos must stay outside every
+// file, or an unknown position resolves to the first one.
+func TestZeroFileSetStillReservesNoPos(t *testing.T) {
+	var fset FileSet
+	f := fset.AddFile("a.go", 4)
+	if f.Base() == NoPos {
+		t.Fatal("the first file starts at NoPos")
+	}
+	if fset.SrcFile(NoPos) != nil {
+		t.Error("NoPos resolved to a file")
 	}
 }

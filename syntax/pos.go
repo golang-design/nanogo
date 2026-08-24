@@ -7,6 +7,8 @@ package syntax
 import (
 	"sort"
 	"strconv"
+	"sync"
+	"sync/atomic"
 )
 
 // Pos is a compact source position.
@@ -262,12 +264,26 @@ func (f *SrcFile) Position(p Pos) Position {
 
 // FileSet assigns each file a disjoint range of the Pos space.
 //
-// It is not safe for concurrent use while files are being added. Files are
-// added by the loader before any concurrent work starts, which is the only
-// point at which the set changes.
+// Adding a file and resolving a position are safe to do concurrently. An
+// earlier version documented the opposite, that files are all added before any
+// concurrent work starts, and that contract was wrong in two ways. It does not
+// survive parsing files in parallel, which is what a compiler does. And a
+// contract enforced by a comment is one the race detector finds violated in a
+// test rather than in review, which is how this was found.
+//
+// The implementation appends under a lock and reads a snapshot with no lock.
+// Entries are only ever appended and never mutated, so a reader that holds an
+// older snapshot sees a prefix of the truth, and a Pos it can resolve is in
+// that prefix by construction: a Pos exists only because AddFile returned the
+// file that owns it, which happened before.
+//
+// Resolving positions is on the hot path, since every line table entry needs
+// one, so the read side must not take a lock. Adding a file happens once per
+// file.
 type FileSet struct {
+	mu    sync.Mutex // held only while appending
 	base  Pos
-	files []*SrcFile // sorted by base
+	files atomic.Pointer[[]*SrcFile] // sorted by base; append-only
 }
 
 // NewFileSet returns an empty set. The first file starts at Pos 1, so that
@@ -284,6 +300,14 @@ func (s *FileSet) AddFile(name string, size int) *SrcFile {
 	if size < 0 {
 		size = 0
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.base == 0 {
+		// A FileSet used as a zero value rather than through NewFileSet still
+		// has to keep NoPos outside every file.
+		s.base = 1
+	}
 	f := &SrcFile{
 		set:   s,
 		name:  name,
@@ -292,20 +316,36 @@ func (s *FileSet) AddFile(name string, size int) *SrcFile {
 		lines: []int{0},
 	}
 	s.base += Pos(size) + 1
-	s.files = append(s.files, f)
+
+	// Copy on append. A reader holding the old slice keeps a valid one, which
+	// is what makes the read side lock-free.
+	old := s.snapshot()
+	next := make([]*SrcFile, len(old), len(old)+1)
+	copy(next, old)
+	next = append(next, f)
+	s.files.Store(&next)
 	return f
+}
+
+// snapshot returns the current file list, which the caller must not modify.
+func (s *FileSet) snapshot() []*SrcFile {
+	if p := s.files.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // SrcFile returns the file containing p, or nil.
 func (s *FileSet) SrcFile(p Pos) *SrcFile {
-	if p == NoPos || len(s.files) == 0 {
+	files := s.snapshot()
+	if p == NoPos || len(files) == 0 {
 		return nil
 	}
-	i := sort.Search(len(s.files), func(i int) bool { return s.files[i].base > p })
+	i := sort.Search(len(files), func(i int) bool { return files[i].base > p })
 	if i == 0 {
 		return nil
 	}
-	f := s.files[i-1]
+	f := files[i-1]
 	if int(p-f.base) > f.size {
 		return nil
 	}
