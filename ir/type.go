@@ -54,7 +54,10 @@ const (
 	Struct
 	Map
 	Chan
-	Func
+	// FuncKind rather than Func, because Func is the function being compiled.
+	// The collision is resolved here rather than there: a kind is named a
+	// handful of times and a function is named everywhere.
+	FuncKind
 	Interface
 
 	// Void is the type of an expression with no value, and of a function with
@@ -86,7 +89,7 @@ var kindNames = [...]string{
 	Struct:     "struct",
 	Map:        "map",
 	Chan:       "chan",
-	Func:       "func",
+	FuncKind:   "func",
 	Interface:  "interface",
 	Void:       "void",
 }
@@ -178,7 +181,7 @@ var scalarLayout = map[Kind]struct{ size, align int64 }{
 	UnsafePtr:  {PtrSize, PtrSize},
 	Map:        {PtrSize, PtrSize},
 	Chan:       {PtrSize, PtrSize},
-	Func:       {PtrSize, PtrSize},
+	FuncKind:   {PtrSize, PtrSize},
 	String:     {2 * PtrSize, PtrSize},
 	Slice:      {3 * PtrSize, PtrSize},
 	Interface:  {2 * PtrSize, PtrSize},
@@ -296,7 +299,7 @@ func roundUp(n, align int64) int64 {
 // scalarPtrBits returns the pointer map of a scalar or built-in kind.
 func scalarPtrBits(k Kind) []byte {
 	switch k {
-	case Ptr, UnsafePtr, Map, Chan, Func:
+	case Ptr, UnsafePtr, Map, Chan, FuncKind:
 		return setBits(nil, 0)
 	case String:
 		// The data pointer, then the length.

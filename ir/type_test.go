@@ -182,7 +182,7 @@ func TestPointerMaps(t *testing.T) {
 		{"interface", scalar(Interface), []int64{0, 1}, 16},
 		{"map", scalar(Map), []int64{0}, 8},
 		{"chan", scalar(Chan), []int64{0}, 8},
-		{"func", scalar(Func), []int64{0}, 8},
+		{"func", scalar(FuncKind), []int64{0}, 8},
 		{"array of pointers", arrayOf(3, p), []int64{0, 1, 2}, 24},
 		{"array of ints", arrayOf(3, i64), nil, 0},
 		{"struct int then pointer", structOf(field("A", i64), field("B", p)), []int64{1}, 16},
