@@ -58,9 +58,16 @@ to have and to read.
 
 ### Rematerialisation
 
-A value that is cheap to recompute — a constant, a frame address, a static
-symbol address — is never spilled. It is recomputed at each use. This removes
+A value that is cheap to recompute, a constant, a frame address or a static
+symbol address, is never spilled. It is recomputed at each use. This removes
 most spill traffic in practice at the cost of one predicate over operations.
+
+That predicate reads the op table, which means **a target's lowering rules have
+to mark their constants as constants** or rematerialisation quietly stops
+applying to that target. Nothing fails when they do not: the code merely gets
+worse, which is the kind of regression nobody notices. The target description's
+tests assert that at least one machine constant and one address form are
+rematerialisable, so the omission is caught rather than measured later.
 
 ### Register classes
 
@@ -87,11 +94,32 @@ on an edge form a permutation and must be executed as a **parallel copy**:
 decompose into cycles, and break each cycle with one temporary register or with
 a three-instruction exchange.
 
+A note on when this fires, because it is easy to conclude the code is dead. Under
+the hole-free range model above, a phi's range covers every predecessor's block
+end and every phi argument is live at that same point, so a phi's home is never
+an argument's home on that edge: sources and destinations are disjoint and no
+cycle forms. The parallel copy is still implemented and tested directly, because
+it becomes reachable the moment coalescing or hole-aware ranges land, and
+because a permutation bug found then would be found in the wrong place.
+
 **The lost copy problem.** A critical edge — one from a block with several
 successors to a block with several predecessors — has no block to put the copies
 in. Every critical edge is split by inserting an empty block before allocation.
 This is done once, as a pass, and it is why the pass list of
 [022](022-optimization-passes.md) can treat edges as ordinary.
+
+### Reload registers, and the control value
+
+Two things this spec did not say, both found by building it.
+
+**A spilled value needs a register to be reloaded into**, and it cannot be one
+the allocator handed out. The target reserves a scratch register per class for
+it. On `arm64` this costs nothing: R16 and R17 were never allocatable, because
+[030](030-abi.md) reserves them for linker trampolines.
+
+**A block's control value is a use.** Omitting it collapses a branch
+condition's live range to nothing and lets two live conditions share one
+register. The spec's list of what constitutes a use did not mention it.
 
 ## Constraints from the ABI
 
@@ -119,6 +147,37 @@ This is confined to one pass, driven by a per-operation flag from
 property reaches above [025](025-lowering-and-rules.md). The other is register
 class, which is universal.
 
+## Spill slot reuse
+
+Two values may share a slot only when sharing cannot be observed. The rule this
+spec first gave was: disjoint live ranges, and neither value a pointer live at a
+safepoint in the other's interval. Implementing it showed that rule is both
+incomplete and, as stated, redundant.
+
+**Redundant, under the range model actually used.** Live ranges here are
+hole-free intervals from definition to last use. Under that model disjointness
+already implies the pointer clause, so the clause never rejects a sharing that
+disjointness accepted. It is implemented anyway, computed independently from the
+safepoint live sets, because it stops being redundant the moment ranges gain
+holes, and a rule that is load-bearing later should not be absent now.
+
+**Incomplete, in a way that matters more.** Disjointness is not sufficient.
+Two values may share a slot only when they also have **identical size,
+alignment and pointer map**.
+
+The reason is not the collector; it is stack copying.
+[035](035-goroutines-and-stack-growth.md) grows a stack by copying it and
+**rewriting every word the frame's pointer map calls a pointer**. The map is
+per frame, not per instant, and [027](027-liveness-and-stackmaps.md)'s liveness
+is a may-analysis: a slot is described as holding a pointer if it holds one on
+any path. So a slot shared by a pointer and an integer is a slot the copier will
+adjust while it holds the integer, and the integer changes value for reasons the
+program cannot see.
+
+This is why the rule is about the slot's description rather than about which
+value is live. Disjointness answers "can both be read"; the pointer map answers
+"will something else write here".
+
 ## Testing
 
 - The verifier extended with allocation invariants: no value in a clobbered
@@ -127,7 +186,5 @@ class, which is universal.
   spills, checked by differential execution ([004](004-conformance.md) L3).
 - Parallel copy tests over hand-built permutations including cycles of length 2
   and 3.
-- Spill-slot reuse checked for correctness rather than for size: two values with
-  disjoint intervals may share a slot only if neither is a pointer live at a
-  safepoint in the other's interval, which is [027](027-liveness-and-stackmaps.md)'s
-  constraint.
+- Spill-slot reuse checked for correctness rather than for size. The rule is in
+  the section below.
