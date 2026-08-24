@@ -87,20 +87,32 @@ The prefix `[N` is common. Deciding needs lookahead past `N`, and `N` can be an
 arbitrary expression in the array case.
 
 The resolution is the one the reference implementation uses, and it is a
-heuristic with a proof obligation rather than a grammar rule. After `[`, scan
-ahead:
+heuristic with a proof obligation rather than a grammar rule. **An earlier
+version of this spec stated it wrongly in three ways, and the implementation
+found all three.** The corrected rule:
+
+After `[`, parse one expression, then re-analyse the tree that came out:
 
 - `]` immediately: slice type.
-- The token after the first expression is `]`: array type, unless the expression
-  was a single identifier and the token after `]` starts a type — which is the
-  `type B [N] int` case that the specification resolves as an array.
+- A single name before `]`: **always an array length**, whatever follows. The
+  earlier text made this conditional on what came after `]`, which contradicted
+  itself: `type B [N] int` is an array, and so is `type B [N]int`.
 - A `,` at depth zero before `]`: type parameter list.
-- An identifier followed by something that starts a type: type parameter list.
+- A name followed by something that can **only** be a type: type parameter
+  list. The earlier text said "something that starts a type", which is too
+  strong. `type B [P *E] struct{}` is an **array**, because `*E` reads equally
+  well as a value expression. Only a constraint that cannot be an expression
+  tilts the decision; anything ambiguous needs the comma.
 
-The parser records which branch it took, and [012](012-type-checking.md) is
-allowed to reject the result. The obligation is L1 agreement in
-[004](004-conformance.md): if nanogo and `go/parser` disagree on any file in the
-distribution, the heuristic is wrong and the disagreement is the bug report.
+**There is no backtracking.** The earlier text described saving and restoring
+scanner state. The reference does not do that, and nanogo's `Scanner` exposes no
+such thing: the expression is parsed once and the resulting tree is
+re-analysed.
+
+The branch taken is recorded by `TypeDecl.TParamList` being non-nil, and
+[012](012-type-checking.md) is allowed to reject the result. The obligation is
+L1 agreement in [004](004-conformance.md), and it is met: 16,293 files, zero
+undocumented disagreements.
 
 ### 2. Index against instantiation
 
@@ -142,6 +154,16 @@ Two rules keep this from producing error cascades:
    `BadDecl` on failure, carrying the position range it consumed. The type
    checker skips bad nodes silently, so one syntax error produces one message
    rather than one message plus the type errors that follow from a hole.
+
+"One mistake, one message" is the goal and it is not always reachable. Three
+inputs produce two messages in nanogo and in the reference parser alike:
+`switch { case: }`, `var x map[int = 0`, and `var x, = 1`. Recovery skips the
+token it could not read, and that token was the one the next production needed.
+
+The spec used to state the stronger rule, which no Go parser achieves. What is
+actually guaranteed, and what the tests assert, is the weaker pair: no two
+messages ever share a position, and the message count matches the reference
+parser's on the same input.
 
 ## Structure
 
