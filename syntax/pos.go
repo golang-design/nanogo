@@ -148,9 +148,17 @@ func (f *SrcFile) AddLine(offset int) {
 
 // AddLineDirective records a //line directive taking effect at offset.
 //
-// offset is the offset of the first byte the directive governs, which is the
-// start of the line after the directive itself. The directive asserts that this
-// offset is at line and, when col is not zero, at that column.
+// offset is the offset of the first byte the directive governs. For a //line
+// comment that is the start of the next line. For a /*line*/ comment, which may
+// stand anywhere, it is the byte just after the closing delimiter, which may be
+// in the middle of a line.
+//
+// The directive asserts that this offset is at line and, when col is not zero,
+// at that column. A position further along the same line is that many bytes
+// further right, which is what makes a mid-line directive resolvable.
+//
+// An empty name means the reported filename is empty, not inherited. See the
+// comment on the append below.
 //
 // A directive with line 0 is ignored: the specification requires a positive
 // line number and accepting one would produce unknown positions for the rest of
@@ -159,22 +167,15 @@ func (f *SrcFile) AddLineDirective(offset int, name string, line, col uint) {
 	if line == 0 {
 		return
 	}
-	if name == "" {
-		// A directive may omit the filename to change only the line, in which
-		// case the name in force continues.
-		name = f.directiveNameAt(offset)
-		if name == "" {
-			name = f.name
-		}
-	}
+	// An empty filename stays empty. It does not inherit the name in force and
+	// it does not fall back to the file on disk.
+	//
+	// An earlier version inherited, on the reasoning that `//line :200` only
+	// means to change the line. Both oracles disagree: for a file that already
+	// carries `//line gen.go:100`, a later `//line :200` makes `go tool
+	// compile` report `:200` and go/scanner report a position with no
+	// filename, not `gen.go:200`.
 	f.directives = append(f.directives, lineDirective{offset: offset, name: name, line: line, col: col})
-}
-
-func (f *SrcFile) directiveNameAt(offset int) string {
-	if d := f.lastDirectiveAt(offset); d != nil {
-		return d.name
-	}
-	return ""
 }
 
 // lastDirectiveAt returns the directive in force at offset, or nil.
@@ -226,11 +227,35 @@ func (f *SrcFile) Position(p Pos) Position {
 	// The directive asserts that its own offset is at d.line, so a position n
 	// lines further down is at d.line + n.
 	rline := d.line + (line - dline)
-	rcol := col
-	if d.col > 0 && line == dline {
-		// A column applies to the governed line only. Every later line starts
-		// at column 1 as usual.
-		rcol = d.col + col - 1
+
+	// Columns under a directive follow three rules, and all three were checked
+	// against the reference compiler rather than reasoned about:
+	//
+	//	//line gen.go:100      -> gen.go:100      and gen.go:101
+	//	//line gen.go:100:5    -> gen.go:100:17   and gen.go:101:13
+	//
+	// So a directive with no column makes the column unknown for every line it
+	// governs, and an unknown column is not printed. Reporting the original
+	// file's raw column under the generated file's name would be a fabrication,
+	// and it would disagree with the errorcheck annotations in the conformance
+	// corpus.
+	//
+	// A directive with a column keeps columns known. On the line the directive
+	// governs, the column is measured from the directive's own offset, which is
+	// what makes a mid-line /*line f:l:c*/ resolvable. An earlier version
+	// measured from the start of the line and reported a column too far right
+	// by however much text preceded the directive; three files in the Go
+	// distribution's test corpus depend on the correct form, and the scanner
+	// cannot compensate for the wrong one because the compensation underflows.
+	// On every later line the ordinary raw column applies.
+	rcol := uint(0)
+	switch {
+	case d.col == 0:
+		// Unknown, as above.
+	case line == dline:
+		rcol = d.col + uint(off-d.offset)
+	default:
+		rcol = col
 	}
 	return Position{Filename: d.name, Line: rline, Col: rcol}
 }

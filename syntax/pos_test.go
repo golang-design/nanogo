@@ -210,7 +210,14 @@ func TestLineDirectiveColumnAppliesToTheFirstLineOnly(t *testing.T) {
 	}
 }
 
-func TestLineDirectiveWithoutNameKeepsTheNameInForce(t *testing.T) {
+// TestLineDirectiveWithoutNameReportsNoName pins a rule that was got wrong by
+// reasoning and right by asking both oracles.
+//
+// `//line :200` does not mean "keep the filename and change the line". It
+// means the filename is empty. For a file that already carries
+// `//line gen.go:100`, `go tool compile` reports `:200` and go/scanner reports
+// a position with no filename. Neither reports `gen.go:200`.
+func TestLineDirectiveWithoutNameReportsNoName(t *testing.T) {
 	const src = "package p\n//line gen.go:100\nvar x = 1\n//line :200\nvar y = 2\n"
 	fset := NewFileSet()
 	f := fset.AddFile("a.go", len(src))
@@ -218,19 +225,19 @@ func TestLineDirectiveWithoutNameKeepsTheNameInForce(t *testing.T) {
 	f.AddLineDirective(strings.Index(src, "var x"), "gen.go", 100, 0)
 	f.AddLineDirective(strings.Index(src, "var y"), "", 200, 0)
 
-	if got := f.Position(f.Pos(strings.Index(src, "var y"))); got.Filename != "gen.go" || got.Line != 200 {
-		t.Errorf("reported position is %v, want gen.go:200", got)
+	if got := f.Position(f.Pos(strings.Index(src, "var y"))); got.Filename != "" || got.Line != 200 {
+		t.Errorf("reported position is %#v, want an empty filename at line 200", got)
 	}
 }
 
-func TestLineDirectiveWithoutNameOrPredecessorUsesTheFile(t *testing.T) {
+func TestLineDirectiveWithoutNameOrPredecessorReportsNoName(t *testing.T) {
 	const src = "package p\n//line :50\nvar x = 1\n"
 	fset := NewFileSet()
 	f := fset.AddFile("a.go", len(src))
 	addLinesFor(f, src)
 	f.AddLineDirective(strings.Index(src, "var x"), "", 50, 0)
-	if got := f.Position(f.Pos(strings.Index(src, "var x"))); got.Filename != "a.go" || got.Line != 50 {
-		t.Errorf("reported position is %v, want a.go:50", got)
+	if got := f.Position(f.Pos(strings.Index(src, "var x"))); got.Filename != "" || got.Line != 50 {
+		t.Errorf("reported position is %#v, want an empty filename at line 50", got)
 	}
 }
 
@@ -252,5 +259,109 @@ func TestFileWithNoLineTableStillResolves(t *testing.T) {
 	f := &SrcFile{name: "a.go", base: 1, size: 10}
 	if got := f.RawPosition(f.Pos(4)); got.Line != 1 || got.Col != 5 {
 		t.Fatalf("got %v, want a.go:1:5", got)
+	}
+}
+
+// TestMidLineDirectiveColumn is the case that a //line comment cannot produce
+// and a /*line*/ comment can: the directive ends in the middle of a line, so
+// the column it asserts is measured from its own offset and not from the start
+// of the line.
+//
+// Three files in the Go distribution's test corpus depend on this, and an
+// earlier version of Position got it wrong in a way the scanner could not
+// compensate for: the compensation underflows.
+func TestMidLineDirectiveColumn(t *testing.T) {
+	const src = "package p\nvar x = /*line gen.go:7:3*/ 1 + 2\nvar y = 3\n"
+	fset := NewFileSet()
+	f := fset.AddFile("a.go", len(src))
+	addLinesFor(f, src)
+
+	// The directive governs the byte just after its closing delimiter.
+	governed := strings.Index(src, "*/") + len("*/")
+	f.AddLineDirective(governed, "gen.go", 7, 3)
+
+	// The governed offset itself is exactly the asserted position.
+	if got := f.Position(f.Pos(governed)); got.Filename != "gen.go" || got.Line != 7 || got.Col != 3 {
+		t.Errorf("the governed offset reports %v, want gen.go:7:3", got)
+	}
+
+	// A position further along the same line is that many bytes further right.
+	one := strings.Index(src, "1 + 2")
+	wantCol := uint(3 + (one - governed))
+	if got := f.Position(f.Pos(one)); got.Line != 7 || got.Col != wantCol {
+		t.Errorf("the literal reports %v, want gen.go:7:%d", got, wantCol)
+	}
+
+	// The next line restarts at column 1, because the column applies to the
+	// governed line only.
+	next := strings.Index(src, "var y")
+	if got := f.Position(f.Pos(next)); got.Line != 8 || got.Col != 1 {
+		t.Errorf("the next line reports %v, want gen.go:8:1", got)
+	}
+}
+
+// TestMidLineDirectiveMatchesGoToken checks the rule against the standard
+// library rather than against my own arithmetic, since the arithmetic is what
+// was wrong before.
+func TestMidLineDirectiveMatchesGoToken(t *testing.T) {
+	const src = "package p\nvar x = /*line gen.go:7:3*/ 1 + 2\n"
+
+	fset := NewFileSet()
+	f := fset.AddFile("a.go", len(src))
+	addLinesFor(f, src)
+	governed := strings.Index(src, "*/") + len("*/")
+	f.AddLineDirective(governed, "gen.go", 7, 3)
+
+	gofset := token.NewFileSet()
+	gof := gofset.AddFile("a.go", -1, len(src))
+	gof.SetLinesForContent([]byte(src))
+	gof.AddLineColumnInfo(governed, "gen.go", 7, 3)
+
+	// Compare every offset on the governed line.
+	lineEnd := strings.IndexByte(src[governed:], '\n') + governed
+	for off := governed; off < lineEnd; off++ {
+		got := f.Position(f.Pos(off))
+		want := gofset.Position(gof.Pos(off))
+		if got.Filename != want.Filename || got.Line != uint(want.Line) || got.Col != uint(want.Column) {
+			t.Fatalf("offset %d: nanogo %v, go/token %s", off, got, want)
+		}
+	}
+}
+
+// TestDirectiveColumnRulesMatchTheReferenceCompiler pins the three rules
+// against what `go tool compile` actually prints, because they were got wrong
+// twice by reasoning and right once by measuring.
+//
+//	//line gen.go:100      -> gen.go:100      then gen.go:101
+//	//line gen.go:100:5    -> gen.go:100:17   then gen.go:101:13
+func TestDirectiveColumnRulesMatchTheReferenceCompiler(t *testing.T) {
+	build := func(directive string) (*SrcFile, string) {
+		src := "package p\n\n" + directive + "\nvar y int = 1\nvar z int = \"nope\"\n"
+		fset := NewFileSet()
+		f := fset.AddFile("bad.go", len(src))
+		addLinesFor(f, src)
+		return f, src
+	}
+
+	// Without a column, no column is reported on any governed line.
+	f, src := build("//line gen.go:100")
+	f.AddLineDirective(strings.Index(src, "var y"), "gen.go", 100, 0)
+	if got := f.Position(f.Pos(strings.Index(src, `"nope"`))); got.String() != "gen.go:101" {
+		t.Errorf("no-column directive reports %q, want %q", got.String(), "gen.go:101")
+	}
+
+	// With a column, the governed line measures from the directive and later
+	// lines use their ordinary column.
+	f, src = build("//line gen.go:100:5")
+	governed := strings.Index(src, "var y")
+	f.AddLineDirective(governed, "gen.go", 100, 5)
+
+	// "var y int = 1": the literal is at raw column 13, so 5 + 12 = 17.
+	one := strings.Index(src, "= 1") + 2
+	if got := f.Position(f.Pos(one)); got.String() != "gen.go:100:17" {
+		t.Errorf("governed line reports %q, want %q", got.String(), "gen.go:100:17")
+	}
+	if got := f.Position(f.Pos(strings.Index(src, `"nope"`))); got.String() != "gen.go:101:13" {
+		t.Errorf("later line reports %q, want %q", got.String(), "gen.go:101:13")
 	}
 }
