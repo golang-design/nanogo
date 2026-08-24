@@ -66,6 +66,48 @@ The tail is long but shallow. This is a rename-and-adjust job over a bounded
 vocabulary, which is why [011](011-parser-and-ast.md) is constrained to keep
 that vocabulary intact.
 
+### The gap, measured
+
+Every name `types2` writes as `syntax.X` was extracted and checked against
+nanogo's tree. 117 names, of which **92 already exist with the same shape**.
+The 25 that do not are the whole of the port's surface, and they are helpers
+rather than nodes:
+
+| Missing name | Call sites in types2 | Disposition |
+| --- | --- | --- |
+| `Unparen` | 14 | provided in `syntax` |
+| `UnpackListExpr` | 13 | provided in `syntax` |
+| `StartPos` | 13 | provided in `syntax` |
+| `EndPos` | 9 | provided in `syntax` |
+| `NewName` | 7 | provided in `syntax` |
+| `Inspect` | 7 | provided in `syntax` |
+| `PosBase`, `NewFileBase` | 8 | **rewrite-table entry**; nanogo's position model is a `FileSet` and a `SrcFile`, per [010](010-scanner-and-positions.md) |
+| `Parse`, `ParseFile` | 7 | provided in `syntax`, with nanogo's signature |
+| `Fprint`, `String`, `ShortForm` | 3 | a tree printer, for error messages |
+| `CommentMap`, `CommentsDo` | 2 | **dropped**; nanogo's tree carries no comments |
+| the rest | 0 | mentions in comments, not code |
+
+No node type is missing. That is the result worth stating: the node set of
+[011](011-parser-and-ast.md) is complete for the checker, and the port's real
+work is a handful of helpers plus one model difference.
+
+### The one model difference
+
+`types2` resolves a position through a `*PosBase` that the `Pos` itself points
+to. nanogo's `Pos` is a bare `uint32` resolved through a `FileSet`, because
+there is a position in every IR node and SSA value and 4 bytes against 16 is
+worth having ([010](010-scanner-and-positions.md)).
+
+The cost of that choice inside the port was measured too, and it is small:
+across all of `types2`, **34 call sites** call a method on a `Pos`, and they use
+four methods, `Col`, `IsKnown`, `Line`, and `RelFilename`. Every one of them is
+inside the checker, which already holds a context object, so the `FileSet` is
+threaded through that object and the rewrite is mechanical.
+
+Had that number been in the hundreds, the compact `Pos` would have been the
+wrong decision and [010](010-scanner-and-positions.md) would need revisiting. It
+is 34, so it is not.
+
 ### Mechanism
 
 A generator in nanogo's repository, in the shape of `go/types/generate_test.go`:
