@@ -125,6 +125,24 @@ type Result struct {
 	Funcdata []*obj.Symbol
 	Pcdata   []*obj.Symbol
 
+	// DwarfInfo is the subprogram symbol of specs/046-debug-info.md, and it
+	// carries no DIE.
+	//
+	// It is mandatory, and the reason is not debugging. cmd/link's DWARF pass
+	// walks every text symbol of a compilation unit and reads the relocations
+	// of its AuxDwarfInfo symbol without checking that there is one
+	// (cmd/link/internal/ld, writedebugaddr): the two lines beside it check
+	// the range and the location symbol and this one does not. A text symbol
+	// with no entry resolves to symbol 0 and the linker panics with "trying
+	// to get oreader for invalid sym 0".
+	//
+	// That pass runs only under the dwarf5 experiment, which internal/buildcfg
+	// turns on for every target except darwin, ios and aix. So an object
+	// without this symbol links on the machine most of this compiler was
+	// developed on and links nowhere else, which is why the symbol is here
+	// rather than in specs/046's own milestone.
+	DwarfInfo *obj.Symbol
+
 	// Gotype is the type descriptor reference the symbol carries, if the
 	// caller gave one.
 	Gotype obj.SymRef
@@ -203,6 +221,12 @@ func (r *Result) Add(p *obj.Package) (obj.SymRef, error) {
 		}
 		entries = append(entries, obj.Aux{Type: obj.AuxFuncdata, Sym: p.AddHashedDef(s)})
 	}
+	if r.DwarfInfo == nil {
+		return obj.SymRef{}, errors.New("ssagen: the result carries no DWARF subprogram symbol, and cmd/link reads one for every text symbol of a compilation unit")
+	}
+	// A plain definition, and named: the linker resolves it by index and then
+	// asserts that its type is SDWARFFCN, so it is not an anonymous payload.
+	entries = append(entries, obj.Aux{Type: obj.AuxDwarfInfo, Sym: p.AddDef(r.DwarfInfo)})
 	// The pc-value tables are content-addressable, as gc makes them: two
 	// functions with the same table are one symbol in the linked binary.
 	for _, x := range []struct {
@@ -1395,6 +1419,26 @@ func appendPC(list []obj.PCEntry, pc int32, value int32) []obj.PCEntry {
 	return append(list, obj.PCEntry{PC: int64(pc), Value: value})
 }
 
+// dwarfInfo returns the DWARF subprogram symbol of one function.
+//
+// The name is gc's (cmd/internal/dwarf, InfoPrefix) and the contents are
+// empty. A compilation unit's function DIEs are the contents of these symbols
+// concatenated, so an empty one contributes no DIE and the unit describes the
+// functions gc compiled and not this one. That is what nanogo knows today:
+// specs/046-debug-info.md puts DWARF at G3, and a DIE invented here would be a
+// wrong one rather than a missing one.
+func (e *emitter) dwarfInfo() *obj.Symbol {
+	return &obj.Symbol{
+		Name:  dwarfInfoPrefix + e.opt.Sym,
+		Type:  obj.SDWARFFCN,
+		Align: 1,
+	}
+}
+
+// dwarfInfoPrefix is gc's name for a subprogram symbol
+// (cmd/internal/dwarf, InfoPrefix).
+const dwarfInfoPrefix = "go:info."
+
 // funcInfoBytes encodes the FuncInfo auxiliary symbol.
 //
 // The layout is cmd/internal/goobj's: the argument size, the frame size
@@ -1483,6 +1527,8 @@ func (e *emitter) result() (*Result, error) {
 		Align: 1,
 		Data:  info,
 	}
+
+	r.DwarfInfo = e.dwarfInfo()
 
 	pcfile := e.pcfile
 	if len(files) > 0 {

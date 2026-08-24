@@ -302,6 +302,24 @@ func (e *emitter) layout() error {
 			Type: abi.In[i].Type,
 		})
 	}
+	// A result the registers could not hold occupies words of the same area
+	// and holds no pointer the collector may follow. It has none at any
+	// safepoint of this function: the copy that fills it is the last thing
+	// before the return, so every safepoint sees the words as the previous
+	// frame left them. Describing them by the result's own type would make
+	// the collector follow whatever is there, and gc's bitmap for such a
+	// function is the same all-zero map over the same width.
+	for i := range abi.Out {
+		av := &abi.Out[i]
+		if av.InReg || av.Type == nil || av.Type.Size == 0 {
+			continue
+		}
+		cfg.Args = append(cfg.Args, ssa.FrameArg{
+			Name: fmt.Sprintf("res%d", i),
+			Off:  av.Off,
+			Type: opaqueArea(av.Type.Size),
+		})
+	}
 	fr, err := ssa.LayoutFrame(e.f, items, cfg)
 	if err != nil {
 		return err
@@ -328,18 +346,30 @@ func (e *emitter) layout() error {
 			e.frames[it.Obj] = it.Off
 		}
 	}
-	// A parameter the register set could not hold stays where the caller
-	// wrote it, so its address is in the incoming argument area rather than
-	// in the locals. The layout knows nothing about it, because
-	// specs/030-abi.md's assignment took it out of Func.Frame; this is where
-	// the offset the assignment gave it becomes an offset from the stack
-	// pointer.
+	// The slots of an argument area that this function addresses. The layout
+	// knows nothing about them, because specs/030-abi.md's assignment keeps
+	// them out of Func.Frame: they are not locals, and a second slot in the
+	// locals would be described twice by the collector. This is where the
+	// offset the assignment gave each of them becomes an offset from the
+	// stack pointer.
+	//
+	// The incoming area is above the frame the prologue pushed, so the frame
+	// is added back. The outgoing area is at the bottom of this frame, over
+	// the word the callee saves its link register in.
 	for i := range abi.In {
 		av := &abi.In[i]
 		if !av.Home || av.Obj == nil {
 			continue
 		}
 		e.frames[av.Obj] = f.size + linkSlot + av.Off
+	}
+	for i := range abi.Homes {
+		h := &abi.Homes[i]
+		if h.Incoming {
+			e.frames[h.Obj] = f.size + linkSlot + h.Off
+			continue
+		}
+		e.frames[h.Obj] = linkSlot + h.Off
 	}
 
 	f.nosplit = f.size == 0 || (f.leaf && f.size < stackSmall)
@@ -387,6 +417,17 @@ func (e *emitter) checkFrame(frameless bool) error {
 	return nil
 }
 
+// opaqueArea returns a type of n bytes that holds no pointer.
+//
+// It describes a region of the argument area whose contents the collector must
+// not follow. A type with no pointer bits is the way to say that, and the size
+// is what keeps the region inside the map the layout builds.
+func opaqueArea(n int64) *ir.Type {
+	return &ir.Type{Kind: ir.Array, Size: n, Align: 8, Len: n / 8,
+		Elem: &ir.Type{Kind: ir.Uintptr, Size: 8, Align: 8, Name: "uintptr"},
+		Name: "result area"}
+}
+
 // callArgs places the operands of one call.
 //
 // The placement is ssa.ABICallArgs and not a second walk here, because the
@@ -399,11 +440,24 @@ func (e *emitter) callArgs(v *ssa.Value) (pl []place, lo int, size int64, err er
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("v%d (%v): %w", v.ID, v.Op, err)
 	}
-	pl, err = valuePlaces(vals)
+	pl, err = valuePlaces(operandPlaces(vals))
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("v%d (%v): %w", v.ID, v.Op, err)
 	}
 	return pl, lo, size, nil
+}
+
+// operandPlaces drops the values that are in the argument area already, so
+// that what is left lines up with the operand list one for one.
+func operandPlaces(vals []ssa.ABIValue) []ssa.ABIValue {
+	out := make([]ssa.ABIValue, 0, len(vals))
+	for i := range vals {
+		if vals[i].Copied {
+			continue
+		}
+		out = append(out, vals[i])
+	}
+	return out
 }
 
 // callArgsSize returns the size of the argument area one call needs.

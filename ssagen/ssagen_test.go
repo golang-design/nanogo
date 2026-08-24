@@ -330,94 +330,120 @@ func disassemble(t *testing.T, r *Result, p *obj.Package) string {
 // ---------------------------------------------------------------------------
 // The milestone: link a compiled function and run it
 
+// linkCfg is one import configuration and the environment that produced it.
+//
+// There is one per environment rather than one in all, because a build
+// configuration is not portable between them. The object header carries the
+// experiment set and the linker refuses an object whose header is not its own,
+// so a test that forces an experiment needs a standard library built with it.
+type linkCfg struct {
+	once    sync.Once
+	env     []string
+	link    string // importcfg.link, for go tool link
+	compile string // the main package's importcfg, for go tool compile
+	err     error
+}
+
 var (
-	linkCfgOnce    sync.Once
-	linkCfgPath    string
-	compileCfgPath string
-	linkCfgWork    string
-	linkCfgDir     string
-	linkCfgErr     error
+	// hostCfg is the toolchain as installed.
+	hostCfg = &linkCfg{}
+
+	// dwarf5Cfg is the toolchain with the dwarf5 experiment forced on.
+	//
+	// internal/buildcfg makes dwarf5 part of the baseline everywhere except
+	// darwin, ios and aix, so on those three the linker skips a DWARF pass
+	// that every other target runs. That pass is where an object nanogo
+	// writes has failed before, and a machine that never runs it is a machine
+	// where the failure is invisible. See
+	// TestLinksUnderTheDwarf5Experiment.
+	dwarf5Cfg = &linkCfg{env: []string{"GOEXPERIMENT=dwarf5"}}
 )
 
-// linkConfig returns an importcfg that maps every package the runtime needs to
-// a compiled archive, which is what the linker wants and what nanogo cannot
-// produce for itself yet. obj/write_test.go builds it the same way.
-func linkConfig(t *testing.T) string {
+// build compiles a stub once with c's environment and records where the go
+// command left the two import configurations it wrote.
+//
+// The stub imports what a caller compiled by these tests imports, because the
+// compile step needs an import configuration of its own and the go command
+// writes one per package it builds. A stub that imported nothing would produce
+// a configuration that names nothing.
+func (c *linkCfg) build(t *testing.T) {
 	t.Helper()
 	goCmd := goTool(t)
-	linkCfgOnce.Do(func() {
-		linkCfgDir, linkCfgErr = os.MkdirTemp("", "nanogo-ssagen-link")
-		if linkCfgErr != nil {
+	c.once.Do(func() {
+		dir, err := os.MkdirTemp("", "nanogo-ssagen-link")
+		if err != nil {
+			c.err = err
 			return
 		}
-		// The stub imports what a caller compiled by the tests of this
-		// package imports, because the compile step needs an import
-		// configuration of its own and the go command writes one per package
-		// it builds. A stub that imported nothing would produce a
-		// configuration that names nothing.
 		files := map[string]string{
 			"go.mod": "module nanogo.example/link\n\ngo 1.27\n",
 			"main.go": "package main\n\nimport (\n\t\"runtime\"\n\t\"sync/atomic\"\n)\n\n" +
 				"var n int32\n\nfunc main() {\n\truntime.GC()\n\tatomic.AddInt32(&n, 1)\n}\n",
 		}
 		for name, body := range files {
-			if linkCfgErr = os.WriteFile(filepath.Join(linkCfgDir, name), []byte(body), 0o600); linkCfgErr != nil {
+			if c.err = os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); c.err != nil {
 				return
 			}
 		}
-		cmd := exec.Command(goCmd, "build", "-work", "-o", filepath.Join(linkCfgDir, "prog"), ".")
-		cmd.Dir = linkCfgDir
-		cmd.Env = append(os.Environ(), "GOPROXY=off")
+		cmd := exec.Command(goCmd, "build", "-work", "-o", filepath.Join(dir, "prog"), ".")
+		cmd.Dir = dir
+		cmd.Env = append(append(os.Environ(), "GOPROXY=off"), c.env...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			linkCfgErr = fmt.Errorf("go build: %v\n%s", err, out)
+			c.err = fmt.Errorf("go build %v: %v\n%s", c.env, err, out)
 			return
 		}
+		work := ""
 		for _, line := range strings.Split(string(out), "\n") {
-			if work, ok := strings.CutPrefix(line, "WORK="); ok {
-				linkCfgWork = strings.TrimSpace(work)
+			if w, ok := strings.CutPrefix(line, "WORK="); ok {
+				work = strings.TrimSpace(w)
 			}
 		}
-		if linkCfgWork == "" {
-			linkCfgErr = fmt.Errorf("go build did not report its work directory:\n%s", out)
+		if work == "" {
+			c.err = fmt.Errorf("go build did not report its work directory:\n%s", out)
 			return
 		}
-		linkCfgErr = filepath.WalkDir(linkCfgWork, func(path string, d fs.DirEntry, err error) error {
+		c.err = filepath.WalkDir(work, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return nil
 			}
 			switch d.Name() {
 			case "importcfg.link":
-				linkCfgPath = path
+				c.link = path
 			case "importcfg":
 				// The main package's, which is the one that names every
 				// package the stub imports.
 				b, err := os.ReadFile(path)
 				if err == nil && strings.Contains(string(b), "packagefile sync/atomic=") {
-					compileCfgPath = path
+					c.compile = path
 				}
 			}
 			return nil
 		})
 	})
-	if linkCfgErr != nil {
-		t.Fatalf("cannot build an import configuration to link against: %v", linkCfgErr)
+	if c.err != nil {
+		t.Fatalf("cannot build an import configuration to link against: %v", c.err)
 	}
-	if linkCfgPath == "" {
-		t.Fatal("the go command produced no importcfg.link")
+	if c.link == "" || c.compile == "" {
+		t.Fatalf("the go command produced no importcfg (link %q, compile %q)", c.link, c.compile)
 	}
-	return linkCfgPath
+}
+
+// linkConfig returns an importcfg that maps every package the runtime needs to
+// a compiled archive, which is what the linker wants and what nanogo cannot
+// produce for itself yet. obj/write_test.go builds it the same way.
+func linkConfig(t *testing.T) string {
+	t.Helper()
+	hostCfg.build(t)
+	return hostCfg.link
 }
 
 // compileConfig returns the import configuration a caller compiled by these
 // tests needs. It is built by the same run as linkConfig.
 func compileConfig(t *testing.T) string {
 	t.Helper()
-	linkConfig(t)
-	if compileCfgPath == "" {
-		t.Fatal("the go command produced no importcfg for the main package")
-	}
-	return compileCfgPath
+	hostCfg.build(t)
+	return hostCfg.compile
 }
 
 // bigType is a struct with more parts than specs/025-lowering-and-rules.md
@@ -520,6 +546,31 @@ func TestLinkAndRun(t *testing.T) {
 			"run(100, 200)",
 			"func g(a, b, c, d, e, f2, h, i, j, k, l, m, n, o, p, q, r, s int) int { return a + s }",
 			"", 300},
+		// A value the register set cannot hold travels in the argument area
+		// whole, and the caller writes it there. This is nanogo writing and
+		// gc reading, so a disagreement about where the area starts or how
+		// wide it is shows up as the wrong number.
+		{"a large struct through a call",
+			big20Type + "func g(s Big20) int\n\nfunc run(s Big20) int { return g(s) }",
+			"run(Big20{A: 3, T: 4})",
+			big20Type + "func g(s Big20) int { return s.A*100 + s.T }",
+			"func run(s Big20) int", 304},
+		// The same value in the other direction: nanogo writes the result
+		// into the area the caller reserved for it and returns nothing in a
+		// register, and gc reads it out.
+		{"a large struct returned",
+			big20Type + "func run(s Big20) Big20 { return s }",
+			"run(Big20{A: 5, T: 6}).T",
+			big20Type, "func run(s Big20) Big20", 6},
+		// The scalar after a large argument is still in the first argument
+		// register, because a value the registers could not hold takes none
+		// of them. Its spill slot is above the whole stack part, which is
+		// where an area laid out as one sequence would put it wrong.
+		{"a scalar after a large struct",
+			big20Type + "func g(s Big20, n int) int\n\nfunc run(s Big20, n int) int { return g(s, n) }",
+			"run(Big20{A: 7}, 9)",
+			big20Type + "func g(s Big20, n int) int { return s.A*100 + n }",
+			"func run(s Big20, n int) int", 709},
 		// A string is two words, so the integer after it is in the fourth
 		// argument register and not in the third. A walk that counted the
 		// string as one word would read it from the wrong place, and the
@@ -578,6 +629,33 @@ func runLinked(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj
 		t.Fatalf("the linked program failed: %v\n%s", err, b)
 	}
 	return string(b)
+}
+
+// runLinkedEnvCfg links and runs with an environment on every step.
+//
+// The environment reaches the linker as well as the program, which the other
+// runners do not need: an experiment that changes what the linker does has to
+// be set when the linker runs and not only when the binary does.
+func runLinkedEnvCfg(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj.Package, caller string, env []string) (string, error) {
+	t.Helper()
+	objPath := writeObject(t, p, tc)
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "main.a")
+	pack := exec.Command(goCmd, "tool", "pack", "c", archive, caller, objPath)
+	pack.Env = append(os.Environ(), env...)
+	if b, err := pack.CombinedOutput(); err != nil {
+		t.Fatalf("go tool pack: %v\n%s", err, b)
+	}
+	out := filepath.Join(dir, "a.out")
+	link := exec.Command(goCmd, "tool", "link", "-importcfg", cfg, "-o", out, archive)
+	link.Env = append(os.Environ(), env...)
+	if b, err := link.CombinedOutput(); err != nil {
+		return string(b), fmt.Errorf("the linker rejected the object: %w", err)
+	}
+	run := exec.Command(out)
+	run.Env = append(os.Environ(), env...)
+	b, err := run.CombinedOutput()
+	return string(b), err
 }
 
 // runLinkedRaw is runLinked for a program that is expected to fail.
@@ -648,6 +726,14 @@ func TestStackGrowthCopiesNanogoFrames(t *testing.T) {
 // specs/030-abi.md and nothing else.
 func exitWrapper(t *testing.T, goCmd, sym, call, defs, decl string) string {
 	t.Helper()
+	return exitWrapperEnv(t, goCmd, sym, call, defs, decl, nil)
+}
+
+// exitWrapperEnv is exitWrapper with an environment for the compile step, so
+// that a test can build the caller with the experiment set it means to link
+// under. The object header carries that set and the linker refuses a mismatch.
+func exitWrapperEnv(t *testing.T, goCmd, sym, call, defs, decl string, env []string) string {
+	t.Helper()
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
 	if decl == "" {
@@ -667,6 +753,7 @@ func exitWrapper(t *testing.T, goCmd, sym, call, defs, decl string) string {
 	}
 	out := filepath.Join(dir, "main.o")
 	cmd := exec.Command(goCmd, "tool", "compile", "-p", "main", "-symabis", abis, "-o", out, src)
+	cmd.Env = append(os.Environ(), env...)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("compiling the caller failed: %v\n%s", err, b)
 	}
@@ -730,6 +817,12 @@ func TestFrameGrowsWithLocals(t *testing.T) {
 			"func f(a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q, r, s int) int { return a + s }\n", 144},
 		{"a struct past the registers", "package main\n\n" + bigType +
 			"func f(a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q int, s Big) int { return a + s.A }\n", 168},
+		// A result the registers cannot hold is in the same area, after the
+		// arguments that could not fit and under the spill slots.
+		{"a large result", "package main\n\n" + big20Type +
+			"func f(s Big20) Big20 { return s }\n", 320},
+		{"a large result after a register argument", "package main\n\n" + big20Type +
+			"func f(a int, s Big20) Big20 { return s }\n", 328},
 	}
 	n := 0
 	for _, tc := range tests {
@@ -940,6 +1033,168 @@ func TestEmitFrameObject(t *testing.T) {
 	t.Logf("frame %d bytes\n%s", r.Frame, text)
 }
 
+// linkReadsAux lists the auxiliary entries cmd/link reads for a text symbol
+// without first checking that they are there, with what each omission does.
+//
+// This is the list the object has to satisfy, and it is written down rather
+// than inferred, because every entry on it was found by a linker crash and not
+// by a diagnostic. An entry added to it is a one-line change here and a test
+// that fails until the emitter writes it.
+var linkReadsAux = []struct {
+	typ  obj.AuxType
+	name string
+	why  string
+}{
+	{obj.AuxFuncInfo, "AuxFuncInfo",
+		"the symbol belongs to no compilation unit and the DWARF pass sorts an empty list"},
+	{obj.AuxDwarfInfo, "AuxDwarfInfo",
+		"cmd/link/internal/ld.writedebugaddr reads the relocations of symbol 0 " +
+			"and panics with \"trying to get oreader for invalid sym 0\""},
+	{obj.AuxPcsp, "AuxPcsp", "the pclntab pass reads the table through an index it does not check"},
+	{obj.AuxPcfile, "AuxPcfile", "the pclntab pass reads the table through an index it does not check"},
+	{obj.AuxPcline, "AuxPcline", "the pclntab pass reads the table through an index it does not check"},
+}
+
+// checkTextAux asserts that a text symbol carries what the linker reads.
+//
+// It is a structural check on the object and it runs on any host, which is the
+// point: the DWARF entry above is read by a pass that darwin does not run, so
+// the failure it prevents was invisible on the machine this compiler is
+// written on for as long as it took a continuous integration run to say so.
+//
+// What it cannot do is find the next such entry. Only running the linker does
+// that, which is TestLinksUnderTheDwarf5Experiment.
+func checkTextAux(t *testing.T, text *obj.Symbol) {
+	t.Helper()
+	for _, want := range linkReadsAux {
+		found := false
+		for _, a := range text.Aux {
+			if a.Type != want.typ {
+				continue
+			}
+			found = true
+			if a.Sym.IsZero() {
+				t.Errorf("%s: the %s entry names no symbol, and %s", text.Name, want.name, want.why)
+			}
+		}
+		if !found {
+			t.Errorf("%s: no %s entry, and %s", text.Name, want.name, want.why)
+		}
+	}
+	// Every entry has to name a symbol, whether or not the linker reads it
+	// unconditionally: a zero reference is index 0 of the definition array.
+	for i, a := range text.Aux {
+		if a.Sym.IsZero() {
+			t.Errorf("%s: auxiliary entry %d (%v) names no symbol", text.Name, i, a.Type)
+		}
+	}
+}
+
+// TestEveryFunctionCarriesWhatTheLinkerReads runs the structural check over
+// the shapes whose auxiliary lists differ: a leaf with no frame, a function
+// that makes a call and therefore has a growth tail, and one with a frame
+// object.
+func TestEveryFunctionCarriesWhatTheLinkerReads(t *testing.T) {
+	srcs := []struct{ name, src string }{
+		{"leaf", "package main\n\nfunc f(a int) int { return a }\n"},
+		{"call", "package main\n\nfunc g(a int) int\n\nfunc f(a int) int { return g(a) }\n"},
+		{"frame", "package main\n\n" + bigType + "func f(s Big) int { return s.A + s.E }\n"},
+		{"area", "package main\n\n" + big20Type + "func f(s Big20) int { return s.A }\n"},
+	}
+	for _, tc := range srcs {
+		t.Run(tc.name, func(t *testing.T) {
+			c := compile(t, tc.src, "f")
+			p := obj.NewPackage("main")
+			r := emit(t, c, p)
+			if _, err := r.Add(p); err != nil {
+				t.Fatal(err)
+			}
+			checkTextAux(t, r.Text)
+		})
+	}
+	// A result with no DWARF symbol is refused rather than written, so the
+	// object cannot reach the linker without one.
+	c := compile(t, "package main\n\nfunc f(a int) int { return a }\n", "f")
+	p := obj.NewPackage("main")
+	r := emit(t, c, p)
+	r.DwarfInfo = nil
+	if _, err := r.Add(p); err == nil || !strings.Contains(err.Error(), "DWARF subprogram") {
+		t.Errorf("a result with no DWARF subprogram symbol gave %v", err)
+	}
+}
+
+// TestLinksUnderTheDwarf5Experiment links and runs the same program the
+// milestone links, with the DWARF 5 experiment forced on.
+//
+// internal/buildcfg puts dwarf5 in the baseline for every target except
+// darwin, ios and aix. The pass it enables, cmd/link/internal/ld.writedebugaddr,
+// walks every text symbol of a compilation unit and reads the relocations of
+// its DWARF subprogram symbol without checking that there is one, so an object
+// with a text symbol that has no such entry links on darwin and panics the
+// linker everywhere else.
+//
+// This test is what makes that reachable here. It costs a standard library
+// built with the experiment, which the build cache keeps, and it buys the
+// whole class: any other linker pass that darwin skips runs here too.
+func TestLinksUnderTheDwarf5Experiment(t *testing.T) {
+	goCmd := goTool(t)
+	dwarf5Cfg.build(t)
+	env := []string{"GOEXPERIMENT=dwarf5"}
+	// The header line carries the experiment set and the linker refuses an
+	// object whose header is not its own, so the object nanogo writes here
+	// has to claim the same set as the caller and the standard library.
+	tc := toolchainEnv(t, env)
+
+	// A nanogo function called by gc-compiled code, which is the shape that
+	// puts both compilers' text symbols in one compilation unit. A unit whose
+	// functions all lack DWARF is textless and the pass skips it, so the
+	// mixture is the case that has to be linked.
+	c := compile(t, "package main\n\nfunc run(a, b int) int { return a * b }\n", "run")
+	p := newMainPackage()
+	r := emit(t, c, p)
+	addFull(t, r, p)
+	caller := exitWrapperEnv(t, goCmd, c.f.Sym, "run(6, 7)", "", "", env)
+	out, err := runLinkedEnvCfg(t, goCmd, tc, dwarf5Cfg.link, p, caller, env)
+	if err != nil {
+		t.Fatalf("the linker or the program failed under dwarf5: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(out); got != "42" {
+		t.Fatalf("the program printed %q, and the function returns 42", got)
+	}
+	t.Logf("linked and ran under GOEXPERIMENT=dwarf5, which returned %s", strings.TrimSpace(out))
+}
+
+// toolchainEnv reports what the installed toolchain writes under an
+// environment, which obj.VerifyToolchain answers only for the one this process
+// runs in. The probe is that function's: assemble an empty file and read the
+// header line out of the result, because no go env variable reports the
+// experiment set.
+func toolchainEnv(t *testing.T, env []string) *obj.Toolchain {
+	t.Helper()
+	host := hostToolchain(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "probe.s")
+	out := filepath.Join(dir, "probe.o")
+	if err := os.WriteFile(src, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(goTool(t), "tool", "asm", "-p", "nanogo/probe", "-o", out, src)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cannot probe the object format under %v: %v\n%s", env, err, b)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nl := bytes.IndexByte(b, '\n')
+	if nl < 0 || !bytes.HasPrefix(b, []byte("go object ")) {
+		t.Fatalf("the probe under %v produced no object header", env)
+	}
+	return &obj.Toolchain{Header: string(b[:nl+1]), Magic: host.Magic}
+}
+
 // TestAddWritesTheAuxiliarySymbols checks that a result reaches an object with
 // every symbol the format wants, in gc's order.
 func TestAddWritesTheAuxiliarySymbols(t *testing.T) {
@@ -956,6 +1211,7 @@ func TestAddWritesTheAuxiliarySymbols(t *testing.T) {
 	want := []obj.AuxType{
 		obj.AuxFuncInfo,
 		obj.AuxFuncdata, obj.AuxFuncdata,
+		obj.AuxDwarfInfo,
 		obj.AuxPcsp, obj.AuxPcfile, obj.AuxPcline,
 		obj.AuxPcdata, obj.AuxPcdata,
 	}
@@ -1491,16 +1747,23 @@ func TestReturnValuesTravelInRegisters(t *testing.T) {
 		t.Errorf("no return:\n%s", text)
 	}
 
-	// Past the sixteenth register a result travels in the frame, which
-	// specs/030-abi.md describes and nothing below writes yet. The assignment
-	// pass names it, which is earlier than this package used to and is the
-	// right place: a function whose results have nowhere to go should not
-	// reach the code generator at all.
-	f := ssa.NewFunc("manyresults")
-	f.Sym = "main.manyresults"
-	build(20)(f)
-	if err := ssa.AssignABI(f, ssa.NewArm64Target()); err == nil {
-		t.Error("a result that does not fit the registers was assigned")
+	// Past the sixteenth register a result travels in the argument area. The
+	// assignment writes an aggregate there with a block move, which needs an
+	// address to copy from; a scalar has none, so the seventeenth integer
+	// result stays an operand of the return and this package refuses it
+	// rather than writing it into a register that is not its own.
+	c = hand(t, "manyresults", build(20))
+	_, err := Emit(c.f, c.a, obj.NewPackage("main"), Options{Sym: "main.manyresults"})
+	if err == nil || !strings.Contains(err.Error(), "travels in the frame") {
+		t.Errorf("a scalar result past the registers gave %v", err)
+	}
+	if n := len(c.f.ABI.Out); n != 20 {
+		t.Errorf("%d results are placed, want 20", n)
+	}
+	for i := 16; i < 20; i++ {
+		if c.f.ABI.Out[i].InReg {
+			t.Errorf("result %d took a register, and there are sixteen", i)
+		}
 	}
 }
 
