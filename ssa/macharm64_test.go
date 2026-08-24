@@ -14,30 +14,124 @@ import (
 
 // machValue builds a value of a machine operation with plausible operands, so
 // that every row of the table can be handed to the encoder.
+// The floating-point types the group 6 rows are built with. A conversion
+// stands between two widths and reads both from its types, so the table walk
+// below needs a float32 as well as a float64 to reach every instruction.
+var (
+	lowF64 = &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
+	lowF32 = &ir.Type{Kind: ir.Float32, Size: 4, Align: 4, Name: "float32"}
+)
+
+// machTypes returns the result type and the argument types a row of the table
+// is exercised with.
+//
+// The types are not decoration. ARM64Encode reads the operand width from them
+// and the register class follows from them too, so a floating-point operation
+// built with integer types would be handed an integer register and the
+// encoder would refuse it, correctly and for the wrong reason.
+func machTypes(op Op, info opInfo, n int) (res *ir.Type, args []*ir.Type) {
+	res = lowI64
+	if info.makesMem {
+		res = MemType
+	}
+	switch op {
+	case OpARM64CMP, OpARM64CMPW, OpARM64CMPconst, OpARM64CMPWconst,
+		OpARM64CMN, OpARM64CMNW, OpARM64CMNconst, OpARM64CMNWconst,
+		OpARM64TST, OpARM64TSTW, OpARM64TSTconst, OpARM64TSTWconst,
+		OpARM64BRcond, OpARM64CBZ, OpARM64CBNZ,
+		OpARM64FCMPD, OpARM64FCMPS, OpARM64FCMPD0, OpARM64FCMPS0:
+		res = FlagsType
+	}
+	args = make([]*ir.Type, n)
+	for i := range args {
+		args[i] = lowI64
+	}
+	if info.takesMem && n > 0 {
+		args[n-1] = MemType
+	}
+
+	// The floating-point rows, by which operand lives in which file.
+	float := func(t *ir.Type, which ...int) {
+		for _, i := range which {
+			if i < len(args) {
+				args[i] = t
+			}
+		}
+	}
+	switch op {
+	case OpARM64FADD, OpARM64FSUB, OpARM64FMUL, OpARM64FDIV:
+		res = lowF64
+		float(lowF64, 0, 1)
+	case OpARM64FNEG, OpARM64FABS, OpARM64FSQRT:
+		res = lowF64
+		float(lowF64, 0)
+	case OpARM64FCMPD, OpARM64FCMPD0:
+		float(lowF64, 0, 1)
+	case OpARM64FCMPS, OpARM64FCMPS0:
+		float(lowF32, 0, 1)
+	case OpARM64FMOVconst:
+		res = lowF64
+	case OpARM64FMOVgpfp:
+		res = lowF64
+	case OpARM64FMOVfpgp:
+		float(lowF64, 0)
+	case OpARM64SCVTF, OpARM64UCVTF:
+		res = lowF64
+	case OpARM64FCVTZS, OpARM64FCVTZU:
+		float(lowF64, 0)
+	case OpARM64FCVT:
+		// The two widths must differ: the class has no conversion from a
+		// width to itself.
+		res = lowF64
+		float(lowF32, 0)
+	case OpARM64FMOVDload:
+		res = lowF64
+	case OpARM64FMOVSload:
+		res = lowF32
+	case OpARM64FMOVDstore:
+		float(lowF64, 1)
+	case OpARM64FMOVSstore:
+		float(lowF32, 1)
+	case OpARM64FMOVDloadidx, OpARM64FMOVDloadidx8:
+		res = lowF64
+	case OpARM64FMOVSloadidx, OpARM64FMOVSloadidx4:
+		res = lowF32
+	case OpARM64FMOVDstoreidx, OpARM64FMOVDstoreidx8:
+		float(lowF64, 2)
+	case OpARM64FMOVSstoreidx, OpARM64FMOVSstoreidx4:
+		float(lowF32, 2)
+	}
+	return res, args
+}
+
+// machRegs returns a destination and argument registers of the classes a
+// value's types call for, so that no encoder is handed a register from the
+// wrong file.
+func machRegs(v *Value) (arm64.Reg, []arm64.Reg) {
+	pick := func(t *ir.Type, n int) arm64.Reg {
+		if c, ok := ClassOfType(t); ok && c == ClassFloat {
+			return arm64.F0 + arm64.Reg(n)
+		}
+		return arm64.R0 + arm64.Reg(n)
+	}
+	dst := pick(v.Type, 0)
+	args := make([]arm64.Reg, len(v.Args))
+	for i, a := range v.Args {
+		args[i] = pick(a.Type, i+1)
+	}
+	return dst, args
+}
+
 func machValue(f *Func, op Op) *Value {
 	info := infoOf(op)
 	n := int(info.argLen)
 	if n < 0 {
 		n = 2
 	}
-	t := lowI64
-	if info.makesMem {
-		t = MemType
-	}
-	switch op {
-	case OpARM64CMP, OpARM64CMPW, OpARM64CMPconst, OpARM64CMPWconst,
-		OpARM64CMN, OpARM64CMNW, OpARM64CMNconst, OpARM64CMNWconst,
-		OpARM64TST, OpARM64TSTW, OpARM64TSTconst, OpARM64TSTWconst,
-		OpARM64BRcond, OpARM64CBZ, OpARM64CBNZ:
-		t = FlagsType
-	}
-	v := f.Entry.NewValue(0, op, t)
+	res, argTypes := machTypes(op, info, n)
+	v := f.Entry.NewValue(0, op, res)
 	for i := 0; i < n; i++ {
-		a := lowI64
-		if info.takesMem && i == n-1 {
-			a = MemType
-		}
-		v.AddArg(f.Entry.NewValue(0, OpArg, a))
+		v.AddArg(f.Entry.NewValue(0, OpArg, argTypes[i]))
 	}
 	switch op {
 	case OpARM64BRcond:
@@ -47,6 +141,10 @@ func machValue(f *Func, op Op) *Value {
 		// Zero is not a logical immediate, so the table walk uses a value the
 		// bitmask scheme can hold.
 		v.AuxInt = 0xff
+	case OpARM64FMOVconst:
+		// Zero is not one of the 256 values FMOV's immediate reaches, so the
+		// table walk uses one that is.
+		v.AuxInt = int64(arm64.FloatBits(arm64.Size64, 1.5))
 	}
 	return v
 }
@@ -119,11 +217,11 @@ func TestARM64OpTable(t *testing.T) {
 func TestARM64Encoders(t *testing.T) {
 	f := NewFunc("f")
 	out := make([]uint32, 8)
-	regs := []arm64.Reg{arm64.R1, arm64.R2, arm64.R3, arm64.R4}
 	var gaps []string
 	for op := OpARM64ADD; op < opARM64End; op++ {
 		v := machValue(f, op)
-		n, ok := ARM64Encode(v, arm64.R0, regs, out)
+		dst, regs := machRegs(v)
+		n, ok := ARM64Encode(v, dst, regs, out)
 		if ARM64MissingEncoder(op) {
 			gaps = append(gaps, op.String())
 			if ok {
@@ -440,5 +538,43 @@ func TestARM64SizeFromType(t *testing.T) {
 	}
 	if ARM64Size(nil) != arm64.Size32 {
 		t.Error("a value with no type is not 32-bit")
+	}
+}
+
+// TestARM64FloatMemOpSelection covers the two type-to-operation lookups.
+//
+// ARM64StoreOp answers from a size and cannot tell a four-byte integer store
+// from a four-byte floating-point one, which is why the type-taking form
+// exists and why ssagen's spill path still goes through the size-only one.
+func TestARM64FloatMemOpSelection(t *testing.T) {
+	f32 := &ir.Type{Kind: ir.Float32, Size: 4, Align: 4, Name: "float32"}
+	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
+	odd := &ir.Type{Kind: ir.Float64, Size: 16, Align: 8, Name: "wide"}
+	for _, c := range []struct {
+		t          *ir.Type
+		load, stor Op
+		ok         bool
+	}{
+		{f32, OpARM64FMOVSload, OpARM64FMOVSstore, true},
+		{f64, OpARM64FMOVDload, OpARM64FMOVDstore, true},
+		{lowI64, OpARM64MOVDload, OpARM64MOVDstore, true},
+		{odd, OpInvalid, OpInvalid, false},
+		{nil, OpInvalid, OpInvalid, false},
+	} {
+		got, ok := ARM64LoadOp(c.t)
+		if ok != c.ok || (c.ok && got != c.load) {
+			t.Errorf("ARM64LoadOp(%v) = %v, %v", c.t, got, ok)
+		}
+		got, ok = ARM64StoreOpForType(c.t)
+		if ok != c.ok || (c.ok && got != c.stor) {
+			t.Errorf("ARM64StoreOpForType(%v) = %v, %v", c.t, got, ok)
+		}
+	}
+	// The size-only form is the integer one and stays that way.
+	if got, ok := ARM64StoreOp(4); !ok || got != OpARM64MOVWstore {
+		t.Errorf("ARM64StoreOp(4) = %v, %v", got, ok)
+	}
+	if _, ok := ARM64StoreOp(3); ok {
+		t.Error("ARM64StoreOp accepted a width with no instruction")
 	}
 }
