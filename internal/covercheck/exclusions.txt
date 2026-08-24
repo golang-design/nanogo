@@ -13,5 +13,4 @@
 # The number is still printed for an excluded package on every run. An
 # exclusion removes the gate, never the measurement.
 #
-# There are no entries. Adding the first one is a review conversation, not a
-# commit.
+golang.design/x/nanogo/cmd/nanogo  # one statement, the process boundary: it hands os.Args and the standard streams to driver.Run and exits with its result. Coverage cannot see it because the only test that runs it, driver's end-to-end toolexec test, runs it as a separate process. The gate that replaces it is that test: it builds this binary and drives a real `go build -toolexec` with it, so a broken main fails the build rather than the coverage number. Delete this entry if main ever grows a second statement.
