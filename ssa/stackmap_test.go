@@ -842,12 +842,20 @@ func (imp *smCorpusImporter) check(path string) *smCorpusPkg {
 
 type smCounts struct {
 	pkgs     int
-	built    int // functions ssa.Build produced
+	funcs    int // functions the typed tree holds
+	built    int // functions ssa.Build produced and the verifier accepted
 	lowered  int // functions that lowered completely
 	mapped   int // functions that reached a stack map
 	pointers int // functions with at least one pointer bit set
 	objects  int // functions with a stack object
 	safe     int // safepoints described
+
+	// notBuilt counts the functions ssa.Build refused, by cause, and verifyNG
+	// the ones it accepted and the verifier did not. Until these existed the
+	// test returned silently on both, so its numbers could only ever go up
+	// and never said what they were measured out of.
+	notBuilt map[string]int
+	verifyNG int
 }
 
 func TestStackMapCorpus(t *testing.T) {
@@ -903,7 +911,7 @@ func TestStackMapCorpus(t *testing.T) {
 	}
 
 	imp := newSMCorpusImporter()
-	c := &smCounts{}
+	c := &smCounts{notBuilt: make(map[string]int)}
 	for _, path := range paths {
 		if path == "unsafe" {
 			continue
@@ -919,12 +927,16 @@ func TestStackMapCorpus(t *testing.T) {
 		c.pkgs++
 		fns := append(append([]*ir.Func{}, pkg.Funcs...), pkg.Inits...)
 		for _, fn := range fns {
+			c.funcs++
 			smCorpusOne(t, path, fn, c)
 		}
 	}
 
 	t.Logf("stack map corpus: %d packages, %d functions built, %d lowered, %d mapped, %d with a pointer bit, %d with a stack object, %d safepoints",
 		c.pkgs, c.built, c.lowered, c.mapped, c.pointers, c.objects, c.safe)
+	t.Logf("construction refused %d of the %d functions the typed tree holds, and %d more did not verify",
+		c.funcs-c.built-c.verifyNG, c.funcs, c.verifyNG)
+	corpusLogCounts(t, "construction refused", c.notBuilt)
 	if c.built == 0 {
 		t.Fatal("the corpus produced no function")
 	}
@@ -991,10 +1003,15 @@ func smCorpusOne(t *testing.T, path string, fn *ir.Func, c *smCounts) {
 	t.Helper()
 	f, err := ssa.Build(fn)
 	if err != nil || f == nil {
+		c.notBuilt[decBuildCause(err)]++
 		return
 	}
 	if vs := ssa.Verify(f); len(vs) != 0 {
-		return // construction is specs/021's corpus test, not this one
+		// The violation itself is specs/021's corpus test to report. That it
+		// happened is this one's, because a function that builds and does not
+		// verify is not a function this pipeline measured.
+		c.verifyNG++
+		return
 	}
 	c.built++
 	// The pipeline of specs/002-architecture.md: decomposition, then

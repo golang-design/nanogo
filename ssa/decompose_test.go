@@ -1045,8 +1045,15 @@ func (imp *decCorpusImporter) check(path string) *decCorpusPkg {
 // decomposeCounts is what one run of the corpus produced.
 type decomposeCounts struct {
 	pkgs    int
+	funcs   int
 	built   int
 	lowered int
+
+	// notBuilt counts the functions ssa.Build refused, by cause. Until this
+	// existed the test returned silently on the error, so its headline number
+	// could only ever go up and never said what it was measured out of. A
+	// count that filters its own denominator is not a measurement.
+	notBuilt map[string]int
 
 	// refused counts the functions lowering refused, by the operation it
 	// named. undecomposed counts the ones that still hold a value wider than
@@ -1134,6 +1141,7 @@ func TestDecomposeCorpus(t *testing.T) {
 
 	imp := newDecCorpusImporter()
 	c := &decomposeCounts{
+		notBuilt:     make(map[string]int),
 		refused:      make(map[string]int),
 		undecomposed: make(map[string]int),
 		wide:         make(map[string]int),
@@ -1153,12 +1161,16 @@ func TestDecomposeCorpus(t *testing.T) {
 		c.pkgs++
 		fns := append(append([]*ir.Func{}, pkg.Funcs...), pkg.Inits...)
 		for _, fn := range fns {
+			c.funcs++
 			decomposeOne(t, path, fn, c)
 		}
 	}
 
 	t.Logf("decompose corpus: %d packages, %d functions reached SSA, %d lowered completely",
 		c.pkgs, c.built, c.lowered)
+	t.Logf("construction refused %d of the %d functions the typed tree holds",
+		c.funcs-c.built, c.funcs)
+	corpusLogCounts(t, "construction refused", c.notBuilt)
 	decLogCounts(t, "unlowered", c.refused)
 	decLogCounts(t, "still wider than a register: operation", c.undecomposed)
 	decLogCounts(t, "still wider than a register: type", c.wide)
@@ -1175,14 +1187,70 @@ func TestDecomposeCorpus(t *testing.T) {
 	if c.built == 0 {
 		t.Fatal("the corpus produced no function")
 	}
-	// The measurement this pass was written to move. Before it, 4,755 of
-	// 8,238 lowered; a regression below three quarters means the pass stopped
-	// doing its work rather than that the corpus changed.
+	// The measurement this pass was written to move. The pair is 17,285 of
+	// 17,367 today, and it was 4,755 of 8,238 when the pass landed: the
+	// denominator moved because construction learned the assignment statement,
+	// and the fraction moved because the shapes that arrived with it are ones
+	// this pass already splits.
+	//
+	// The bound stays at three quarters rather than following the measurement
+	// up. It is a tripwire for the pass having stopped working, not a record
+	// of the best number seen, and a bound set just under the last measurement
+	// fails on every change to the corpus rather than on a regression here.
 	if c.lowered*4 < c.built*3 {
 		t.Errorf("only %d of %d functions lowered", c.lowered, c.built)
 	}
 	if required && c.built < 1000 {
 		t.Fatalf("only %d functions reached SSA; the corpus collapsed", c.built)
+	}
+}
+
+// decBuildCause reduces a construction error to the cause it reports.
+//
+// The detail already is the cause. What is cut is the tail of the few details
+// that print a type, so that one cause is one row rather than one row per
+// type.
+func decBuildCause(err error) string {
+	e, ok := err.(*ssa.Error)
+	if !ok {
+		return "Build returned no function and no construction error"
+	}
+	d := e.Detail
+	head := ""
+	if i := strings.Index(d, ": "); i >= 0 {
+		head, d = d[:i+2], d[i+2:]
+	}
+	for _, prefix := range []string{
+		"a conversion from ", "an index of ", "operator ", "unary ",
+		"comparison ", "the address of ", "field ",
+	} {
+		if strings.HasPrefix(d, prefix) {
+			return head + prefix + "..."
+		}
+	}
+	return head + d
+}
+
+// corpusLogCounts prints a set of counts, largest first, from a sorted slice
+// of keys rather than from a range over the map: specs/053-determinism.md
+// forbids output that depends on map order, and a report whose rows move
+// between runs cannot be diffed.
+//
+// It is shared with ssa/stackmap_test.go, which counts refusals the same way.
+func corpusLogCounts(t *testing.T, what string, m map[string]int) {
+	t.Helper()
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]] != m[keys[j]] {
+			return m[keys[i]] > m[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	for _, k := range keys {
+		t.Logf("%s %6d  %s", what, m[k], k)
 	}
 }
 
@@ -1225,6 +1293,7 @@ func decomposeOne(t *testing.T, path string, fn *ir.Func, c *decomposeCounts) {
 	t.Helper()
 	f, err := ssa.Build(fn)
 	if err != nil || f == nil {
+		c.notBuilt[decBuildCause(err)]++
 		return
 	}
 	c.built++

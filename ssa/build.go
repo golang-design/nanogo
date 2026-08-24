@@ -97,6 +97,12 @@ type builder struct {
 	// labelled break or continue can find the loop or switch it names.
 	pendingLabel string
 
+	// fallthru is the block a fallthrough in the clause being built jumps to,
+	// or nil outside a clause and in the last one. It is a field rather than a
+	// label because fallthrough names the next clause's body and not its test:
+	// the case expressions of that clause are not evaluated.
+	fallthru *Block
+
 	ctrl []ctrlFrame
 
 	ptrTypes map[*ir.Type]*ir.Type
@@ -548,6 +554,14 @@ func (b *builder) stmt(n ir.Stmt) {
 	case ir.OLabel:
 		b.labelStmt(n)
 	case ir.OGoto:
+		if n.Label == fallthroughLabel {
+			if b.fallthru == nil {
+				b.errorf(InvNone, "fallthrough outside a switch clause that has a next one")
+				return
+			}
+			b.jump(b.fallthru)
+			return
+		}
 		b.jump(b.labelBlock(n.Label))
 	case ir.OBreak:
 		t := b.target(n.Label, false)
@@ -565,61 +579,43 @@ func (b *builder) stmt(n ir.Stmt) {
 		b.jump(t)
 	case ir.OCall:
 		b.stmts(n.Init)
-		b.call(n)
-	case ir.OBinary:
-		// specs/020-ir.md has no assignment node, so construction takes a
-		// binary node with no operator, or with the operator of a short
-		// variable declaration, to be one. See assignParts.
-		dst, src, ok := assignParts(n)
-		if !ok {
-			b.unsupported(n, "a binary expression as a statement")
-			return
-		}
+		// A call statement discards the results, so the call itself is built
+		// and nothing reads it. Reading result zero and dropping the value
+		// would leave a value the code generator has to place for nobody.
+		b.callValue(n)
+	case ir.OAssign:
 		b.stmts(n.Init)
-		b.assign(dst, b.expr(src), n.Pos)
+		b.assignStmt(n)
 	default:
 		b.unsupported(n, "statement")
 	}
 }
 
-// assignParts returns the two sides of an assignment statement.
-//
-// specs/020-ir.md's node set has no assignment operation, which it needs and
-// which is reported as a finding rather than worked around anywhere but here.
-// The convention until it has one: a binary node whose operator is absent, or
-// is the operator of a short variable declaration, assigns Y to X. Everything
-// that reads that convention is this function, so one edit moves it.
-func assignParts(n *ir.Node) (dst, src ir.Expr, ok bool) {
-	if n.Op != ir.OBinary {
-		return nil, nil, false
-	}
-	if n.Op1 != 0 && n.Op1 != syntax.Def {
-		return nil, nil, false
-	}
-	if n.X == nil || n.Y == nil {
-		return nil, nil, false
-	}
-	return n.X, n.Y, true
-}
-
 // forParts returns the four parts of a for statement.
 //
-// specs/020-ir.md gives ir.Node no post-statement field, so the convention
-// until it has one is that Else carries the post statements. Reported as a
-// finding, and confined here.
+// The post statements are in Post. An earlier version of this function read
+// them out of Else, which was the convention before ir.Node had the field, and
+// ir.Build has never written them there: every post statement of the corpus
+// was silently dropped, so every counted loop ran forever.
 func forParts(n *ir.Node) (init []ir.Stmt, cond ir.Expr, post []ir.Stmt, body []ir.Stmt) {
-	return n.Init, n.X, n.Else, n.Body
+	return n.Init, n.X, n.Post, n.Body
 }
 
 // switchCases returns the clauses of a switch.
 //
-// specs/020-ir.md has no case node, so the convention is that each clause is a
-// block node whose Args are the case expressions and whose Body is the clause
-// body. A clause with no case expression is the default. Reported as a finding,
-// and confined here.
+// A clause is an ir.OCase whose Args are the case expressions and whose Body
+// is the clause body. A clause with no case expression is the default. An
+// earlier version required an ir.OBlock, which was the convention before
+// ir.OCase existed, and refused 992 functions of the corpus for having the
+// node the IR does emit.
+//
+// A clause's Init is not built, and that is checked rather than assumed:
+// ir.Build writes Init on a clause only in selectStmt, where it holds the
+// communication statement the specification evaluates on entry to the select.
+// ir.OSelect is Go-specific, so such a clause never reaches here.
 func switchCases(n *ir.Node) (clauses []*ir.Node, ok bool) {
 	for _, c := range n.Body {
-		if c == nil || c.Op != ir.OBlock {
+		if c == nil || c.Op != ir.OCase {
 			return nil, false
 		}
 		clauses = append(clauses, c)
@@ -772,16 +768,31 @@ func (b *builder) switchStmt(n *ir.Node, label string) {
 	}
 
 	b.ctrl = append(b.ctrl, ctrlFrame{label: label, brk: done})
+	// The binding of fallthrough is saved and restored around the clauses, so
+	// that a switch inside a clause binds its own and gives this one back.
+	outer := b.fallthru
 	for i, c := range clauses {
+		b.fallthru = nil
+		if i+1 < len(clauses) {
+			b.fallthru = bodies[i+1]
+		}
+		// Every predecessor of this body is known by now: the test chain added
+		// its edge before the loop, and a fallthrough from the clause before
+		// added its edge in the previous iteration.
 		b.seal(bodies[i])
 		b.cur = bodies[i]
 		b.stmts(c.Body)
 		b.jumpIfLive(done)
 	}
+	b.fallthru = outer
 	b.ctrl = b.ctrl[:len(b.ctrl)-1]
 
 	b.startJoin(done)
 }
+
+// fallthroughLabel is the label ir.Build gives a fallthrough statement. A
+// source label cannot collide with it, because fallthrough is a keyword.
+const fallthroughLabel = "fallthrough"
 
 func (b *builder) labelStmt(n *ir.Node) {
 	blk := b.labelBlock(n.Label)
@@ -897,6 +908,25 @@ func (b *builder) expr(n ir.Expr) *Value {
 		b.errorf(InvGoSpecific, "%s reached SSA construction", n.Op)
 		return b.zeroValue(n.Type)
 	}
+	// An expression carries statements in Init where there is no enclosing
+	// statement list to put them in, which ir.Build's conventions name as a
+	// loop condition and the right operand of && and ||. Both are evaluated
+	// somewhere other than where the statement holding them is, so building
+	// them here is what puts them on the one path that reaches the operand.
+	// Construction dropped them until now, which left every temporary they
+	// assign holding the zero the entry block wrote.
+	if len(n.Init) > 0 {
+		b.stmts(n.Init)
+		if b.cur == nil {
+			// Control left the block the operand was to be built in, so the
+			// operand has nowhere to go. Nothing in ir.Build produces this,
+			// and the alternative to naming it is a nil block dereference.
+			b.errorf(InvNone, "%s: control left the block its operands are in", n.Op)
+		}
+		if b.err != nil {
+			return b.zeroValue(n.Type)
+		}
+	}
 	switch n.Op {
 	case ir.OConst:
 		return b.constant(n)
@@ -966,6 +996,134 @@ func (b *builder) readObject(o *ir.Object, pos syntax.Pos) *Value {
 		return b.load(b.globalAddr(o, pos), o.Type, pos)
 	}
 	return b.read(o, b.cur)
+}
+
+// assignStmt builds an assignment.
+//
+// ir.Build's conventions: X is the destination and Y is the source, and a
+// multi-value assignment leaves X nil and lists its destinations in Args. Op1
+// is syntax.Def when the statement declares its destinations, which is x := y
+// and var x = y.
+//
+// Both forms of Op1 build the same thing, and that is the whole of what
+// construction owes the Go 1.22 loop variable rule. ir.Build has already given
+// each iteration its own instance: a loop variable whose address is taken gets
+// a carrier that the loop control works on, and the body opens by declaring
+// the variable again from the carrier. Honouring that means building the
+// declaration as a definition wherever it executes, every time it executes.
+// Treating syntax.Def as "the entry block already zeroed this, so there is
+// nothing to do" is what would put the pre-1.22 semantics back, because the
+// body would then read whatever the previous iteration left.
+//
+// What a definition does not yet emit is the lifetime marker. OpVarDef says a
+// frame slot's previous contents are dead, which is the other half of "a new
+// instance each time"; specs/025-lowering-and-rules.md owns the markers and
+// ssa/liveness.go reads them, so emitting one here would move a decision this
+// pass does not own. Without it every stack object is live from the entry,
+// which is the conservative answer.
+func (b *builder) assignStmt(n *ir.Node) {
+	if n.X != nil {
+		if n.Y == nil {
+			b.errorf(InvNone, "an assignment with no value")
+			return
+		}
+		b.assign(n.X, b.expr(n.Y), n.Pos)
+		return
+	}
+	if len(n.Args) == 0 {
+		b.errorf(InvNone, "an assignment with no destination")
+		return
+	}
+	b.multiAssign(n)
+}
+
+// multiAssign builds an assignment whose one value produces several.
+//
+// The value is a call, a two-value map read, a type assertion or a channel
+// receive. Only the call is built. The other three are rows of
+// specs/020-ir.md's lowering table that no pass performs, so they arrive here
+// intact and are refused, the receive and the assertion by the Go-specific
+// guard and the map read by addr.
+func (b *builder) multiAssign(n *ir.Node) {
+	src := n.Y
+	if src == nil {
+		b.errorf(InvNone, "a multi-value assignment with no value")
+		return
+	}
+	if src.Op != ir.OCall {
+		b.unsupported(n, "a multi-value assignment from "+src.Op.String())
+		return
+	}
+	types := resultTypes(src.Type, len(n.Args))
+	if len(types) != len(n.Args) {
+		b.errorf(InvNone, "%d destinations and %d results", len(n.Args), len(types))
+		return
+	}
+	// A result wider than a register is refused rather than built, and the
+	// reason is a pass below this one. SelectN's index means the result before
+	// decomposition and the machine word of the result area after it, and
+	// ssa/decompose.go renumbers a part of result i as word i+j, which is only
+	// right when every result before i is one word. A wide result at index
+	// zero expands into the words the later indices already claim, and a wide
+	// one above zero is not split at all, so either way two reads would name
+	// one word. The fix belongs in that renumbering, not here.
+	//
+	// One destination cannot collide with anything, so the bound is only on
+	// the form that produces more than one read of the call.
+	if len(types) > 1 {
+		for _, t := range types {
+			if Multiword(t) {
+				b.unsupported(n, "a multi-value assignment with a result wider than a register")
+				return
+			}
+		}
+	}
+	c := b.callValue(src)
+	if b.err != nil || c == nil {
+		return
+	}
+	// Every result is read before any destination is written, and both halves
+	// of that matter. SelectN reads the call, which is a memory value, so a
+	// SelectN placed after a store would read a memory the store has already
+	// superseded and break the one-memory-per-point invariant. The order is
+	// also the specification's: a multi-value assignment produces its values
+	// first and assigns them left to right afterwards.
+	//
+	// One SelectN per result, including a result assigned to the blank
+	// identifier: the code generator places the results of a call together and
+	// names each one by the SelectN that reads it, so a gap in the sequence is
+	// a result it cannot place.
+	reads := make([]*Value, len(n.Args))
+	for i := range n.Args {
+		r := b.value(OpSelectN, types[i], n.Pos, c)
+		r.AuxInt = int64(i)
+		reads[i] = r
+	}
+	for i, dst := range n.Args {
+		b.assign(dst, reads[i], n.Pos)
+	}
+}
+
+// resultTypes returns the types of the values one expression produces.
+//
+// A tuple is the type of a multi-value expression and its fields are the
+// values, in order. A single result is not a tuple, so a call with one result
+// assigned to one destination reads its own type.
+func resultTypes(t *ir.Type, want int) []*ir.Type {
+	if t == nil {
+		return nil
+	}
+	if t.Kind != ir.Tuple {
+		if want == 1 {
+			return []*ir.Type{t}
+		}
+		return nil
+	}
+	out := make([]*ir.Type, len(t.Fields))
+	for i := range t.Fields {
+		out[i] = t.Fields[i].Type
+	}
+	return out
 }
 
 func (b *builder) assign(dst ir.Expr, val *Value, pos syntax.Pos) {
@@ -1238,7 +1396,24 @@ func (b *builder) convert(n ir.Expr) *Value {
 }
 
 // call builds a call and returns its first result, or nil when it has none.
+//
+// A call with several results is read by multiAssign, which needs the call
+// itself rather than one result, so the two are separate functions.
 func (b *builder) call(n ir.Expr) *Value {
+	c := b.callValue(n)
+	if c == nil || b.err != nil {
+		return nil
+	}
+	if n.Type == nil || n.Type.Kind == ir.Void {
+		return nil
+	}
+	r := b.value(OpSelectN, n.Type, n.Pos, c)
+	r.AuxInt = 0
+	return r
+}
+
+// callValue builds a call and returns the call itself.
+func (b *builder) callValue(n ir.Expr) *Value {
 	fun := n.X
 	if fun == nil {
 		b.errorf(InvNone, "a call with no function")
@@ -1270,15 +1445,7 @@ func (b *builder) call(n ir.Expr) *Value {
 	c := b.value(op, MemType, n.Pos, args...)
 	c.Aux = callee
 	b.setMemory(c)
-
-	if n.Type == nil || n.Type.Kind == ir.Void {
-		return nil
-	}
-	// One result. A call with several is a tuple, and specs/020-ir.md gives
-	// the IR no tuple type, so it is a finding rather than a guess here.
-	r := b.value(OpSelectN, n.Type, n.Pos, c)
-	r.AuxInt = 0
-	return r
+	return c
 }
 
 // String concatenation.

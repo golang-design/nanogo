@@ -5,11 +5,19 @@
 package ssa
 
 import (
+	"fmt"
+	gobuild "go/build"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/syntax"
+	"golang.design/x/nanogo/types2"
 )
 
 // The IR of these tests is built by hand. The IR builder of specs/020-ir.md is
@@ -65,9 +73,22 @@ func cst(t *ir.Type, text string) ir.Expr {
 
 func cint(v string) ir.Expr { return cst(tInt, v) }
 
-// asn is the assignment convention of assignParts.
+// asn is a plain assignment: dst = src.
 func asn(dst, src ir.Expr) ir.Stmt {
-	return &ir.Node{Op: ir.OBinary, X: dst, Y: src}
+	return &ir.Node{Op: ir.OAssign, X: dst, Y: src, Type: tVoid}
+}
+
+// def is a declaring assignment: dst := src. ir.Build marks the form with
+// syntax.Def, and a declaration inside a loop body is a new instance of its
+// object every time it executes.
+func def(dst, src ir.Expr) ir.Stmt {
+	return &ir.Node{Op: ir.OAssign, Op1: syntax.Def, X: dst, Y: src, Type: tVoid}
+}
+
+// multiAsn is a multi-value assignment: X is nil and the destinations are in
+// Args.
+func multiAsn(src ir.Expr, dsts ...ir.Expr) ir.Stmt {
+	return &ir.Node{Op: ir.OAssign, Args: dsts, Y: src, Type: tVoid}
 }
 
 func bin(op syntax.Operator, x, y ir.Expr) ir.Expr {
@@ -82,14 +103,13 @@ func ifStmt(cond ir.Expr, body []ir.Stmt, els []ir.Stmt) ir.Stmt {
 	return &ir.Node{Op: ir.OIf, X: cond, Body: body, Else: els}
 }
 
-// forStmt uses the convention of forParts: Else carries the post statements.
 func forStmt(init []ir.Stmt, cond ir.Expr, post []ir.Stmt, body []ir.Stmt) ir.Stmt {
-	return &ir.Node{Op: ir.OFor, Init: init, X: cond, Else: post, Body: body}
+	return &ir.Node{Op: ir.OFor, Init: init, X: cond, Post: post, Body: body}
 }
 
-// clause uses the convention of switchCases.
+// clause is one switch clause. No case expression is the default.
 func clause(exprs []ir.Expr, body ...ir.Stmt) ir.Stmt {
-	return &ir.Node{Op: ir.OBlock, Args: exprs, Body: body}
+	return &ir.Node{Op: ir.OCase, Args: exprs, Body: body}
 }
 
 func switchStmt(tag ir.Expr, clauses ...ir.Stmt) ir.Stmt {
@@ -97,6 +117,19 @@ func switchStmt(tag ir.Expr, clauses ...ir.Stmt) ir.Stmt {
 }
 
 func ret(args ...ir.Expr) ir.Stmt { return &ir.Node{Op: ir.OReturn, Args: args} }
+
+// fallthroughStmt is the encoding ir.Build gives a fallthrough: a goto whose
+// label is the keyword, which no source label can collide with.
+func fallthroughStmt() ir.Stmt { return &ir.Node{Op: ir.OGoto, Label: "fallthrough"} }
+
+// tuple is the type of a multi-value expression.
+func tuple(types ...*ir.Type) *ir.Type {
+	fields := make([]ir.Field, len(types))
+	for i, t := range types {
+		fields[i] = ir.Field{Name: "r", Type: t}
+	}
+	return mkType(&ir.Type{Kind: ir.Tuple, Fields: fields})
+}
 
 func label(name string, body ...ir.Stmt) ir.Stmt {
 	return &ir.Node{Op: ir.OLabel, Label: name, Body: body}
@@ -988,6 +1021,420 @@ func TestAddrtakenLivesInTheFrame(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Assignment
+
+// TestBuildAssignForms builds every form of assignment and asserts what each
+// one produces.
+//
+// The shape of each answer is the point rather than the fact that it verifies:
+// a local that lives in a value is written into the variable map and produces
+// no memory operation at all, and a local that lives in the frame is reached
+// by an address and a store. Those two are the halves of specs/021's rule that
+// an address-taken variable is not an SSA value, and a test that only checked
+// that the graph verifies would pass with the two exchanged.
+func TestBuildAssignForms(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func() *ir.Func
+		// want counts the operations the form must produce.
+		want map[Op]int
+	}{
+		{
+			name: "a local that lives in a value",
+			fn: func() *ir.Func {
+				x := obj("x", tInt, ir.ClassLocal)
+				return fun("f", []*ir.Object{x}, asn(local(x), cint("7")), ret(local(x)))
+			},
+			// No store and no local address: the value is the variable.
+			want: map[Op]int{OpStore: 0, OpLoad: 0, OpLocalAddr: 0},
+		},
+		{
+			name: "a local whose address is taken",
+			fn: func() *ir.Func {
+				x := obj("x", tInt, ir.ClassLocal)
+				x.Addrtaken = true
+				return fun("f", []*ir.Object{x}, asn(local(x), cint("7")), ret(local(x)))
+			},
+			// The zero of the entry block, then the assignment, then the read.
+			want: map[Op]int{OpStore: 1, OpLoad: 1, OpZero: 1},
+		},
+		{
+			name: "a short variable declaration",
+			fn: func() *ir.Func {
+				x := obj("x", tInt, ir.ClassLocal)
+				return fun("f", []*ir.Object{x}, def(local(x), cint("7")), ret(local(x)))
+			},
+			want: map[Op]int{OpStore: 0, OpLoad: 0},
+		},
+		{
+			name: "a short variable declaration of a frame-resident local",
+			fn: func() *ir.Func {
+				x := obj("x", tInt, ir.ClassLocal)
+				x.Addrtaken = true
+				return fun("f", []*ir.Object{x}, def(local(x), cint("7")), ret(local(x)))
+			},
+			want: map[Op]int{OpStore: 1, OpLoad: 1},
+		},
+		{
+			name: "through a pointer",
+			fn: func() *ir.Func {
+				p := obj("p", tIntPtr, ir.ClassParam)
+				return fun("f", nil, asn(deref(local(p), tInt), cint("7")), ret())
+			},
+			want: map[Op]int{OpStore: 1, OpNilCheck: 1},
+		},
+		{
+			name: "a struct field",
+			fn: func() *ir.Func {
+				s := obj("s", tStruct, ir.ClassLocal)
+				return fun("f", []*ir.Object{s},
+					asn(field(local(s), 1, tInt), cint("7")), ret())
+			},
+			// A struct does not fit a register, so it is in the frame and the
+			// field is an offset from its slot. The two local addresses are
+			// the zeroing of the entry block and the assignment.
+			want: map[Op]int{OpStore: 1, OpOffPtr: 1, OpLocalAddr: 2},
+		},
+		{
+			name: "an array element",
+			fn: func() *ir.Func {
+				a := obj("a", tArr4, ir.ClassLocal)
+				return fun("f", []*ir.Object{a},
+					asn(index(local(a), cint("2"), tInt), cint("7")), ret())
+			},
+			want: map[Op]int{OpStore: 1, OpBoundsCheck: 1, OpPtrIndex: 1},
+		},
+		{
+			name: "a slice element",
+			fn: func() *ir.Func {
+				sl := obj("sl", tSlice, ir.ClassLocal)
+				return fun("f", []*ir.Object{sl},
+					asn(index(local(sl), cint("2"), tInt), cint("7")), ret())
+			},
+			// The data pointer and the length are read out of the header, then
+			// the bounds check, then the store.
+			want: map[Op]int{OpStore: 1, OpBoundsCheck: 1, OpPtrIndex: 1, OpLoad: 2},
+		},
+		{
+			name: "a global",
+			fn: func() *ir.Func {
+				g := obj("g", tInt, ir.ClassGlobal)
+				return fun("f", nil, asn(local(g), cint("7")), ret())
+			},
+			// A global is reached by its symbol and never by a frame slot.
+			want: map[Op]int{OpStore: 1, OpAddr: 1, OpLocalAddr: 0},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := build(t, tc.fn())
+			for _, op := range sortedOps(tc.want) {
+				if got := countOp(f, op); got != tc.want[op] {
+					t.Errorf("got %d %v, want %d\n%s", got, op, tc.want[op], f)
+				}
+			}
+		})
+	}
+}
+
+// sortedOps returns the keys of an operation count in order.
+//
+// specs/053-determinism.md forbids a range over a map on a path that produces
+// output, and a test failure is output.
+func sortedOps(m map[Op]int) []Op {
+	ops := make([]Op, 0, len(m))
+	for op := range m {
+		ops = append(ops, op)
+	}
+	sort.Slice(ops, func(i, j int) bool { return ops[i] < ops[j] })
+	return ops
+}
+
+// TestBuildMultiValueAssign asserts the shape of an assignment from a call
+// that produces several values.
+//
+// Two properties, and the second is the one a verifier would not catch on its
+// own: every result is read before any destination is written. SelectN reads
+// the call, which is a memory value, so a read placed after a store would name
+// a memory the store has already superseded.
+func TestBuildMultiValueAssign(t *testing.T) {
+	x := obj("x", tInt, ir.ClassLocal)
+	y := obj("y", tInt, ir.ClassLocal)
+	y.Addrtaken = true
+	callee := obj("callee", tFunc, ir.ClassFunc)
+	fn := fun("f", []*ir.Object{x, y},
+		multiAsn(call(callee, tuple(tInt, tInt)), local(x), local(y)),
+		ret(local(x), local(y)))
+	f := build(t, fn)
+
+	var sel []*Value
+	firstStore := -1
+	for _, b := range f.Blocks {
+		for i, v := range b.Values {
+			switch v.Op {
+			case OpSelectN:
+				sel = append(sel, v)
+				if firstStore >= 0 {
+					t.Errorf("a result is read after a destination is written\n%s", f)
+				}
+			case OpStore:
+				if firstStore < 0 && b == f.Entry {
+					firstStore = i
+				}
+			}
+		}
+	}
+	if len(sel) != 2 {
+		t.Fatalf("got %d result reads, want one per destination\n%s", len(sel), f)
+	}
+	for i, v := range sel {
+		if v.AuxInt != int64(i) {
+			t.Errorf("result read %d names index %d\n%s", i, v.AuxInt, f)
+		}
+		if v.Args[0].Op != OpStaticCall {
+			t.Errorf("result read %d reads %v and not the call\n%s", i, v.Args[0].Op, f)
+		}
+	}
+}
+
+// TestBuildMultiValueAssignOneDestination asserts the form with one
+// destination builds.
+//
+// It cannot collide with anything, because one read of a call names one word
+// however wide the result is, so the bound that refuses a wide result does not
+// apply to it.
+func TestBuildMultiValueAssignOneDestination(t *testing.T) {
+	s := obj("s", tString, ir.ClassLocal)
+	callee := obj("callee", tFunc, ir.ClassFunc)
+	fn := fun("f", []*ir.Object{s},
+		multiAsn(call(callee, tString), local(s)),
+		ret(local(s)))
+	f := build(t, fn)
+	if n := countOp(f, OpSelectN); n != 1 {
+		t.Errorf("got %d result reads, want 1\n%s", n, f)
+	}
+}
+
+// TestBuildMultiValueAssignNamesEveryResult asserts a result assigned to the
+// blank identifier is still read.
+//
+// The code generator places the results of a call together and names each one
+// by the SelectN that reads it, so a gap in the sequence is a result it cannot
+// place. ir.Build gives the blank identifier an object of its own that is in
+// no declaration list, which is why nothing is stored for it.
+func TestBuildMultiValueAssignNamesEveryResult(t *testing.T) {
+	blank := &ir.Object{Name: "_", Type: tInt, Class: ir.ClassLocal}
+	y := obj("y", tInt, ir.ClassLocal)
+	callee := obj("callee", tFunc, ir.ClassFunc)
+	fn := fun("f", []*ir.Object{y},
+		multiAsn(call(callee, tuple(tInt, tInt)), local(blank), local(y)),
+		ret(local(y)))
+	f := build(t, fn)
+	if n := countOp(f, OpSelectN); n != 2 {
+		t.Errorf("got %d result reads, want 2 even though one result is discarded\n%s", n, f)
+	}
+}
+
+// TestBuildPerIterationLoopVariable is the Go 1.22 loop variable, checked
+// against the shape ir.Build produces for it.
+//
+// ir.Build gives each iteration its own instance already: a loop variable
+// whose address is taken is replaced in the loop control by a carrier, the
+// body opens by declaring the variable again from the carrier, and the post
+// list opens by copying it back. Construction's obligation is to build that
+// declaration where it stands, so that it runs on every iteration.
+//
+// The test fails under pre-1.22 semantics in two independent ways. If the
+// declaration is treated as done by the entry block's zeroing, the store to
+// the variable's slot is in the entry block and every iteration reads what the
+// last one left. If the post list is dropped, which it was while forParts read
+// Else, the copy back and the increment are both gone and the loop does not
+// advance at all.
+func TestBuildPerIterationLoopVariable(t *testing.T) {
+	carrier := obj(".loopvar_i", tInt, ir.ClassLocal)
+	i := obj("i", tInt, ir.ClassLocal)
+	i.Addrtaken = true
+	use := obj("use", tFunc, ir.ClassFunc)
+
+	loop := forStmt(
+		[]ir.Stmt{def(local(carrier), cint("0"))},
+		cmp(syntax.Lss, local(carrier), cint("3")),
+		[]ir.Stmt{
+			asn(local(carrier), local(i)),
+			asn(local(carrier), bin(syntax.Add, local(carrier), cint("1"))),
+		},
+		[]ir.Stmt{
+			def(local(i), local(carrier)),
+			&ir.Node{Op: ir.OCall, X: local(use), Args: []ir.Expr{addrOf(local(i))}, Type: tVoid},
+		})
+	fn := fun("f", []*ir.Object{carrier, i}, loop, ret())
+	f := build(t, fn)
+
+	if len(f.Frame) != 1 || f.Frame[0] != i {
+		t.Fatalf("frame is %v, want the address-taken loop variable alone\n%s", f.Frame, f)
+	}
+	stores := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpStore {
+				continue
+			}
+			stores++
+			if b == f.Entry {
+				t.Errorf("the declaration of %s is in the entry block, so every "+
+					"iteration reads what the last one left\n%s", i.Name, f)
+			}
+			if a := v.Args[0]; a.Op != OpLocalAddr || a.Aux != any(i) {
+				t.Errorf("the store writes %v and not the loop variable's slot\n%s", a.LongString(), f)
+			}
+		}
+	}
+	if stores != 1 {
+		t.Errorf("got %d stores, want the one the declaration is\n%s", stores, f)
+	}
+	// The post list ran: the copy back reads the slot and the increment adds.
+	if n := countOp(f, OpAdd); n != 1 {
+		t.Errorf("got %d additions, want the loop increment\n%s", n, f)
+	}
+	loads := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpLoad && v.Args[0].Op == OpLocalAddr && v.Args[0].Aux == any(i) {
+				loads++
+			}
+		}
+	}
+	if loads == 0 {
+		t.Errorf("nothing reads the loop variable's slot, so the copy back is gone\n%s", f)
+	}
+}
+
+// TestBuildForPostStatementsRun asserts a for statement's post list is built.
+//
+// The post statements are in Post. Construction read them out of Else until
+// now, which is the field an if uses for something else, and ir.Build has
+// never written them there: every counted loop of the corpus lost its
+// increment and ran forever.
+func TestBuildForPostStatementsRun(t *testing.T) {
+	x := obj("x", tInt, ir.ClassLocal)
+	fn := fun("f", []*ir.Object{x},
+		forStmt(
+			[]ir.Stmt{def(local(x), cint("0"))},
+			cmp(syntax.Lss, local(x), cint("3")),
+			[]ir.Stmt{asn(local(x), bin(syntax.Add, local(x), cint("1")))},
+			nil),
+		ret(local(x)))
+	f := build(t, fn)
+	if n := countOp(f, OpAdd); n != 1 {
+		t.Fatalf("got %d additions, want the post statement's\n%s", n, f)
+	}
+	// The increment feeds the phi of the loop header, which is the same thing
+	// as saying it runs on the back edge.
+	phis := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpPhi {
+				continue
+			}
+			phis++
+			fed := false
+			for _, a := range v.Args {
+				if a.Op == OpAdd {
+					fed = true
+				}
+			}
+			if !fed {
+				t.Errorf("the loop phi %v does not read the increment\n%s", v.LongString(), f)
+			}
+		}
+	}
+	if phis != 1 {
+		t.Errorf("got %d phis, want the one the induction variable is\n%s", phis, f)
+	}
+}
+
+// TestBuildExpressionInitRuns asserts the statements an expression carries in
+// Init are built.
+//
+// ir.Build puts statements there where there is no enclosing statement list to
+// put them in, which is a loop condition and the right operand of && and ||.
+// Both are evaluated somewhere other than where the statement holding them is,
+// so the statements have to be built on the path that reaches the operand.
+// Construction dropped them until now, which left every temporary they assign
+// holding the zero the entry block wrote.
+func TestBuildExpressionInitRuns(t *testing.T) {
+	x := obj("x", tInt, ir.ClassLocal)
+	next := obj("next", tFunc, ir.ClassFunc)
+	cond := cmp(syntax.Lss, local(x), cint("3"))
+	// The temporary the condition needs, assigned immediately before it and
+	// therefore once per iteration.
+	cond.Init = []ir.Stmt{asn(local(x), call(next, tInt))}
+
+	fn := fun("f", []*ir.Object{x},
+		forStmt(nil, cond, nil, nil),
+		ret(local(x)))
+	f := build(t, fn)
+
+	calls := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpStaticCall {
+				continue
+			}
+			calls++
+			if b == f.Entry {
+				t.Errorf("the condition's temporary is assigned in the entry block, "+
+					"so it is not re-evaluated\n%s", f)
+			}
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("got %d calls, want the one the condition's Init holds\n%s", calls, f)
+	}
+}
+
+// TestBuildFallthrough asserts a fallthrough enters the next clause's body
+// without evaluating its case expressions.
+func TestBuildFallthrough(t *testing.T) {
+	x := obj("x", tInt, ir.ClassLocal)
+	y := obj("y", tInt, ir.ClassLocal)
+	fn := fun("f", []*ir.Object{x, y},
+		switchStmt(local(x),
+			clause([]ir.Expr{cint("1")}, asn(local(y), cint("10")), fallthroughStmt()),
+			clause([]ir.Expr{cint("2")}, asn(local(y), cint("20"))),
+		),
+		ret(local(y)))
+	f := build(t, fn)
+
+	// Two comparisons, one per case expression, and the second clause's body
+	// has two predecessors: its own test and the fallthrough.
+	if n := countOp(f, OpEq); n != 2 {
+		t.Errorf("got %d comparisons, want one per case expression\n%s", n, f)
+	}
+	second := blockDefining(f, 20)
+	if second == nil {
+		t.Fatalf("no block assigns the second clause's value\n%s", f)
+	}
+	if len(second.Preds) != 2 {
+		t.Errorf("the second clause's body has %d predecessors, want its test and the fallthrough\n%s",
+			len(second.Preds), f)
+	}
+}
+
+// blockDefining returns the block holding the constant with value n.
+func blockDefining(f *Func, n int64) *Block {
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpConstInt && v.AuxInt == n {
+				return b
+			}
+		}
+	}
+	return nil
+}
+
 // TestBuildRejects covers the inputs construction must refuse rather than
 // guess at.
 func TestBuildRejects(t *testing.T) {
@@ -1030,10 +1477,15 @@ func TestBuildRejects(t *testing.T) {
 			return fun("f", []*ir.Object{x},
 				switchStmt(local(x), clause(nil), clause(nil)), ret())
 		}},
-		{"a switch clause that is not a block", InvNone, func() *ir.Func {
+		{"a switch clause that is not a case", InvNone, func() *ir.Func {
 			x := obj("x", tInt, ir.ClassLocal)
 			return fun("f", []*ir.Object{x},
 				&ir.Node{Op: ir.OSwitch, X: local(x), Body: []ir.Stmt{ret()}})
+		}},
+		{"a fallthrough in the last clause", InvNone, func() *ir.Func {
+			x := obj("x", tInt, ir.ClassLocal)
+			return fun("f", []*ir.Object{x},
+				switchStmt(local(x), clause([]ir.Expr{cint("1")}, fallthroughStmt())), ret())
 		}},
 		{"a binary expression as a statement", InvNone, func() *ir.Func {
 			x := obj("x", tInt, ir.ClassLocal)
@@ -1126,8 +1578,52 @@ func TestBuildRejects(t *testing.T) {
 			return fun("f", nil,
 				ret(&ir.Node{Op: ir.OIndex, X: &ir.Node{Op: ir.OConst}, Y: cint("0"), Type: tInt}))
 		}},
-		{"an assignment with no left side", InvNone, func() *ir.Func {
-			return fun("f", nil, &ir.Node{Op: ir.OBinary, Y: cint("1")})
+		{"an assignment with no destination", InvNone, func() *ir.Func {
+			return fun("f", nil, &ir.Node{Op: ir.OAssign, Y: cint("1"), Type: tVoid})
+		}},
+		{"an assignment with no value", InvNone, func() *ir.Func {
+			x := obj("x", tInt, ir.ClassLocal)
+			return fun("f", []*ir.Object{x},
+				&ir.Node{Op: ir.OAssign, X: local(x), Type: tVoid})
+		}},
+		{"a multi-value assignment with no value", InvNone, func() *ir.Func {
+			x := obj("x", tInt, ir.ClassLocal)
+			y := obj("y", tInt, ir.ClassLocal)
+			return fun("f", []*ir.Object{x, y},
+				&ir.Node{Op: ir.OAssign, Args: []ir.Expr{local(x), local(y)}, Type: tVoid})
+		}},
+		{"a multi-value assignment from something that is not a call", InvNone, func() *ir.Func {
+			x := obj("x", tInt, ir.ClassLocal)
+			y := obj("y", tInt, ir.ClassLocal)
+			m := obj("m", mkType(&ir.Type{Kind: ir.Map, Key: tInt, Elem: tInt}), ir.ClassLocal)
+			return fun("f", []*ir.Object{x, y, m},
+				multiAsn(index(local(m), cint("0"), tInt), local(x), local(y)))
+		}},
+		{"a multi-value assignment from a call with no type", InvNone, func() *ir.Func {
+			x := obj("x", tInt, ir.ClassLocal)
+			y := obj("y", tInt, ir.ClassLocal)
+			callee := obj("callee", tFunc, ir.ClassFunc)
+			return fun("f", []*ir.Object{x, y},
+				multiAsn(&ir.Node{Op: ir.OCall, X: local(callee)}, local(x), local(y)))
+		}},
+		{"an operand that is a call through something that is not a function", InvNone, func() *ir.Func {
+			x := obj("x", tInt, ir.ClassLocal)
+			return fun("f", []*ir.Object{x},
+				asn(local(x), &ir.Node{Op: ir.OCall, X: cint("1"), Type: tInt}))
+		}},
+		{"a multi-value assignment whose destinations do not match the results", InvNone, func() *ir.Func {
+			x := obj("x", tInt, ir.ClassLocal)
+			y := obj("y", tInt, ir.ClassLocal)
+			callee := obj("callee", tFunc, ir.ClassFunc)
+			return fun("f", []*ir.Object{x, y},
+				multiAsn(call(callee, tInt), local(x), local(y)))
+		}},
+		{"a multi-value assignment with a result wider than a register", InvNone, func() *ir.Func {
+			s := obj("s", tString, ir.ClassLocal)
+			ok := obj("ok", tBool, ir.ClassLocal)
+			callee := obj("callee", tFunc, ir.ClassFunc)
+			return fun("f", []*ir.Object{s, ok},
+				multiAsn(call(callee, tuple(tString, tBool)), local(s), local(ok)))
 		}},
 		{"the address of an expression that has none", InvNone, func() *ir.Func {
 			callee := obj("callee", tFunc, ir.ClassFunc)
@@ -1379,5 +1875,283 @@ func TestBuildStringConcatEvaluationOrder(t *testing.T) {
 	want := "f1 f2 f3 runtime.concatstring3"
 	if got := strings.Join(order, " "); got != want {
 		t.Errorf("call order\ngot:  %s\nwant: %s\n%s", got, want, f)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The corpus
+
+// The corpus test of construction itself.
+//
+// specs/021-ssa-construction.md's headline number is how many of the typed
+// tree's functions reach SSA, and until this test existed it was measured by
+// hand. The two corpus tests below construction, ssa/decompose_test.go and
+// ssa/stackmap_test.go, both walk the same 536 packages and both return
+// silently when Build refuses a function, so neither of their numbers can go
+// down and neither says what was refused. This one counts the refusals and
+// reports them by cause, which is what turns the acceptance rate into a
+// measurement rather than a filter.
+//
+// The importer is this file's own rather than shared with the two tests below.
+// They are in the external test package, because they lower with ssa/rules,
+// and this test is in the internal one, because it reads the builder's own
+// error type.
+
+type bcPkg struct {
+	pkg   *types2.Package
+	files []*syntax.File
+	info  *types2.Info
+	err   error
+}
+
+type bcImporter struct {
+	fset *syntax.FileSet
+	done map[string]*bcPkg
+}
+
+func newBCImporter() *bcImporter {
+	return &bcImporter{fset: syntax.NewFileSet(), done: make(map[string]*bcPkg)}
+}
+
+func (imp *bcImporter) Import(path string) (*types2.Package, error) {
+	r := imp.check(path)
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.pkg, nil
+}
+
+func (imp *bcImporter) check(path string) *bcPkg {
+	if have, ok := imp.done[path]; ok {
+		if have == nil {
+			return &bcPkg{err: fmt.Errorf("import cycle at %s", path)}
+		}
+		return have
+	}
+	if path == "unsafe" {
+		r := &bcPkg{pkg: types2.Unsafe}
+		imp.done[path] = r
+		return r
+	}
+	// The nil entry is the cycle marker. It is written before the recursive
+	// check and replaced by the result, so a package that imports itself
+	// through the graph gets an error rather than an endless walk.
+	imp.done[path] = nil
+	r := &bcPkg{}
+	imp.done[path] = r
+
+	bp, err := gobuild.Import(path, "", 0)
+	if err != nil {
+		for _, prefix := range []string{"vendor/", "cmd/vendor/"} {
+			if bp2, err2 := gobuild.Import(prefix+path, "", 0); err2 == nil {
+				bp, err = bp2, nil
+				break
+			}
+		}
+	}
+	if err != nil {
+		r.err = err
+		return r
+	}
+	if len(bp.CgoFiles) > 0 || len(bp.GoFiles) == 0 {
+		r.err = fmt.Errorf("%s has no plain Go files", path)
+		return r
+	}
+	for _, name := range bp.GoFiles {
+		file, err := syntax.ParseFile(imp.fset, filepath.Join(bp.Dir, name), nil, nil, 0)
+		if err != nil || file == nil {
+			r.err = fmt.Errorf("parse %s: %v", name, err)
+			return r
+		}
+		r.files = append(r.files, file)
+	}
+	r.info = &types2.Info{
+		Types:      make(map[syntax.Expr]types2.TypeAndValue),
+		Defs:       make(map[*syntax.Name]types2.Object),
+		Uses:       make(map[*syntax.Name]types2.Object),
+		Implicits:  make(map[syntax.Node]types2.Object),
+		Selections: make(map[*syntax.SelectorExpr]*types2.Selection),
+		Scopes:     make(map[syntax.Node]*types2.Scope),
+		Instances:  make(map[*syntax.Name]types2.Instance),
+	}
+	conf := types2.Config{Fset: imp.fset, Importer: imp, Sizes: types2.SizesFor("gc", "arm64")}
+	r.pkg, r.err = conf.Check(path, r.files, r.info)
+	return r
+}
+
+// bcPaths returns the package directories under src.
+func bcPaths(t *testing.T, src string, all bool) []string {
+	t.Helper()
+	var paths []string
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if path != src && (name == "testdata" || name == "vendor" ||
+			strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".")) {
+			return fs.SkipDir
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil || rel == "." {
+			return nil
+		}
+		paths = append(paths, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	sort.Strings(paths)
+	if all {
+		return paths
+	}
+	// The unattended run takes a sample and leaves the tool chain out, as the
+	// corpus tests below this one do. CI sets NANOGO_REQUIRE_CORPUS.
+	var library []string
+	for _, p := range paths {
+		if !strings.HasPrefix(p, "cmd/") && p != "cmd" && p != "unsafe" {
+			library = append(library, p)
+		}
+	}
+	const sample = 40
+	if len(library) > sample {
+		step := len(library) / sample
+		var taken []string
+		for i := 0; i < len(library); i += step {
+			taken = append(taken, library[i])
+		}
+		library = taken
+	}
+	return library
+}
+
+// buildCounts is one run of the construction corpus.
+type buildCounts struct {
+	pkgs  int
+	funcs int
+	built int
+
+	// verifyNG counts a function Build accepted and Verify rejected. It is
+	// counted apart from a refusal because it is worse than one: a refusal is
+	// visible and a malformed graph is not.
+	verifyNG int
+
+	// refused counts the functions Build refused, by cause. The key is the
+	// error detail with the parts that name a type or an object removed, so
+	// that one cause is one row rather than one row per type.
+	refused map[string]int
+}
+
+// bcCause reduces a construction error to the cause it reports.
+//
+// The detail of an unsupported form is "<op>: <what> is not built yet" and the
+// detail of a Go-specific node is "<op> reached SSA construction". Both are
+// already the cause. What is stripped is the tail of the few details that
+// print a type, because "a conversion from int to any" and "a conversion from
+// string to any" are one cause and two rows would hide it.
+func bcCause(err error) string {
+	e, ok := err.(*Error)
+	if !ok {
+		return "not a construction error"
+	}
+	d := e.Detail
+	head := ""
+	if i := strings.Index(d, ": "); i >= 0 {
+		head, d = d[:i+2], d[i+2:]
+	}
+	for _, prefix := range []string{
+		"a conversion from ", "an index of ", "operator ", "unary ",
+		"comparison ", "the address of ", "field ",
+	} {
+		if strings.HasPrefix(d, prefix) {
+			return head + prefix + "..."
+		}
+	}
+	return head + d
+}
+
+// TestBuildCorpus measures how much of the Go distribution reaches SSA.
+//
+// The log line is deliberately worded so that it cannot be confused with the
+// one ssa/decompose_test.go prints. internal/hygiene scrapes a count out of
+// that line by pattern, and two lines matching one pattern would make the gate
+// read whichever test happened to run first.
+func TestBuildCorpus(t *testing.T) {
+	required := os.Getenv("NANOGO_REQUIRE_CORPUS") == "1"
+	src := filepath.Join(runtime.GOROOT(), "src")
+	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
+		if required {
+			t.Fatalf("NANOGO_REQUIRE_CORPUS=1 and %s is not there", src)
+		}
+		t.Skipf("no corpus at %s", src)
+	}
+
+	imp := newBCImporter()
+	c := &buildCounts{refused: make(map[string]int)}
+	for _, path := range bcPaths(t, src, required) {
+		if path == "unsafe" {
+			continue
+		}
+		r := imp.check(path)
+		if r.err != nil || r.pkg == nil {
+			continue
+		}
+		pkg, _ := ir.Build(r.pkg, r.files, r.info)
+		if pkg == nil {
+			continue
+		}
+		c.pkgs++
+		fns := append(append([]*ir.Func{}, pkg.Funcs...), pkg.Inits...)
+		for _, fn := range fns {
+			c.funcs++
+			f, err := Build(fn)
+			if err != nil || f == nil {
+				c.refused[bcCause(err)]++
+				continue
+			}
+			c.built++
+			if vs := Verify(f); len(vs) != 0 {
+				c.verifyNG++
+				if c.verifyNG < 4 {
+					t.Errorf("%s: %s built and did not verify: %v", path, fn.Name, vs)
+				}
+			}
+		}
+	}
+
+	t.Logf("construction corpus: %d packages, %d functions built of %d",
+		c.pkgs, c.built, c.funcs)
+	bcLogRefusals(t, c.refused)
+	if c.verifyNG != 0 {
+		t.Errorf("%d functions built and did not verify", c.verifyNG)
+	}
+	if c.funcs == 0 {
+		t.Fatal("the corpus produced no function")
+	}
+	if required && c.built < 1000 {
+		t.Fatalf("only %d functions were built; the corpus collapsed", c.built)
+	}
+}
+
+// bcLogRefusals prints the causes, largest first.
+//
+// By count and then by name, from a sorted slice of keys rather than from a
+// range over the map: specs/053-determinism.md forbids output that depends on
+// map order, and a report whose rows move between runs cannot be diffed.
+func bcLogRefusals(t *testing.T, m map[string]int) {
+	t.Helper()
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]] != m[keys[j]] {
+			return m[keys[i]] > m[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	for _, k := range keys {
+		t.Logf("refused %6d  %s", m[k], k)
 	}
 }
