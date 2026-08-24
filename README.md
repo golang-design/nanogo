@@ -83,7 +83,7 @@ That is the point: a compiler's bugs are invisible in its own output.
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
 | [`obj/arm64`](obj/arm64/) | 99% | 864,092 encodings agree with `go tool asm`, with none disagreeing |
 | [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 4.2M nodes |
-| [`ssa`](ssa/) | 97% | construction, lowering, decomposition, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant; **8,085 of 8,238** distribution functions lower completely |
+| [`ssa`](ssa/) | 97% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant; **8,231 of 8,238** distribution functions compile |
 | [`ssagen`](ssagen/) | 91% | emits machine code that **links and runs**, and stack maps a real collector honours |
 | [`rtsym`](rtsym/) | 100% | 41 runtime signatures checked against the runtime's own source |
 | [`driver`](driver/) | 97% | a real `go build -toolexec` completes |
@@ -100,12 +100,14 @@ stack maps are proved by a collector: an object reachable only from a
 nanogo frame slot survives a collection, the same object with the slot killed is
 freed, and 200,000 frames are grown, copied and unwound.
 
-**Not built:** floating point, which needs registers `obj/arm64` does not yet
-have, and passing a value too large for a register, which needs the ABI
-assignment pass of [`specs/030`](specs/030-abi.md). Those two account for every
-one of the 153 distribution functions that do not lower. Beyond code
-generation, the language features nanogo's own source does not use are the
-distance to [`specs/060`](specs/060-selfhost.md)'s fixed point.
+**Seven functions of 8,238 do not compile**, all of them a value too large for
+the register set at a call boundary, needing a name for a slot of the outgoing
+argument area. Everything else in the distribution's 536 buildable packages
+reaches machine code.
+
+That is code generation. It is not a working compiler: the language features
+nanogo's own source does not use, and the ones it does, are the distance to
+[`specs/060`](specs/060-selfhost.md)'s fixed point.
 
 ## Specs
 
