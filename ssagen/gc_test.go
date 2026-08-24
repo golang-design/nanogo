@@ -186,6 +186,7 @@ func gcArgFunc(t *testing.T, name string) *compiled {
 // freed object read through a stale pointer holds a recognisable pattern
 // rather than its old contents. GOGC=1 collects as often as it can.
 func TestStackMapKeepsALiveSlotAndFreesADeadOne(t *testing.T) {
+	hostRunsNanogoOutput(t)
 	goCmd := goTool(t)
 	tc := hostToolchain(t)
 	cfg := linkConfig(t)

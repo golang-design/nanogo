@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,6 +55,38 @@ func TestMain(m *testing.M) {
 // reason to skip. CI sets NANOGO_REQUIRE_CORPUS, so a gate that stopped
 // running would turn red instead of green.
 func requireCorpus() bool { return os.Getenv("NANOGO_REQUIRE_CORPUS") == "1" }
+
+// requireHostCanRunOutput reports whether a host that cannot run nanogo's
+// output is a failure rather than a reason to skip.
+//
+// CI sets NANOGO_REQUIRE_LINK on the arm64 runner only, so the tests that link
+// and run are required there and skipped elsewhere. Without the variable a
+// green run would be indistinguishable from a run that linked nothing.
+func requireHostCanRunOutput() bool { return os.Getenv("NANOGO_REQUIRE_LINK") == "1" }
+
+// hostRunsNanogoOutput guards every test that links nanogo's output and runs it.
+//
+// nanogo emits arm64 machine code and has no second backend yet
+// (specs/000-decisions.md decision 9 makes darwin/arm64 first and
+// linux/amd64 second, and specs/043-amd64-backend.md is unbuilt). On any other
+// host the linker is asked to build a binary for that host out of arm64
+// instructions, and the result dies with "invalid runtime symbol table" as soon
+// as the runtime walks its pc tables. That is not a bug in the object; it is a
+// test asking the machine to run code for a different architecture.
+//
+// Cross-linking would not help either: go tool link builds for the host unless
+// the whole toolchain is cross-configured, and the runtime it links against is
+// the host's.
+func hostRunsNanogoOutput(t *testing.T) {
+	t.Helper()
+	if runtime.GOARCH == "arm64" {
+		return
+	}
+	if requireHostCanRunOutput() {
+		t.Fatalf("NANOGO_REQUIRE_LINK is set and GOARCH is %s; nanogo emits arm64 and cannot be run here", runtime.GOARCH)
+	}
+	t.Skipf("nanogo emits arm64 machine code and GOARCH is %s, so the linked program cannot run here", runtime.GOARCH)
+}
 
 func goTool(t *testing.T) string {
 	t.Helper()
@@ -462,6 +495,7 @@ const big20Type = "type Big20 struct{ A, B, C, D, E, F, G, H, I, J, K, L, M, N, 
 // runs. Every stage below the front end is exercised and the result is a
 // process whose exit status is what the compiled code computed.
 func TestLinkAndRun(t *testing.T) {
+	hostRunsNanogoOutput(t)
 	goCmd := goTool(t)
 	tc := hostToolchain(t)
 	cfg := linkConfig(t)
@@ -698,6 +732,7 @@ func runLinkedRaw(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *
 // This test used to assert the throw. The stack maps are what turned it into
 // an assertion about the value.
 func TestStackGrowthCopiesNanogoFrames(t *testing.T) {
+	hostRunsNanogoOutput(t)
 	goCmd := goTool(t)
 	tc := hostToolchain(t)
 	cfg := linkConfig(t)
@@ -1137,6 +1172,7 @@ func TestEveryFunctionCarriesWhatTheLinkerReads(t *testing.T) {
 // built with the experiment, which the build cache keeps, and it buys the
 // whole class: any other linker pass that darwin skips runs here too.
 func TestLinksUnderTheDwarf5Experiment(t *testing.T) {
+	hostRunsNanogoOutput(t)
 	goCmd := goTool(t)
 	dwarf5Cfg.build(t)
 	env := []string{"GOEXPERIMENT=dwarf5"}

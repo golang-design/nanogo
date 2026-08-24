@@ -71,9 +71,16 @@ jobs:
     # this variable a corpus test that found nothing would skip, and a skipped
     # test reads exactly like a passing one in `go test ./...` output. The gate
     # would be green having compared no files at all.
+    # NANOGO_REQUIRE_LINK is set only where nanogo's output can actually run.
+    # nanogo emits arm64 machine code and has no second backend yet, so on the
+    # amd64 runner the linker is asked to build an amd64 binary out of arm64
+    # instructions and the program dies walking its own pc tables. Those tests
+    # skip there and are REQUIRED on the arm64 runner, so a green run is never
+    # a run that linked nothing.
     - name: Test
       env:
         NANOGO_REQUIRE_CORPUS: '1'
+        NANOGO_REQUIRE_LINK: ${{ runner.arch == 'ARM64' && '1' || '' }}
       run: go test ./...
 
     # Run twice, without and then with the detector. A data race can change
@@ -135,9 +142,14 @@ jobs:
         fi
         echo "all files formatted"
 
+  # Coverage runs on the arm64 runner, not the amd64 one, because that is the
+  # only host where every test runs. nanogo emits arm64 machine code, so the
+  # tests that link and run its output skip on amd64, and a coverage number
+  # measured there is a number for a smaller suite. Measuring where the suite
+  # is complete is the whole point of the gate.
   coverage:
     name: coverage
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
     - uses: actions/checkout@v5
     - uses: actions/setup-go@v6
@@ -151,6 +163,7 @@ jobs:
     - name: Measure
       env:
         NANOGO_REQUIRE_CORPUS: '1'
+        NANOGO_REQUIRE_LINK: '1'
       run: go test -coverprofile=cover.out -coverpkg=./... ./...
 
     # Per package, never one repository average. An average lets a well-tested
