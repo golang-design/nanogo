@@ -102,63 +102,82 @@ const (
 	OPrint        // print(Args...)
 	OPrintln      // println(Args...)
 
+	// The unsafe intrinsics. They are operations, not calls: each lowers to
+	// pointer arithmetic or to building a slice or string header, and none of
+	// them reaches the runtime.
+	//
+	// The alternative, which the builder used until these existed, is a call
+	// to a global named "unsafe.Add". That makes every later pass recognise an
+	// intrinsic by matching a string, and a pass that forgets to match it
+	// emits a call to a function that does not exist.
+	OUnsafeAdd        // unsafe.Add(X, Y)
+	OUnsafeSlice      // unsafe.Slice(X, Y)
+	OUnsafeSliceData  // unsafe.SliceData(X)
+	OUnsafeString     // unsafe.String(X, Y)
+	OUnsafeStringData // unsafe.StringData(X)
+
 	opCount
 )
 
 var opNames = [...]string{
-	OpInvalid:     "invalid",
-	OConst:        "const",
-	OLocal:        "local",
-	OGlobal:       "global",
-	OField:        "field",
-	OIndex:        "index",
-	ODeref:        "deref",
-	OAddr:         "addr",
-	OUnary:        "unary",
-	OBinary:       "binary",
-	OCompare:      "compare",
-	OConvert:      "convert",
-	OCall:         "call",
-	OIf:           "if",
-	OFor:          "for",
-	OSwitch:       "switch",
-	OSelect:       "select",
-	OBlock:        "block",
-	OGoto:         "goto",
-	OLabel:        "label",
-	OReturn:       "return",
-	OBreak:        "break",
-	OContinue:     "continue",
-	ORange:        "range",
-	OTypeAssert:   "typeassert",
-	OTypeSwitch:   "typeswitch",
-	OClosure:      "closure",
-	ODefer:        "defer",
-	OGo:           "go",
-	OSend:         "send",
-	ORecv:         "recv",
-	OMake:         "make",
-	OAppend:       "append",
-	OCopy:         "copy",
-	ODelete:       "delete",
-	OPanic:        "panic",
-	ORecover:      "recover",
-	OLen:          "len",
-	OCap:          "cap",
-	ONew:          "new",
-	OComplex:      "complex",
-	OReal:         "real",
-	OImag:         "imag",
-	OClear:        "clear",
-	OMin:          "min",
-	OMax:          "max",
-	OAssign:       "assign",
-	OCase:         "case",
-	OCompositeLit: "compositelit",
-	OSlice:        "slice",
-	OClose:        "close",
-	OPrint:        "print",
-	OPrintln:      "println",
+	OpInvalid:         "invalid",
+	OConst:            "const",
+	OLocal:            "local",
+	OGlobal:           "global",
+	OField:            "field",
+	OIndex:            "index",
+	ODeref:            "deref",
+	OAddr:             "addr",
+	OUnary:            "unary",
+	OBinary:           "binary",
+	OCompare:          "compare",
+	OConvert:          "convert",
+	OCall:             "call",
+	OIf:               "if",
+	OFor:              "for",
+	OSwitch:           "switch",
+	OSelect:           "select",
+	OBlock:            "block",
+	OGoto:             "goto",
+	OLabel:            "label",
+	OReturn:           "return",
+	OBreak:            "break",
+	OContinue:         "continue",
+	ORange:            "range",
+	OTypeAssert:       "typeassert",
+	OTypeSwitch:       "typeswitch",
+	OClosure:          "closure",
+	ODefer:            "defer",
+	OGo:               "go",
+	OSend:             "send",
+	ORecv:             "recv",
+	OMake:             "make",
+	OAppend:           "append",
+	OCopy:             "copy",
+	ODelete:           "delete",
+	OPanic:            "panic",
+	ORecover:          "recover",
+	OLen:              "len",
+	OCap:              "cap",
+	ONew:              "new",
+	OComplex:          "complex",
+	OReal:             "real",
+	OImag:             "imag",
+	OClear:            "clear",
+	OMin:              "min",
+	OMax:              "max",
+	OAssign:           "assign",
+	OCase:             "case",
+	OCompositeLit:     "compositelit",
+	OSlice:            "slice",
+	OClose:            "close",
+	OPrint:            "print",
+	OPrintln:          "println",
+	OUnsafeAdd:        "unsafe.Add",
+	OUnsafeSlice:      "unsafe.Slice",
+	OUnsafeSliceData:  "unsafe.SliceData",
+	OUnsafeString:     "unsafe.String",
+	OUnsafeStringData: "unsafe.StringData",
 }
 
 func (o Op) String() string {
@@ -180,6 +199,8 @@ var goSpecificOps = map[Op]bool{
 	OImag: true, OClear: true, OMin: true, OMax: true, OSelect: true,
 	OCompositeLit: true, OSlice: true,
 	OClose: true, OPrint: true, OPrintln: true,
+	OUnsafeAdd: true, OUnsafeSlice: true, OUnsafeSliceData: true,
+	OUnsafeString: true, OUnsafeStringData: true,
 }
 
 // IsGoSpecific reports whether o is a construct that must be lowered away.
