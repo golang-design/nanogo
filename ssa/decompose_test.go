@@ -706,15 +706,23 @@ func TestDecomposeEquality(t *testing.T) {
 		{"array", decArr2, false, ssa.OpEq, ssa.OpAnd, true},
 		{"complex", decCplx, false, ssa.OpEq, ssa.OpAnd, true},
 		// A string compares its bytes and not its pointer, so a part
-		// comparison would be wrong and the pass leaves it alone.
-		{"string", decStr, false, ssa.OpEq, ssa.OpEq, false},
+		// comparison would be wrong. It becomes the length check and the call
+		// to runtime.memequal of specs/020's table, joined by And.
+		{"string", decStr, false, ssa.OpEq, ssa.OpAnd, true},
+		{"string neq", decStr, false, ssa.OpNeq, ssa.OpNot, true},
+		// A string inside a struct is not reached: the expansion is written
+		// for a whole string and the field-wise walk has no place to put a
+		// call, so the struct stays whole.
 		{"struct holding a string", decNamed, false, ssa.OpEq, ssa.OpEq, false},
 		// Two general interfaces need the type's equality function.
 		{"interface", decIface, false, ssa.OpEq, ssa.OpEq, false},
 		// An interface against the literal nil is two zero words and nothing
 		// else, so the part comparison is the whole answer.
 		{"interface against nil", decIface, true, ssa.OpNeq, ssa.OpOr, true},
-		{"slice against nil", decSlice, true, ssa.OpEq, ssa.OpEq, false},
+		// A slice against nil is the data pointer alone, so the comparison
+		// keeps its operation and loses two of its three parts.
+		{"slice against nil", decSlice, true, ssa.OpEq, ssa.OpEq, true},
+		{"slice against nil neq", decSlice, true, ssa.OpNeq, ssa.OpNeq, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1379,4 +1387,389 @@ func TestStringSymString(t *testing.T) {
 	if got := (&ssa.StringSym{}).String(); got != "<nil>" {
 		t.Errorf("a symbol with no object prints %q", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// String equality, which is a call and not a comparison of the parts
+
+// stringEqFn returns a function that compares two loaded strings.
+func stringEqFn(op ssa.Op) (*decFn, *ssa.Value) {
+	p := newDecFn()
+	eq := p.v(op, decBool, p.load(decStr), p.load(decStr))
+	return p, eq
+}
+
+// TestDecomposeStringEqualForm asserts the whole expansion, so that a change
+// to it is reviewable.
+//
+// specs/020-ir.md's table: runtime.memequal plus a length check. The mask is
+// what makes one call safe for both answers, and it is the part of the shape
+// that is easy to get wrong: without it the call reads len(x) bytes out of a
+// shorter y.
+func TestDecomposeStringEqualForm(t *testing.T) {
+	p, _ := stringEqFn(ssa.OpEq)
+	f := p.ret(p.b.Values[len(p.b.Values)-1])
+	ssa.Decompose(f)
+	decVerified(t, f)
+	decWantForm(t, f, `
+b0:
+    v0 = InitMem <mem>
+    v1 = Arg <*int> {p}
+    v8 = OffPtr <*int> [8] v1
+    v7 = Load <*uint8> v1 v0
+    v9 = Load <int> v8 v0
+    v3 = Arg <*int> {p}
+    v11 = OffPtr <*int> [8] v3
+    v10 = Load <*uint8> v3 v0
+    v12 = Load <int> v11 v0
+    v13 = Eq <bool> v9 v12
+    v14 = ZeroExt <int> v13
+    v15 = Neg <int> v14
+    v16 = And <int> v9 v15
+    v17 = StaticCall <mem> {runtime.memequal} v7 v10 v16 v0
+    v18 = SelectN <bool> [0] v17
+    v19 = ZeroExt <bool> v18
+    v5 = And <bool> v13 v19
+    v6 = MakeResult <mem> v5 v17
+  Ret v6`)
+	if vs := ssa.CheckDecomposed(f); len(vs) != 0 {
+		t.Errorf("a value wider than a register survived: %v", vs)
+	}
+}
+
+// TestDecomposeStringEqualLowers takes the expansion through selection.
+//
+// The call is the point: lowering introduces one into a block that had none,
+// which is why specs/027-liveness-and-stackmaps.md runs after this pass.
+func TestDecomposeStringEqualLowers(t *testing.T) {
+	for _, op := range []ssa.Op{ssa.OpEq, ssa.OpNeq} {
+		p, eq := stringEqFn(op)
+		f := p.ret(eq)
+		ssa.Lower(f, rules.ARM64)
+		decVerified(t, f)
+		if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
+			t.Fatalf("%v: %v", op, vs)
+		}
+		calls := 0
+		for _, b := range f.Blocks {
+			for _, v := range b.Values {
+				if v.Op != ssa.OpARM64CALLstatic {
+					continue
+				}
+				calls++
+				o, _ := v.Aux.(*ir.Object)
+				if o == nil || o.Name != "runtime.memequal" {
+					t.Errorf("%v: the call is to %v", op, v.Aux)
+				}
+				// The pointers of both strings, the masked length, and the
+				// memory the call is ordered after.
+				if len(v.Args) != 4 {
+					t.Errorf("%v: the call takes %d arguments, want 4: %s", op, len(v.Args), v.LongString())
+				}
+			}
+		}
+		if calls != 1 {
+			t.Errorf("%v: %d calls, want one", op, calls)
+		}
+	}
+}
+
+// TestDecomposeStringNotEqual asserts that != is the negation of ==.
+//
+// Not lowers to one bit flipped, which is only the negation of a value that is
+// exactly 0 or 1. The And in front of it is what guarantees that, because a
+// comparison answers 0 or 1 and an And with it cannot answer anything else.
+func TestDecomposeStringNotEqual(t *testing.T) {
+	p, ne := stringEqFn(ssa.OpNeq)
+	f := p.ret(ne)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if ne.Op != ssa.OpNot || len(ne.Args) != 1 || ne.Args[0].Op != ssa.OpAnd {
+		t.Fatalf("!= became %s", ne.LongString())
+	}
+	and := ne.Args[0]
+	if and.Args[0].Op != ssa.OpEq {
+		t.Errorf("the length check is %s", and.Args[0].LongString())
+	}
+}
+
+// TestDecomposeStringEqualConstant is the common shape: s == "abc". The
+// constant's parts are its symbol and its length, and both reach the call.
+func TestDecomposeStringEqualConstant(t *testing.T) {
+	p := newDecFn()
+	k := p.v(ssa.OpConstString, decStr)
+	k.Aux = "abc"
+	eq := p.v(ssa.OpEq, decBool, p.load(decStr), k)
+	f := p.ret(eq)
+	ssa.Decompose(f)
+	decVerified(t, f)
+
+	var call *ssa.Value
+	for _, v := range p.b.Values {
+		if v.Op == ssa.OpStaticCall {
+			call = v
+		}
+	}
+	if call == nil {
+		t.Fatal("no call to runtime.memequal")
+	}
+	if call.Args[1].Op != ssa.OpAddr {
+		t.Errorf("the constant's data is %s", call.Args[1].LongString())
+	}
+	// The length the call is given is the mask of the first string's length,
+	// not the constant's: the two are equal exactly when the lengths agree,
+	// and that is what the mask says.
+	if call.Args[2].Op != ssa.OpAnd {
+		t.Errorf("the length is %s", call.Args[2].LongString())
+	}
+}
+
+// TestDecomposeStringEqualIdempotent runs the pass twice.
+//
+// ssa.Lower calls Decompose itself, so every function this pass touches is
+// decomposed twice in the corpus. The second run must find nothing to do.
+func TestDecomposeStringEqualIdempotent(t *testing.T) {
+	p, eq := stringEqFn(ssa.OpEq)
+	f := p.ret(eq)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	before := decForm(f)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if got := decForm(f); got != before {
+		t.Errorf("the second pass changed the function\nfirst:\n%s\nsecond:\n%s", before, got)
+	}
+}
+
+// TestDecomposeStringEqualBetweenCallAndResult covers the refusal.
+//
+// SelectN names a call result by reading the call, and the verifier reads that
+// argument as the memory the read is ordered against. A new call between the
+// two would leave the read naming memory that is no longer live, so the
+// expansion declines and the strings stay whole rather than the graph breaking.
+func TestDecomposeStringEqualBetweenCallAndResult(t *testing.T) {
+	p := newDecFn()
+	ptr := p.arg(decPtr, "p")
+	call := p.v(ssa.OpStaticCall, ssa.MemType, p.mem)
+	call.Aux = ssa.RuntimeFunc("runtime.newobject")
+	x := p.v(ssa.OpLoad, decStr, ptr, call)
+	y := p.v(ssa.OpLoad, decStr, ptr, call)
+	eq := p.v(ssa.OpEq, decBool, x, y)
+	res := p.v(ssa.OpSelectN, decBool, call)
+	p.mem = call
+	f := p.ret(eq, res)
+	decVerified(t, f)
+
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if eq.Op != ssa.OpEq {
+		t.Errorf("the comparison was expanded where it cannot be: %s", eq.LongString())
+	}
+	if len(ssa.CheckDecomposed(f)) == 0 {
+		t.Error("the operands were split for a comparison that was not built")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The memory chain a call has to be spliced into
+
+// TestDecomposeMemoryPhiAtJoin covers the phi the expansion forces.
+//
+// The comparison is on one arm of a branch, so that arm leaves with the call's
+// memory and the other leaves with the memory before it. A join whose
+// predecessors disagree needs a memory phi, and nothing above this pass knows
+// the call is coming.
+func TestDecomposeMemoryPhiAtJoin(t *testing.T) {
+	f := ssa.NewFunc("f")
+	entry := f.Entry
+	entry.Kind = ssa.BlockIf
+	mem := entry.NewValue(0, ssa.OpInitMem, ssa.MemType)
+	ptr := entry.NewValue(0, ssa.OpArg, decPtr)
+	entry.Control = entry.NewValue(0, ssa.OpArg, decBool)
+
+	left := f.NewBlock(ssa.BlockPlain)
+	right := f.NewBlock(ssa.BlockPlain)
+	join := f.NewBlock(ssa.BlockRet)
+	entry.AddEdgeTo(left)
+	entry.AddEdgeTo(right)
+	left.AddEdgeTo(join)
+	right.AddEdgeTo(join)
+
+	x := left.NewValue(0, ssa.OpLoad, decStr, ptr, mem)
+	y := left.NewValue(0, ssa.OpLoad, decStr, ptr, mem)
+	eq := left.NewValue(0, ssa.OpEq, decBool, x, y)
+	no := right.NewValue(0, ssa.OpConstBool, decBool)
+	phi := join.NewValue(0, ssa.OpPhi, decBool, eq, no)
+	join.Control = join.NewValue(0, ssa.OpMakeResult, ssa.MemType, phi, mem)
+
+	decVerified(t, f)
+	ssa.Decompose(f)
+	decVerified(t, f)
+
+	var memPhi *ssa.Value
+	for _, v := range join.Values {
+		if v.Op == ssa.OpPhi && v.Type == ssa.MemType {
+			memPhi = v
+		}
+	}
+	if memPhi == nil {
+		t.Fatalf("the join has no memory phi:\n%s", f)
+	}
+	if len(memPhi.Args) != 2 {
+		t.Fatalf("the memory phi has %d arguments: %s", len(memPhi.Args), memPhi.LongString())
+	}
+	if memPhi.Args[0].Op != ssa.OpStaticCall {
+		t.Errorf("the arm that calls leaves with %s", memPhi.Args[0].LongString())
+	}
+	if memPhi.Args[1] != mem {
+		t.Errorf("the arm that does not call leaves with %s", memPhi.Args[1].LongString())
+	}
+	if got := join.Control.Args[len(join.Control.Args)-1]; got != memPhi {
+		t.Errorf("the return reads %s and not the phi", got.LongString())
+	}
+}
+
+// TestDecomposeMemoryChainInLoop covers the round the fixed point needs.
+//
+// The call is in the body, so the loop header's predecessors disagree only
+// once the body has been walked, and the phi that merges them changes the
+// memory the header leaves with, which the body then reads. One walk cannot
+// see that, which is why the dataflow runs to a fixed point.
+func TestDecomposeMemoryChainInLoop(t *testing.T) {
+	f := ssa.NewFunc("f")
+	entry := f.Entry
+	entry.Kind = ssa.BlockPlain
+	mem := entry.NewValue(0, ssa.OpInitMem, ssa.MemType)
+	ptr := entry.NewValue(0, ssa.OpArg, decPtr)
+
+	head := f.NewBlock(ssa.BlockIf)
+	body := f.NewBlock(ssa.BlockPlain)
+	exit := f.NewBlock(ssa.BlockRet)
+	entry.AddEdgeTo(head)
+	head.AddEdgeTo(body)
+	head.AddEdgeTo(exit)
+	body.AddEdgeTo(head)
+	head.Control = head.NewValue(0, ssa.OpArg, decBool)
+
+	x := body.NewValue(0, ssa.OpLoad, decStr, ptr, mem)
+	y := body.NewValue(0, ssa.OpLoad, decStr, ptr, mem)
+	body.NewValue(0, ssa.OpEq, decBool, x, y)
+	exit.Control = exit.NewValue(0, ssa.OpMakeResult, ssa.MemType, mem)
+
+	decVerified(t, f)
+	ssa.Decompose(f)
+	decVerified(t, f)
+
+	var memPhi *ssa.Value
+	for _, v := range head.Values {
+		if v.Op == ssa.OpPhi && v.Type == ssa.MemType {
+			memPhi = v
+		}
+	}
+	if memPhi == nil {
+		t.Fatalf("the loop header has no memory phi:\n%s", f)
+	}
+	if len(memPhi.Args) != 2 || memPhi.Args[0] != mem || memPhi.Args[1].Op != ssa.OpStaticCall {
+		t.Errorf("the header's phi is %s", memPhi.LongString())
+	}
+	if got := exit.Control.Args[len(exit.Control.Args)-1]; got != memPhi {
+		t.Errorf("the exit reads %s and not the header's phi", got.LongString())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A slice against nil
+
+// TestDecomposeSliceNilComparesPointer asserts the comparison is the data
+// pointer alone.
+//
+// It is not a per-part comparison. A slice whose pointer is nil and whose
+// length is not is a value unsafe can build, and gc answers true for it: one
+// CMP against zero on the first word is the whole comparison. specs/000
+// decision 11 makes a difference from gc a nanogo bug.
+func TestDecomposeSliceNilComparesPointer(t *testing.T) {
+	for _, op := range []ssa.Op{ssa.OpEq, ssa.OpNeq} {
+		p := newDecFn()
+		cmp := p.v(op, decBool, p.load(decSlice), p.v(ssa.OpConstNil, decSlice))
+		f := p.ret(cmp)
+		ssa.Decompose(f)
+		decVerified(t, f)
+		if cmp.Op != op || len(cmp.Args) != 2 {
+			t.Fatalf("%v became %s", op, cmp.LongString())
+		}
+		if cmp.Args[0].Type.Kind != ir.Ptr || cmp.Args[1].Op != ssa.OpConstNil {
+			t.Errorf("%v compares %s", op, cmp.LongString())
+		}
+		if vs := ssa.CheckDecomposed(f); len(vs) != 0 {
+			t.Errorf("%v: %v", op, vs)
+		}
+		ssa.Lower(f, rules.ARM64)
+		if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
+			t.Errorf("%v: %v", op, vs)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The symbol table
+
+// TestRuntimeFunc covers the lookup that keeps every generated call inside
+// rtsym, which specs/031-runtime-lowering.md requires to be checked against
+// the runtime's source.
+func TestRuntimeFunc(t *testing.T) {
+	o := ssa.RuntimeFunc("runtime.memequal")
+	if o == nil || o.Name != "runtime.memequal" || o.Class != ir.ClassFunc {
+		t.Fatalf("runtime.memequal is %v", o)
+	}
+	if ssa.RuntimeFunc("runtime.memequal") != o {
+		t.Error("two calls to one symbol named two objects, so they are two relocations")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("a symbol that is not in rtsym did not panic")
+		}
+	}()
+	ssa.RuntimeFunc("runtime.notasymbol")
+}
+
+// TestDecomposeStringEqualAsControl covers the shape the corpus is mostly
+// made of: if s == "x". The comparison is the block's control, so the value
+// has to keep its identity through the expansion or the branch loses it.
+func TestDecomposeStringEqualAsControl(t *testing.T) {
+	f := ssa.NewFunc("f")
+	entry := f.Entry
+	entry.Kind = ssa.BlockIf
+	mem := entry.NewValue(0, ssa.OpInitMem, ssa.MemType)
+	ptr := entry.NewValue(0, ssa.OpArg, decPtr)
+	k := entry.NewValue(0, ssa.OpConstString, decStr)
+	k.Aux = "x"
+	eq := entry.NewValue(0, ssa.OpEq, decBool, entry.NewValue(0, ssa.OpLoad, decStr, ptr, mem), k)
+	entry.Control = eq
+
+	yes := f.NewBlock(ssa.BlockRet)
+	no := f.NewBlock(ssa.BlockRet)
+	entry.AddEdgeTo(yes)
+	entry.AddEdgeTo(no)
+	yes.Control = yes.NewValue(0, ssa.OpMakeResult, ssa.MemType, mem)
+	no.Control = no.NewValue(0, ssa.OpMakeResult, ssa.MemType, mem)
+
+	decVerified(t, f)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if entry.Control != eq || eq.Op != ssa.OpAnd {
+		t.Fatalf("the control is %s", entry.Control.LongString())
+	}
+	// Both arms leave with the memory the call produced, so no phi is needed
+	// and the returns must read it rather than the memory before the call.
+	for _, b := range []*ssa.Block{yes, no} {
+		got := b.Control.Args[len(b.Control.Args)-1]
+		if got.Op != ssa.OpStaticCall {
+			t.Errorf("b%d returns with %s", b.ID, got.LongString())
+		}
+	}
+	ssa.Lower(f, rules.ARM64)
+	if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
+		t.Errorf("%v", vs)
+	}
+	decVerified(t, f)
 }

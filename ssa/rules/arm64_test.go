@@ -1830,12 +1830,22 @@ func TestARM64ImmediateSweep(t *testing.T) {
 //
 // String and interface equality are not per-part comparisons: a string
 // compares its bytes and an interface calls the dynamic type's equality
-// function. specs/020-ir.md's lowering table makes both runtime calls, so this
-// rule must refuse them rather than guess.
+// function. specs/020-ir.md's lowering table makes both runtime calls.
+// Decomposition builds the string one, out of the parts it has, so a whole
+// string no longer reaches this rule. Everything it does not build still does,
+// and the rule must refuse rather than guess.
 func TestCompareRefusesWideOperands(t *testing.T) {
+	big := &ir.Type{Kind: ir.Struct, Name: "big", Fields: []ir.Field{
+		{Name: "A", Type: tI64}, {Name: "B", Type: tI64},
+		{Name: "C", Type: tI64}, {Name: "D", Type: tI64},
+		{Name: "E", Type: tI64},
+	}}
+	if err := ir.Layout(big); err != nil {
+		t.Fatal(err)
+	}
 	for _, ty := range []*ir.Type{
-		{Kind: ir.String, Size: 16, Align: 8, Name: "string"},
 		{Kind: ir.Interface, Size: 16, Align: 8, Name: "any"},
+		big,
 	} {
 		p := newBuilder()
 		cmp := p.val(ssa.OpEq, tBool, p.arg(ty), p.arg(ty))

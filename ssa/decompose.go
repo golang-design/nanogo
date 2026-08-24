@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"golang.design/x/nanogo/ir"
+	"golang.design/x/nanogo/rtsym"
 	"golang.design/x/nanogo/syntax"
 )
 
@@ -117,6 +118,7 @@ type decomposer struct {
 
 	tInt   *ir.Type
 	tByte  *ir.Type
+	tBool  *ir.Type
 	tUnsaf *ir.Type
 
 	// users lists the values that read each value, indexed by identifier.
@@ -139,6 +141,10 @@ type decomposer struct {
 	// load whose only reader became a block move.
 	remove []bool
 
+	// memAdded reports that a phase inserted a value that produces memory, so
+	// that the chain has to be repaired before the pass returns.
+	memAdded bool
+
 	// moves counts the load and store pairs that became one block move. It is
 	// reported separately, because it is a different answer to the same
 	// question and the corpus number should say how much came from each.
@@ -153,6 +159,7 @@ func (d *decomposer) run() {
 	d.create()
 	d.link()
 	d.rewrite()
+	d.repairMemory()
 }
 
 // index rebuilds the reader lists and the control marks.
@@ -315,6 +322,14 @@ func (d *decomposer) byteType() *ir.Type {
 		d.tByte = &ir.Type{Kind: ir.Uint8, Size: 1, Align: 1, Name: "uint8"}
 	}
 	return d.tByte
+}
+
+// boolType returns the type of a comparison's result.
+func (d *decomposer) boolType() *ir.Type {
+	if d.tBool == nil {
+		d.tBool = &ir.Type{Kind: ir.Bool, Size: 1, Align: 1, Name: "bool"}
+	}
+	return d.tBool
 }
 
 // unsafeType returns the type of a word that holds a pointer to something the
@@ -533,9 +548,10 @@ func (d *decomposer) sourcesOK(v *Value) bool {
 //
 // For a string or an interface they are not. String equality compares the
 // bytes and not the pointer, so two equal strings at two addresses would
-// compare unequal. General interface equality calls the type's equality
-// function. Both need a call and a branch, which this pass does not build, so
-// it leaves them alone and lowering refuses them by name.
+// compare unequal, and expandStringEqual builds the call to runtime.memequal
+// that specs/020's table gives it. General interface equality calls the type's
+// equality function through runtime.ifaceeq, which rtsym does not carry, so it
+// is still left alone and lowering refuses it by name.
 //
 // An interface against the literal nil is the exception, and it is the common
 // one. The zero interface is two zero words and nothing else is, so comparing
@@ -563,8 +579,18 @@ func (d *decomposer) equalityOK(u *Value) bool {
 	if comparableByParts(x.Type) && comparableByParts(y.Type) {
 		return true
 	}
-	return x.Type.Kind == ir.Interface && y.Type.Kind == ir.Interface &&
-		(x.Op == OpConstNil || y.Op == OpConstNil)
+	if x.Type.Kind == ir.String && y.Type.Kind == ir.String {
+		// The bytes, through runtime.memequal, which expandStringEqual builds
+		// out of the parts this admits.
+		return d.stringEqualOK(u)
+	}
+	if x.Type.Kind != y.Type.Kind || (x.Op != OpConstNil && y.Op != OpConstNil) {
+		return false
+	}
+	// A slice against nil is the data pointer, which expandSliceNil builds. A
+	// map and a function are the same question and never reach here, because
+	// both are one word and are compared whole.
+	return x.Type.Kind == ir.Interface || x.Type.Kind == ir.Slice
 }
 
 // comparableByParts reports whether == over t is == over each of its parts.
@@ -576,7 +602,8 @@ func comparableByParts(t *ir.Type) bool {
 	case ir.String, ir.Interface, ir.Slice, ir.Map, ir.FuncKind:
 		// The first two need a call. The last three are not comparable in Go
 		// at all, except against nil, and a part comparison against nil is
-		// not what the language means by it.
+		// not what the language means by it: equalityOK admits those by name
+		// and expandSliceNil builds the one that is more than one word.
 		return false
 	case ir.Struct, ir.Tuple:
 		for i := range t.Fields {
@@ -765,7 +792,14 @@ func (d *decomposer) rewrite() {
 				}
 			case OpEq, OpNeq:
 				if len(v.Args) == 2 && d.isSplit(v.Args[0]) {
-					d.expandEqual(b, v, &out)
+					switch v.Args[0].Type.Kind {
+					case ir.String:
+						d.expandStringEqual(b, v, &out)
+					case ir.Slice:
+						d.expandSliceNil(v)
+					default:
+						d.expandEqual(b, v, &out)
+					}
 				}
 			case OpStaticCall, OpClosureCall, OpInterCall, OpMakeResult:
 				d.spliceArgs(v)
@@ -866,6 +900,25 @@ func (d *decomposer) expandEqual(b *Block, v *Value, out *[]*Value) {
 	setArgs(v, acc, c)
 }
 
+// expandSliceNil compares a slice against the literal nil.
+//
+// The answer is the data pointer and nothing else. That is what gc emits for
+// the same expression, one CMP against zero on the first word, and it is not
+// the same question as a comparison of all three parts: a slice whose pointer
+// is nil and whose length is not is a value unsafe can build, and the two
+// answers differ on it. specs/000-decisions.md decision 11 makes a difference
+// from gc a nanogo bug, so the pointer is the whole comparison.
+//
+// v keeps its operation and its identity, so nothing that reads the result is
+// redirected and != needs no separate case.
+func (d *decomposer) expandSliceNil(v *Value) {
+	xs, ys := d.parts[v.Args[0].ID], d.parts[v.Args[1].ID]
+	if len(xs) == 0 || len(ys) == 0 {
+		return
+	}
+	setArgs(v, xs[0], ys[0])
+}
+
 // spliceArgs replaces every whole-value argument of a call or a return by its
 // parts, in place, so the argument order is still the source order.
 func (d *decomposer) spliceArgs(v *Value) {
@@ -928,6 +981,335 @@ func setArgs(v *Value, args ...*Value) {
 	v.Args = v.Args[:0]
 	for _, a := range args {
 		v.AddArg(a)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The runtime call specs/020's table left behind
+
+// String equality is not one machine instruction and it is not a per-part
+// comparison either. specs/020-ir.md's table gives it to runtime.memequal
+// after a length check, and specs/025-lowering-and-rules.md's "operations that
+// lower to calls" covers "every operation in 031's table that survived 020".
+// It survived: ssa/build.go maps every == to OpEq whatever the operand type
+// is, so a string comparison arrives here whole.
+//
+// It is built in this pass and not in selection, which is where specs/025 puts
+// a call. The reason is the parts: memequal takes the data pointer and the
+// length of a string, and neither exists as a value until the string is split.
+// A rule in the target's file would see an operand that no rule can lower and
+// no argument it could name. That is the difference between this row of the
+// table and the concatenation row above it, which needs no part and belongs
+// where specs/020 puts it.
+
+// runtimeFuncType is the type of every runtime symbol the compiler calls.
+//
+// A call names its callee by symbol and the argument list is the values, so
+// nothing below reads the signature. rtsym holds the signatures, checked
+// against the runtime's source, and this is only the object a relocation is
+// emitted against.
+var runtimeFuncType = &ir.Type{Kind: ir.FuncKind, Size: ir.PtrSize, Align: ir.PtrSize, Name: "func()"}
+
+// runtimeFuncs names each runtime symbol once, so that two calls to one symbol
+// are two relocations against one name. It is a lookup table and is never
+// ranged over on a path that produces output (specs/053-determinism.md).
+var runtimeFuncs = func() map[string]*ir.Object {
+	all := rtsym.All()
+	m := make(map[string]*ir.Object, len(all))
+	for _, s := range all {
+		m[s.Name] = &ir.Object{Name: s.Name, Type: runtimeFuncType, Class: ir.ClassFunc}
+	}
+	return m
+}()
+
+// RuntimeFunc returns the object that names a runtime function.
+//
+// The name must be one rtsym holds, which specs/031-runtime-lowering.md
+// requires to be checked against the runtime's source rather than typed in. A
+// name that is not there panics rather than returning nil, because a call to a
+// symbol that does not exist links against nothing and jumps into whatever the
+// linker left at that address.
+func RuntimeFunc(name string) *ir.Object {
+	if o := runtimeFuncs[name]; o != nil {
+		return o
+	}
+	panic("ssa: " + name + " is not in rtsym")
+}
+
+// expandStringEqual builds string equality out of the parts of the two
+// strings, per specs/020's row: runtime.memequal plus a length check.
+//
+// The shape is
+//
+//	e = len(x) == len(y)
+//	n = len(x) AND -e
+//	r = e AND memequal(x.ptr, y.ptr, n)
+//
+// and it is branchless. A branch would save the call when the lengths differ,
+// which is the common answer, and it needs a join with a phi that this pass
+// has no machinery for; specs/042's group 8 inline forms are where that is
+// bought back. The mask is what makes the call safe to make unconditionally:
+// memequal reads n bytes from both strings, so passing len(x) when the lengths
+// differ would read past the end of the shorter one. With the mask it is
+// called with zero, which reads nothing and answers true, and the length
+// comparison is then the whole answer.
+func (d *decomposer) expandStringEqual(b *Block, v *Value, out *[]*Value) {
+	xs, ys := d.parts[v.Args[0].ID], d.parts[v.Args[1].ID]
+	mem := d.someMem()
+
+	lenEq := d.mk(b, v.Pos, OpEq, d.boolType(), xs[1], ys[1])
+	wide := d.mk(b, v.Pos, OpZeroExt, d.intType(), lenEq)
+	mask := d.mk(b, v.Pos, OpNeg, d.intType(), wide)
+	n := d.mk(b, v.Pos, OpAnd, d.intType(), xs[1], mask)
+	call := d.mk(b, v.Pos, OpStaticCall, MemType, xs[0], ys[0], n, mem)
+	call.Aux = RuntimeFunc("runtime.memequal")
+	res := d.mk(b, v.Pos, OpSelectN, d.boolType(), call)
+	// The ABI states a bool result in the low byte and says nothing about the
+	// bits above it. Not is one bit flipped, so a value that is not exactly 0
+	// or 1 would negate to the wrong answer.
+	same := d.mk(b, v.Pos, OpZeroExt, d.boolType(), res)
+	*out = append(*out, lenEq, wide, mask, n, call, res, same)
+	d.memAdded = true
+
+	if v.Op == OpEq {
+		v.Op = OpAnd
+		setArgs(v, lenEq, same)
+		return
+	}
+	both := d.mk(b, v.Pos, OpAnd, d.boolType(), lenEq, same)
+	*out = append(*out, both)
+	v.Op = OpNot
+	setArgs(v, both)
+}
+
+// stringEqualOK reports whether the equality of two strings can be built where
+// it stands.
+func (d *decomposer) stringEqualOK(u *Value) bool {
+	return d.someMem() != nil && d.memInsertSafe(u.Block, valueIndex(u.Block, u))
+}
+
+// someMem returns a memory value to hang a new call on.
+//
+// It is the memory the function starts with, which dominates every block. The
+// call is almost never ordered after it, and it does not have to be: the
+// argument is a placeholder that repairMemory replaces by the memory that is
+// really live where the call ended up. Naming one here rather than leaving the
+// argument empty keeps every intermediate graph well formed.
+func (d *decomposer) someMem() *Value {
+	e := d.f.Entry
+	if e == nil {
+		return nil
+	}
+	for _, v := range e.Values {
+		if v.Op == OpInitMem {
+			return v
+		}
+	}
+	return nil
+}
+
+// memInsertSafe reports whether a value that produces memory may be inserted
+// at index at.
+//
+// One shape refuses: a call earlier in the block whose result is read after
+// the insertion point. SelectN names a result by reading the call, and the
+// verifier treats that argument as the memory the read is ordered against, so
+// a new memory value between the two would leave the read naming memory that
+// is no longer live.
+func (d *decomposer) memInsertSafe(b *Block, at int) bool {
+	if at < 0 {
+		return false
+	}
+	for _, w := range b.Values[at:] {
+		if w.Op != OpSelectN || len(w.Args) != 1 {
+			continue
+		}
+		if i := valueIndex(b, w.Args[0]); i >= 0 && i < at {
+			return false
+		}
+	}
+	return true
+}
+
+// valueIndex returns the position of v in its block, or -1.
+func valueIndex(b *Block, v *Value) int {
+	for i, w := range b.Values {
+		if w == v {
+			return i
+		}
+	}
+	return -1
+}
+
+// insertAt splices values into a block before the value at index at.
+func (d *decomposer) insertAt(b *Block, at int, vs ...*Value) {
+	b.Values = append(b.Values, make([]*Value, len(vs))...)
+	copy(b.Values[at+len(vs):], b.Values[at:])
+	copy(b.Values[at:], vs)
+}
+
+// ---------------------------------------------------------------------------
+// The memory chain
+
+// repairMemory reinstates the single memory chain after a call was inserted
+// into it.
+//
+// Verify's rule is that exactly one memory value is live at any point in a
+// block, so every value that takes memory names the one before it. Inserting a
+// call breaks that in two ways: the values after it in the block still name
+// the memory it displaced, and a join whose predecessors no longer leave with
+// the same memory needs a phi that was not there before.
+//
+// Both are repaired here rather than at each insertion, because the second is
+// not a local question: a phi added to one block changes the memory that block
+// leaves with, which can make a later join disagree in turn. The dataflow
+// therefore runs to a fixed point before anything is rewritten.
+//
+// It does not run when nothing was inserted. The walk is the identity in that
+// case, and not running it is the stronger statement: a function with no
+// string comparison in it comes out of this pass exactly as it did before,
+// rather than out of a walk that is believed to change nothing.
+func (d *decomposer) repairMemory() {
+	if !d.memAdded {
+		return
+	}
+	order := Dominators(d.f).ReversePostorder()
+	exit := d.memFixedPoint(order)
+	d.memRetarget(order, exit)
+}
+
+// memFixedPoint computes the memory each block leaves with and adds the phis
+// the joins need. It returns the exit memory indexed by block identifier.
+func (d *decomposer) memFixedPoint(order []*Block) []*Value {
+	exit := make([]*Value, d.f.NumBlocks())
+	// The bound is the assertion, not the termination argument: each round
+	// either adds a phi, of which there is at most one per block, or moves a
+	// block's exit memory forward along the chain, and neither can happen
+	// forever.
+	for round := 0; ; round++ {
+		if round > len(order)+2 {
+			panic("ssa: decompose: the memory chain did not settle")
+		}
+		changed := false
+		for _, b := range order {
+			in, ok := d.memIn(b, exit)
+			if !ok {
+				// The predecessors disagree and nothing merges them yet.
+				in = d.addMemPhi(b, exit)
+				changed = true
+			}
+			cur := in
+			for _, v := range b.Values {
+				if v.Op != OpPhi && infoOf(v.Op).makesMem {
+					cur = v
+				}
+			}
+			if int(b.ID) < len(exit) && exit[b.ID] != cur {
+				exit[b.ID] = cur
+				changed = true
+			}
+		}
+		if !changed {
+			return exit
+		}
+	}
+}
+
+// memIn returns the memory a block starts with, and whether it is settled.
+//
+// It is not settled when two predecessors that are both known leave with
+// different memory and the block has no memory phi. A predecessor that is not
+// known yet is a back edge on the first round and is not a disagreement.
+func (d *decomposer) memIn(b *Block, exit []*Value) (*Value, bool) {
+	if p := memPhiOf(b); p != nil {
+		return p, true
+	}
+	var first *Value
+	for _, p := range b.Preds {
+		if int(p.ID) >= len(exit) || exit[p.ID] == nil {
+			continue
+		}
+		if first == nil {
+			first = exit[p.ID]
+			continue
+		}
+		if exit[p.ID] != first {
+			return nil, false
+		}
+	}
+	return first, true
+}
+
+// memPhiOf returns the block's memory phi, or nil.
+func memPhiOf(b *Block) *Value {
+	for _, v := range b.Values {
+		if v.Op != OpPhi {
+			return nil
+		}
+		if IsMemory(v) {
+			return v
+		}
+	}
+	return nil
+}
+
+// addMemPhi puts a memory phi at the head of a join, after the phis that are
+// already there, so that the phi prefix the verifier requires stays one run.
+func (d *decomposer) addMemPhi(b *Block, exit []*Value) *Value {
+	phi := d.f.newValue(OpPhi, MemType, b.Pos)
+	phi.Block = b
+	at := 0
+	for at < len(b.Values) && b.Values[at].Op == OpPhi {
+		at++
+	}
+	d.insertAt(b, at, phi)
+	// The arguments are filled from the predecessors that are known. The rest
+	// are filled by memRetarget once the fixed point has settled, and the phi
+	// needs one argument per predecessor from the moment it exists.
+	for _, p := range b.Preds {
+		var m *Value
+		if int(p.ID) < len(exit) {
+			m = exit[p.ID]
+		}
+		phi.AddArg(m)
+	}
+	return phi
+}
+
+// memRetarget points every reader at the memory that is live where it stands.
+func (d *decomposer) memRetarget(order []*Block, exit []*Value) {
+	for _, b := range order {
+		in, _ := d.memIn(b, exit)
+		cur := in
+		for _, v := range b.Values {
+			if v.Op == OpPhi {
+				continue
+			}
+			if infoOf(v.Op).takesMem && len(v.Args) > 0 && cur != nil {
+				if i := len(v.Args) - 1; v.Args[i] != cur {
+					v.SetArg(i, cur)
+				}
+			}
+			if infoOf(v.Op).makesMem {
+				cur = v
+			}
+		}
+	}
+	// The phi arguments come last, because a predecessor's exit memory can be
+	// a phi in a block the walk had not reached.
+	for _, b := range order {
+		phi := memPhiOf(b)
+		if phi == nil {
+			continue
+		}
+		for i, p := range b.Preds {
+			if i >= len(phi.Args) || int(p.ID) >= len(exit) || exit[p.ID] == nil {
+				continue
+			}
+			if phi.Args[i] != exit[p.ID] {
+				phi.SetArg(i, exit[p.ID])
+			}
+		}
 	}
 }
 
