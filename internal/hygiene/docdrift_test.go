@@ -549,6 +549,22 @@ func TestTheFactsAreCurrent(t *testing.T) {
 	}
 
 	have := readFacts(t, path)
+
+	// A corpus whose size depends on what is on the machine cannot be a fixed
+	// fact. The scanner, the parser and the constraint evaluator all read every
+	// Go source tree they can find, so a developer with a checkout of the Go
+	// repository beside GOROOT compares far more files than a CI runner with
+	// GOROOT alone. Pinning those counts makes the gate fail for everyone whose
+	// machine differs from whoever refreshed it last, which is not drift.
+	//
+	// They are still checked, in the direction that means something: the
+	// documented number must be reachable, so the measurement may not exceed
+	// it, and it may not collapse to nothing.
+	elastic := map[string]bool{
+		"syntax.scanner.files":    true,
+		"syntax.parser.files":     true,
+		"loader.constraint.files": true,
+	}
 	var keys []string
 	for k := range got {
 		keys = append(keys, k)
@@ -559,6 +575,19 @@ func TestTheFactsAreCurrent(t *testing.T) {
 		switch {
 		case !ok:
 			t.Errorf("%s holds no %s and the tests produce %s", factsPath, k, format(got[k]))
+		case elastic[k]:
+			// The corpus is whatever this machine holds. A count above the
+			// documented one means the document undersells the work; a count
+			// of zero means the corpus went missing and the test measured
+			// nothing, which is the failure worth catching.
+			switch {
+			case got[k] == 0:
+				t.Errorf("%s measured no files; the corpus is missing and the test proved nothing", k)
+			case got[k] > old:
+				t.Errorf("%s says %s is %s and the tests compare %s, which is more.\n"+
+					"Refresh it with NANOGO_REFRESH_FACTS=1 so the documents do not undersell it.",
+					factsPath, k, format(old), format(got[k]))
+			}
 		case old != got[k]:
 			t.Errorf("%s says %s is %s and the tests produce %s.\n"+
 				"Refresh it with NANOGO_REFRESH_FACTS=1 and correct whatever document quotes it.",

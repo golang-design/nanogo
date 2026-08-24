@@ -156,6 +156,12 @@ func TestCompileIsDeterministic(t *testing.T) {
 // owns the package, so a refusal has to say which construct to remove or which
 // component to build, per specs/051-build-integration.md.
 func TestCompileRefusals(t *testing.T) {
+	// Compile refuses a host it cannot emit for before it looks at the source,
+	// so on any other architecture every one of these cases reports that
+	// instead of the refusal it is written to check. The guard is not about
+	// code generation here; it is that the message under test is unreachable.
+	arm64Only(t)
+
 	tests := []struct {
 		name string
 		src  string
