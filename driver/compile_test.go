@@ -1,0 +1,555 @@
+// Copyright 2026 The golang.design Initiative Authors.
+// All rights reserved. Use of this source code is governed by
+// a BSD-style license that can be found in the LICENSE file.
+
+package driver
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"golang.design/x/nanogo/obj"
+	"golang.design/x/nanogo/syntax"
+)
+
+// arm64Only guards the tests that reach the backend.
+//
+// Everything above code generation is architecture independent and runs
+// everywhere, which is why only these tests carry the guard. CI sets
+// NANOGO_REQUIRE_LINK on the arm64 runner, so a skip there is a failure.
+func arm64Only(t *testing.T) {
+	t.Helper()
+	if runtime.GOARCH == "arm64" {
+		return
+	}
+	if os.Getenv("NANOGO_REQUIRE_LINK") == "1" {
+		t.Fatalf("NANOGO_REQUIRE_LINK is set and GOARCH is %s; nanogo emits arm64", runtime.GOARCH)
+	}
+	t.Skipf("nanogo emits arm64 machine code and GOARCH is %s", runtime.GOARCH)
+}
+
+// needGoCommand skips a test that cannot run without the go command. The
+// object header nanogo writes is the installed toolchain's, and obj probes for
+// it rather than declaring it.
+func needGoCommand(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skipf("no go command: %v", err)
+	}
+}
+
+// compileSource writes src to a temporary file and compiles it with cfg
+// filled in. It returns the output path and the error Compile reported.
+func compileSource(t *testing.T, src string, edit func(*Config)) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		Package:   "main",
+		Output:    filepath.Join(dir, "_pkg_.a"),
+		Lang:      "go1.27",
+		GoVersion: PinnedGoVersion,
+		Files:     []string{path},
+	}
+	if edit != nil {
+		edit(cfg)
+	}
+	return cfg.Output, Compile(cfg)
+}
+
+// TestCompileWritesAnArchive is the unit form of the end to end test: the
+// pipeline runs and the bytes that come out are the archive -pack asks for.
+func TestCompileWritesAnArchive(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	out, err := compileSource(t, "package main\n\nfunc f(a, b int) int { return a*b + 1 }\n\nfunc main() { f(20, 3) }\n",
+		func(c *Config) { c.Pack = true })
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(b), archiveMagic) {
+		t.Fatalf("the output does not start with the archive magic: %q", b[:min(16, len(b))])
+	}
+	header := string(b[len(archiveMagic) : len(archiveMagic)+archiveHeader])
+	if !strings.HasPrefix(header, objectMember) {
+		t.Errorf("the first member is %q, want %q", header[:16], objectMember)
+	}
+	if !strings.HasSuffix(header, "`\n") {
+		t.Errorf("the member header does not end with the archive terminator: %q", header)
+	}
+	// The linker refuses an object whose header line is not its own, so the
+	// member has to carry the installed toolchain's.
+	if !strings.Contains(string(b), "go object ") {
+		t.Error("the member is not a Go object")
+	}
+	if !strings.Contains(string(b), "\nmain\n") {
+		t.Error("the object does not carry the main mark, and cmd/link needs it")
+	}
+}
+
+// TestCompileWritesABareObject checks the other half of -pack: without it the
+// output is the object and nothing around it.
+func TestCompileWritesABareObject(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	out, err := compileSource(t, "package p\n\nfunc f(a int) int { return a + 1 }\n",
+		func(c *Config) { c.Package = "p" })
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(b), "go object ") {
+		t.Errorf("the output is not a bare object: %q", b[:min(16, len(b))])
+	}
+	if strings.Contains(string(b), "\nmain\n") {
+		t.Error("a package that is not main carries the main mark")
+	}
+}
+
+// TestCompileIsDeterministic is specs/053-determinism.md at the driver's
+// level: the same source compiled twice is the same bytes.
+func TestCompileIsDeterministic(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(src, []byte("package p\n\nfunc a(x int) int { return x * 2 }\n\nfunc b(x int) int { return x + 3 }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The same source file, because the file name reaches the pc-file table
+	// and two paths are two different objects for a good reason.
+	compile := func(out string) []byte {
+		t.Helper()
+		if err := Compile(&Config{Package: "p", Output: out, Lang: "go1.27", Files: []string{src}}); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	if string(compile(filepath.Join(dir, "1.o"))) != string(compile(filepath.Join(dir, "2.o"))) {
+		t.Error("two compilations of the same source produced different objects")
+	}
+}
+
+// TestCompileRefusals covers every input nanogo declines, and checks that the
+// message names what stopped it.
+//
+// The message is the whole point. An allowlist entry is a claim that nanogo
+// owns the package, so a refusal has to say which construct to remove or which
+// component to build, per specs/051-build-integration.md.
+func TestCompileRefusals(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		edit func(*Config)
+		want []string // every substring the message must carry
+	}{
+		{
+			name: "a type error names the position",
+			src:  "package main\n\nfunc f() int { return \"x\" }\n",
+			want: []string{"a.go:3:23", "cannot use"},
+		},
+		{
+			name: "a syntax error names the position",
+			src:  "package main\n\nfunc f() int { return }}\n",
+			want: []string{"a.go:3:24"},
+		},
+		{
+			name: "an import with no configuration entry says so",
+			src:  "package main\n\nimport \"errors\"\n\nvar _ = errors.New\n",
+			want: []string{"errors", "no entry"},
+		},
+		{
+			name: "an import with a configuration entry names the archive",
+			src:  "package main\n\nimport \"errors\"\n\nvar _ = errors.New\n",
+			edit: func(c *Config) {
+				c.ImportCfg = mustImportCfg(t, "packagefile errors=/pkg/errors.a\n")
+			},
+			want: []string{"errors", "/pkg/errors.a", "export data"},
+		},
+		{
+			name: "an importmap is applied before the lookup",
+			src:  "package main\n\nimport \"errors\"\n\nvar _ = errors.New\n",
+			edit: func(c *Config) {
+				c.ImportCfg = mustImportCfg(t, "importmap errors=vendor/errors\npackagefile vendor/errors=/pkg/v.a\n")
+			},
+			want: []string{"/pkg/v.a"},
+		},
+		{
+			name: "an assignment names the function and the pass",
+			src:  "package main\n\nfunc f(a int) int {\n\tb := a\n\treturn b\n}\n",
+			want: []string{"function f", "a.go:3:6", "assign"},
+		},
+		{
+			name: "a package-level variable is refused",
+			src:  "package main\n\nvar n = 1\n\nfunc f() int { return n }\n",
+			want: []string{"package-level variables"},
+		},
+		{
+			name: "-complete makes a bodyless declaration an error",
+			src:  "package main\n\nfunc f(a int) int\n\nfunc g() int { return 1 }\n",
+			edit: func(c *Config) { c.Complete = true },
+			want: []string{"a.go:3:6", "missing function body"},
+		},
+		{
+			name: "a package with no bodies is refused",
+			src:  "package main\n\nfunc f(a int) int\n",
+			want: []string{"no function bodies"},
+		},
+		{
+			name: "the runtime is refused",
+			src:  "package main\n\nfunc f() int { return 1 }\n",
+			edit: func(c *Config) { c.CompilingRuntime = true },
+			want: []string{"the runtime", "specs/034"},
+		},
+		{
+			name: "go:embed is refused",
+			src:  "package main\n\nfunc f() int { return 1 }\n",
+			edit: func(c *Config) { c.EmbedCfgFile = "/tmp/embedcfg" },
+			want: []string{"go:embed", "-embedcfg"},
+		},
+		{
+			name: "no output file",
+			src:  "package main\n\nfunc f() int { return 1 }\n",
+			edit: func(c *Config) { c.Output = "" },
+			want: []string{"no -o output file"},
+		},
+		{
+			name: "no source files",
+			src:  "package main\n\nfunc f() int { return 1 }\n",
+			edit: func(c *Config) { c.Files = nil },
+			want: []string{"no source files"},
+		},
+		{
+			name: "a source file that is not there",
+			src:  "package main\n\nfunc f() int { return 1 }\n",
+			edit: func(c *Config) { c.Files = []string{"nosuch.go"} },
+			want: []string{"nosuch.go"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := compileSource(t, tt.src, tt.edit)
+			if err == nil {
+				t.Fatal("Compile succeeded, want a refusal")
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the message does not carry %q:\n%v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestCompileRefusesAssembly checks both flags the go command sends for a
+// package that has .s files in it.
+func TestCompileRefusesAssembly(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"symabis", func(c *Config) { c.SymABIs = "/work/b001/symabis" }},
+		{"asmhdr", func(c *Config) { c.AsmHdr = "/work/b001/go_asm.h" }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := compileSource(t, "package main\n\nfunc f(a int) int\n", tt.edit)
+			if err == nil {
+				t.Fatal("Compile accepted a package with assembly")
+			}
+			for _, want := range []string{"assembly", "ABI0", "ABIInternal", "specs/030"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the message does not carry %q:\n%v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestCompileRefusesAnUnwritableOutput covers the error the writer returns
+// rather than the ones the front end does.
+func TestCompileRefusesAnUnwritableOutput(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	_, err := compileSource(t, "package main\n\nfunc f() int { return 1 }\n",
+		func(c *Config) { c.Output = filepath.Join(t.TempDir(), "nosuchdir", "o.a") })
+	if err == nil {
+		t.Fatal("Compile wrote to a directory that does not exist")
+	}
+}
+
+func TestCompileRejectsNilConfig(t *testing.T) {
+	if err := Compile(nil); err == nil {
+		t.Fatal("Compile(nil) = nil")
+	}
+}
+
+func mustImportCfg(t *testing.T, body string) *ImportCfg {
+	t.Helper()
+	cfg, err := ParseImportCfg("importcfg", []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestImportErrorMessages(t *testing.T) {
+	e := &ImportError{Path: "errors", Package: "strconv"}
+	if !strings.Contains(e.Error(), "no entry") {
+		t.Errorf("an import with no configuration entry reads %q", e)
+	}
+	e.File = "/pkg/errors.a"
+	if !strings.Contains(e.Error(), "/pkg/errors.a") {
+		t.Errorf("an import with an entry does not name the archive: %q", e)
+	}
+
+	// The importer works with no configuration at all, because a package that
+	// imports nothing gets no -importcfg and must still fail readably if the
+	// source names an import the go command did not list.
+	var n noExportData
+	pkg, err := n.Import("errors")
+	if pkg != nil {
+		t.Error("the importer returned a package")
+	}
+	var ie *ImportError
+	if !errors.As(err, &ie) {
+		t.Fatalf("Import = %v (%T), want *ImportError", err, err)
+	}
+}
+
+func TestUnsupportedErrorMessage(t *testing.T) {
+	e := &UnsupportedError{Package: "strconv", What: "a thing"}
+	if got, want := e.Error(), "strconv: nanogo cannot compile a thing"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	e.Detail = "why"
+	if !strings.HasSuffix(e.Error(), ": why") {
+		t.Errorf("Error() = %q, want the detail at the end", e)
+	}
+}
+
+func TestTrimPath(t *testing.T) {
+	sep := string(filepath.Separator)
+	rewrites := []TrimRewrite{
+		{Old: "/src/mod", New: "example.com/m"},
+		{Old: "/work/b001", New: ""},
+	}
+	tests := []struct{ in, want string }{
+		{filepath.Join("/src/mod", "a.go"), "example.com/m" + sep + "a.go"},
+		{filepath.Join("/work/b001", "importcfg"), "importcfg"},
+		{"/src/mod", "example.com/m"},
+		{filepath.Join("/elsewhere", "a.go"), filepath.Join("/elsewhere", "a.go")},
+		// A prefix that is not a path element must not match, or a rewrite of
+		// /src/mod would also rewrite /src/module.
+		{filepath.Join("/src/modular", "a.go"), filepath.Join("/src/modular", "a.go")},
+	}
+	for _, tt := range tests {
+		if got := TrimPath(rewrites, tt.in); got != tt.want {
+			t.Errorf("TrimPath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+	if got := TrimPath(nil, "/a/b.go"); got != "/a/b.go" {
+		t.Errorf("TrimPath with no rewrites changed %q", got)
+	}
+}
+
+// TestCompileAppliesTrimPath checks that the rewrite reaches the object,
+// because the file name in the pc-file table is what a traceback prints.
+func TestCompileAppliesTrimPath(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(src, []byte("package p\n\nfunc f(a int) int { return a }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "p.o")
+	cfg := &Config{Package: "p", Output: out, Lang: "go1.27", Files: []string{src}}
+	if err := setTrimPath(cfg, dir+"=>trimmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Compile(cfg); err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), dir) {
+		t.Error("the object carries the untrimmed source directory")
+	}
+	if !strings.Contains(string(b), "trimmed/a.go") {
+		t.Error("the object does not carry the trimmed file name")
+	}
+}
+
+func TestPositionFallsBackToTheName(t *testing.T) {
+	if got := position(nil, 0, "f"); got != "f" {
+		t.Errorf("position with no file set = %q, want %q", got, "f")
+	}
+	if _, line := fileAndLine(&Config{}, nil, 0); line != 1 {
+		t.Errorf("fileAndLine with no file set gave line %d, want 1", line)
+	}
+}
+
+func TestPragmaHandlerRecordsNothing(t *testing.T) {
+	if p := pragmaHandler(0, false, "go:noinline", nil); p != nil {
+		t.Errorf("pragmaHandler = %v, want nil", p)
+	}
+}
+
+// TestCompileRefusesAnInitFunction is separate from the table because an init
+// reaches ir.Package.Inits and not ir.Package.Globals, and the two refusals
+// have different reasons.
+func TestCompileRefusesAnInitFunction(t *testing.T) {
+	_, err := compileSource(t, "package main\n\nfunc init() {}\n\nfunc f() int { return 1 }\n", nil)
+	if err == nil {
+		t.Fatal("Compile accepted a package with an init function")
+	}
+	if !strings.Contains(err.Error(), "init function") {
+		t.Errorf("the message does not name the construct:\n%v", err)
+	}
+}
+
+// TestCompileReportsAnEmitFailure covers the last stage of the pipeline.
+//
+// A string constant needs a data symbol, and specs/032 has no writer, so the
+// emitter has no address to relocate against. The message has to name the
+// function, because the allowlist entry that produced it names only a package.
+func TestCompileReportsAnEmitFailure(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	_, err := compileSource(t, "package main\n\nfunc f() string { return \"x\" }\n", nil)
+	if err == nil {
+		t.Fatal("Compile emitted a function that returns a string constant")
+	}
+	for _, want := range []string{"function f", "a.go:3:6", "ssagen.Emit"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message does not carry %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestCompileCapsTheErrorReport checks the bound on how many errors one
+// package reports. The checker keeps going after a soft error, and a hundred
+// follow-on messages hide the first one, which is the one to act on.
+func TestCompileCapsTheErrorReport(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("package main\n")
+	for i := 0; i < maxReportedErrors*3; i++ {
+		b.WriteString("func f() int { return }}\n")
+	}
+	_, err := compileSource(t, b.String(), nil)
+	if err == nil {
+		t.Fatal("Compile accepted a file of syntax errors")
+	}
+	if n := strings.Count(err.Error(), "a.go:"); n > maxReportedErrors {
+		t.Errorf("the report carries %d positions, and the cap is %d", n, maxReportedErrors)
+	}
+}
+
+// TestPositionOfAnUnknownOffset covers the fallback for a position the file
+// set cannot resolve. A node with no position must still produce a message
+// that names something.
+func TestPositionOfAnUnknownOffset(t *testing.T) {
+	fset := syntax.NewFileSet()
+	fset.AddFile("a.go", 4)
+	if got := position(fset, syntax.Pos(1<<30), "f"); got != "f" {
+		t.Errorf("position of an offset outside the set = %q, want %q", got, "f")
+	}
+}
+
+// TestFileAndLineOfAnUnknownOffset covers the line the object records when
+// the position cannot be resolved. Zero is not a line number, and the runtime
+// reads this table to print a traceback.
+func TestFileAndLineOfAnUnknownOffset(t *testing.T) {
+	fset := syntax.NewFileSet()
+	fset.AddFile("a.go", 4)
+	if _, line := fileAndLine(&Config{}, fset, syntax.Pos(1<<30)); line != 1 {
+		t.Errorf("line = %d, want 1", line)
+	}
+}
+
+// TestCompileRefusesAGenericFunction covers the report ir.Build makes.
+//
+// specs/013-generics.md stencils, and stenciling needs the body of the
+// instantiated function, which is the same export data specs/015 has no reader
+// for. The builder says so and the driver passes it on with the package named.
+func TestCompileRefusesAGenericFunction(t *testing.T) {
+	_, err := compileSource(t, "package main\n\nfunc f[T any](x T) T { return x }\n\nfunc g() int { return f(1) }\n", nil)
+	if err == nil {
+		t.Fatal("Compile accepted a generic function")
+	}
+	for _, want := range []string{"main", "generic"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message does not carry %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestCheckHostNamesTheArchitecture covers the refusal a host that is not
+// arm64 gets. It is a function of the architecture rather than of runtime, so
+// the arm64 runner checks the message the amd64 one sees.
+func TestCheckHostNamesTheArchitecture(t *testing.T) {
+	if err := checkHost("strconv", TargetArch); err != nil {
+		t.Errorf("the target host was refused: %v", err)
+	}
+	err := checkHost("strconv", "amd64")
+	if err == nil {
+		t.Fatal("a host that is not arm64 was accepted")
+	}
+	for _, want := range []string{"strconv", "amd64", TargetArch, "specs/043"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message does not carry %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestWriteOutputReportsAToolchainFailure covers the two failures the writer
+// can report after the whole pipeline has succeeded.
+//
+// nanogo writes the object header the installed toolchain writes, because
+// cmd/link compares it and refuses an object whose line differs by one
+// character. So a toolchain nanogo cannot probe stops the compile, and it stops
+// it with the package named.
+func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
+	saved := verifyToolchain
+	defer func() { verifyToolchain = saved }()
+
+	verifyToolchain = func() (*obj.Toolchain, error) { return nil, errors.New("no go command") }
+	err := writeOutput(&Config{Package: "strconv", Output: filepath.Join(t.TempDir(), "o.a")}, obj.NewPackage("strconv"))
+	if err == nil || !strings.Contains(err.Error(), "strconv") || !strings.Contains(err.Error(), "no go command") {
+		t.Errorf("writeOutput = %v, want the probe failure with the package named", err)
+	}
+
+	// A header the object writer refuses reaches the same call, after the file
+	// exists. The file has to be closed even so, or a build that compiles many
+	// packages runs out of descriptors before it runs out of packages.
+	verifyToolchain = func() (*obj.Toolchain, error) { return &obj.Toolchain{Header: "not a header\n"}, nil }
+	out := filepath.Join(t.TempDir(), "o.a")
+	err = writeOutput(&Config{Package: "strconv", Output: out}, obj.NewPackage("strconv"))
+	if err == nil || !strings.Contains(err.Error(), "strconv") {
+		t.Errorf("writeOutput = %v, want the writer's refusal with the package named", err)
+	}
+	if _, statErr := os.Stat(out); statErr != nil {
+		t.Errorf("the output file was not created: %v", statErr)
+	}
+}

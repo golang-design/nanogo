@@ -202,16 +202,15 @@ func TestRunSelection(t *testing.T) {
 		r.allowlist("errors", "strconv")
 		code := r.run(compileArgs("strconv")...)
 		if code == 0 {
-			t.Fatal("exit 0 although nanogo has no compiler")
+			t.Fatal("exit 0 although the source file does not exist")
 		}
 		if r.exec.called {
 			t.Fatal("the package reached gc although it is nanogo's")
 		}
-		if !strings.Contains(r.stderr.String(), "strconv") {
-			t.Errorf("stderr %q does not name the package", r.stderr.String())
-		}
-		if !strings.Contains(r.stderr.String(), "not implemented") {
-			t.Errorf("stderr %q does not say what is missing", r.stderr.String())
+		// nanogo read the command line and went looking for the source, which
+		// is what proves it took the package rather than handing it over.
+		if !strings.Contains(r.stderr.String(), "a.go") {
+			t.Errorf("stderr %q does not name the source file nanogo tried to read", r.stderr.String())
 		}
 	})
 
@@ -327,12 +326,12 @@ func TestRunReadsImportCfg(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		r := newRunner(t)
 		r.allowlist("strconv")
-		code := r.run("/goroot/pkg/tool/compile", "-p", "strconv", "-importcfg", good, "a.go")
+		code := r.run("/goroot/pkg/tool/compile", "-p", "strconv", "-o", "_pkg_.a", "-importcfg", good, "a.go")
 		if code == 0 {
-			t.Fatal("exit 0 although nanogo has no compiler")
+			t.Fatal("exit 0 although the source file does not exist")
 		}
-		if !strings.Contains(r.stderr.String(), "not implemented") {
-			t.Errorf("stderr %q, want the not implemented report", r.stderr.String())
+		if !strings.Contains(r.stderr.String(), "a.go") {
+			t.Errorf("stderr %q, want the report about the source file", r.stderr.String())
 		}
 	})
 
@@ -432,17 +431,13 @@ func TestScanCompile(t *testing.T) {
 	}
 }
 
-func TestCompileNotImplemented(t *testing.T) {
-	err := Compile(&Config{Package: "strconv", GoVersion: PinnedGoVersion})
-	var ni *NotImplementedError
-	if !errors.As(err, &ni) {
-		t.Fatalf("Compile = %v (%T), want *NotImplementedError", err, err)
+func TestCompileRejectsAWrongGoVersion(t *testing.T) {
+	err := Compile(&Config{Package: "strconv", GoVersion: "go1.0"})
+	if err == nil {
+		t.Fatal("Compile accepted a -goversion that is not the pinned release")
 	}
-	if ni.Package != "strconv" {
-		t.Errorf("Package = %q, want %q", ni.Package, "strconv")
-	}
-	if !strings.Contains(err.Error(), "strconv") {
-		t.Errorf("error %q does not name the package", err)
+	if !strings.Contains(err.Error(), "strconv") || !strings.Contains(err.Error(), PinnedGoVersion) {
+		t.Errorf("error %q names neither the package nor the pinned release", err)
 	}
 }
 

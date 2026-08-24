@@ -8,8 +8,12 @@
 //
 //	go build -toolexec=nanogo ./...
 //
-// nanogo compiles the packages on its allowlist and runs the real tool for
-// everything else. See specs/050-driver.md and
+// nanogo compiles the packages named by NANOGO_ALLOWLIST and runs the real
+// tool for everything else, so a build is part nanogo and part gc. Run
+// "nanogo help" for what it compiles and what it refuses, and "nanogo version"
+// for the release it is object compatible with.
+//
+// nanogo has one target, darwin/arm64. See specs/050-driver.md and
 // specs/051-build-integration.md. All the logic is in
 // golang.design/x/nanogo/driver, so that it is testable without a process.
 package main

@@ -184,8 +184,12 @@ func TestToolexecPassthrough(t *testing.T) {
 }
 
 // TestToolexecAllowlisted proves the selection wiring runs in the real binary.
-// nanogo has no compiler yet, so a package on the allowlist must stop the
-// build and the message must name the package.
+//
+// The package on the allowlist returns a string constant, which nanogo has no
+// data symbol for, so the build stops. What is checked is that it stops in
+// nanogo, naming the package and the construct: an allowlist entry is a claim
+// that nanogo owns the package, so a construct nanogo cannot compile is an
+// error and never a silent hand back to gc.
 func TestToolexecAllowlisted(t *testing.T) {
 	goBin := needGo(t)
 	dir := t.TempDir()
@@ -209,7 +213,7 @@ func TestToolexecAllowlisted(t *testing.T) {
 	if !strings.Contains(string(o), "nanogotest/greet") {
 		t.Errorf("the failure does not name the package:\n%s", o)
 	}
-	if !strings.Contains(string(o), "not implemented") {
+	if !strings.Contains(string(o), "cannot compile") {
 		t.Errorf("the failure does not say what is missing:\n%s", o)
 	}
 }

@@ -83,11 +83,28 @@ func Run(env Env) int {
 	return code
 }
 
-// usage is the message for an empty or malformed command line.
+// usage is the one line form, used when the command line is malformed.
 const usage = "usage: nanogo [-fallback] <tool> [arguments]"
 
 func run(env *Env) (int, error) {
 	args := env.Args
+
+	// A human types "nanogo help" or "nanogo version". The go command never
+	// does: -toolexec appends an absolute tool path, so the first argument of
+	// a real invocation is a path and not a word. The two forms cannot be
+	// confused, and a driver whose limits are only discoverable by hitting
+	// them is a driver that wastes a user's afternoon.
+	if len(args) == 1 {
+		switch args[0] {
+		case "help", "-h", "-help", "--help":
+			fmt.Fprint(env.Stdout, Help)
+			return 0, nil
+		case "version", "-V", "--version":
+			fmt.Fprintln(env.Stdout, HumanVersion())
+			return 0, nil
+		}
+	}
+
 	fallback := false
 
 	// nanogo's own flags come before the tool path, because -toolexec splits
@@ -132,6 +149,7 @@ func run(env *Env) (int, error) {
 	// nanogo has never seen appears later on the line.
 	pkg, flagFallback := scanCompile(toolArgs)
 	if fallback || flagFallback {
+		logDecision(env.Getenv, DecisionDelegated, pkg, "-fallback")
 		return env.Exec(toolPath, toolArgs)
 	}
 	allow, err := AllowlistFromEnv(env.Getenv)
@@ -139,6 +157,7 @@ func run(env *Env) (int, error) {
 		return 1, err
 	}
 	if !allow.Has(pkg) {
+		logDecision(env.Getenv, DecisionDelegated, pkg, "not on the allowlist")
 		return env.Exec(toolPath, toolArgs)
 	}
 
@@ -147,6 +166,7 @@ func run(env *Env) (int, error) {
 	// specs/050-driver.md and the flowchart in specs/051-build-integration.md.
 	cfg, err := ParseCompile(toolArgs)
 	if err != nil {
+		logDecision(env.Getenv, DecisionDelegated, pkg, err.Error())
 		return env.Exec(toolPath, toolArgs)
 	}
 	if cfg.ImportCfgFile != "" {
@@ -156,8 +176,10 @@ func run(env *Env) (int, error) {
 		}
 	}
 	if err := Compile(cfg); err != nil {
+		logDecision(env.Getenv, DecisionFailed, pkg, err.Error())
 		return 1, err
 	}
+	logDecision(env.Getenv, DecisionCompiled, pkg, cfg.Output)
 	return 0, nil
 }
 
@@ -197,30 +219,4 @@ func scanCompile(args []string) (pkg string, fallback bool) {
 		}
 	}
 	return pkg, fallback
-}
-
-// NotImplementedError reports that nanogo owns a package but has no compiler
-// for it yet.
-type NotImplementedError struct {
-	Package string
-}
-
-func (e *NotImplementedError) Error() string {
-	return e.Package + ": not implemented: nanogo has no compiler yet"
-}
-
-// Compile is the single point where nanogo's own compiler runs. Swapping in a
-// real compiler is a change to this function and to nothing else.
-//
-// M0 has no compiler, so an allowlisted package fails here. The failure names
-// the package, because the allowlist is the project's progress metric and a
-// failure must say which entry produced it.
-func Compile(cfg *Config) error {
-	// specs/000-decisions.md decision 11 pins nanogo to one Go release. The
-	// go command states the release it expects with -goversion.
-	if cfg.GoVersion != "" && cfg.GoVersion != PinnedGoVersion {
-		return fmt.Errorf("%s: -goversion %s does not match the pinned %s",
-			cfg.Package, cfg.GoVersion, PinnedGoVersion)
-	}
-	return &NotImplementedError{Package: cfg.Package}
 }
