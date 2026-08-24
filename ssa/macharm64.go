@@ -10,8 +10,8 @@ import (
 )
 
 // The arm64 machine operation set, per specs/042-arm64-backend.md rule groups
-// 1 to 5. Floating point, atomics and the inline memmove forms are groups 6 to
-// 8 and are not here, which is the same line obj/arm64 draws.
+// 1 to 6. Atomics and the inline memmove forms are groups 7 and 8 and are not
+// here, which is the same line obj/arm64 draws.
 //
 // Three conventions run through the table.
 //
@@ -159,6 +159,61 @@ const (
 	// instruction and no block.
 	OpARM64LoweredNilCheck
 
+	// Group 6: floating point.
+	//
+	// The width follows the same convention as the integer forms: FADD covers
+	// the single and the double instruction and the width comes from the
+	// value's type, because a float32 is four bytes and a float64 is eight.
+	// The compares are the exception, as CMP and CMPW are, because a flags
+	// value has no width.
+	OpARM64FADD
+	OpARM64FSUB
+	OpARM64FMUL
+	OpARM64FDIV
+	OpARM64FNEG
+	OpARM64FABS
+	OpARM64FSQRT
+
+	// The floating-point flag producers. FCMPD0 and FCMPS0 compare against
+	// zero, which the class encodes as an opcode and not as an operand, so
+	// they take one argument.
+	OpARM64FCMPD
+	OpARM64FCMPS
+	OpARM64FCMPD0
+	OpARM64FCMPS0
+
+	// Constants and the two moves between the register files. AuxInt of
+	// FMOVconst is the IEEE bit pattern and not a value, because that is what
+	// the instruction stream holds and because two NaNs that compare equal as
+	// floats are two different constants.
+	OpARM64FMOVconst
+	OpARM64FMOVgpfp // the bits of an integer register into a floating-point one
+	OpARM64FMOVfpgp // and back
+
+	// Conversions. Each takes both widths from the types it stands between,
+	// so one operation covers the four combinations the architecture encodes.
+	OpARM64SCVTF  // signed integer to floating point
+	OpARM64UCVTF  // unsigned integer to floating point
+	OpARM64FCVTZS // floating point to signed integer, rounding toward zero
+	OpARM64FCVTZU // floating point to unsigned integer
+	OpARM64FCVT   // between the two precisions
+
+	// Floating-point loads and stores. They are the integer addressing forms
+	// with the transfer register in the other file, so they carry the same
+	// AuxInt offset and fold the same way.
+	OpARM64FMOVDload
+	OpARM64FMOVSload
+	OpARM64FMOVDstore
+	OpARM64FMOVSstore
+	OpARM64FMOVDloadidx
+	OpARM64FMOVSloadidx
+	OpARM64FMOVDloadidx8
+	OpARM64FMOVSloadidx4
+	OpARM64FMOVDstoreidx
+	OpARM64FMOVSstoreidx
+	OpARM64FMOVDstoreidx8
+	OpARM64FMOVSstoreidx4
+
 	opARM64End
 )
 
@@ -193,6 +248,13 @@ const (
 	encCall                          // BL
 	encCallInd                       // BLR
 	encRet                           // RET
+	encFArith                        // sz, dst, a, b in the floating-point file
+	encFUnary                        // sz, dst, a
+	encFCmp                          // sz, a, b
+	encFCmpZero                      // sz, a
+	encFConst                        // FMOV with the immediate
+	encFMove                         // FMOV between the two register files
+	encFCvt                          // a conversion, which reads two widths
 )
 
 // arm64Op is one row of the machine operation table.
@@ -339,6 +401,43 @@ var arm64Ops = [opARM64End - OpARM64ADD]arm64Op{
 	OpARM64RET - OpARM64ADD: ai("ARM64RET", -1, encRet).takes().makes(),
 
 	OpARM64LoweredNilCheck - OpARM64ADD: ai("ARM64LoweredNilCheck", 2, encMem).takes().m(arm64.LoadBU),
+
+	OpARM64FADD - OpARM64ADD:  ai("ARM64FADD", 2, encFArith).comm(),
+	OpARM64FSUB - OpARM64ADD:  ai("ARM64FSUB", 2, encFArith),
+	OpARM64FMUL - OpARM64ADD:  ai("ARM64FMUL", 2, encFArith).comm(),
+	OpARM64FDIV - OpARM64ADD:  ai("ARM64FDIV", 2, encFArith),
+	OpARM64FNEG - OpARM64ADD:  ai("ARM64FNEG", 1, encFUnary),
+	OpARM64FABS - OpARM64ADD:  ai("ARM64FABS", 1, encFUnary),
+	OpARM64FSQRT - OpARM64ADD: ai("ARM64FSQRT", 1, encFUnary),
+
+	OpARM64FCMPD - OpARM64ADD:  ai("ARM64FCMPD", 2, encFCmp).w64(),
+	OpARM64FCMPS - OpARM64ADD:  ai("ARM64FCMPS", 2, encFCmp).w32(),
+	OpARM64FCMPD0 - OpARM64ADD: ai("ARM64FCMPD0", 1, encFCmpZero).w64(),
+	OpARM64FCMPS0 - OpARM64ADD: ai("ARM64FCMPS0", 1, encFCmpZero).w32(),
+
+	OpARM64FMOVconst - OpARM64ADD: ai("ARM64FMOVconst", 0, encFConst).aux().konst(),
+	OpARM64FMOVgpfp - OpARM64ADD:  ai("ARM64FMOVgpfp", 1, encFMove),
+	OpARM64FMOVfpgp - OpARM64ADD:  ai("ARM64FMOVfpgp", 1, encFMove),
+
+	OpARM64SCVTF - OpARM64ADD:  ai("ARM64SCVTF", 1, encFCvt),
+	OpARM64UCVTF - OpARM64ADD:  ai("ARM64UCVTF", 1, encFCvt),
+	OpARM64FCVTZS - OpARM64ADD: ai("ARM64FCVTZS", 1, encFCvt),
+	OpARM64FCVTZU - OpARM64ADD: ai("ARM64FCVTZU", 1, encFCvt),
+	OpARM64FCVT - OpARM64ADD:   ai("ARM64FCVT", 1, encFCvt),
+
+	OpARM64FMOVDload - OpARM64ADD:  ai("ARM64FMOVDload", 2, encMem).aux().takes().m(arm64.LoadF64),
+	OpARM64FMOVSload - OpARM64ADD:  ai("ARM64FMOVSload", 2, encMem).aux().takes().m(arm64.LoadF32),
+	OpARM64FMOVDstore - OpARM64ADD: ai("ARM64FMOVDstore", 3, encMem).aux().takes().makes().m(arm64.StoreF64),
+	OpARM64FMOVSstore - OpARM64ADD: ai("ARM64FMOVSstore", 3, encMem).aux().takes().makes().m(arm64.StoreF32),
+
+	OpARM64FMOVDloadidx - OpARM64ADD:   ai("ARM64FMOVDloadidx", 3, encMemIdx).takes().m(arm64.LoadF64),
+	OpARM64FMOVSloadidx - OpARM64ADD:   ai("ARM64FMOVSloadidx", 3, encMemIdx).takes().m(arm64.LoadF32),
+	OpARM64FMOVDloadidx8 - OpARM64ADD:  ai("ARM64FMOVDloadidx8", 3, encMemIdx).takes().m(arm64.LoadF64).sc(),
+	OpARM64FMOVSloadidx4 - OpARM64ADD:  ai("ARM64FMOVSloadidx4", 3, encMemIdx).takes().m(arm64.LoadF32).sc(),
+	OpARM64FMOVDstoreidx - OpARM64ADD:  ai("ARM64FMOVDstoreidx", 4, encMemIdx).takes().makes().m(arm64.StoreF64),
+	OpARM64FMOVSstoreidx - OpARM64ADD:  ai("ARM64FMOVSstoreidx", 4, encMemIdx).takes().makes().m(arm64.StoreF32),
+	OpARM64FMOVDstoreidx8 - OpARM64ADD: ai("ARM64FMOVDstoreidx8", 4, encMemIdx).takes().makes().m(arm64.StoreF64).sc(),
+	OpARM64FMOVSstoreidx4 - OpARM64ADD: ai("ARM64FMOVSstoreidx4", 4, encMemIdx).takes().makes().m(arm64.StoreF32).sc(),
 }
 
 func init() {
@@ -385,10 +484,16 @@ func ARM64MemFits(op Op, off int64) bool {
 	if !ok {
 		return false
 	}
-	if _, ok := arm64.MemUnsignedOffset(m, arm64.R0, arm64.R1, off); ok {
+	// The probe register has to come from the file the form transfers, or the
+	// encoder refuses it for the wrong reason.
+	rt := arm64.R0
+	if m.IsFloat() {
+		rt = arm64.F0
+	}
+	if _, ok := arm64.MemUnsignedOffset(m, rt, arm64.R1, off); ok {
 		return true
 	}
-	_, ok = arm64.MemUnscaled(m, arm64.R0, arm64.R1, off)
+	_, ok = arm64.MemUnscaled(m, rt, arm64.R1, off)
 	return ok
 }
 
@@ -411,6 +516,17 @@ func ARM64Size(t *ir.Type) arm64.Size {
 // it wrong is a value that compares equal to the right one half the time.
 func ARM64LoadOp(t *ir.Type) (Op, bool) {
 	if t == nil {
+		return OpInvalid, false
+	}
+	if t.Kind.IsFloat() {
+		// A floating-point load has no signedness and no narrow form: it
+		// fills the register it names.
+		switch t.Size {
+		case 4:
+			return OpARM64FMOVSload, true
+		case 8:
+			return OpARM64FMOVDload, true
+		}
 		return OpInvalid, false
 	}
 	signed := t.Kind.IsSigned()
@@ -436,8 +552,30 @@ func ARM64LoadOp(t *ir.Type) (Op, bool) {
 	return OpInvalid, false
 }
 
-// ARM64StoreOp returns the store of a value of the given size. A store has no
-// signedness: it writes the low bits and nothing else.
+// ARM64StoreOpForType returns the store of a value of type t.
+//
+// The type and not the size, because a four-byte store from an integer
+// register and one from a floating-point register are different instructions
+// and the size cannot tell them apart. ARM64StoreOp is the size-only form and
+// answers for the integer file alone.
+func ARM64StoreOpForType(t *ir.Type) (Op, bool) {
+	if t == nil {
+		return OpInvalid, false
+	}
+	if t.Kind.IsFloat() {
+		switch t.Size {
+		case 4:
+			return OpARM64FMOVSstore, true
+		case 8:
+			return OpARM64FMOVDstore, true
+		}
+		return OpInvalid, false
+	}
+	return ARM64StoreOp(t.Size)
+}
+
+// ARM64StoreOp returns the integer store of a value of the given size. A
+// store has no signedness: it writes the low bits and nothing else.
 func ARM64StoreOp(size int64) (Op, bool) {
 	switch size {
 	case 1:
@@ -469,6 +607,10 @@ var arm64Idx = [...]struct {
 	{OpARM64MOVWstore, OpARM64MOVWstoreidx, OpARM64MOVWstoreidx4},
 	{OpARM64MOVHstore, OpARM64MOVHstoreidx, OpARM64MOVHstoreidx2},
 	{OpARM64MOVBstore, OpARM64MOVBstoreidx, OpInvalid},
+	{OpARM64FMOVDload, OpARM64FMOVDloadidx, OpARM64FMOVDloadidx8},
+	{OpARM64FMOVSload, OpARM64FMOVSloadidx, OpARM64FMOVSloadidx4},
+	{OpARM64FMOVDstore, OpARM64FMOVDstoreidx, OpARM64FMOVDstoreidx8},
+	{OpARM64FMOVSstore, OpARM64FMOVSstoreidx, OpARM64FMOVSstoreidx4},
 }
 
 // ARM64IndexOp returns the register-offset form of a load or store.
@@ -645,8 +787,59 @@ func ARM64Encode(v *Value, dst arm64.Reg, args []arm64.Reg, out []uint32) (int, 
 		return one(arm64.Blr(a(0)))
 	case encRet:
 		return one(arm64.Ret(arm64.RegLink))
+	case encFArith:
+		return one(arm64EncFArith(v.Op, sz, dst, a(0), a(1)))
+	case encFUnary:
+		switch v.Op {
+		case OpARM64FNEG:
+			return one(arm64.FnegReg(sz, dst, a(0)))
+		case OpARM64FABS:
+			return one(arm64.FabsReg(sz, dst, a(0)))
+		default:
+			return one(arm64.FsqrtReg(sz, dst, a(0)))
+		}
+	case encFCmp:
+		return one(arm64.FcmpRegReg(sz, a(0), a(1)))
+	case encFCmpZero:
+		return one(arm64.FcmpZero(sz, a(0)))
+	case encFConst:
+		return oneIf(arm64.FmovImm(sz, dst, arm64.FloatFromBits(sz, uint64(v.AuxInt))))
+	case encFMove:
+		if v.Op == OpARM64FMOVgpfp {
+			return one(arm64.FmovIntToFloat(sz, dst, a(0)))
+		}
+		return one(arm64.FmovFloatToInt(sz, dst, a(0)))
+	case encFCvt:
+		// A conversion stands between two widths and reads both of them from
+		// the types it joins, which is why it is the one family that does not
+		// use the single sz above.
+		from, to := ARM64Size(v.Args[0].Type), ARM64Size(v.Type)
+		switch v.Op {
+		case OpARM64SCVTF:
+			return one(arm64.ScvtfReg(from, to, dst, a(0)))
+		case OpARM64UCVTF:
+			return one(arm64.UcvtfReg(from, to, dst, a(0)))
+		case OpARM64FCVTZS:
+			return one(arm64.FcvtzsReg(from, to, dst, a(0)))
+		case OpARM64FCVTZU:
+			return one(arm64.FcvtzuReg(from, to, dst, a(0)))
+		default:
+			return oneIf(arm64.FcvtReg(from, to, dst, a(0)))
+		}
 	}
 	return 0, false
+}
+
+func arm64EncFArith(op Op, sz arm64.Size, dst, x, y arm64.Reg) uint32 {
+	switch op {
+	case OpARM64FADD:
+		return arm64.FaddRegReg(sz, dst, x, y)
+	case OpARM64FSUB:
+		return arm64.FsubRegReg(sz, dst, x, y)
+	case OpARM64FMUL:
+		return arm64.FmulRegReg(sz, dst, x, y)
+	}
+	return arm64.FdivRegReg(sz, dst, x, y)
 }
 
 func arm64EncArith(op Op, sz arm64.Size, dst, x, y arm64.Reg) uint32 {

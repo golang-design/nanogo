@@ -12,7 +12,13 @@ import (
 // notAllocatable is specs/042's table, transcribed. It is written out here
 // rather than derived from the package, so that the test fails if the table
 // changes and nobody changed the spec.
-var notAllocatable = []Reg{R16, R17, R18, R26, R27, R28, R29, R30, RSP, ZR}
+//
+// F30 and F31 are the floating-point materialisation pair, which is what R16
+// and R17 are for the integer file. specs/042 gives every other
+// floating-point register to the allocator: F0 to F15 carry arguments and
+// results, and an argument register is a register like any other between
+// calls.
+var notAllocatable = []Reg{R16, R17, R18, R26, R27, R28, R29, R30, RSP, ZR, F30, F31}
 
 func TestNotAllocatable(t *testing.T) {
 	for _, r := range notAllocatable {
@@ -87,7 +93,8 @@ func TestRegString(t *testing.T) {
 		want string
 	}{
 		{R0, "R0"}, {R15, "R15"}, {R18, "R18"}, {R30, "R30"},
-		{ZR, "ZR"}, {RSP, "RSP"}, {Reg(99), "Reg(99)"},
+		{ZR, "ZR"}, {RSP, "RSP"}, {F0, "F0"}, {F15, "F15"}, {F31, "F31"},
+		{Reg(99), "Reg(99)"},
 	}
 	for _, c := range cases {
 		if got := c.r.String(); got != c.want {
@@ -198,7 +205,7 @@ func TestMemOpString(t *testing.T) {
 			t.Errorf("%v has scale %d", m, s)
 		}
 	}
-	if got := numMemOp.String(); got != "MemOp(13)" {
+	if got := numMemOp.String(); got != "MemOp(17)" {
 		t.Errorf("numMemOp.String() = %q", got)
 	}
 }

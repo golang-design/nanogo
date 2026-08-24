@@ -72,6 +72,8 @@ func regZ(r Reg) uint32 {
 		return 31
 	case r == RSP:
 		panic("arm64: RSP used where the encoding means the zero register")
+	case r.IsFloat():
+		panic("arm64: " + r.String() + " used where the encoding means an integer register")
 	}
 	panic("arm64: invalid register " + r.String())
 }
@@ -85,8 +87,23 @@ func regSP(r Reg) uint32 {
 		return 31
 	case r == ZR:
 		panic("arm64: ZR used where the encoding means the stack pointer")
+	case r.IsFloat():
+		panic("arm64: " + r.String() + " used where the encoding means an integer register")
 	}
 	panic("arm64: invalid register " + r.String())
+}
+
+// regF encodes r in the floating-point file.
+//
+// An integer register panics rather than encoding. Register number 5 names X5
+// in one instruction and D5 in another, and the file is chosen by the
+// instruction and never by the operand, so a caller that passes the wrong one
+// has written the wrong instruction.
+func regF(r Reg) uint32 {
+	if r.IsFloat() {
+		return uint32(r - F0)
+	}
+	panic("arm64: " + r.String() + " used where the encoding means a floating-point register")
 }
 
 // Nop encodes the HINT #0 instruction. It is here because instruction
@@ -860,6 +877,14 @@ const (
 	LoadHS64              // load 16 bits, sign-extend to 64
 	LoadWS64              // load 32 bits, sign-extend to 64
 
+	// The floating-point transfers. They are the same five addressing forms
+	// with bit 26 set, and the transfer register is read from the other file.
+	// There is no signed floating-point load: a float fills its register.
+	LoadF32  // load 32 bits into a floating-point register
+	LoadF64  // load 64 bits into a floating-point register
+	StoreF32 // store the low 32 bits of a floating-point register
+	StoreF64 // store 64 bits of a floating-point register
+
 	numMemOp
 )
 
@@ -869,20 +894,25 @@ var memOpEnc = [numMemOp]struct {
 	size  uint32 // bits 31:30
 	opc   uint32 // bits 23:22
 	scale int64  // the unsigned-offset form multiplies by this
+	fp    bool   // bit 26, the V bit, which selects the other register file
 }{
-	StoreB:   {0, 0, 1},
-	StoreH:   {1, 0, 2},
-	StoreW:   {2, 0, 4},
-	StoreX:   {3, 0, 8},
-	LoadBU:   {0, 1, 1},
-	LoadHU:   {1, 1, 2},
-	LoadWU:   {2, 1, 4},
-	LoadX:    {3, 1, 8},
-	LoadBS32: {0, 3, 1},
-	LoadBS64: {0, 2, 1},
-	LoadHS32: {1, 3, 2},
-	LoadHS64: {1, 2, 2},
-	LoadWS64: {2, 2, 4},
+	StoreB:   {0, 0, 1, false},
+	StoreH:   {1, 0, 2, false},
+	StoreW:   {2, 0, 4, false},
+	StoreX:   {3, 0, 8, false},
+	LoadBU:   {0, 1, 1, false},
+	LoadHU:   {1, 1, 2, false},
+	LoadWU:   {2, 1, 4, false},
+	LoadX:    {3, 1, 8, false},
+	LoadBS32: {0, 3, 1, false},
+	LoadBS64: {0, 2, 1, false},
+	LoadHS32: {1, 3, 2, false},
+	LoadHS64: {1, 2, 2, false},
+	LoadWS64: {2, 2, 4, false},
+	LoadF32:  {2, 1, 4, true},
+	LoadF64:  {3, 1, 8, true},
+	StoreF32: {2, 0, 4, true},
+	StoreF64: {3, 0, 8, true},
 }
 
 var memOpNames = [numMemOp]string{
@@ -890,6 +920,8 @@ var memOpNames = [numMemOp]string{
 	LoadBU: "LoadBU", LoadHU: "LoadHU", LoadWU: "LoadWU", LoadX: "LoadX",
 	LoadBS32: "LoadBS32", LoadBS64: "LoadBS64", LoadHS32: "LoadHS32",
 	LoadHS64: "LoadHS64", LoadWS64: "LoadWS64",
+	LoadF32: "LoadF32", LoadF64: "LoadF64",
+	StoreF32: "StoreF32", StoreF64: "StoreF64",
 }
 
 func (m MemOp) String() string {
@@ -908,6 +940,16 @@ func (m MemOp) Scale() int64 {
 	return memOpEnc[m].scale
 }
 
+// IsFloat reports whether the transfer register of m is a floating-point
+// register. The addressing forms are the same either way; only the transfer
+// register and bit 26 change.
+func (m MemOp) IsFloat() bool {
+	if m >= numMemOp {
+		panic("arm64: invalid MemOp")
+	}
+	return memOpEnc[m].fp
+}
+
 func (m MemOp) enc() (size, opc uint32, scale int64) {
 	if m >= numMemOp {
 		panic("arm64: invalid MemOp " + strconv.Itoa(int(m)))
@@ -916,12 +958,31 @@ func (m MemOp) enc() (size, opc uint32, scale int64) {
 	return e.size, e.opc, e.scale
 }
 
+// vbit is the V bit at position 26, which selects the floating-point file.
+func (m MemOp) vbit() uint32 {
+	if memOpEnc[m].fp {
+		return memFloat
+	}
+	return 0
+}
+
+// transfer encodes the transferred register in the file m names. A store of
+// ZR is how a zero reaches memory, and that spelling exists only in the
+// integer forms.
+func (m MemOp) transfer(rt Reg) uint32 {
+	if memOpEnc[m].fp {
+		return regF(rt)
+	}
+	return regZ(rt)
+}
+
 const (
 	memUnsignedBase = 0x39000000 // bits 25:24 are 01
 	memUnscaledBase = 0x38000000 // bits 25:24 are 00
 	memPostIndex    = 1 << 10    // bits 11:10 are 01
 	memPreIndex     = 3 << 10    // bits 11:10 are 11
 	memRegOffset    = 1 << 21    // bit 21 selects the register-offset form
+	memFloat        = 1 << 26    // the V bit, which selects the other file
 )
 
 // MemUnsignedOffset encodes a load or store with a 12-bit offset that the
@@ -937,8 +998,8 @@ func MemUnsignedOffset(op MemOp, rt, base Reg, off int64) (uint32, bool) {
 	if imm > MaxMemOffsetScaled {
 		return 0, false
 	}
-	return memUnsignedBase | size<<30 | opc<<22 | uint32(imm)<<10 |
-		regSP(base)<<5 | regZ(rt), true
+	return memUnsignedBase | op.vbit() | size<<30 | opc<<22 | uint32(imm)<<10 |
+		regSP(base)<<5 | op.transfer(rt), true
 }
 
 // memImm9 encodes the LDUR, STUR, pre-index and post-index forms, which share
@@ -948,8 +1009,8 @@ func memImm9(op MemOp, rt, base Reg, off int64, mode uint32) (uint32, bool) {
 	if off < MinMemOffsetUnscaled || off > MaxMemOffsetUnscaled {
 		return 0, false
 	}
-	return memUnscaledBase | size<<30 | opc<<22 | uint32(off&0x1ff)<<12 | mode |
-		regSP(base)<<5 | regZ(rt), true
+	return memUnscaledBase | op.vbit() | size<<30 | opc<<22 | uint32(off&0x1ff)<<12 | mode |
+		regSP(base)<<5 | op.transfer(rt), true
 }
 
 // MemUnscaled encodes the LDUR or STUR form: a signed 9-bit offset that is not
@@ -991,9 +1052,9 @@ func MemRegOffset(op MemOp, rt, base, index Reg, ext Extend, shifted bool) (uint
 	if shifted {
 		s = 1 << 12
 	}
-	return memUnscaledBase | size<<30 | opc<<22 | memRegOffset |
+	return memUnscaledBase | op.vbit() | size<<30 | opc<<22 | memRegOffset |
 		regZ(index)<<16 | uint32(ext)<<13 | s | 2<<10 |
-		regSP(base)<<5 | regZ(rt), true
+		regSP(base)<<5 | op.transfer(rt), true
 }
 
 // ---------------------------------------------------------------------------

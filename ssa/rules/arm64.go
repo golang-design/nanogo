@@ -44,8 +44,15 @@ import (
 //  5. Calls. The four shapes differ only in how the destination is computed,
 //     so they differ by one rule each.
 //
-// Floating point, atomics and the inline memmove forms are groups 6 to 8 and
-// are not here. Deferred lists what that leaves unlowered and why.
+//  6. Floating point. It reuses the rules of groups 1 to 4 rather than adding
+//     a parallel set: the arithmetic, the comparison and the loads and stores
+//     branch on the type of the value, because that is the only thing that
+//     differs. What is genuinely new is the constant, which has an immediate
+//     that reaches 256 values and an integer register for everything else,
+//     and the condition codes, which are not the integer ones.
+//
+// Atomics and the inline memmove forms are groups 7 and 8 and are not here.
+// Deferred lists what that leaves unlowered and why.
 
 // ARM64 is the arm64 rule set.
 var ARM64 = newARM64()
@@ -115,6 +122,14 @@ func newARM64() *ssa.RuleSet {
 	v[ssa.OpBoundsCheck] = lowerBoundsCheck
 	v[ssa.OpSliceBoundsCheck] = lowerBoundsCheck
 
+	// Group 6: floating point. The arithmetic, the comparison and the loads
+	// and stores reach the rules above, which branch on the type; only the
+	// three conversions are operations of their own.
+	v[ssa.OpConstFloat] = lowerConst
+	v[ssa.OpCvtIntToFloat] = lowerCvtIntToFloat
+	v[ssa.OpCvtFloatToInt] = lowerCvtFloatToInt
+	v[ssa.OpCvtFloatToFloat] = lowerCvtFloatToFloat
+
 	return &ssa.RuleSet{
 		Name:      "arm64",
 		Value:     v,
@@ -131,6 +146,8 @@ var loadStoreOps = []ssa.Op{
 	ssa.OpARM64MOVBUload,
 	ssa.OpARM64MOVDstore, ssa.OpARM64MOVWstore, ssa.OpARM64MOVHstore,
 	ssa.OpARM64MOVBstore,
+	ssa.OpARM64FMOVDload, ssa.OpARM64FMOVSload,
+	ssa.OpARM64FMOVDstore, ssa.OpARM64FMOVSstore,
 }
 
 // arm64Essential reports the operations that must survive with no user.
@@ -144,25 +161,19 @@ func arm64Essential(op ssa.Op) bool { return op == ssa.OpARM64LoweredNilCheck }
 // reason. The coverage report of specs/025 prints it, and an operation that is
 // in neither the rule table nor this list fails the test.
 //
-// The two reasons are different in kind and the report keeps them apart.
-// Floating point is deferred by specs/042 itself, which puts it in group 6 and
-// marks the F registers deferred because groups 1 to 5 need none of them.
-// obj/arm64 draws the same line and has no floating-point encoder.
+// One entry is left. It is not deferred by any spec: a string constant is two
+// words, and a value that does not fit a register has to be split into the
+// registers that hold it, which specs/025-lowering-and-rules.md's multi-word
+// section owns and the decomposition pass performs. It cannot be worked around
+// here, because a 16-byte Store cannot become a memmove: memmove needs a
+// source address and Store has a source value.
 //
-// The multi-word operations are not deferred by any spec. They need a value
-// that does not fit a register to be split into the registers that hold it,
-// which specs/025-lowering-and-rules.md's multi-word section now owns and the
-// decomposition pass performs. It cannot be worked around here: a 16-byte
-// Store cannot become a memmove, because memmove needs a source address and
-// Store has a source value.
+// The four floating-point entries this list used to hold are gone. Group 6 is
+// written and obj/arm64 encodes it.
 var Deferred = []struct {
 	Op     ssa.Op
 	Reason string
 }{
-	{ssa.OpConstFloat, "floating point is specs/042 group 6, and obj/arm64 has no encoder for it"},
-	{ssa.OpCvtIntToFloat, "floating point is specs/042 group 6"},
-	{ssa.OpCvtFloatToInt, "floating point is specs/042 group 6"},
-	{ssa.OpCvtFloatToFloat, "floating point is specs/042 group 6"},
 	{ssa.OpConstString, "a string constant is two words, and specs/025's decomposition splits it into its symbol and its length before selection sees it"},
 }
 
@@ -205,6 +216,12 @@ func valConst(a *ssa.Value) (int64, bool) {
 // the engine to crash on, with the operation named.
 func isFloat(t *ir.Type) bool { return t != nil && (t.Kind.IsFloat() || t.Kind.IsComplex()) }
 
+// isScalarFloat reports whether t is float32 or float64, the two types that
+// live in one floating-point register. A complex is two of them and is not
+// one, which is why isFloat above is the wider predicate and this is the one
+// the floating-point rules turn on.
+func isScalarFloat(t *ir.Type) bool { return t != nil && t.Kind.IsFloat() }
+
 func signed(t *ir.Type) bool { return t != nil && t.Kind.IsSigned() }
 
 // constInto materialises a constant in a register.
@@ -223,7 +240,11 @@ func constInto(v *ssa.Value, e *ssa.Edit, val int64, t *ir.Type) *ssa.Value {
 // Group 1: integer arithmetic, comparison and the conditional forms
 
 func lowerConst(v *ssa.Value, e *ssa.Edit) bool {
+	if isScalarFloat(v.Type) {
+		return lowerFloatConst(v, e)
+	}
 	if isFloat(v.Type) {
+		// A complex constant is two floats and does not fit one register.
 		return false
 	}
 	c := v.AuxInt
@@ -238,6 +259,12 @@ func lowerConst(v *ssa.Value, e *ssa.Edit) bool {
 // unsigned, so x + (-8) has no add form at all and would otherwise materialise
 // a constant for every negative offset a program computes.
 func lowerAdd(v *ssa.Value, e *ssa.Edit) bool {
+	if isScalarFloat(v.Type) {
+		// There is no floating-point add with an immediate, so the constant
+		// folds of the integer path below have nothing to offer here.
+		e.Set(v, ssa.OpARM64FADD, v.Args[0], v.Args[1])
+		return true
+	}
 	if isFloat(v.Type) {
 		return false
 	}
@@ -264,6 +291,14 @@ func lowerAdd(v *ssa.Value, e *ssa.Edit) bool {
 }
 
 func lowerSub(v *ssa.Value, e *ssa.Edit) bool {
+	if isScalarFloat(v.Type) {
+		// Never rewritten to a negation of the second operand, which the
+		// integer path below does for a zero first operand. 0.0 - (-0.0) is
+		// +0.0 and -(-0.0) is +0.0, but 0.0 - (+0.0) is +0.0 where -(+0.0) is
+		// -0.0, so the two disagree on a value Go can observe.
+		e.Set(v, ssa.OpARM64FSUB, v.Args[0], v.Args[1])
+		return true
+	}
 	if isFloat(v.Type) {
 		return false
 	}
@@ -296,6 +331,12 @@ func lowerSub(v *ssa.Value, e *ssa.Edit) bool {
 // constant is what an index into an array of a power-of-two element size
 // becomes before the address rules see it.
 func lowerMul(v *ssa.Value, e *ssa.Edit) bool {
+	if isScalarFloat(v.Type) {
+		// A multiply by a power of two is not a shift here, and it is not
+		// even always exact: the exponent can overflow or go subnormal.
+		e.Set(v, ssa.OpARM64FMUL, v.Args[0], v.Args[1])
+		return true
+	}
 	if isFloat(v.Type) {
 		return false
 	}
@@ -324,6 +365,13 @@ func lowerMul(v *ssa.Value, e *ssa.Edit) bool {
 // SdivRegReg says in as many words, so the check is the rule's work. A divisor
 // that is a non-zero constant needs none.
 func lowerDiv(v *ssa.Value, e *ssa.Edit) bool {
+	if isScalarFloat(v.Type) {
+		// No guard. A floating-point divide by zero is defined by IEEE 754 as
+		// an infinity, or as a NaN when the numerator is zero too, and Go
+		// says the same. It is the integer divide that panics.
+		e.Set(v, ssa.OpARM64FDIV, v.Args[0], v.Args[1])
+		return true
+	}
 	if isFloat(v.Type) {
 		return false
 	}
@@ -426,6 +474,13 @@ func lowerLogical(v *ssa.Value, e *ssa.Edit) bool {
 }
 
 func lowerNeg(v *ssa.Value, e *ssa.Edit) bool {
+	if isScalarFloat(v.Type) {
+		// FNEG and not a subtraction from zero. FNEG inverts the sign bit, so
+		// -(+0.0) is -0.0 and the sign of a NaN flips, which is what Go
+		// defines; 0.0 - x gets both of those wrong.
+		e.Set(v, ssa.OpARM64FNEG, v.Args[0])
+		return true
+	}
 	if isFloat(v.Type) {
 		return false
 	}
@@ -542,7 +597,12 @@ func log2(n int64) int64 {
 // comparison of the wrong width that is right for half of every value range.
 func lowerCompare(v *ssa.Value, e *ssa.Edit) bool {
 	x, y := v.Args[0], v.Args[1]
+	if isScalarFloat(x.Type) {
+		return lowerFloatCompare(v, e, x, y)
+	}
 	if isFloat(x.Type) {
+		// A complex comparison is two comparisons and an AND, which nothing
+		// above this pass has decomposed.
 		return false
 	}
 	// An operand that does not fit one register has no compare instruction,
@@ -669,13 +729,29 @@ func lowerExt(v *ssa.Value, e *ssa.Edit) bool {
 	return true
 }
 
-// lowerBitcast is a change of type and not of bits, so it is a copy and
-// register allocation removes it.
+// lowerBitcast is a change of type and not of bits.
+//
+// Within one register file it is a copy and register allocation removes it.
+// Across the two files it is an instruction, because the bits have to move
+// from an integer register to a floating-point one or back, which is what
+// math.Float64bits and math.Float64frombits are.
 func lowerBitcast(v *ssa.Value, e *ssa.Edit) bool {
-	if isFloat(v.Type) || isFloat(v.Args[0].Type) {
+	to, from := v.Type, v.Args[0].Type
+	if to == nil || from == nil || to.Size != from.Size {
 		return false
 	}
-	e.Set(v, ssa.OpCopy, v.Args[0])
+	toF, fromF := isScalarFloat(to), isScalarFloat(from)
+	switch {
+	case isFloat(to) != toF || isFloat(from) != fromF:
+		// One side is a complex, which is two registers and not one move.
+		return false
+	case toF && !fromF:
+		e.Set(v, ssa.OpARM64FMOVgpfp, v.Args[0])
+	case fromF && !toF:
+		e.Set(v, ssa.OpARM64FMOVfpgp, v.Args[0])
+	default:
+		e.Set(v, ssa.OpCopy, v.Args[0])
+	}
 	return true
 }
 
@@ -683,7 +759,7 @@ func lowerBitcast(v *ssa.Value, e *ssa.Edit) bool {
 // Group 2: loads and stores
 
 func lowerLoad(v *ssa.Value, e *ssa.Edit) bool {
-	if isFloat(v.Type) {
+	if isFloat(v.Type) && !isScalarFloat(v.Type) {
 		return false
 	}
 	op, ok := ssa.ARM64LoadOp(v.Type)
@@ -696,10 +772,23 @@ func lowerLoad(v *ssa.Value, e *ssa.Edit) bool {
 }
 
 func lowerStore(v *ssa.Value, e *ssa.Edit) bool {
-	if isFloat(v.Args[1].Type) {
+	t := v.Args[1].Type
+	if isFloat(t) && !isScalarFloat(t) {
 		return false
 	}
 	op, ok := ssa.ARM64StoreOp(v.AuxInt)
+	if isScalarFloat(t) {
+		// The type and not the size. A four-byte store from an integer
+		// register and one from a floating-point register are different
+		// instructions, and AuxInt cannot tell them apart.
+		op, ok = ssa.ARM64StoreOpForType(t)
+		if ok && t.Size != v.AuxInt {
+			// The store's width and the value's disagree. A floating-point
+			// store transfers the whole register, so there is no form of it
+			// that writes some other number of bytes.
+			return false
+		}
+	}
 	if !ok {
 		return false
 	}
@@ -1038,6 +1127,241 @@ func panicCall(fail *ssa.Block, v *ssa.Value, mem *ssa.Value, sym string, args .
 	c.Aux = rtObj(sym)
 	fail.Kind = ssa.BlockExit
 	fail.Control = c
+}
+
+// ---------------------------------------------------------------------------
+// Group 6: floating point
+//
+// What is here is only what differs from the integer rules. The arithmetic,
+// the loads and the stores branch inside the rules above, because the shape of
+// the rewrite is the same and only the operation changes. Three things are
+// genuinely different and are here: the constant, the comparison, and the
+// conversions.
+
+// floatConstOf returns the value a floating-point constant holds.
+//
+// It accepts both spellings for the reason argConst does: the engine walks a
+// block forwards, so a constant defined earlier is usually already a machine
+// operation while one defined in another block may not be. The machine form
+// carries the bit pattern, which is why the width is read back from the type.
+//
+// It is deliberately separate from valConst. Feeding a floating-point constant
+// to valConst would offer it to the integer folds, and a rule that turned a
+// float into an integer NEG or an ADD immediate would produce code that runs
+// and computes the wrong answer.
+func floatConstOf(a *ssa.Value) (float64, bool) {
+	switch a.Op {
+	case ssa.OpConstFloat:
+		if a.Aux == nil {
+			// The zero value of the type, which build leaves with no Aux.
+			return 0, true
+		}
+		f, ok := a.Aux.(float64)
+		return f, ok
+	case ssa.OpARM64FMOVconst:
+		return arm64.FloatFromBits(width(a), uint64(a.AuxInt)), true
+	case ssa.OpARM64FMOVgpfp:
+		// The other machine spelling of a constant: a bit pattern built in an
+		// integer register and moved across. It is the spelling zero takes,
+		// which is the one the compare against zero has to recognise.
+		if c, ok := valConst(a.Args[0]); ok {
+			return arm64.FloatFromBits(width(a), uint64(c)), true
+		}
+	}
+	return 0, false
+}
+
+// lowerFloatConst materialises a floating-point constant.
+//
+// Two forms. FMOV's immediate names 256 values, a sign and four fraction bits
+// against an exponent window of eight around 1, so 1.5 and -0.125 are one
+// instruction. Everything else, zero and the infinities included, has the bit
+// pattern built in an integer register and moved across with FMOV. arm64
+// therefore needs no constant pool for a float, which is the target choice
+// specs/025's constants section leaves open.
+//
+// The pattern is materialised with an integer type on purpose. The register
+// allocator takes a value's class from its own type, so a constant that
+// carried the float type would be given a floating-point register and the FMOV
+// that reads it as a general register would read the wrong file.
+func lowerFloatConst(v *ssa.Value, e *ssa.Edit) bool {
+	val, ok := floatConstOf(v)
+	if !ok {
+		// A constant the front end could not parse back out of its text. It
+		// is left unlowered rather than guessed at.
+		return false
+	}
+	sz := width(v)
+	bits := int64(arm64.FloatBits(sz, val))
+	if _, ok := arm64.FloatImm8(val); ok {
+		e.Set(v, ssa.OpARM64FMOVconst)
+		v.AuxInt = bits
+		return true
+	}
+	c := constInto(v, e, bits, typeU64)
+	e.Set(v, ssa.OpARM64FMOVgpfp, c)
+	return true
+}
+
+// condOfFloat is the condition code a Go comparison of two floats becomes.
+//
+// It is not condOf with the same four answers, and the difference is IEEE 754.
+// FCMP has four outcomes and sets V only in the unordered one, where either
+// operand is a NaN. Go requires every ordered comparison to be false there and
+// != to be true, so:
+//
+//	==  EQ   Z set, which is the equal row alone
+//	!=  NE   Z clear, which is less, greater and unordered
+//	<   MI   N set, which is the less row alone
+//	<=  LS   C clear or Z set, which is less or equal and neither of the rest
+//
+// LT and LE, which the integer rules use, are both true in the unordered row
+// because N != V holds there. A float compare lowered with them would report
+// NaN < NaN as true.
+//
+// There is no Greater and no GreaterEqual to answer for: specs/021 rewrites
+// x > y as y < x, and the swap keeps the semantics, because the unordered row
+// is symmetric and stays false either way.
+func condOfFloat(op ssa.Op) arm64.Cond {
+	switch op {
+	case ssa.OpEq:
+		return arm64.EQ
+	case ssa.OpNeq:
+		return arm64.NE
+	case ssa.OpLess:
+		return arm64.MI
+	default:
+		return arm64.LS
+	}
+}
+
+// lowerFloatCompare produces an FCMP and a conditional set.
+func lowerFloatCompare(v *ssa.Value, e *ssa.Edit, x, y *ssa.Value) bool {
+	if !isScalarFloat(y.Type) || x.Type.Size != y.Type.Size {
+		return false
+	}
+	// The condition is read before the operation is replaced, because e.Set
+	// overwrites v.Op and the condition is derived from it.
+	cond := condOfFloat(v.Op)
+	flags, cond := compareFloatFlags(v, e, x, y, cond)
+	e.Set(v, ssa.OpARM64CSET, flags)
+	v.Aux = cond
+	return true
+}
+
+// compareFloatFlags emits the compare and returns the flags value, with the
+// condition the caller must use.
+//
+// The compare against zero is the only immediate form the class has, and it
+// earns its place because zero is exactly the constant FMOV's immediate cannot
+// reach: without the fold, x == 0 would cost a move-wide, an FMOV across the
+// files, and then the compare.
+//
+// The fold applies to a zero on either side, and that is not symmetry for its
+// own sake. specs/021 rewrites x > 0 as Less(0, x), so the constant of the most
+// common float test in Go lands in the first operand. Folding it means
+// comparing the other operand against zero and reading the opposite condition,
+// which is where GT and GE come from: they are unordered-false, as MI and LS
+// are, so an ordered comparison stays false for a NaN.
+//
+// A constant of negative zero folds too. IEEE 754 makes +0.0 and -0.0 compare
+// equal, so the sign cannot change which of the four rows the compare lands
+// in, and every condition here reads only those rows.
+func compareFloatFlags(v *ssa.Value, e *ssa.Edit, x, y *ssa.Value, cond arm64.Cond) (*ssa.Value, arm64.Cond) {
+	op := ssa.OpARM64FCMPS
+	zero := ssa.OpARM64FCMPS0
+	if width(x) == arm64.Size64 {
+		op, zero = ssa.OpARM64FCMPD, ssa.OpARM64FCMPD0
+	}
+	if c, ok := floatConstOf(y); ok && c == 0 {
+		return e.Insert(v.Pos, zero, ssa.FlagsType, x), cond
+	}
+	if c, ok := floatConstOf(x); ok && c == 0 {
+		return e.Insert(v.Pos, zero, ssa.FlagsType, y), swapFloatCond(cond)
+	}
+	return e.Insert(v.Pos, op, ssa.FlagsType, x, y), cond
+}
+
+// swapFloatCond returns the condition that reads the compare with its operands
+// exchanged.
+//
+// Equality is symmetric and keeps its condition. The two orderings become the
+// other pair, which is the pair the integer rules never reach because specs/021
+// canonicalises Greater away: GT is C set and Z clear, GE is N equal to V, and
+// both are false in the unordered row, so the NaN behaviour is the one Go
+// defines.
+func swapFloatCond(c arm64.Cond) arm64.Cond {
+	switch c {
+	case arm64.MI:
+		return arm64.GT
+	case arm64.LS:
+		return arm64.GE
+	}
+	return c
+}
+
+// lowerCvtIntToFloat is SCVTF or UCVTF, chosen by the source's signedness.
+//
+// Both widths come from the two types, so one operation covers the four
+// instructions the architecture has. A source narrower than a word is already
+// extended in its register, because lowerExt above put it there, and the
+// conversion reads the whole W register.
+func lowerCvtIntToFloat(v *ssa.Value, e *ssa.Edit) bool {
+	x := v.Args[0]
+	if !isScalarFloat(v.Type) || !isIntClass(x.Type) {
+		return false
+	}
+	op := ssa.OpARM64UCVTF
+	if signed(x.Type) {
+		op = ssa.OpARM64SCVTF
+	}
+	e.Set(v, op, x)
+	return true
+}
+
+// lowerCvtFloatToInt is FCVTZS or FCVTZU, chosen by the destination's
+// signedness. Both round toward zero, which is the truncation Go defines.
+//
+// No range check is emitted and none is required. Go leaves the result
+// unspecified when the value is not representable in the destination type, and
+// the instruction saturates there: a value above the largest integer produces
+// that integer and a NaN produces zero. What the rule relies on is only the
+// in-range behaviour, which is the truncation Go specifies.
+func lowerCvtFloatToInt(v *ssa.Value, e *ssa.Edit) bool {
+	x := v.Args[0]
+	if !isScalarFloat(x.Type) || !isIntClass(v.Type) {
+		return false
+	}
+	op := ssa.OpARM64FCVTZU
+	if signed(v.Type) {
+		op = ssa.OpARM64FCVTZS
+	}
+	e.Set(v, op, x)
+	return true
+}
+
+// lowerCvtFloatToFloat is FCVT, which has no encoding from a width to itself.
+// A conversion between two types of the same width is a change of type and
+// not of bits, so it is a copy.
+func lowerCvtFloatToFloat(v *ssa.Value, e *ssa.Edit) bool {
+	x := v.Args[0]
+	if !isScalarFloat(v.Type) || !isScalarFloat(x.Type) {
+		return false
+	}
+	if width(v) == width(x) {
+		e.Set(v, ssa.OpCopy, x)
+		return true
+	}
+	e.Set(v, ssa.OpARM64FCVT, x)
+	return true
+}
+
+// isIntClass reports whether a value of type t lives in one integer register.
+// It is ssa.ClassOfType, asked rather than restated, so that the rules and the
+// allocator cannot disagree about where a value goes.
+func isIntClass(t *ir.Type) bool {
+	c, ok := ssa.ClassOfType(t)
+	return ok && c == ssa.ClassInt
 }
 
 // rtObjs names each runtime symbol once, so that two calls to one symbol are

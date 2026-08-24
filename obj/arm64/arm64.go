@@ -10,8 +10,8 @@
 // fixed point.
 //
 // The package covers the instructions a first code generator emits: rule
-// groups 1 to 5 of specs/042-arm64-backend.md. Floating point, atomics, and
-// the inline memmove forms (groups 6 to 8) are not here yet.
+// groups 1 to 6 of specs/042-arm64-backend.md. Atomics and the inline memmove
+// forms (groups 7 and 8) are not here yet.
 //
 // # The contract on immediates
 //
@@ -33,14 +33,34 @@
 // encoder accepts only the one its class defines. Silently accepting either
 // produces an instruction that assembles, disassembles, and touches the wrong
 // storage.
+//
+// # The two register files
+//
+// Reg numbers the integer registers and the floating-point registers in one
+// enum, because the register allocator wants one number per register and one
+// bitset over all of them. The three encoding helpers keep the files apart:
+// regZ and regSP accept only an integer register and regF only a
+// floating-point one. Register number 5 names X5 in one instruction and D5 in
+// another, and an encoder that accepted either would read the wrong file with
+// no diagnostic at all.
+//
+// The architecture calls the floating-point file V0 to V31, with S and D
+// naming its 32-bit and 64-bit views. Go's Plan 9 assembler and
+// specs/030-abi.md spell the same registers F0 to F31, and this package
+// follows that spelling so that one name serves the ABI table, a dump, and the
+// differential test against go tool asm. The view is not in the name: it is
+// the Size the encoder is given, which is the same parameter that selects W
+// or X for an integer instruction.
 package arm64
 
 import "strconv"
 
-// Reg is an integer register.
+// Reg is a machine register, integer or floating-point.
 //
 // R0 to R30 encode as their own number. ZR and RSP both encode as 31 and are
-// separate values here for the reason the package comment gives.
+// separate values here for the reason the package comment gives. F0 to F31
+// encode as 0 to 31 in the floating-point file, which is a different file
+// from the integer one and not a different range of the same one.
 type Reg uint8
 
 // The integer registers. Roles are from specs/030-abi.md.
@@ -79,8 +99,50 @@ const (
 	ZR  // reads as zero, writes discarded
 	RSP // stack pointer, 16-byte aligned always
 
+	// The floating-point file, V0 to V31 in the manual. F0 to F15 carry
+	// floating-point arguments and results and F16 to F31 have no ABI role
+	// (specs/030-abi.md, specs/042-arm64-backend.md).
+	F0
+	F1
+	F2
+	F3
+	F4
+	F5
+	F6
+	F7
+	F8
+	F9
+	F10
+	F11
+	F12
+	F13
+	F14
+	F15
+	F16
+	F17
+	F18
+	F19
+	F20
+	F21
+	F22
+	F23
+	F24
+	F25
+	F26
+	F27
+	F28
+	F29
+	F30 // materialisation scratch, never allocated
+	F31 // materialisation scratch, never allocated
+
 	numReg
 )
+
+// NumIntReg is the number of integer register spellings, which is also the
+// number of the first floating-point register. Nothing here depends on the
+// two files being adjacent, but the register allocator numbers registers with
+// these values and a test pins the identity.
+const NumIntReg = int(F0)
 
 // Aliases for the registers that carry an ABI role.
 const (
@@ -92,6 +154,13 @@ const (
 	RegTrampLo    = R16
 	RegPlatform   = R18
 	RegAsmScratch = R27
+
+	// The floating-point pair the allocator holds back for materialisation,
+	// which is what R16 and R17 are for the integer file. F30 and F31 are
+	// taken because specs/030-abi.md gives no role to any register above F15,
+	// so the pair costs nothing that an argument register would.
+	RegFScratchLo = F30
+	RegFScratchHi = F31
 )
 
 // regNames is indexed by Reg. An array, not a map, so that any output derived
@@ -102,16 +171,29 @@ var regNames = [numReg]string{
 	R16: "R16", R17: "R17", R18: "R18", R19: "R19", R20: "R20", R21: "R21", R22: "R22", R23: "R23",
 	R24: "R24", R25: "R25", R26: "R26", R27: "R27", R28: "R28", R29: "R29", R30: "R30",
 	ZR: "ZR", RSP: "RSP",
+	F0: "F0", F1: "F1", F2: "F2", F3: "F3", F4: "F4", F5: "F5", F6: "F6", F7: "F7",
+	F8: "F8", F9: "F9", F10: "F10", F11: "F11", F12: "F12", F13: "F13", F14: "F14", F15: "F15",
+	F16: "F16", F17: "F17", F18: "F18", F19: "F19", F20: "F20", F21: "F21", F22: "F22", F23: "F23",
+	F24: "F24", F25: "F25", F26: "F26", F27: "F27", F28: "F28", F29: "F29", F30: "F30", F31: "F31",
 }
 
 // allocatable is indexed by Reg. The false entries are specs/042's table: the
 // two linker trampoline scratch registers, darwin's reserved register, the
 // closure, goroutine, frame pointer and link registers, the assembler's
 // scratch, and the two spellings of register 31.
+//
+// Every floating-point register carries a value except F30 and F31, which are
+// the materialisation pair. specs/042 marks F0 to F15 as the argument and
+// result registers and F16 to F31 as scratch, and both halves are allocatable:
+// an argument register is a register like any other between calls.
 var allocatable = [numReg]bool{
 	R0: true, R1: true, R2: true, R3: true, R4: true, R5: true, R6: true, R7: true,
 	R8: true, R9: true, R10: true, R11: true, R12: true, R13: true, R14: true, R15: true,
 	R19: true, R20: true, R21: true, R22: true, R23: true, R24: true, R25: true,
+	F0: true, F1: true, F2: true, F3: true, F4: true, F5: true, F6: true, F7: true,
+	F8: true, F9: true, F10: true, F11: true, F12: true, F13: true, F14: true, F15: true,
+	F16: true, F17: true, F18: true, F19: true, F20: true, F21: true, F22: true, F23: true,
+	F24: true, F25: true, F26: true, F27: true, F28: true, F29: true,
 }
 
 // Valid reports whether r names a register this package can encode.
@@ -131,13 +213,27 @@ func (r Reg) String() string {
 	return regNames[r]
 }
 
-// AllocatableRegs returns the allocatable registers in increasing order.
+// IsFloat reports whether r names a floating-point register.
+func (r Reg) IsFloat() bool { return r >= F0 && r < numReg }
+
+// AllocatableRegs returns the allocatable integer registers in increasing
+// order.
 //
 // The order is fixed rather than derived from a map so that a caller that
 // walks it produces the same output on every run.
-func AllocatableRegs() []Reg {
-	out := make([]Reg, 0, numReg)
-	for r := Reg(0); r < numReg; r++ {
+//
+// The two files have separate accessors because the register allocator keeps
+// a separate free list per class (specs/026-register-allocation.md), so a
+// caller always wants one file or the other and never both mixed together.
+func AllocatableRegs() []Reg { return allocatableIn(R0, F0) }
+
+// AllocatableFRegs returns the allocatable floating-point registers in
+// increasing order.
+func AllocatableFRegs() []Reg { return allocatableIn(F0, numReg) }
+
+func allocatableIn(lo, hi Reg) []Reg {
+	out := make([]Reg, 0, hi-lo)
+	for r := lo; r < hi; r++ {
 		if allocatable[r] {
 			out = append(out, r)
 		}

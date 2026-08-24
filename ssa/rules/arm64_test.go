@@ -188,17 +188,38 @@ func lower(t *testing.T, f *ssa.Func) *ssa.Func {
 func encodeAll(t *testing.T, f *ssa.Func) {
 	t.Helper()
 	out := make([]uint32, 8)
-	regs := []arm64.Reg{arm64.R1, arm64.R2, arm64.R3, arm64.R4, arm64.R5}
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			if !ssa.IsARM64Op(v.Op) || ssa.ARM64MissingEncoder(v.Op) {
 				continue
 			}
-			if n, ok := ssa.ARM64Encode(v, arm64.R0, regs, out); !ok || n == 0 {
+			dst, regs := encodeRegs(v)
+			if n, ok := ssa.ARM64Encode(v, dst, regs, out); !ok || n == 0 {
 				t.Errorf("%s: the encoder rejected %s", f.Name, v.LongString())
 			}
 		}
 	}
+}
+
+// encodeRegs picks a destination and argument registers of the classes a
+// value's types call for.
+//
+// The class is not decoration here. An encoder is given a register from one
+// file or the other and refuses the wrong one, so handing every operation an
+// integer register would make every floating-point row fail for a reason that
+// has nothing to do with the rule that produced it.
+func encodeRegs(v *ssa.Value) (arm64.Reg, []arm64.Reg) {
+	pick := func(t *ir.Type, n int) arm64.Reg {
+		if c, ok := ssa.ClassOfType(t); ok && c == ssa.ClassFloat {
+			return arm64.F0 + arm64.Reg(n)
+		}
+		return arm64.R0 + arm64.Reg(n)
+	}
+	args := make([]arm64.Reg, len(v.Args))
+	for i, a := range v.Args {
+		args[i] = pick(a.Type, i+1)
+	}
+	return pick(v.Type, 0), args
 }
 
 // runRule builds, lowers and compares against the expected form.
