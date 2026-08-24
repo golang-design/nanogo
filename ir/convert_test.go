@@ -536,3 +536,51 @@ func a2[T any]() (T, T) { var zero T; return zero, zero }
 		t.Error("a tuple of one type parameter converted")
 	}
 }
+
+// TestEmptyInterfaceIsDistinguished pins the one fact about an interface that
+// the backend needs and that the type boundary nearly excluded.
+//
+// Both interface kinds are two pointer words, so size, alignment and pointer
+// map are identical and none of them separates the two. The first word's
+// meaning differs: an empty interface holds a *_type and a non-empty one holds
+// an *itab. Equality calls runtime.efaceeq for the first and runtime.ifaceeq
+// for the second, and calling the wrong one makes the runtime read a function
+// pointer at the wrong offset and jump through it.
+func TestEmptyInterfaceIsDistinguished(t *testing.T) {
+	src := `package p
+
+type Stringer interface{ String() string }
+type Empty interface{}
+
+var a any
+var b Stringer
+var c Empty
+var d interface{ M(); N() }
+`
+	pkg, _, _ := buildTypecheck(t, src)
+	c := NewConverter()
+
+	for _, tc := range []struct {
+		name  string
+		empty bool
+	}{
+		{"a", true},
+		{"b", false},
+		{"c", true},
+		{"d", false},
+	} {
+		ty := c.mustConvert(t, pkg.Scope().Lookup(tc.name).Type())
+		if ty.Kind != Interface {
+			t.Errorf("%s has kind %v, want Interface", tc.name, ty.Kind)
+			continue
+		}
+		if ty.EmptyIface != tc.empty {
+			t.Errorf("%s: EmptyIface = %v, want %v", tc.name, ty.EmptyIface, tc.empty)
+		}
+		// The layout facts really are identical, which is the reason the flag
+		// has to exist at all.
+		if ty.Size != 16 || ty.PtrBytes() != 16 {
+			t.Errorf("%s: size %d, PtrBytes %d, want 16 and 16", tc.name, ty.Size, ty.PtrBytes())
+		}
+	}
+}

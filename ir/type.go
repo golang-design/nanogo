@@ -159,6 +159,24 @@ type Type struct {
 	Fields []Field // struct
 	Len    int64   // array length
 
+	// EmptyIface distinguishes an interface with no methods from one with
+	// methods, for Kind == Interface only.
+	//
+	// This looks like a method set fact and is not one, which is why it is
+	// here rather than excluded by the rule above. Both kinds of interface are
+	// two pointer words, but the *meaning of the first word differs*: an empty
+	// interface holds a *_type, and a non-empty one holds an *itab. Equality
+	// therefore calls runtime.efaceeq for one and runtime.ifaceeq for the
+	// other, and calling the wrong one makes the runtime read a function
+	// pointer at the wrong offset and jump through it.
+	//
+	// So this is which of two layouts the first word has. That is as
+	// machine-relevant as the pointer map, and a backend that cannot see it
+	// cannot generate a correct comparison. It was added when the SSA builder
+	// reached for the distinction, found nothing, and stopped rather than
+	// guessing.
+	EmptyIface bool
+
 	// Name is carried for diagnostics only. Nothing below the IR may branch on
 	// it, which is the rule this comment exists to state.
 	Name string

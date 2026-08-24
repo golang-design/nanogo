@@ -259,6 +259,12 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 
 	case *types2.Interface:
 		out.Kind = Interface
+		// Which of the two interface layouts this is. An empty interface holds
+		// a *_type in its first word and a non-empty one holds an *itab, so
+		// equality calls a different runtime function for each and calling the
+		// wrong one reads a function pointer at the wrong offset. See the field
+		// comment in type.go.
+		out.EmptyIface = t.NumMethods() == 0
 		return nil
 
 	case *types2.TypeParam:
