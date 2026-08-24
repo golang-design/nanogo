@@ -25,6 +25,7 @@ import (
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
 	"golang.design/x/nanogo/obj/arm64"
+	"golang.design/x/nanogo/ssa"
 )
 
 // synth emits the prologue, the epilogue and the growth tail of a function
@@ -270,7 +271,7 @@ func TestGrowstackSpillsTheArgumentRegisters(t *testing.T) {
 	var in []place
 	var spill, reload []string
 	for i := 0; i < 5; i++ {
-		in = append(in, place{reg: argRegs[i], inReg: true, off: int64(i) * 8, size: 8, typ: word})
+		in = append(in, place{reg: intArgRegs[i], inReg: true, off: int64(i) * 8, typ: word})
 		spill = append(spill, fmt.Sprintf("\tMOVD\tR%d, %d(RSP)", i, 8+i*8))
 		reload = append(reload, fmt.Sprintf("\tMOVD\t%d(RSP), R%d", 8+i*8, i))
 	}
@@ -379,6 +380,14 @@ func runtimeGOROOT(t *testing.T) string {
 	return strings.TrimSpace(string(out))
 }
 
+// intArgRegs is the integer argument sequence, spelled in obj/arm64's
+// registers, so that a test can name the register an argument arrives in
+// without going through the allocator's numbering.
+var intArgRegs = [16]arm64.Reg{
+	arm64.R0, arm64.R1, arm64.R2, arm64.R3, arm64.R4, arm64.R5, arm64.R6, arm64.R7,
+	arm64.R8, arm64.R9, arm64.R10, arm64.R11, arm64.R12, arm64.R13, arm64.R14, arm64.R15,
+}
+
 // TestAssignFollowsTheConvention checks specs/030-abi.md's walk.
 //
 // The area advances for every argument, including one that travels in a
@@ -402,7 +411,7 @@ func TestAssignFollowsTheConvention(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, size, err := assign(tc.types)
+			got, size, err := assignArgs(tc.types)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -425,7 +434,7 @@ func TestAssignFollowsTheConvention(t *testing.T) {
 	for i := range many {
 		many[i] = word
 	}
-	got, size, err := assign(many)
+	got, size, err := assignArgs(many)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,9 +450,33 @@ func TestAssignFollowsTheConvention(t *testing.T) {
 	// A float has no encoder on this target, so it is named rather than
 	// placed into a register that no instruction can read.
 	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
-	if _, _, err := assign([]*ir.Type{f64}); err == nil {
+	if _, _, err := assignArgs([]*ir.Type{f64}); err == nil {
 		t.Error("a floating-point argument was placed, and no instruction can read it")
 	}
+
+	// A value the register set cannot hold is refused rather than written into
+	// the area by a form this package does not have.
+	big := &ir.Type{Kind: ir.Struct, Size: 40, Align: 8, Name: "big"}
+	for i := 0; i < 5; i++ {
+		big.Fields = append(big.Fields, ir.Field{Name: "f", Type: word, Offset: int64(i) * 8})
+	}
+	if _, _, err := assignArgs([]*ir.Type{big}); err == nil {
+		t.Error("a five-word value was placed as one, and no register holds it")
+	}
+}
+
+// assignArgs is specs/030-abi.md's walk as this package consumes it: one place
+// per value passed.
+func assignArgs(types []*ir.Type) ([]place, int64, error) {
+	vals, size, err := ssa.ABIArgs(ssa.NewArm64Target(), types)
+	if err != nil {
+		return nil, 0, err
+	}
+	pl, err := valuePlaces(vals)
+	if err != nil {
+		return nil, 0, err
+	}
+	return pl, size, nil
 }
 
 // TestFrameArithmetic checks the sizes against the numbers gc prints for the

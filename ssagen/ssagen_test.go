@@ -124,12 +124,24 @@ func compile(t *testing.T, src, name string) *compiled {
 	if err != nil {
 		t.Fatalf("ssa.Build: %v", err)
 	}
+	target := ssa.NewArm64Target()
+	// The pipeline of specs/002-architecture.md: decomposition, then
+	// specs/030-abi.md's assignment, then selection. The assignment runs
+	// between them because it finishes work decomposition stopped at its
+	// bound and because the rewrites it makes still need lowering rules.
+	ssa.Decompose(f)
+	if err := ssa.AssignABI(f, target); err != nil {
+		t.Fatalf("ssa.AssignABI: %v", err)
+	}
+	if vs := ssa.Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify after the ABI pass: %v", vs)
+	}
 	ssa.Lower(f, rules.ARM64)
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("the function did not verify after lowering: %v", vs)
 	}
 	ssa.SplitCriticalEdges(f)
-	a, err := ssa.Allocate(f, ssa.NewArm64Target())
+	a, err := ssa.Allocate(f, target)
 	if err != nil {
 		t.Fatalf("ssa.Allocate: %v", err)
 	}
@@ -408,6 +420,15 @@ func compileConfig(t *testing.T) string {
 	return compileCfgPath
 }
 
+// bigType is a struct with more parts than specs/025-lowering-and-rules.md
+// decomposes and few enough for the convention to put in registers. It is the
+// shape specs/030-abi.md's assignment pass exists for.
+const bigType = "type Big struct{ A, B, C, D, E int }\n\n"
+
+// big20Type has more parts than the sixteen integer argument registers, so the
+// convention sends it to the argument area whole.
+const big20Type = "type Big20 struct{ A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T int }\n\n"
+
 // TestLinkAndRun is the milestone of this package.
 //
 // A Go function goes through parse, check, ir.Build, ssa.Build, lower,
@@ -428,24 +449,84 @@ func TestLinkAndRun(t *testing.T) {
 		src  string
 		call string
 		defs string
+		// decl is the declaration the gc-compiled caller sees. It defaults to
+		// the two-integer signature the older cases use.
+		decl string
 		want int
 	}{
-		{"empty", "func run(a, b int) int { return 0 }", "run(1, 2)", "", 0},
-		{"constant", "func run(a, b int) int { return 7 }", "run(1, 2)", "", 7},
-		{"argument", "func run(a, b int) int { return b }", "run(3, 9)", "", 9},
-		{"arithmetic", "func run(a, b int) int { return a*b + 1 }", "run(20, 3)", "", 61},
-		{"branch", "func run(a, b int) int {\n\tif a > b {\n\t\treturn a - b\n\t}\n\treturn b - a\n}", "run(4, 30)", "", 26},
-		{"nested", "func run(a, b int) int {\n\tif a > b {\n\t\tif a > 100 {\n\t\t\treturn 1\n\t\t}\n\t\treturn 2\n\t}\n\treturn 3\n}", "run(200, 1)", "", 1},
+		{"empty", "func run(a, b int) int { return 0 }", "run(1, 2)", "", "", 0},
+		{"constant", "func run(a, b int) int { return 7 }", "run(1, 2)", "", "", 7},
+		{"argument", "func run(a, b int) int { return b }", "run(3, 9)", "", "", 9},
+		{"arithmetic", "func run(a, b int) int { return a*b + 1 }", "run(20, 3)", "", "", 61},
+		{"branch", "func run(a, b int) int {\n\tif a > b {\n\t\treturn a - b\n\t}\n\treturn b - a\n}", "run(4, 30)", "", "", 26},
+		{"nested", "func run(a, b int) int {\n\tif a > b {\n\t\tif a > 100 {\n\t\t\treturn 1\n\t\t}\n\t\treturn 2\n\t}\n\treturn 3\n}", "run(200, 1)", "", "", 1},
 		// A call reaches a function gc compiled, so the argument and the
 		// result cross the toolchain boundary through specs/030-abi.md and
 		// nothing else. It is also the first function here with a frame, a
 		// stack-growth check and a growth tail.
 		{"call", "func twice(x int) int\n\nfunc run(a, b int) int { return twice(a) }", "run(21, 0)",
-			"func twice(x int) int { return x * 2 }", 42},
+			"func twice(x int) int { return x * 2 }", "", 42},
 		// A division carries a check that branches to a block that calls the
 		// runtime and does not return, so the object holds a relocation
 		// against a symbol rtsym names.
-		{"divide", "func run(a, b int) int { return a / b }", "run(41, 6)", "", 6},
+		{"divide", "func run(a, b int) int { return a / b }", "run(41, 6)", "", "", 6},
+
+		// specs/030-abi.md across the toolchain boundary. gc compiles the
+		// caller, nanogo compiles run, and the two agree or the program reads
+		// a word the other one never wrote. Nothing below the assignment can
+		// catch a disagreement, so these are the gate.
+		//
+		// A five-field struct is the case the assignment pass exists for: gc
+		// passes it in five registers, and the bound of
+		// specs/025-lowering-and-rules.md stops decomposition at four.
+		{"struct in registers",
+			bigType + "func run(s Big) int { return s.A*10000 + s.B*1000 + s.C*100 + s.D*10 + s.E }",
+			"run(Big{1, 2, 3, 4, 5})", bigType, "func run(s Big) int", 12345},
+		// A struct with more parts than the register set holds travels in the
+		// argument area whole, and the callee reads it where the caller wrote
+		// it.
+		{"struct in the argument area",
+			big20Type + "func run(s Big20) int { return s.A*100 + s.J*10 + s.T }",
+			"run(Big20{A: 7, J: 8, T: 9})", big20Type, "func run(s Big20) int", 789},
+		// A mixture: the scalars around the struct take the registers the
+		// struct did not, which is where an off-by-one in the walk shows up.
+		{"struct between scalars",
+			bigType + "func run(x int, s Big, y int) int { return x*100000 + s.A*10000 + s.E*10 + y }",
+			"run(6, Big{1, 2, 3, 4, 5}, 9)", bigType, "func run(x int, s Big, y int) int", 610059},
+		// Eighteen integers exhaust the sixteen argument registers, so the
+		// last two travel in the area. Pre-colouring is what lets the
+		// allocator hold sixteen live arguments at once.
+		{"registers exhausted",
+			"func run(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r int) int { return a + r*1000 }",
+			"run(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5)", "",
+			"func run(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r int) int", 5001},
+		// nanogo calls gc with a struct that travels in registers, and gc
+		// returns it into nanogo's own return. Both directions of the
+		// convention are in one program.
+		{"struct through a call",
+			bigType + "func sum(s Big) int\n\nfunc run(s Big) int { return sum(s) }",
+			"run(Big{10, 20, 30, 40, 50})",
+			bigType + "func sum(s Big) int { return s.A + s.B + s.C + s.D + s.E }",
+			"func run(s Big) int", 150},
+		// Eighteen operands at a call, more than the two scratch registers
+		// the target reserves. Without ssa.Target.UseReg naming the register
+		// each operand is read from, the allocator asks for a scratch
+		// register per spilled operand and refuses the function. The last two
+		// operands travel in the argument area, so this is also a stack
+		// argument written by nanogo and read by gc.
+		{"a call with more operands than scratch registers",
+			"func g(a, b, c, d, e, f2, h, i, j, k, l, m, n, o, p, q, r, s int) int\n\n" +
+				"func run(a, b int) int { return g(a, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, b) }",
+			"run(100, 200)",
+			"func g(a, b, c, d, e, f2, h, i, j, k, l, m, n, o, p, q, r, s int) int { return a + s }",
+			"", 300},
+		// A string is two words, so the integer after it is in the fourth
+		// argument register and not in the third. A walk that counted the
+		// string as one word would read it from the wrong place, and the
+		// pointer in front of it is a word the arguments bitmap has to mark.
+		{"a string between a pointer and an integer",
+			"func run(p *int, s string, n int) int { return n * 3 }",
+			`run(new(int), "abcd", 7)`, "", "func run(p *int, s string, n int) int", 21},
 	}
 	for _, tc2 := range tests {
 		t.Run(tc2.name, func(t *testing.T) {
@@ -459,7 +540,7 @@ func TestLinkAndRun(t *testing.T) {
 			// generated code computed. The caller is assembly rather than Go
 			// because nanogo compiles one function here and the driver that
 			// compiles a package is specs/050-driver.md.
-			caller := exitWrapper(t, goCmd, c.f.Sym, tc2.call, tc2.defs)
+			caller := exitWrapper(t, goCmd, c.f.Sym, tc2.call, tc2.defs, tc2.decl)
 			got := strings.TrimSpace(runLinked(t, goCmd, tc, cfg, p, caller))
 			if want := strconv.Itoa(tc2.want); got != want {
 				t.Fatalf("the program printed %q, and the function returns %s", got, want)
@@ -547,7 +628,7 @@ func TestStackGrowthCopiesNanogoFrames(t *testing.T) {
 	p := newMainPackage()
 	r := emit(t, c, p)
 	addFull(t, r, p)
-	caller := exitWrapper(t, goCmd, c.f.Sym, "run(200000, 0)", "")
+	caller := exitWrapper(t, goCmd, c.f.Sym, "run(200000, 0)", "", "")
 	// gccheckmark marks a second time with the world stopped and compares, so
 	// a frame the copier read with the wrong map is a crash here rather than a
 	// wrong answer somewhere else.
@@ -565,11 +646,14 @@ func TestStackGrowthCopiesNanogoFrames(t *testing.T) {
 // exits with its result. It is compiled by gc, so the test is a real
 // cross-toolchain call: gc's caller reaches nanogo's callee through
 // specs/030-abi.md and nothing else.
-func exitWrapper(t *testing.T, goCmd, sym, call, defs string) string {
+func exitWrapper(t *testing.T, goCmd, sym, call, defs, decl string) string {
 	t.Helper()
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
-	body := "package main\n\nfunc run(a, b int) int\n\n" + defs + "\n\nfunc main() { println(" + call + ") }\n"
+	if decl == "" {
+		decl = "func run(a, b int) int"
+	}
+	body := "package main\n\n" + defs + "\n\n" + decl + "\n\nfunc main() { println(" + call + ") }\n"
 	if err := os.WriteFile(src, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -633,6 +717,19 @@ func TestFrameGrowsWithLocals(t *testing.T) {
 		{"one", "package main\n\nfunc f(a int) int { return a }\n", 8},
 		{"three", "package main\n\nfunc f(a, b, c int) int { return a + b + c }\n", 24},
 		{"narrow", "package main\n\nfunc f(a int8, b int32) int32 { return b }\n", 8},
+		// specs/030-abi.md's argument area has two parts: the values the
+		// registers could not hold, then one spill slot per value that took
+		// registers. gc's number is the only check that the two are laid out
+		// in that order and not interleaved, because the total is the same
+		// either way and only the offsets differ.
+		{"a struct in registers", "package main\n\n" + bigType + "func f(s Big) int { return s.A }\n", 40},
+		{"a struct in the area", "package main\n\n" + big20Type + "func f(s Big20) int { return s.A }\n", 160},
+		{"a struct between scalars", "package main\n\n" + bigType +
+			"func f(x int, s Big, y int) int { return x + s.A + y }\n", 56},
+		{"registers exhausted", "package main\n\n" +
+			"func f(a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q, r, s int) int { return a + s }\n", 144},
+		{"a struct past the registers", "package main\n\n" + bigType +
+			"func f(a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q int, s Big) int { return a + s.A }\n", 168},
 	}
 	n := 0
 	for _, tc := range tests {
@@ -705,12 +802,16 @@ func hand(t *testing.T, name string, build func(f *ssa.Func)) *compiled {
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("the hand-built function did not verify: %v\n%s", vs, f)
 	}
+	target := ssa.NewArm64Target()
+	if err := ssa.AssignABI(f, target); err != nil {
+		t.Fatalf("ssa.AssignABI: %v", err)
+	}
 	ssa.Lower(f, rules.ARM64)
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("the hand-built function did not verify after lowering: %v", vs)
 	}
 	ssa.SplitCriticalEdges(f)
-	a, err := ssa.Allocate(f, ssa.NewArm64Target())
+	a, err := ssa.Allocate(f, target)
 	if err != nil {
 		t.Fatalf("ssa.Allocate: %v", err)
 	}
@@ -1101,12 +1202,14 @@ func TestIndirectCall(t *testing.T) {
 // TestEmitterRejectsBadInput covers the checks that turn a broken input into a
 // named error rather than into an instruction that is not the one meant.
 func TestEmitterRejectsBadInput(t *testing.T) {
+	// A register the target does not describe is refused rather than
+	// converted into whatever number it happens to be.
 	e := &emitter{opt: Options{Sym: "test.f"}}
-	if got := e.reg(ssa.Arm64FReg(0)); got != arm64.ZR {
-		t.Errorf("a floating-point register converted to %v", got)
+	if got := e.reg(ssa.Reg(ssa.MaxRegs - 1)); got != arm64.ZR {
+		t.Errorf("a register outside the target converted to %v", got)
 	}
 	if e.err() == nil {
-		t.Error("a floating-point register was accepted, and no encoder reads one")
+		t.Error("a register outside the target was accepted")
 	}
 
 	e = &emitter{opt: Options{Sym: "test.f"}}
@@ -1389,10 +1492,116 @@ func TestReturnValuesTravelInRegisters(t *testing.T) {
 	}
 
 	// Past the sixteenth register a result travels in the frame, which
-	// specs/030-abi.md describes and this package does not write yet.
-	c = hand(t, "manyresults", build(20))
-	if _, err := Emit(c.f, c.a, obj.NewPackage("main"), Options{Sym: "main.manyresults"}); err == nil {
-		t.Error("a result that does not fit the registers was emitted")
+	// specs/030-abi.md describes and nothing below writes yet. The assignment
+	// pass names it, which is earlier than this package used to and is the
+	// right place: a function whose results have nowhere to go should not
+	// reach the code generator at all.
+	f := ssa.NewFunc("manyresults")
+	f.Sym = "main.manyresults"
+	build(20)(f)
+	if err := ssa.AssignABI(f, ssa.NewArm64Target()); err == nil {
+		t.Error("a result that does not fit the registers was assigned")
+	}
+}
+
+// TestALargeParameterIsDescribedByTheArgumentsBitmap is the collector's half
+// of homing a parameter in the incoming argument area.
+//
+// The parameter is no longer a local, so the locals bitmap does not describe
+// it. The arguments bitmap has to, and it has to describe it by the
+// parameter's own type: the pointer word is at offset 0 of a twenty-word
+// struct that lives where the caller wrote it, and a collector that missed it
+// would free an object the function still reads.
+func TestALargeParameterIsDescribedByTheArgumentsBitmap(t *testing.T) {
+	// The pointer is the last field, so the bitmap has to be twenty bits wide
+	// and the bit that is set is the last one. A map sized from the pointer
+	// alone would be one bit long and would describe the wrong word.
+	const src = "package main\n\n" +
+		"type BigP struct {\n\tA, B, C, D, E, F, G, H, I, J, K, L, M, N, O, Q, R, S, T int\n\tP *int\n}\n\n" +
+		"func g(x int) int\n\n" +
+		"func run(s BigP) int { return g(s.T) }\n"
+	c := compile(t, src, "run")
+	if len(c.f.Frame) != 0 {
+		t.Errorf("the parameter is still a local, and its storage is the argument area")
+	}
+	if _, ok := c.f.ABI.ArgHome(c.f.ABI.In[0].Obj); !ok {
+		t.Fatal("the parameter is not homed in the argument area")
+	}
+	p := obj.NewPackage("main")
+	r := emit(t, c, p)
+	if r.Args != 160 {
+		t.Errorf("the argument area is %d bytes and the parameter is 160", r.Args)
+	}
+	// The bitmap symbol holds n, nbit and one bitmap per stack map index. The
+	// arguments bitmap is the same at every safepoint, so there is one.
+	data := r.Funcdata[ssa.FUNCDATA_ArgsPointerMaps].Data
+	if len(data) < 9 {
+		t.Fatalf("the arguments bitmap is %d bytes", len(data))
+	}
+	if nbit := int32(data[4]); nbit != 20 {
+		t.Fatalf("the arguments bitmap has %d bits, and the parameter is twenty words", nbit)
+	}
+	// Twenty bits are three bytes, and the pointer is bit nineteen.
+	if got := []byte{data[8], data[9], data[10]}; got[0] != 0 || got[1] != 0 || got[2] != 1<<3 {
+		t.Errorf("the arguments bitmap is %#x, and the pointer is the twentieth word", got)
+	}
+	t.Logf("argument area %d bytes, %d bitmap bits", r.Args, data[4])
+}
+
+// TestTheAssignmentHasToBeThere covers the joins between this package and
+// specs/030-abi.md's assignment pass.
+//
+// The placement is not computed here any more, so every way the assignment can
+// fail to describe what the function holds is a named error and not a wrong
+// offset.
+func TestTheAssignmentHasToBeThere(t *testing.T) {
+	c := hand(t, "noabi", func(f *ssa.Func) {
+		e := f.Entry
+		e.Kind = ssa.BlockRet
+		mem := e.NewValue(0, ssa.OpInitMem, ssa.MemType)
+		a := e.NewValue(0, ssa.OpArg, typeInt)
+		e.Control = e.NewValue(0, ssa.OpMakeResult, ssa.MemType, a, mem)
+	})
+	abi := c.f.ABI
+	c.f.ABI = nil
+	if _, err := Emit(c.f, c.a, obj.NewPackage("main"), Options{Sym: "main.noabi"}); err == nil ||
+		!strings.Contains(err.Error(), "no ABI assignment") {
+		t.Errorf("a function with no assignment gave %v", err)
+	}
+	c.f.ABI = abi
+
+	// An argument at an offset the assignment does not describe. Placing it
+	// anyway would read one of the caller's words at random.
+	for _, v := range c.f.Entry.Values {
+		if v.Op == ssa.OpArg {
+			v.AuxInt = 4096
+		}
+	}
+	if _, err := Emit(c.f, c.a, obj.NewPackage("main"), Options{Sym: "main.noabi"}); err == nil ||
+		!strings.Contains(err.Error(), "not a word of any parameter") {
+		t.Errorf("an argument outside its parameter gave %v", err)
+	}
+
+	// A result a floating-point register would carry is refused, because
+	// obj/arm64's encoder for it is specs/042 group 6 and the rules that need
+	// it are not written.
+	e := &emitter{opt: Options{Sym: "test.f"}, a: &ssa.Alloc{Target: ssa.NewArm64Target()}}
+	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
+	if _, err := e.resultPlaces([]*ir.Type{f64}); err == nil {
+		t.Error("a floating-point result was placed, and no instruction writes it")
+	}
+	// A result of no width takes no register and is not an error.
+	empty := &ir.Type{Kind: ir.Struct, Size: 0, Align: 1, Name: "struct{}"}
+	if pl, err := e.resultPlaces([]*ir.Type{empty}); err != nil || len(pl) != 1 || pl[0].inReg {
+		t.Errorf("a result of no width gave %v and %v", pl, err)
+	}
+	// A result the register set cannot hold has no form here.
+	big := &ir.Type{Kind: ir.Struct, Size: 40, Align: 8, Name: "big"}
+	for i := 0; i < 5; i++ {
+		big.Fields = append(big.Fields, ir.Field{Name: "f", Type: typeInt, Offset: int64(i) * 8})
+	}
+	if _, err := e.resultPlaces([]*ir.Type{big}); err == nil {
+		t.Error("a five-word result was placed as one register")
 	}
 }
 
@@ -1442,6 +1651,7 @@ func TestSmallHelpers(t *testing.T) {
 func TestCallFailuresAreNamed(t *testing.T) {
 	newEmitter := func(f *ssa.Func, n int) *emitter {
 		a := &ssa.Alloc{
+			Target: ssa.NewArm64Target(),
 			Home:   make([]ssa.Loc, n),
 			Fixed:  make([]ssa.Reg, n),
 			Result: make([]ssa.Reg, n),
@@ -1535,15 +1745,15 @@ func TestCallFailuresAreNamed(t *testing.T) {
 	}
 }
 
-// TestArgumentsThatShareAHomeAreAllRead is the second shape of entryArgs.
+// TestStackArgumentsAreReadWhereTheyAreDefined is the property pre-colouring
+// left behind.
 //
-// Each argument here is used once, right after it is defined, so their live
-// ranges do not overlap and the allocator gives one register to several of
-// them. A parallel move at the entry cannot realise that, because two moves
-// would have one destination, so every argument goes through the argument
-// area instead. The ones past the sixteenth register are already in that area
-// and must still be read out of it, which is the half that is easy to lose.
-func TestArgumentsThatShareAHomeAreAllRead(t *testing.T) {
+// The arguments past the sixteenth register arrive in the caller's frame. The
+// allocator may give one of them the register an earlier argument vacated,
+// because their live ranges do not meet, so reading it at the entry would
+// destroy that earlier argument. It is read at its own definition instead, and
+// this checks that every one of them is read at all and from its own offset.
+func TestStackArgumentsAreReadWhereTheyAreDefined(t *testing.T) {
 	const n = 18
 	c := hand(t, "shared", func(f *ssa.Func) {
 		e := f.Entry
@@ -1556,34 +1766,29 @@ func TestArgumentsThatShareAHomeAreAllRead(t *testing.T) {
 		}
 		e.Control = e.NewValue(0, ssa.OpMakeResult, ssa.MemType, sum, mem)
 	})
-	// The premise: two arguments share a home. Without it the test would
-	// exercise the parallel move instead and prove nothing.
-	seen := map[ssa.Loc]int{}
-	shared := false
+	// The premise: the first sixteen arguments are fixed to the argument
+	// registers and the last two are not.
+	fixed := 0
 	for _, v := range c.f.Entry.Values {
-		if v.Op != ssa.OpArg {
-			continue
-		}
-		h := c.a.Home[v.ID]
-		seen[h]++
-		if seen[h] > 1 {
-			shared = true
+		if v.Op == ssa.OpArg && c.a.Fixed[v.ID] != ssa.NoReg {
+			fixed++
 		}
 	}
-	if !shared {
-		t.Skip("the allocator gave every argument a home of its own, so the second shape is not reached")
+	if fixed != 16 {
+		t.Fatalf("%d arguments are pre-coloured, and the convention has sixteen integer argument registers", fixed)
 	}
 
 	p := obj.NewPackage("main")
 	r := emit(t, c, p)
 	text := disassemble(t, r, p)
-	// Every argument is read from its own offset in the area, including the
-	// two the convention put there rather than in a register.
-	for i := 0; i < n; i++ {
-		off := r.Frame + 8 + int64(i)*8
+	// The stack part of the argument area comes first and the spill slots of
+	// the register arguments follow it, so the seventeenth argument is at
+	// offset zero of the area and not at offset 128.
+	for i := 16; i < n; i++ {
+		off := r.Frame + 8 + int64(i-16)*8
 		if !strings.Contains(text, fmt.Sprintf("MOVD %d(RSP), R", off)) {
 			t.Errorf("argument %d is never read from %d(RSP):\n%s", i, off, text)
 		}
 	}
-	t.Logf("frame %d, %d arguments through the argument area", r.Frame, n)
+	t.Logf("frame %d, %d arguments in registers and %d in the area", r.Frame, fixed, n-fixed)
 }

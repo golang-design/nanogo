@@ -22,14 +22,17 @@
 // amd64 case, where an instruction's size depends on a displacement that
 // depends on sizes, and the loop has to exist.
 //
-// # What it does that no pass above it does yet
+// # What it does with the calling convention
 //
-// specs/030-abi.md's assignment walk lands here, because the pass that owns it
-// does not exist. ssa.Target has DefReg and UseReg hooks for it and both
-// return "no register", so nothing is pre-coloured: an incoming argument, a
-// call's operands, a call's results and a return's values are placed here
-// instead. The placement is a parallel move, because the home of argument 0
-// can be the register argument 1 arrives in.
+// Nothing is decided here. specs/030-abi.md's assignment pass placed the
+// parameters, the results and every call's operands, and the allocator
+// pre-coloured them from that same answer through ssa.Target's DefReg and
+// UseReg. This package reads the assignment and emits the moves that realise
+// it. Two placements computed apart would be a call that reads its arguments
+// from the wrong place, so there is one and this is not it.
+//
+// The moves at an entry, a call and a return are parallel moves, because the
+// home of argument 0 can be the register argument 1 arrives in.
 //
 // # The frame and the collector's tables
 //
@@ -284,15 +287,14 @@ type emitter struct {
 	pcline  []obj.PCEntry
 	line    int32
 
-	// args lists the incoming parameters, in parameter order.
-	args []*ssa.Value
+	// args lists the incoming argument values in the order the entry block
+	// holds them, and argPlace says where each of them arrives. One parameter
+	// is several of these when the convention gives it several registers.
+	args     []*ssa.Value
+	argPlace []place
 
 	// byID finds a value by its identifier, which an edge copy names.
 	byID []*ssa.Value
-
-	// argsInFrame reports that the incoming arguments are read out of the
-	// argument area rather than out of the registers they arrived in.
-	argsInFrame bool
 
 	done map[ssa.ID]bool // values already emitted out of order
 	errs []error
@@ -718,56 +720,86 @@ func (e *emitter) slotOffset(slot int32) int64 {
 // ---------------------------------------------------------------------------
 // The calling convention, which specs/030-abi.md assigns and no pass performs
 
-// incoming reads the parameter list off the entry block and places it.
+// incoming reads the parameter placement off the function.
 //
-// An incoming parameter is an OpArg value in the entry block, in parameter
-// order, and its Aux is the object it names. That is the only description of
-// the signature that reaches this package: ir.Type carries no parameter list
-// for a function kind, so the values are the list.
+// specs/030-abi.md's assignment pass computed it and the allocator has already
+// pre-coloured the arguments from the same answer, so nothing is decided here.
+// What is done here is the join: each OpArg value of the entry block is one
+// word of one parameter, and this finds which.
 func (e *emitter) incoming() error {
-	var types []*ir.Type
+	abi := e.f.ABI
+	if abi == nil {
+		return errors.New("the function has no ABI assignment")
+	}
+	e.frame.in, e.frame.args = wordPlaces(abi.In), abi.ArgsSize
 	for _, v := range e.f.Entry.Values {
-		if v.Op == ssa.OpArg {
-			types = append(types, v.Type)
-			e.args = append(e.args, v)
+		if v.Op != ssa.OpArg {
+			continue
+		}
+		p, ok := e.placeOfArg(v)
+		if !ok {
+			return fmt.Errorf("v%d: %v is not a word of any parameter", v.ID, v.LongString())
+		}
+		e.args = append(e.args, v)
+		e.argPlace = append(e.argPlace, p)
+	}
+	return nil
+}
+
+// placeOfArg returns where one OpArg value arrives.
+//
+// The value names its parameter in Aux and its byte offset within that
+// parameter in AuxInt, which is the pair specs/025-lowering-and-rules.md
+// leaves on every part of a decomposed argument.
+func (e *emitter) placeOfArg(v *ssa.Value) (place, bool) {
+	o, _ := v.Aux.(*ir.Object)
+	av, ok := e.f.ABI.ArgOf(o)
+	if !ok || v.Type == nil {
+		return place{}, false
+	}
+	for j := range av.Parts {
+		p := &av.Parts[j]
+		if p.Off == v.AuxInt && p.Type != nil && p.Type.Size == v.Type.Size {
+			return partPlace(av, p), true
 		}
 	}
-	in, size, err := assign(types)
-	if err != nil {
-		return err
+	if v.Type.Size == 0 {
+		// A parameter of no width occupies no word and no register. It is
+		// still a value, and it still has to be accounted for.
+		return place{off: av.Off, typ: v.Type}, true
 	}
-	e.frame.in, e.frame.args = in, size
-	return nil
+	return place{}, false
 }
 
 // entryArgs places the incoming arguments where the allocation wants them.
 //
-// Two shapes, and the first is the one that produces good code.
+// It is one parallel move: all of them at once, because the home of the first
+// argument can be the register the second arrives in, and a cycle is broken
+// with the scratch register.
 //
-// When every argument has a home of its own, the placement is one parallel
-// move: all of them at once, because the home of the first argument can be the
-// register the second arrives in, and a cycle needs the scratch register.
+// Only the arguments that arrived in registers are moved here, and that is the
+// whole of the reason the move is one instant. A register argument has to be
+// rescued before anything overwrites the register the caller left it in, so
+// every one of them moves at once. An argument that arrived in the argument
+// area is in the caller's frame, where nothing this function does can reach
+// it, so it is read where it is defined instead: loadArg.
 //
-// When two arguments share a home it is not, and this is not a rare case: the
-// allocator gives one register to two values whose live ranges do not overlap,
-// which two arguments often have. A parallel move cannot realise that, because
-// the two moves have one destination. Every argument then goes through the
-// argument area instead: it is stored there at the entry, out of the register
-// the convention delivered it in, and read back where it is defined. The area
-// is the spill space specs/030-abi.md reserves in the caller's frame for
-// exactly this, and it is what the stack-growth tail writes to.
-//
-// specs/030-abi.md's assignment pass is what removes the second shape: with
-// ssa.Target.DefReg pre-colouring an argument, the allocator knows the
-// register is occupied from the entry and never gives it to another value
-// first.
+// The distinction is not a refinement, it is what makes the move a permutation.
+// The allocator may give a stack argument the register a register argument
+// vacated, because their live ranges do not meet; moving both at the entry
+// would put two moves into one destination, and the earlier argument would be
+// destroyed before its last use. Before specs/030-abi.md's assignment pass
+// existed, nothing was pre-coloured, two register arguments could share a home
+// as well, and the answer was to send every argument through the argument
+// area. Pre-colouring removed that half: two register arguments are fixed to
+// two registers.
 func (e *emitter) entryArgs() {
 	e.spillPointerArgs()
 	x := make([]xfer, 0, len(e.args))
 	seen := make(map[ssa.Loc]bool, len(e.args))
 	for i, v := range e.args {
-		if i >= len(e.frame.in) {
-			break
+		if !e.argPlace[i].inReg {
+			continue
 		}
 		e.done[v.ID] = true
 		dst := e.home(v)
@@ -775,49 +807,16 @@ func (e *emitter) entryArgs() {
 			continue // the argument is never read
 		}
 		if seen[dst] {
-			e.argsInFrame = true
+			// Two register arguments in one home is not a parallel move, and
+			// pre-colouring is what makes it impossible. Saying so is cheaper
+			// than the code that used to work around it.
+			e.fail("v%d and an earlier argument share the home %v", v.ID, e.a.Target.LocString(dst))
+			return
 		}
 		seen[dst] = true
-		p := e.frame.in[i]
-		if p.inReg {
-			x = append(x, xfer{dst: dst, src: ssa.RegLoc(ssa.Reg(p.reg)), v: v})
-			continue
-		}
-		// A stack-resident argument stays where the caller put it. The offset
-		// is from the entry stack pointer, so the frame the prologue pushed
-		// has to be added back.
-		x = append(x, xfer{dst: dst, v: v, mem: true, off: e.argOff(i)})
+		x = append(x, xfer{dst: dst, src: ssa.RegLoc(ssa.Reg(e.argPlace[i].reg)), v: v})
 	}
-	if !e.argsInFrame {
-		e.transfer(x)
-		e.markLine(e.f.Entry.Pos)
-		return
-	}
-	// Out of the registers first, into the area the convention already
-	// reserves for them, and then each argument is loaded where it is
-	// defined. An argument that arrived in the frame is already there and
-	// only needs the second half.
-	for i, p := range e.frame.in {
-		if i >= len(e.args) {
-			break
-		}
-		if e.home(e.args[i]).Kind == ssa.LocNone {
-			continue
-		}
-		e.done[e.args[i].ID] = false
-		if !p.inReg || (p.typ != nil && p.typ.HasPointers()) {
-			// A pointer-holding argument is in the area already:
-			// spillPointerArgs put it there, because the arguments bitmap
-			// describes that word whether or not this shape is taken.
-			continue
-		}
-		op, ok := memOpFor(p.typ, true)
-		if !ok {
-			e.fail("an argument of type %v has no store", p.typ)
-			continue
-		}
-		e.mem(op, p.reg, arm64.RSP, e.argOff(i))
-	}
+	e.transfer(x)
 	e.markLine(e.f.Entry.Pos)
 }
 
@@ -847,19 +846,19 @@ func (e *emitter) spillPointerArgs() {
 			e.fail("an argument of type %v has no store", p.typ)
 			continue
 		}
-		e.mem(op, p.reg, arm64.RSP, e.argOff(i))
+		e.mem(op, p.reg, arm64.RSP, e.argOff(*p))
 	}
 }
 
-// argOff returns the offset of an incoming argument from the current stack
+// argOff returns the offset of one incoming word from the current stack
 // pointer.
 //
 // The area starts eight bytes above the entry stack pointer, because the word
 // at the entry stack pointer is where this function saved the link register.
 // The prologue has already moved the stack pointer by then, so the frame is
 // added back.
-func (e *emitter) argOff(i int) int64 {
-	return e.frame.size + linkSlot + e.frame.in[i].off
+func (e *emitter) argOff(p place) int64 {
+	return e.frame.size + linkSlot + p.off
 }
 
 // loadArg reads one incoming argument out of the argument area into its home.
@@ -874,7 +873,7 @@ func (e *emitter) loadArg(v *ssa.Value) {
 			i = k
 		}
 	}
-	if i < 0 || i >= len(e.frame.in) {
+	if i < 0 {
 		e.fail("v%d: an argument outside the entry block", v.ID)
 		return
 	}
@@ -891,7 +890,7 @@ func (e *emitter) loadArg(v *ssa.Value) {
 	if dst.Kind == ssa.LocReg {
 		reg = e.reg(dst.Reg)
 	}
-	e.mem(op, reg, arm64.RSP, e.argOff(i))
+	e.mem(op, reg, arm64.RSP, e.argOff(e.argPlace[i]))
 	if dst.Kind == ssa.LocSlot {
 		e.store(reg, dst.Slot, v.Type)
 	}
@@ -899,16 +898,12 @@ func (e *emitter) loadArg(v *ssa.Value) {
 
 // xfer is one value that has to end up somewhere.
 //
-// src is where it is now. mem marks a source that is neither a register nor a
-// slot but a fixed offset from the stack pointer, which is where an incoming
-// stack argument lives.
+// src is where it is now, and a src of no kind is a value that is recomputed
+// into its destination rather than moved.
 type xfer struct {
-	dst  ssa.Loc
-	src  ssa.Loc
-	v    *ssa.Value
-	mem  bool
-	off  int64
-	rmat bool // the source is nothing and the value is recomputed
+	dst ssa.Loc
+	src ssa.Loc
+	v   *ssa.Value
 }
 
 // transfer performs a set of moves that happen at one instant.
@@ -940,28 +935,7 @@ func (e *emitter) transfer(x []xfer) {
 		if m.src.Kind == ssa.LocReg {
 			continue
 		}
-		switch {
-		case m.mem && m.dst.Kind == ssa.LocReg:
-			op, ok := memOpFor(m.v.Type, false)
-			if !ok {
-				e.fail("v%d: no load for type %v", m.v.ID, m.v.Type)
-				continue
-			}
-			e.mem(op, e.reg(m.dst.Reg), arm64.RSP, m.off)
-		case m.mem:
-			// The argument arrives in the caller's frame and the allocation
-			// gave it a slot of its own, so it is copied through the scratch
-			// register the materialisation reserves.
-			op, ok := memOpFor(m.v.Type, false)
-			if !ok {
-				e.fail("v%d: no load for type %v", m.v.ID, m.v.Type)
-				continue
-			}
-			e.mem(op, moveScratch, arm64.RSP, m.off)
-			e.move(m.dst, ssa.RegLoc(ssa.Reg(moveScratch)), m.v)
-		default:
-			e.move(m.dst, m.src, m.v)
-		}
+		e.move(m.dst, m.src, m.v)
 	}
 }
 
@@ -1037,8 +1011,7 @@ const moveScratch = arm64.RegTrampHi
 // callValue emits a call: the arguments into their registers, the call
 // itself, and the results out of theirs.
 func (e *emitter) callValue(v *ssa.Value) {
-	types := e.callArgTypes(v)
-	places, _, err := assign(types)
+	places, lo, _, err := e.callArgs(v)
 	if err != nil {
 		e.fail("v%d: %v", v.ID, err)
 		return
@@ -1050,12 +1023,13 @@ func (e *emitter) callValue(v *ssa.Value) {
 	indirect := v.Op == ssa.OpARM64CALLclosure || v.Op == ssa.OpARM64CALLinter
 	var entry, ctx *ssa.Value
 	if indirect {
-		if len(args) < 2 {
+		if len(args) < lo || lo < 2 {
 			e.fail("v%d: an indirect call with no entry point", v.ID)
 			return
 		}
-		entry, ctx, args = args[0], args[1], args[2:]
+		entry, ctx = args[0], args[1]
 	}
+	args = args[lo:]
 
 	x := make([]xfer, 0, len(args)+1)
 	if v.Op == ssa.OpARM64CALLclosure {
@@ -1076,8 +1050,7 @@ func (e *emitter) callValue(v *ssa.Value) {
 			e.storeArg(a, linkSlot+p.off)
 			continue
 		}
-		x = append(x, xfer{dst: ssa.RegLoc(ssa.Reg(p.reg)), src: e.home(a), v: a,
-			rmat: e.home(a).Kind == ssa.LocNone})
+		x = append(x, xfer{dst: ssa.RegLoc(ssa.Reg(p.reg)), src: e.home(a), v: a})
 	}
 	e.transfer(x)
 
@@ -1111,6 +1084,19 @@ func (e *emitter) callValue(v *ssa.Value) {
 		e.wordIf(w, ok, "BL %s", c.name)
 	}
 	e.results(v)
+}
+
+// resultPlaces places a list of result values.
+//
+// specs/030-abi.md walks the results with the register counters restarted, and
+// the allocator read the same walk when it pre-coloured a call's results and a
+// return's values.
+func (e *emitter) resultPlaces(types []*ir.Type) ([]place, error) {
+	vals, _, err := ssa.ABIResults(e.a.Target, types)
+	if err != nil {
+		return nil, err
+	}
+	return valuePlaces(vals)
 }
 
 // storeArg writes one outgoing argument into the frame.
@@ -1161,7 +1147,7 @@ func (e *emitter) results(call *ssa.Value) {
 			return
 		}
 	}
-	places, _, err := assign(types)
+	places, err := e.resultPlaces(types)
 	if err != nil {
 		e.fail("v%d: %v", call.ID, err)
 		return
@@ -1193,7 +1179,7 @@ func (e *emitter) ret(v *ssa.Value) {
 	for _, a := range args {
 		types = append(types, a.Type)
 	}
-	places, _, err := assign(types)
+	places, err := e.resultPlaces(types)
 	if err != nil {
 		e.fail("v%d: %v", v.ID, err)
 		return

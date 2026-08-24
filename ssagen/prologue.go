@@ -126,7 +126,10 @@ type frame struct {
 	// nosplit reports that no stack-growth check is emitted.
 	nosplit bool
 
-	// in places each incoming argument, in parameter order.
+	// in holds one entry per word of the incoming arguments, in the order
+	// specs/030-abi.md assigns them. A five-field struct in registers is five
+	// entries, because the spill and the store the arguments bitmap needs are
+	// per word.
 	in []place
 }
 
@@ -141,80 +144,78 @@ func (f *frame) locals() int64 {
 	return f.size - 8
 }
 
-// place is where one argument or result travels.
+// place is where one word of an argument or a result travels.
+//
+// It is one part of one top-level value: specs/030-abi.md assigns a register
+// per word, so a five-field struct in registers is five of these.
 type place struct {
-	// reg is the register the value arrives in, when inReg is set.
+	// reg is the register the word arrives in, when inReg is set.
 	reg   arm64.Reg
 	inReg bool
 
-	// off is the byte offset of the value in the argument area. Every
-	// argument has one, including one that travels in a register, because the
-	// stack-growth tail spills it there.
+	// off is the byte offset of the word in the argument area. Every word has
+	// one, including one that travels in a register, because the stack-growth
+	// tail spills it there.
 	off int64
 
-	// size and typ describe the value, so the spill can use the right store.
-	size int64
-	typ  *ir.Type
+	// typ describes the word, so the spill can use the right store.
+	typ *ir.Type
 }
 
-// assign places arguments or results, per specs/030-abi.md.
+// wordPlaces flattens an assignment into one entry per word.
 //
-// The walk is the spec's: each value takes the next register of its class, and
-// a value that does not fit in one goes to the stack. The area offset advances
-// for every value whether or not it took a register, which is the spill space
-// the stack-growth tail writes to.
-//
-// Floating point is not placed. obj/arm64 encodes no floating-point
-// instruction and ssa/rules refuses the operations, so a float here would be
-// placed correctly and then never encoded. The error names it instead.
-func assign(types []*ir.Type) ([]place, int64, error) {
-	out := make([]place, 0, len(types))
-	next := 0
-	off := int64(0)
-	for i, t := range types {
-		if t == nil {
-			return nil, 0, fmt.Errorf("argument %d has no type", i)
+// It is what the stack-growth tail and the arguments bitmap need: both work a
+// word at a time, and a five-field struct in registers is five words. The
+// offsets become absolute, because a part's offset is within its value.
+func wordPlaces(vals []ssa.ABIValue) []place {
+	out := make([]place, 0, len(vals))
+	for i := range vals {
+		v := &vals[i]
+		for j := range v.Parts {
+			out = append(out, partPlace(v, &v.Parts[j]))
 		}
-		class, ok := ssa.ClassOfType(t)
-		if class == ssa.ClassFloat {
-			return nil, 0, fmt.Errorf("argument %d is %v, and this target has no floating-point encoder", i, t)
-		}
-		if t.Align > 0 {
-			off = roundUp(off, t.Align)
-		}
-		p := place{off: off, size: t.Size, typ: t}
-		if ok && next < len(argRegs) {
-			p.reg, p.inReg = argRegs[next], true
-			next++
-		} else if !ok {
-			// A value that does not fit one register travels on the stack
-			// whole, and specs/030 makes that all-or-nothing per argument.
-			// Nothing in rule groups 1 to 5 produces one, so the register
-			// counter is not advanced for its words.
-			return nil, 0, fmt.Errorf("argument %d is %v, which does not fit one register", i, t)
-		}
-		off += t.Size
-		out = append(out, p)
 	}
-	return out, roundUp(off, 8), nil
+	return out
 }
 
-// argRegs is the integer argument and result sequence of specs/030-abi.md.
-//
-// An array rather than a derivation from ssa.Target, because the target's
-// register numbers are the allocator's and this file speaks obj/arm64's. The
-// two agree by construction: ssa.Arm64Reg is the identity on integer
-// registers.
-var argRegs = [16]arm64.Reg{
-	arm64.R0, arm64.R1, arm64.R2, arm64.R3, arm64.R4, arm64.R5, arm64.R6, arm64.R7,
-	arm64.R8, arm64.R9, arm64.R10, arm64.R11, arm64.R12, arm64.R13, arm64.R14, arm64.R15,
-}
-
-func roundUp(n, align int64) int64 {
-	if align <= 1 {
-		return n
+func partPlace(v *ssa.ABIValue, p *ssa.ABIPart) place {
+	pl := place{off: v.Off + p.Off, typ: p.Type}
+	if v.InReg && p.Reg != ssa.NoReg {
+		pl.reg, pl.inReg = arm64.Reg(p.Reg), true
 	}
-	return (n + align - 1) / align * align
+	return pl
+}
+
+// valuePlaces returns one entry per value passed, which is what a call site
+// and a return need: there the placement and the operand list are walked
+// together, so they must have the same length.
+//
+// A value of more than one word is refused. specs/030-abi.md's assignment pass
+// splits every such value that travels in registers, so one that reaches here
+// travels in the argument area whole, and the code generator has no form that
+// writes it there.
+//
+// A value a floating-point register would carry is refused too. obj/arm64's
+// floating-point encoder is specs/042 group 6 and the rules that need it are
+// not written, so such a value would be placed correctly and never encoded.
+func valuePlaces(vals []ssa.ABIValue) ([]place, error) {
+	out := make([]place, 0, len(vals))
+	for i := range vals {
+		v := &vals[i]
+		if len(v.Parts) > 1 {
+			return nil, fmt.Errorf("value %d is %v, which does not fit one register", i, v.Type)
+		}
+		if len(v.Parts) == 0 {
+			// A value of no width occupies no register and no word.
+			out = append(out, place{off: v.Off, typ: v.Type})
+			continue
+		}
+		if c, _ := ssa.ClassOfType(v.Parts[0].Type); c == ssa.ClassFloat {
+			return nil, fmt.Errorf("value %d is %v, and this target has no floating-point encoder", i, v.Type)
+		}
+		out = append(out, partPlace(v, &v.Parts[0]))
+	}
+	return out, nil
 }
 
 // linkSlot is the word at the bottom of the frame that holds the saved link
@@ -239,6 +240,7 @@ const linkSlot = 8
 // arguments are.
 func (e *emitter) layout() error {
 	f := &e.frame
+	abi := e.f.ABI
 
 	// The outgoing argument area is the largest a call needs. A call whose
 	// arguments all travel in registers still needs the space, because the
@@ -289,11 +291,15 @@ func (e *emitter) layout() error {
 	if !frameless {
 		cfg.OutArgs = linkSlot + f.outArgs
 	}
-	for i := range f.in {
+	// The arguments bitmap describes the area by whole parameters and not by
+	// the words they were split into. The type of a parameter carries the
+	// pointer map the collector reads, and reassembling it from the parts
+	// would be a second computation of something ir.Layout already did.
+	for i := range abi.In {
 		cfg.Args = append(cfg.Args, ssa.FrameArg{
 			Name: fmt.Sprintf("arg%d", i),
-			Off:  f.in[i].off,
-			Type: f.in[i].typ,
+			Off:  abi.In[i].Off,
+			Type: abi.In[i].Type,
 		})
 	}
 	fr, err := ssa.LayoutFrame(e.f, items, cfg)
@@ -322,6 +328,20 @@ func (e *emitter) layout() error {
 			e.frames[it.Obj] = it.Off
 		}
 	}
+	// A parameter the register set could not hold stays where the caller
+	// wrote it, so its address is in the incoming argument area rather than
+	// in the locals. The layout knows nothing about it, because
+	// specs/030-abi.md's assignment took it out of Func.Frame; this is where
+	// the offset the assignment gave it becomes an offset from the stack
+	// pointer.
+	for i := range abi.In {
+		av := &abi.In[i]
+		if !av.Home || av.Obj == nil {
+			continue
+		}
+		e.frames[av.Obj] = f.size + linkSlot + av.Off
+	}
+
 	f.nosplit = f.size == 0 || (f.leaf && f.size < stackSmall)
 	return nil
 }
@@ -367,49 +387,29 @@ func (e *emitter) checkFrame(frameless bool) error {
 	return nil
 }
 
-// callArgsSize returns the size of the argument area one call needs.
+// callArgs places the operands of one call.
 //
-// The callee's signature is not available: specs/021's call operations carry
-// the callee as an *ir.Object whose type is the bare function kind, so the
-// only description of the arguments is the values passed. That is exact for
-// the calls rule group 5 produces and it is what is used.
-func (e *emitter) callArgsSize(v *ssa.Value) (int64, error) {
-	types := e.callArgTypes(v)
-	_, size, err := assign(types)
+// The placement is ssa.ABICallArgs and not a second walk here, because the
+// allocator pre-coloured the same operands from the same function: two
+// placements that disagree is a call that reads its arguments from the wrong
+// place. lo is the index of the first operand in v.Args, so the caller can
+// walk the operands and the placement together.
+func (e *emitter) callArgs(v *ssa.Value) (pl []place, lo int, size int64, err error) {
+	vals, lo, size, err := ssa.ABICallArgs(e.a.Target, v)
 	if err != nil {
-		return 0, fmt.Errorf("v%d (%v): %w", v.ID, v.Op, err)
+		return nil, 0, 0, fmt.Errorf("v%d (%v): %w", v.ID, v.Op, err)
 	}
-	return size, nil
+	pl, err = valuePlaces(vals)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("v%d (%v): %w", v.ID, v.Op, err)
+	}
+	return pl, lo, size, nil
 }
 
-// callArgTypes returns the types of the values a call passes, in order.
-//
-// The memory argument is not one of them, and neither is the entry point an
-// indirect call computes: lowering puts that in front of the argument list, so
-// it is dropped here rather than counted as an argument.
-func (e *emitter) callArgTypes(v *ssa.Value) []*ir.Type {
-	args := v.Args
-	if len(args) > 0 && v.Op.TakesMemory() {
-		args = args[:len(args)-1]
-	}
-	switch v.Op {
-	case ssa.OpARM64CALLclosure, ssa.OpARM64CALLinter:
-		// Two words in front of the arguments and neither is one. Lowering
-		// puts the entry point first, and the value it was loaded out of is
-		// second: the closure, which specs/030-abi.md passes in the closure
-		// register rather than in the argument sequence, or the interface
-		// table, which is read here and not passed at all.
-		if len(args) > 2 {
-			args = args[2:]
-		} else {
-			args = nil
-		}
-	}
-	out := make([]*ir.Type, 0, len(args))
-	for _, a := range args {
-		out = append(out, a.Type)
-	}
-	return out
+// callArgsSize returns the size of the argument area one call needs.
+func (e *emitter) callArgsSize(v *ssa.Value) (int64, error) {
+	_, _, size, err := e.callArgs(v)
+	return size, err
 }
 
 // prologue emits the stack-growth check and the frame setup.
