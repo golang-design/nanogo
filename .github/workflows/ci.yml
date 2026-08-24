@@ -84,6 +84,34 @@ jobs:
     - name: Test under the race detector
       run: go test -race ./...
 
+  # A compiler must build from any host: nanogo targets arm64 and amd64, and
+  # neither target may need a host of the same architecture. This job exists
+  # because that was broken and the ordinary test matrix did not say so: a file
+  # named machop_arm64.go carried a GOARCH constraint in its name, so the arm64
+  # machine operation table was excluded on every non-arm64 host and the
+  # package referencing it failed to build. The macOS runner is arm64 and was
+  # green throughout.
+  cross:
+    name: cross-compile
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.27.x'
+        check-latest: true
+    - name: Build for every target
+      env:
+        CGO_ENABLED: '0'
+      run: |
+        set -e
+        for pair in darwin/arm64 linux/amd64 linux/arm64; do
+          GOOS=${pair%/*} GOARCH=${pair#*/}
+          echo "--- $GOOS/$GOARCH"
+          GOOS=$GOOS GOARCH=$GOARCH go build ./...
+          GOOS=$GOOS GOARCH=$GOARCH go vet ./...
+        done
+
   gofmt:
     name: gofmt
     runs-on: ubuntu-latest
