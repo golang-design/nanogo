@@ -14,6 +14,15 @@ depends_on:
 The G2 gate of [001](001-bootstrap-gates.md): nanogo builds nanogo on a machine
 with no `go` binary.
 
+**Nothing here is built, and G2 is not the next thing to build.** It follows
+G1, and [060](060-selfhost.md) records that G1's stage 1 does not start. Of the
+four dependencies in the table below, none is retired: [045](045-linker.md) is
+unbuilt, [014](014-package-loader.md) has its G1 half and shells out to
+`go list`, and there is no orchestrator. One claim below is confirmed and worth
+keeping: nanogo's own source still contains no assembly, which
+`internal/hygiene` checks from the other side by walking the tree for file names
+that carry an accidental platform constraint.
+
 ## The test
 
 A container with:
@@ -42,7 +51,7 @@ container.
 G2 does not require [044](044-plan9-assembler.md). This looks wrong and is not.
 
 nanogo's own source contains no assembly. The standard library packages nanogo
-depends on do — `internal/bytealg`, `math`, `sync/atomic`, and the runtime — so a
+depends on do, `internal/bytealg`, `math`, `sync/atomic` and the runtime, so a
 G2 build must handle them somehow, and there are two honest answers:
 
 1. **Build the assembly-containing packages ahead of time**, outside the
@@ -67,7 +76,7 @@ that nothing before it tests:
 1. **The linker produces a working binary from nanogo's own objects.** Until G2,
    `go tool link` has been quietly correcting or tolerating whatever nanogo
    emitted. A relocation type that was wrong but tolerated, a missing auxiliary
-   symbol, an inconsistent ABI record — all of these can survive to G1.
+   symbol, an inconsistent ABI record: all of these can survive to G1.
 2. **The package loader agrees with the `go` command.** Until G2 it has been
    reading `go list`'s answer. Now it computes one, and a disagreement is a
    different program being built.

@@ -10,12 +10,22 @@ depends_on:
 
 # Plan 9 assembler
 
+**This spec describes unbuilt work.** There is no `asm` package. Nothing in the
+tree parses Plan 9 syntax, and the only thing that reads it is a test helper:
+`ssagen`'s prologue test writes assembly text and hands it to `go tool asm` as
+an oracle, which is the reverse of what this spec builds. This was found by
+listing the tree against [002](002-architecture.md)'s package layout.
+
+The dependency this retires is therefore still live.
+[000](000-decisions.md) decision 4 lists `go tool asm` as retired at G3 by this
+spec, and G3 is not reached.
+
 nanogo needs an assembler for one reason: the Go runtime is not all Go. It has
 hand-written `.s` files in Plan 9 syntax, and G3 ([001](001-bootstrap-gates.md))
 is compiling the distribution.
 
 Until G3, `gc` and the `go` command assemble those files in hosted mode
-([000](000-decisions.md) decision 11), and this spec is unbuilt.
+([000](000-decisions.md) decision 11).
 
 ## What has to be assembled
 
@@ -43,7 +53,7 @@ which is work:
 The automatic prologue is the feature that makes this an assembler rather than an
 encoder with a parser. `TEXT` with a frame size generates the stack-growth check,
 the frame setup, and the epilogue at every `RET`, using
-[035](035-goroutines-and-stack-growth.md)'s rules — the same rules the compiler's
+[035](035-goroutines-and-stack-growth.md)'s rules, the same rules the compiler's
 backend uses, which is why they live in one place.
 
 ### `SP` is two things
@@ -63,8 +73,11 @@ must accept.
 and the offset must be that parameter's offset. This catches the most common
 assembly bug, which is a frame offset that was right before a signature changed.
 
-nanogo implements the check. It is cheap, it needs the type information the front
-end already has, and skipping it means a class of runtime bug with no diagnostic.
+nanogo will implement the check. It is cheap, it needs the type information the
+front end already has, and skipping it means a class of runtime bug with no
+diagnostic. The spec said "nanogo implements the check", in the present tense,
+which reads as a statement about the code. Nothing implements it. The tense is
+corrected rather than the decision.
 
 ## Structure
 
@@ -74,6 +87,16 @@ Parser, per-architecture operand parser, and the encoder of
 The sharing is the point. The compiler and the assembler emit the same
 instructions into the same object format, so they differ only in what produces
 the instruction list.
+
+One half of that sharing is already built and is worth naming, because it
+bounds the work this spec still has. `obj` writes the object format and
+`obj/arm64` encodes the instructions, both gated
+([040](040-object-format.md), [041](041-instruction-encoding.md)). What is
+missing is the parser, the per-architecture operand parser, and the automatic
+prologue. The prologue is missing in a narrower sense than the rest:
+`ssagen/prologue.go` emits [042](042-arm64-backend.md)'s four forms today, and
+sharing it means lifting it out of the compiler's emitter rather than writing
+it again.
 
 ## Directives that carry metadata
 

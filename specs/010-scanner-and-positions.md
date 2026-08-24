@@ -1,6 +1,6 @@
 ---
 title: "Source positions and the scanner"
-status: draft
+status: complete
 layer: front end
 gate: G1
 depends_on:
@@ -88,18 +88,31 @@ UTF-8. A leading byte order mark is skipped. An invalid UTF-8 sequence, a NUL
 byte, and a byte order mark anywhere but the first position are errors, matching
 the specification's requirement that source is UTF-8 text.
 
-Decoding is by hand rather than through `utf8.DecodeRune`, with the ASCII case
-first. This is the hottest loop in the front end and the branch is worth it.
+The ASCII byte is decoded inline and `utf8.DecodeRune` runs only where a
+multibyte rune is possible. This is the hottest loop in the front end and the
+branch is worth it.
+
+The spec said decoding is by hand rather than through `utf8.DecodeRune`. The
+code calls `utf8.DecodeRune` in `skipCh` and in `atIdentChar` and decodes only
+the ASCII byte itself. This was found when the scanner was read for this audit.
+The sentence was absolute where the code is a split, and the code's own comment
+already stated the split correctly.
 
 ### Token set
 
 The specification's token set, unchanged: identifiers, keywords, operators and
-punctuation, and four literal kinds. Tokens are a small integer plus, for
-literals and identifiers, the source text as a subslice of the input. No
-allocation per token.
+punctuation, and four literal kinds. A token is a small integer plus, for
+literals and identifiers, the text as a `string`.
 
-Identifiers are interned into a string table on first sight, so that later
-comparison is pointer comparison rather than string comparison.
+**The spec claimed two optimisations that the code does not have.** It said the
+token text is a subslice of the input with no allocation per token, and that
+identifiers are interned into a string table so that later comparison is
+pointer comparison. Neither is true. `Scanner.Lit` is a `string`, and both the
+producers build it with `string(s.src[s.tokOff:s.off])`, which allocates:
+`ident` for a name, `setLit` for every literal. No string table exists anywhere
+in `syntax`. This was found by reading `ident` for this audit.
+The claims are removed rather than turned into work, because the corpus gate
+passes without them and neither has been measured as a cost.
 
 ### Semicolon insertion
 
@@ -144,12 +157,21 @@ one changes the meaning of the next declaration:
 | Comment | Consumer |
 | --- | --- |
 | `//line` and `/*line*/` | this spec, above |
-| `//go:` directives | [016](016-directives-and-pragmas.md) |
-| `//export`, `// +build`, `//go:build` | [014](014-package-loader.md) |
+| `//go:` directives, `//go:build` among them | [016](016-directives-and-pragmas.md) |
+| `// +build` | the same handler, by a second prefix |
 
 A `//go:` comment binds to the next declaration and is attached by the parser,
 so the scanner's job is only to hand it over with its position rather than drop
 it.
+
+**The table used to route `//export`, `// +build` and `//go:build` to
+[014](014-package-loader.md).** Two of those three rows were wrong. `lineComment`
+has no case for `//export`, and the loader never reads the scanner. It reads a
+file's header comments itself, in `parseFileHeader` in `loader/constraint.go`,
+because it decides which files are in a package before anything is parsed.
+`lineComment` routes exactly two prefixes to the pragma handler, `go:` and
+` +build`. This was found by reading `lineComment` against the loader for this
+audit.
 
 ### Errors
 
@@ -162,9 +184,16 @@ The error limit and the reporting interface belong to
 
 ## Testing
 
-- Token-stream equality against `go/scanner` for every file in the distribution.
-  Different messages are allowed; different token streams are not.
-- Position round-trip: for every token, the reported position resolved from the
-  `Pos` equals the position `go/token` reports, including under `//line`.
+All three are built and gated. `syntax` is above the 90% coverage gate, and CI
+sets
+`NANOGO_REQUIRE_CORPUS=1`, which makes a missing corpus fail instead of skip.
+
+- Token-stream equality against `go/scanner`. 19,674 of 19,691 files compared,
+  17 skipped because `go/scanner` rejects them, 0 failures
+  (`syntax/scanner_test.go`). Different messages are allowed; different token
+  streams are not. The reverse direction holds over the corpus today as well:
+  no file that `go/scanner` rejects is read without an error.
+- Position round-trip against `go/token`, including under `//line` and
+  `/*line*/`.
 - A rejection corpus of invalid literals, invalid UTF-8, and misplaced
   separators, each pinned to an exact position.

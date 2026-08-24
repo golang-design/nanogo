@@ -10,9 +10,25 @@ depends_on:
 
 # Escape analysis
 
-Decides, for each allocation, whether it can live in the caller's stack frame or
-must go on the heap. Runs on the IR of [020](020-ir.md), before SSA, because it
-needs to see assignment to fields and passing to calls as Go operations.
+**Nothing in this spec is built.** There is no pass, no graph, no summary and no
+`-m` output. `ir/` holds a builder, a type layout, a node set and a converter,
+and nothing else. What exists is one reserved field, `ir.Object.Escapes`, which
+is assigned nowhere outside a test.
+
+The safe answer is being taken by default, everywhere, which is what makes the
+absence tolerable: the compiler is correct and allocates more than it needs to.
+Two consumers are waiting on it and say so in their own comments. `ssa/build.go`
+cannot put a string concatenation buffer in the frame, because it does not know
+which concatenation escapes. `ir/build.go` keeps a composite literal as one node
+for the same reason. Two rows of [020](020-ir.md)'s lowering table, the closure
+and the composite literal, name this spec as the thing that decides them.
+
+The design below stands. It was reviewed and not disproved, only deferred.
+
+Escape analysis decides, for each allocation, whether it can live in the
+caller's stack frame or must go on the heap. It runs on the IR of
+[020](020-ir.md), before SSA, because it needs to see assignment to fields and
+passing to calls as Go operations.
 
 The safe answer is always "heap". [022](022-optimization-passes.md) explains why
 that stops being acceptable at G3.
@@ -61,15 +77,15 @@ terminates.
 ## Across function boundaries
 
 The whole-program version of this is not affordable. The standard answer, and
-nanogo's, is a **summary per function**: for each parameter, how far it leaks —
+nanogo's, is a **summary per function**: for each parameter, how far it leaks,
 to the heap, to a specific result, or not at all.
 
 Summaries are computed bottom-up over the call graph's strongly connected
 components. Within a component, iterate to a fixed point. Across packages, the
 summary travels in export data ([015](015-export-data.md)).
 
-A call to a function with no summary — indirect, or through an interface nanogo
-did not devirtualise — leaks every pointer argument to the heap. This is the
+A call to a function with no summary, indirect or through an interface nanogo
+did not devirtualise, leaks every pointer argument to the heap. This is the
 conservative case and it is common.
 
 ## The directives
@@ -110,6 +126,9 @@ other.
 
 ## Testing
 
+None of this is written. Recorded because the oracle is the reason this pass is
+cheap to get right, and it should be set up before the first line of the pass:
+
 - `gc` has `-m` output stating each decision, and Go's `test/escape*.go` corpus
   annotates the expected decisions. nanogo emits the same shape of output and
   runs that corpus. This is a rare case of a compiler-internal decision having a
@@ -117,3 +136,12 @@ other.
 - Differential execution with the pass off, per
   [022](022-optimization-passes.md): identical output required.
 - A corpus for the three directives, checked in generated code.
+
+## Deviations
+
+The spec said nothing false. It said nothing about being unbuilt either, and a
+reader of the deck had no way to tell this apart from a pass that ships. The
+state was found by listing `ir/` and grepping for the one field the design
+names: `ir.Object.Escapes` has exactly three mentions in the repository, its
+declaration, its doc comment, and one assertion in `ir/node_test.go` that a
+fresh object has it clear.

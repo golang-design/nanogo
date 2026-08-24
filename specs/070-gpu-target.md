@@ -10,8 +10,10 @@ depends_on:
 
 # GPU targets
 
-Post-v1 and unscheduled. It is specified now for one reason: to fix where it
-attaches, so that no earlier decision is taken to suit it.
+Post-v1 and unscheduled, and nothing in this spec is built: there is no shader
+target, no second consumer of the SSA, and no target-neutral pass list for one
+to attach to. It is specified now for one reason: to fix where it attaches, so
+that no earlier decision is taken to suit it.
 
 [000](000-decisions.md) decision 5 states the constraint and it is the governing
 sentence of this spec: **a GPU backend is a consumer of the SSA and never a

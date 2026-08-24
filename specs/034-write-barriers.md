@@ -18,6 +18,32 @@ those stores observable.
 A missing write barrier does not fail a test. It frees a live object under
 concurrent marking, some of the time.
 
+## Nothing here is built
+
+**nanogo emits no write barrier.** Not one, anywhere, under any condition. The
+word does not appear in the compiler outside this spec: no pass reads
+`runtime.writeBarrier`, no lowering rule builds the diamond, and
+`runtime.gcWriteBarrier` is not in `rtsym`, which is the table
+[031](031-runtime-lowering.md) requires every generated call to come from.
+`rtsym` has a write barrier group and the group has no members.
+
+The three directives are not read either. `//go:nowritebarrier`,
+`//go:nowritebarrierrec` and `//go:yeswritebarrierrec` reach no check, which is
+consistent: a check that rejects a barrier has nothing to reject.
+
+This is safe today, and only because of what nanogo compiles. The barrier is a
+rule about a pointer store to a heap location, and nanogo emits no such store.
+The assignment statement is refused by SSA construction, and so is every form
+that allocates, so the only stores that reach the code generator are the ones
+the compiler introduces itself: a spill to a frame slot, a copy into an
+argument area, a block move between them. Every destination is the stack.
+
+The condition to watch is therefore narrow and it is not "the runtime
+compiles". The first pointer store to a heap location that nanogo emits is the
+point at which this spec stops being a plan and starts being a defect.
+
+The rest of this spec is the design, unchanged.
+
 ## When a barrier is required
 
 A store of a **pointer** to a location that may be in the **heap**.
@@ -80,8 +106,8 @@ the runtime uses all three:
 
 The recursive check is a real graph traversal over the package's call graph, not
 a local check. It exists because the runtime has functions that run in contexts
-where the barrier's own machinery is not available — inside the collector, on the
-system stack with no goroutine — and a barrier there deadlocks or corrupts.
+where the barrier's own machinery is not available, inside the collector or on
+the system stack with no goroutine, and a barrier there deadlocks or corrupts.
 
 This check is a **G3 requirement**. Nothing outside the runtime uses these
 directives, and the runtime is compiled at M9 in [003](003-sequencing.md). It is

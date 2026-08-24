@@ -12,6 +12,37 @@ depends_on:
 
 The G1 gate of [001](001-bootstrap-gates.md), as a procedure that can be run.
 
+## This procedure cannot be run yet
+
+Stage 1 does not start. The blocker is not a percentage of the language, it is
+four categorical refusals in `driver.Compile`, and nanogo's own packages trip
+all four:
+
+| Refused | Why | Owner |
+| --- | --- | --- |
+| a package that imports another package | there is no reader for `gc`'s export data | [015](015-export-data.md) |
+| a package with a package-level variable | a global needs a data symbol | [020](020-ir.md), [040](040-object-format.md) |
+| a package with an `init` function | an init needs a package init task | [040](040-object-format.md) |
+| a package with assembly | an assembly definition is ABI0 and needs a wrapper | [030](030-abi.md) |
+
+Every package of nanogo has imports. So the count of nanogo packages that nanogo
+compiles today is zero, and no arithmetic over the language subset changes that.
+
+The second-order measure is the language, and it says the same thing more
+slowly. The IR builder produces 39,947 functions for 536 packages of the
+distribution. SSA construction accepts 8,238 of them, one in five. Every
+accepted function lowers completely to arm64 machine operations and 8,237 carry
+a stack map, so the back half of the pipeline is in better shape than the front
+of it. The largest single refusal is the assignment statement: 24,031 functions
+are refused with `assign: statement is not built yet`. `ssagen`'s link-and-run
+tests say the same in a comment, that their sources contain no assignment
+because `ssa.Build` refuses one, and that this is the widest program the
+pipeline compiles.
+
+A compiler that cannot compile `x = 1` is a long way from compiling itself. The
+sections below are the procedure for the day it is not, and they are unchanged
+because the procedure is not what was wrong.
+
 ## The build
 
 ```
@@ -44,7 +75,7 @@ and it is worth listing because it sizes M5 in [003](003-sequencing.md):
 
 The standard library entries are the load-bearing ones. nanogo's dependency set
 reaches a large part of `fmt`, `go/types`' fork, and the `internal` packages
-underneath them, so "the subset nanogo uses" is not small — it is most of the
+underneath them, so "the subset nanogo uses" is not small: it is most of the
 language exercised by ordinary application code, and none of the language
 exercised only by the runtime.
 

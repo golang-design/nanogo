@@ -9,6 +9,27 @@ depends_on:
 
 # amd64 backend
 
+**This spec describes unbuilt work.** There is no `obj/amd64` package, no amd64
+rule set, and no amd64 machine operation set. `darwin/arm64` is the only target
+that exists, and `driver/compile.go` refuses any other `GOARCH` with an error
+that names this spec as the reason. This was found by listing the tree: `obj/`
+holds `arm64` and nothing else.
+
+The middle end's amd64 seams do exist, and that is the part worth reporting
+rather than the absence. `ssa/target.go` carries a `TwoAddress` predicate
+for the operand form that belongs to amd64 alone, `ssa/regalloc.go` emits the
+`Fixup` copy it needs, and `ssa/frame.go` carries the case where the call
+instruction pushes the return address above the frame. So three of the hooks
+[000](000-decisions.md) decision 5 predicts were built in advance of the target
+that needs them. Whether they are the right hooks is untested, because only one
+target has ever used them, and one thing this section asks for is not there at
+all: the allocator has no pre-coloured operand, only the pre-coloured argument
+and result that [030](030-abi.md) fixes.
+
+Everything below is the design, unchanged, and none of it is code.
+
+## Purpose
+
 The second target. Its purpose is partly to run on `linux/amd64` and mostly to
 test [000](000-decisions.md) decision 5: **if adding this target requires an edit
 above [025](025-lowering-and-rules.md), the middle end is wrong.**
@@ -24,7 +45,7 @@ a test.
 | Two-address arithmetic | The destination is also a source; [026](026-register-allocation.md)'s fix-up pass exists for this |
 | 16 general registers, some with fixed roles | More spilling; `RSP` and `RBP` are not allocatable and `RCX` is fixed for variable shifts |
 | Complex addressing modes | More rule opportunity, and more rules |
-| Condition codes set as a side effect | Arithmetic sets flags, so a comparison can sometimes be removed — and a rule that reorders across a flag-setting instruction is wrong |
+| Condition codes set as a side effect | Arithmetic sets flags, so a comparison can sometimes be removed, and a rule that reorders across a flag-setting instruction is wrong |
 | Byte and word register aliasing | A write to a 32-bit register zeroes the upper half; a write to an 8-bit one does not |
 
 The last row is the classic source of miscompiles on this target. A 32-bit
@@ -48,7 +69,7 @@ same assumption for an 8-bit or 16-bit operation is not.
 
 The constrained registers are the reason the allocator needs a notion of a
 pre-coloured operand rather than only pre-coloured arguments. That is a change to
-[026](026-register-allocation.md) — and it is a change *inside* the allocator's
+[026](026-register-allocation.md), and it is a change *inside* the allocator's
 existing abstraction, which is why it does not violate the acceptance criterion.
 
 ## Instruction layout iteration

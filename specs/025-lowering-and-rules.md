@@ -1,6 +1,6 @@
 ---
 title: "Lowering: from target-neutral SSA to machine operations"
-status: draft
+status: complete
 layer: middle end
 gate: G1
 depends_on:
@@ -16,11 +16,23 @@ operations: `ARM64ADD`, `ARM64MOVDload`, `ARM64CMP`. Lowering is the pass that
 rewrites one into the other, and it is the only place a target name appears above
 the encoders.
 
+This pass is built, for `arm64`, and gated. `ssa` and `ssa/rules` are both above
+the 90% coverage gate, and `TestARM64RuleCoverage` fails if a target-neutral
+operation has neither a rule nor a stated reason to be deferred; one operation
+is deferred and none is missing.
+
+What lowering sees is narrower than the language, and the narrowing happens
+above it. SSA construction accepts 8,238 of the 39,947 functions the IR builder
+produces for the Go distribution, and [021](021-ssa-construction.md) counts the
+refusals. **All 8,238 lower completely.** Read the two numbers together: this
+pass finishes everything that reaches it, over one fifth of the distribution.
+
 ## Rewrite rules
 
-Both the target-neutral simplifications of [022](022-optimization-passes.md) pass
-3 and the machine selection here are expressed as rewrite rules: a pattern over
-the value graph, a condition, and a replacement.
+The machine selection here is expressed as rewrite rules: a pattern over the
+value graph, a condition, and a replacement. The target-neutral simplifications
+of [022](022-optimization-passes.md) pass 3 are meant to use the same engine,
+and that pass is not written, so the engine has one client today.
 
 ```
 (Add64 (Const64 [c]) (Const64 [d]))  =>  (Const64 [c+d])
@@ -28,10 +40,23 @@ the value graph, a condition, and a replacement.
 (Less32U x y)                        =>  (ARM64LessThanU (CMPW x y))
 ```
 
-Rules are matched bottom-up over a block's values, repeatedly until no rule
-applies. Termination is by construction: every rule either reduces a size measure
-or moves an operation strictly closer to machine form, and a rule that does
-neither is rejected in review.
+Rules are matched forward over a block's values, from the first, and the block
+is walked again until no rule applies.
+
+Termination is asserted, not reviewed, and the assertion is what the engine
+rests on. A selection rule leaves machine and pseudo-operations only, so the
+number of target-neutral values strictly decreases at every application;
+`applyRule` checks exactly that after every rule fires and crashes naming the
+operation if a rule left one behind. A folding rule may only replace an argument
+by one of that argument's own arguments, or merge two values into one, which
+strictly reduces the sum over values of the height of their arguments in an
+acyclic use-def graph. The pass cap of 100 walks per block is therefore not the
+termination argument. It is the assertion that the argument holds: a bad rule
+makes the engine crash rather than hang.
+
+An earlier version of this paragraph said "bottom-up" and put the whole
+termination argument in review. `ssa/lower.go`'s `lowerer.block` walks forward
+from index zero, and `checkRule` runs the check on every application.
 
 ### Written by hand first, generated later
 
@@ -41,7 +66,7 @@ the rules as Go functions, one per operation, matching on argument shape.
 
 This is more verbose per rule and needs no generator, no DSL, and no build step.
 When the rule count makes that intolerable, a generator is added and the rules
-are ported — but not before, because a generator written for twenty rules is a
+are ported, but not before, because a generator written for twenty rules is a
 generator with twenty users' worth of bugs and no test corpus.
 
 The rule *file* is per target, in `ssa/rules/`. The rule *engine* is shared.
@@ -82,19 +107,39 @@ and a struct or array can be any size. `Load` and `Store` of such a type, and a
 string constant, have no single instruction on any target here.
 
 **Splitting them into per-word operations is this pass's work**, and an earlier
-version of this spec did not say so anywhere. That omission was not academic: it
-is the largest single reason a function fails to lower, accounting for 3,164 of
-3,483 refusals over the distribution corpus.
+version of this spec did not say so anywhere. That omission was not academic.
+When it was written, splitting was the largest single reason a function failed
+to lower, at 3,164 of 3,483 refusals over the distribution corpus.
+
+That is discharged. `ssa/decompose.go` exists, and the corpus of
+`ssa/decompose_test.go` now reports 8,238 functions reaching SSA and 8,238
+lowering completely, against 4,755 before the pass. Lowering refuses nothing.
+What is left is residue rather than refusal: after decomposition and the ABI
+assignment, 13 functions still hold a `SelectN` of multi-word type, 3 hold a
+value of array type, and 10 hold a value of struct type. Every one of those
+functions lowers anyway, and no composite call result is read at an index above
+zero, which is the part-numbering error the test exists to catch.
+
+Anything in the deck that still names undecomposed wide values as the largest
+cause of unlowered functions is out of date by one pass. The cause of a function
+not reaching machine code is now construction refusing it, not lowering failing
+on it.
 
 It cannot be pushed into a rule or worked around downstream. A 16-byte `Store`
 cannot become a call to `runtime.memmove`, because `memmove` takes a source
 **address** and a `Store` has a source **value**; there is nothing to take the
 address of. The decomposition has to happen while the value is still a value.
 
-So lowering runs a decomposition step before selection: a value of a multi-word
-type is replaced by one value per machine word, and every operation over it is
-replaced by the corresponding per-word operations. Selection then sees only
-single-register values, which is the property every rule below assumes.
+So decomposition runs before selection: a value of a multi-word type is replaced
+by one value per machine word, and every operation over it is replaced by the
+corresponding per-word operations. Selection then sees only single-register
+values, which is the property every rule below assumes.
+
+It is a pass of its own, `ssa.Decompose`, and not a step inside `ssa.Lower`, and
+the ABI assignment runs between the two. `driver/compile.go` is where that order
+is written: `Build`, `Decompose`, `AssignABI`, `Lower`. The assignment sits
+there because it finishes the split at the call boundary, which the next
+paragraph is about.
 
 The step has a bound on how many parts it will produce, because decomposition
 trades one memory object for that many simultaneously live values and stops
@@ -108,14 +153,17 @@ pins that its walk and this one produce identical offsets and widths.
 
 ## Operations that lower to calls
 
-Some target-neutral operations have no machine instruction. On both targets these
-include 64-bit division on 32-bit registers, some conversions, and every
-operation in [031](031-runtime-lowering.md)'s table that survived
-[020](020-ir.md).
+Some target-neutral operations have no machine instruction. They lower to calls,
+which means lowering can introduce a call into a block that had none.
+[027](027-liveness-and-stackmaps.md) must therefore run after lowering, because
+a call is a safepoint and safepoints determine stack maps.
 
-These lower to calls, which means lowering can introduce a call into a block that
-had none. [027](027-liveness-and-stackmaps.md) must therefore run after lowering,
-because a call is a safepoint and safepoints determine stack maps.
+On `arm64` the rules that do this are a short list, and it is worth naming
+because each one is a contract with the runtime rather than an instruction
+choice: a wide move becomes `runtime.memmove`, a zeroing becomes
+`runtime.memclrNoHeapPointers` or `runtime.memclrHasPointers` by pointer map, a
+division guards against zero and branches to `runtime.panicdivide`, and a failed
+bounds check calls the `runtime.goPanic*` family.
 
 ## Address modes
 
@@ -177,10 +225,45 @@ for the ones a test happens to try.
 ## Testing
 
 - The verifier of [021](021-ssa-construction.md), extended with "no
-  target-neutral operation remains".
+  target-neutral operation remains". Built: `lowerer.check` runs over every
+  value after the pass, and `driver/compile.go` runs `ssa.Verify` after it.
 - Per-rule tests: a minimal function whose lowered form is asserted exactly.
-  These are the tests that make a rule change reviewable.
-- Differential execution ([004](004-conformance.md) L3), which is what actually
-  finds a wrong rule, since a wrong rule usually produces code that runs.
+  Built, in `ssa/rules/arm64_test.go` and `ssa/rules/float_test.go`.
 - A rule-coverage report: which target-neutral operations have no rule for a
-  target. It must be empty before that target is claimed to work.
+  target. Built, as `TestARM64RuleCoverage`. It fails on an operation with
+  neither a rule nor an entry in `Deferred`, and it fails on an operation that
+  has both, because two answers to one question is how such a list rots.
+- Differential execution ([004](004-conformance.md) L3), which is what actually
+  finds a wrong rule, since a wrong rule usually produces code that runs. This
+  spec cites that mechanism and does not build it:
+  [004](004-conformance.md) owns it, and it needs a whole program to compile.
+  What proves the pass produces runnable code today is `ssagen`'s 18 cases,
+  which take source text to a linked, running process.
+
+## Deviations
+
+The spec said splitting wide values is the largest single reason a function
+fails to lower, at 3,164 of 3,483. The pass was then written, and the number is
+now zero: `ssa/decompose_test.go`'s corpus reports 8,238 of 8,238 lowering
+completely. The note is kept rather than deleted because the claim it makes
+about *where* the split belongs, above selection and while the value is still a
+value, is what the pass then proved.
+
+The spec said rules are matched bottom-up. `ssa/lower.go`'s `lowerer.block`
+walks a block forward from index zero and repeats. This was found by reading the
+engine while checking the termination argument, which turned out to be checked
+in code rather than in review.
+
+The spec said lowering runs a decomposition step. Decomposition is its own
+exported pass, with the ABI assignment between it and selection. The order is in
+`driver/compile.go`.
+
+The spec cited [022](022-optimization-passes.md) pass 3 as the engine's other
+client. That pass does not exist.
+
+Accurate and left alone: the pseudo-operation table, which matches
+`ssa.isPseudo` operation for operation including the exclusion of `MakeResult`;
+the shift-mask derivation, which matches `lowerShift` down to the reason the
+one-instruction conditional select is not used, that `obj/arm64` has no encoder
+for it; and the requirement that constant and address forms be
+rematerialisable.

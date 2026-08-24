@@ -9,6 +9,30 @@ depends_on:
 
 # Optimization passes
 
+**Nothing in this spec is built.** No optimization pass exists in `ssa/` or in
+`ir/`. Rows 1 to 9, 11 and 12 of the list below have no code anywhere in the
+repository, and no flag turns a pass off because there is no pass to turn off.
+Rows 10, 13 and 14 exist and are owned by [025](025-lowering-and-rules.md),
+[026](026-register-allocation.md) and [027](027-liveness-and-stackmaps.md),
+which is where they are gated.
+
+This is a design that has held up rather than a design that shipped, and it
+costs nothing yet: the governing rule below is exactly why. What is missing is
+speed in the generated code, not correctness.
+
+The pipeline that runs today is in `driver/compile.go` and is six calls:
+
+    ssa.Build, ssa.Decompose, ssa.AssignABI, ssa.Lower,
+    ssa.SplitCriticalEdges, ssa.Allocate
+
+`ssa.Verify` runs after `AssignABI` and after `Lower`. Three of those passes are
+not in the ordered list below and have to be: decomposition and the ABI
+assignment split values wider than a register, per
+[025](025-lowering-and-rules.md) and [030](030-abi.md), and
+`SplitCriticalEdges` prepares the graph for
+[026](026-register-allocation.md)'s phi resolution. The list below is a plan for
+the optional work, and it was never the whole pass order.
+
 The governing rule comes from [000](000-decisions.md) decision 10 and is stated
 first because it decides every argument in this spec:
 
@@ -64,9 +88,9 @@ for i := 0; i < len(s); i++ { s[i] = 0 }
 the induction variable's lower bound comes from the initialiser and its upper
 bound from the loop condition, and the check is removed.
 
-nanogo implements the dominator-tree fact propagation and no more. Loop
+nanogo is to implement the dominator-tree fact propagation and no more. Loop
 induction analysis beyond the direct comparison, and the full integer relation
-lattice, are explicitly not implemented. The budget in
+lattice, are excluded by design. The budget in
 [000](000-decisions.md) decision 10 buys the simple version of this pass and not
 the complete one.
 
@@ -94,7 +118,7 @@ dependence. It is the last pass that may reorder anything.
 At G3 nanogo compiles the runtime, and the runtime contains functions marked
 `//go:nowritebarrier` and `//go:nosplit` that assume their locals are on the
 stack. A compiler that heap-allocates everything makes those functions allocate,
-which makes them need write barriers, which makes them fail to compile — and the
+which makes them need write barriers, which makes them fail to compile, and the
 ones that do compile call the allocator from contexts where the allocator cannot
 be called.
 
@@ -118,10 +142,29 @@ accepts all of them.
 
 ## Testing
 
+None of this exists, because no pass does. Recorded so that the mechanism is
+designed before the first pass is written, not after:
+
 - The verifier of [021](021-ssa-construction.md) after every pass.
 - Each pass individually disableable by flag, with a test asserting the program
   still produces the same output with the pass off. This is the mechanical form
-  of the governing rule, and it is what keeps the rule true.
+  of the governing rule, and it is what keeps the rule true. There is no such
+  flag today. `driver/flags.go` parses `-N`, which `gc` uses to disable
+  optimization, and nothing reads it.
 - Differential execution ([004](004-conformance.md) L3) with all passes on and
   all passes off, over the whole corpus. A disagreement isolates to a pass by
   bisection over the flag set.
+
+## Deviations
+
+The spec said the list is ordered and complete. It is neither, and both were
+found by reading `driver/compile.go`, which is the only place the pass order is
+written down in code. It runs three passes this list never named, and none of
+the fourteen it did name except lowering, allocation and liveness.
+
+The spec is also cited by two files that assume its passes exist.
+`ssa/build.go` inserts a bounds check "specs/022 removes the ones prove can
+discharge", and `ssa/dom.go` computes the dominator tree "by the verifier and by
+prove, cse and nilcheckelim in specs/022". The checks are inserted and the tree
+is computed. Nothing removes a check, and no pass named in either comment
+exists.

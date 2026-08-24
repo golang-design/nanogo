@@ -1,6 +1,6 @@
 ---
 title: "Object files: writing goobj"
-status: draft
+status: in progress
 layer: back end
 gate: G1
 depends_on:
@@ -36,7 +36,7 @@ declared.
 
 It failed the easy one. [`spikes/symbolnames`](../spikes/symbolnames) shows the
 assembler rejects any symbol name containing a colon, and the entire compiler
-namespace — `type:`, `go:itab.`, `go:string.` — uses one.
+namespace (`type:`, `go:itab.`, `go:string.`) uses one.
 [032](032-type-descriptors-and-itabs.md) explains why renaming them breaks itab
 pointer identity, which is a correctness failure and not a limitation.
 
@@ -53,6 +53,7 @@ cause. A real object file begins with a text header:
 ```
 go object <goos> <arch> <version> [GOARM64=...] X:<experiments>
 main
+
 !
 ```
 
@@ -60,6 +61,13 @@ The `main` line is present only for package main, and the blank line and `!`
 close the header. **The linker compares the header line, not the magic**, and it
 refuses the first object it reads with "not package main" when the `main` line
 is absent.
+
+The blank line is part of the shape and this spec's listing did not have one.
+`obj.WriteObject` writes the header, then `main` and an empty line for a main
+package, then `!`. A package that is not main gets the header and `!` with
+nothing between them, because the linker reads one thing out of the region and
+stops at the first empty line. This was found by reading the writer against the
+listing.
 
 A consequence for [000](000-decisions.md) decision 11's version pin: the header
 carries the enabled `GOEXPERIMENT` list, and `go env GOEXPERIMENT` does not
@@ -96,7 +104,7 @@ what nanogo writes.
 ### Content-addressable symbols
 
 `HashedDefs` is how the format deduplicates. A symbol whose identity is its
-content — a stack map, a string literal, a type descriptor — is written with its
+content (a stack map, a string literal, a type descriptor) is written with its
 content hash, and the linker keeps one copy across all object files.
 
 Three details, each of which produces silent corruption if guessed:
@@ -202,33 +210,78 @@ zero for $-1$ in the stack map index, and a leading unsafe-point region only
 costs preemption opportunities. It is a real divergence from `gc`'s bytes, and
 it would corrupt any table that genuinely needs a $-1$ prefix.
 
-nanogo produces one per index it uses:
+nanogo produces two, and the count is a correction. This spec listed four
+indices and the writer emits two, which `ssa/stackmap.go` declares and
+`ssagen/stackmap.go` fills:
 
 | Index | Contents |
 | --- | --- |
 | `PCDATA_UnsafePoint` | where the frame is inconsistent |
 | `PCDATA_StackMapIndex` | which stack map bitmap is current |
-| `PCDATA_InlTreeIndex` | which inlined function the pc belongs to |
-| `PCDATA_ArgLiveIndex` | which argument liveness map is current |
 
 Plus the line and file tables, which are the same encoding over source positions
 from [010](010-scanner-and-positions.md).
 
-## The fingerprint
+The two that are gone were not dropped, they were never reachable. The spec
+said nanogo produces a `PCDATA_InlTreeIndex` and a `PCDATA_ArgLiveIndex`
+stream; the code declares neither constant. This was found by reading the index
+constants in `ssa/stackmap.go` against the table. The inline tree waits on
+[024](024-inlining-and-devirtualization.md), which is unbuilt, so there is no
+tree to index. Argument liveness is an optimization of the collector's scan and
+nanogo does not compute one.
+
+The `AuxFuncdata` count has the same shape. The format allows one entry per
+`FUNCDATA` index and nanogo writes exactly two, `FUNCDATA_ArgsPointerMaps` and
+`FUNCDATA_LocalsPointerMaps`. `FUNCDATA_StackObjects` is declared in
+`ssa/stackmap.go` and is not written: a stack object record holds an offset to
+the local's type descriptor, and [032](032-type-descriptors-and-itabs.md) has
+no writer for one. The omission is conservative rather than wrong. Such a local
+stays in the locals bitmap for the whole of its marked lifetime, so the
+collector scans it and never misses it.
+
+## The fingerprint, which is plumbing with no value in it
 
 Each object records a fingerprint of the package's export data, and each import
 records the fingerprint it was compiled against. The linker checks them and
 refuses a mismatched build.
 
-This is the mechanism that makes hosted mode ([000](000-decisions.md)
-decision 11) safe: a nanogo-compiled package and a `gc`-compiled importer either
-agree or fail loudly.
+That is the format. It is not what nanogo does, and this is the one part of
+this spec's scope that is written down and not built. `obj.Package` has a
+`Fingerprint` field and `obj.AddImport` takes one, and nothing outside `obj`
+ever sets either. `driver/compile.go` records no import at all, so the Autolib
+block is empty and the fingerprint is eight zero bytes. This was found by
+grepping for every writer of the field and finding only the writer that copies
+it into the object.
+
+The consequence is worth stating plainly, because the spec claimed the
+opposite. This spec said the fingerprint is "the mechanism that makes hosted
+mode ([000](000-decisions.md) decision 11) safe: a nanogo-compiled package and
+a `gc`-compiled importer either agree or fail loudly." They do not fail loudly.
+Zero equals zero, so the linker's check passes on any pair, and a nanogo object
+compiled against stale export data links silently. The safety net decision 11
+leans on is declared and absent.
+
+It is absent for a reason above this spec rather than in it: the fingerprint is
+a hash of export data, [015](015-export-data.md) owns export data, and
+[015](015-export-data.md) is unwritten. There is nothing to hash yet. The field
+is the right shape and it waits on its input.
 
 ## Version pinning
 
-The magic string carries a version. nanogo asserts it at startup against the
-pinned Go release. There is no compatibility range and no negotiation: a
-mismatch is an error naming both versions.
+The magic string carries a version. `obj.Magic` is nanogo's, and
+`obj.VerifyToolchain` compares it against what the installed toolchain writes.
+There is no compatibility range and no negotiation: a mismatch is an error
+naming both, and it also names the header line so that a reader can see which
+release produced it.
+
+Two details of when, because "asserts it at startup" was what this spec said
+and is not what happens. The check runs when the driver is about to write an
+object (`driver/compile.go`, `writeOutput`), not at process start, and it runs
+once per process behind a `sync.Once` because it costs an `asm` invocation. A
+compile that fails before it reaches the writer therefore never checks the
+version. That is the right order: a version mismatch is only a problem for an
+object that is written, and running the probe on every invocation would put a
+subprocess in the path of `nanogo -V=full`.
 
 ## What the writer proved
 
@@ -241,8 +294,16 @@ tested against reality rather than argued, and it passed:
 | `go tool objdump` | names the TEXT symbol and decodes its instructions |
 | **`go tool link`** | **links a nanogo object against the real Go runtime into a binary that runs** |
 | Content hash against `gc` | byte-identical for a real `go:string.*` symbol |
-| pc-value tables against `-d=pctab` | byte-identical |
+| pc-value encoder against `-d=pctab` | byte-identical |
 | Determinism | identical bytes across processes, working directories and environments |
+
+The pc-value row is narrower than it looks and is worth reading exactly. The
+test takes the entries `go tool compile -d=pctab=pctospadj` prints, re-encodes
+them with `obj.EncodePCData`, and compares the bytes. It proves the encoding of
+[040](040-object-format.md)'s delta scheme against `gc`'s, which is the part
+that is easy to get wrong. It does not compare nanogo's own line or file stream
+against `gc`'s for the same function, because nanogo and `gc` do not lay out
+the same instructions.
 
 The link result is the one that matters. It is the earliest empirical answer to
 whether nanogo's objects are objects the Go toolchain accepts, and it arrived
@@ -262,10 +323,18 @@ by the linker, at G2, and [045](045-linker.md) owns it.
 
 ## Testing
 
-- `go tool nm` and `go tool objdump` on nanogo's output, compared against `gc`'s
-  for the same source. Structural differences are expected; missing symbols and
-  wrong types are not.
-- The linker is the real test, and it is available from M3 in hosted mode.
-- Determinism ([053](053-determinism.md)): the same source produces the same
-  object bytes. This is the earliest place the G1 fixed point can be broken and
-  the cheapest place to check it.
+Every check below is written and gated, in `obj/write_test.go`:
+
+- `TestNMReadsWhatWasWritten` and `TestObjdumpReadsText` run `go tool nm` and
+  `go tool objdump` on nanogo's output. `TestSameSymbolsAsAssembler` compares
+  the symbol set against `go tool asm`'s for the same input. Structural
+  differences are expected there; missing symbols and wrong types are not.
+- `TestLinkerReadsObject` is the real test, and it is the one that closed
+  [000](000-decisions.md) decision 3's open question.
+- `TestPCDataMatchesCompiler` gates the pc-value encoder against `gc`'s own
+  bytes.
+- `TestDeterminismAcrossProcesses` is determinism
+  ([053](053-determinism.md)): the same source produces the same object bytes,
+  from two processes with different environments and working directories. This
+  is the earliest place the G1 fixed point can be broken and the cheapest place
+  to check it.

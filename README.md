@@ -15,26 +15,29 @@
 ---
 
 > [!IMPORTANT]
-> **nanogo cannot compile a program yet.** The front end, the type checker, the
-> object writer and the arm64 encoder are built and gated. The middle of the
-> compiler, from the typed tree down through SSA to code generation, is not.
-> Do not depend on this.
+> **nanogo compiles some Go programs and cannot compile a package yet.** The
+> whole pipeline is built, from source text to a `goobj` file that `go tool
+> link` links against the real Go runtime into a binary that runs. What it
+> accepts is far narrower than Go. SSA construction refuses an assignment
+> statement, a `range`, a composite literal, a closure, `defer`, `panic` and
+> most builtins, so about one function in five of the standard library gets
+> past it. Do not depend on this.
 
 nanogo is a compiler for the Go language as defined by the
-[Go language specification](https://go.dev/ref/spec). It is small on purpose: the
-goal is a compiler that can be read end to end, under a stated budget of 40,000
-lines, and the measure of the project is that it compiles its own source to a
-fixed point.
+[Go language specification](https://go.dev/ref/spec). It is small on purpose:
+the goal is a compiler that can be read end to end, under a stated budget of
+40,000 lines, and the measure of the project is that it compiles its own source
+to a fixed point.
 
 ## The three gates
 
 "Bootstrap" names three separate properties, and nanogo keeps them separate.
 
-| Gate | Means |
-| --- | --- |
-| **G1** self-compiling | nanogo compiles nanogo, and the result is byte-identical to itself |
-| **G2** toolchain-independent | it builds with no `go` binary on the machine: its own linker, its own package loader |
-| **G3** distribution-compiling | it compiles the pure-Go Go distribution, runtime included |
+| Gate | Means | Reached |
+| --- | --- | --- |
+| **G1** self-compiling | nanogo compiles nanogo, and the result is byte-identical to itself | no |
+| **G2** toolchain-independent | it builds with no `go` binary on the machine: its own linker, its own package loader | no |
+| **G3** distribution-compiling | it compiles the pure-Go Go distribution, runtime included | no |
 
 G2 and G3 are siblings. Neither needs the other.
 [`specs/001-bootstrap-gates.md`](specs/001-bootstrap-gates.md) has the
@@ -43,7 +46,7 @@ definitions and the fixed-point protocol.
 ## Shape of the compiler
 
 ```
-source → scanner → parser → type checker → typed IR → SSA → machine ops → goobj
+source -> scanner -> parser -> type checker -> typed IR -> SSA -> machine ops -> goobj
 ```
 
 Two intermediate representations and no more: a typed tree that still speaks Go,
@@ -55,13 +58,14 @@ Some decisions worth knowing before reading further:
 
 - **The parser is written; the type checker is forked.** Rewriting Go's type
   checker is the largest correctness risk in the project and buys nothing that
-  bootstrapping needs — the reference Go compiler has a forked `go/types` of its
+  bootstrapping needs. The reference Go compiler has a forked `go/types` of its
   own. [`specs/012`](specs/012-type-checking.md)
 - **The compiler emits object files, not assembly text.** Two spikes decided
-  this, and both are in [`spikes/`](spikes). [`specs/040`](specs/040-object-format.md)
-- **It is meant to fit 40,000 lines for v1**, and the accounting in
-  [`specs/000`](specs/000-decisions.md) says it currently does not, by five per
-  cent. That is recorded rather than adjusted.
+  this, and both are in [`spikes/`](spikes/). [`specs/040`](specs/040-object-format.md)
+- **It is meant to fit 40,000 lines for v1.** The compiler is 31,257 lines
+  today, and export data, escape analysis, inlining and generics instantiation
+  are not written. [`specs/000`](specs/000-decisions.md) carries the accounting
+  and the two places to recover the budget if it runs out.
 - **It is object-compatible with `gc`**, so `go build -toolexec=nanogo` can
   compile one package with nanogo while `gc` compiles the rest. That is how the
   compiler is brought up and how a failure gets one suspect.
@@ -75,17 +79,20 @@ Some decisions worth knowing before reading further:
 Every package is gated against an external oracle rather than against itself.
 That is the point: a compiler's bugs are invisible in its own output.
 
+Coverage is stated rounded down, and the gate is 90% per package.
+
 | Package | Coverage | What proves it |
 | --- | --- | --- |
 | [`syntax`](syntax/) | 99% | 19,674 files agree with `go/scanner` on tokens and positions; 16,293 agree with `go/parser` on accept, reject and first error |
-| [`types2`](types2/) | see below | a fork of the Go type checker, re-pointed at nanogo's tree: 613 subtests, a 375-package errorcheck corpus, and it type-checks nanogo's own source |
-| [`loader`](loader/) | 99% | 6,821 files on two platforms agree with `go/build`; 467 packages agree with `go list` |
+| [`types2`](types2/) | see below | a fork of the Go type checker, re-pointed at nanogo's tree: 613 subtests, a 375-entry errorcheck corpus, and it type-checks nanogo's own source |
+| [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 521 packages agree with `go list` |
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
-| [`obj/arm64`](obj/arm64/) | 99% | 864,092 encodings agree with `go tool asm`, with none disagreeing |
-| [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 4.2M nodes |
-| [`ssa`](ssa/) | 96% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant; **every function** of the distribution's 536 buildable packages compiles |
-| [`ssagen`](ssagen/) | 91% | emits machine code that **links and runs**, and stack maps a real collector honours |
-| [`rtsym`](rtsym/) | 100% | 41 runtime signatures checked against the runtime's own source |
+| [`obj/arm64`](obj/arm64/) | 99% | 963,460 encodings agree with `go tool asm`, with none disagreeing |
+| [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 39,947 functions and 4,188,075 nodes |
+| [`ssa`](ssa/) | 96% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant |
+| [`ssa/rules`](ssa/rules/) | 97% | the arm64 rule set, checked by lowering the corpus and by a verifier after every rule |
+| [`ssagen`](ssagen/) | 92% | emits machine code that **links and runs**, and stack maps a real collector honours |
+| [`rtsym`](rtsym/) | 100% | 45 runtime signatures checked against the runtime's own source |
 | [`driver`](driver/) | 97% | a real `go build -toolexec` completes |
 
 `types2` is excluded from the coverage gate, with the reason recorded in
@@ -93,21 +100,44 @@ That is the point: a compiler's bugs are invisible in its own output.
 is a fork, and the gate that replaces coverage is upstream's own test suite,
 ported with the sources.
 
+## How far it reaches
+
 **nanogo compiles Go source to a running program.** `ssagen`'s `TestLinkAndRun`
-takes eight functions from source text through the whole pipeline to a process
-that returns the right answer, including a call into `gc`-compiled code. Its
-stack maps are proved by a collector: an object reachable only from a
-nanogo frame slot survives a collection, the same object with the slot killed is
-freed, and 200,000 frames are grown, copied and unwound.
+is the proof: 18 programs go from source text through the whole pipeline to a
+process that returns the right answer, and several of them call into, or are
+called from, `gc`-compiled code, so the calling convention is checked across the
+toolchain boundary. Its stack maps are proved by a collector: an object
+reachable only from a nanogo frame slot survives a collection, the same object
+with the slot killed is freed, and 200,000 frames are grown, copied and unwound.
 
-**All 8,238 functions of the distribution's 536 buildable packages compile** to
-arm64 machine code, and 8,237 of them carry stack maps.
+The honest measure of reach is the corpus, and it is one number with two halves.
 
-That is code generation, and it is not a working compiler. What stands between
-here and [`specs/060`](specs/060-selfhost.md)'s fixed point is the language
-itself: generics instantiation, `defer` and `panic`, goroutines and channels,
-interfaces beyond equality, and the reflection metadata a running program needs.
-[`specs/003`](specs/003-sequencing.md) says which milestone owns each.
+**8,238 of those functions reach SSA construction, and every one of them lowers
+completely** to arm64 machine operations. 8,237 of the 8,238 carry a stack map.
+Nothing is left undecomposed except 13 functions holding a wide `SelectN`, 3
+holding an array and 10 holding a struct.
+
+The other four functions in five never reach SSA at all. Construction refuses
+them by name, and the counts say what is missing:
+
+| Functions refused | Because construction does not build |
+| --- | --- |
+| 24,031 | an assignment statement |
+| 1,377 | `len` |
+| 992 | a `switch` whose clauses are not block nodes |
+| 984 | `range` |
+| 903 | a composite literal |
+| 510 | `panic` |
+| 461 | a closure |
+| 222 | a type switch |
+| 180 | a slice expression |
+| 102 | an index of a map |
+| the rest | type assertions, `append`, `make`, `new`, `select`, `send`, `recv`, `defer`, `print`, and conversions between named types |
+
+So the back half of the compiler is real and the front of the middle end is not
+finished. What stands between here and
+[`specs/060`](specs/060-selfhost.md)'s fixed point is the language itself.
+[`specs/003`](specs/003-sequencing.md) says which milestone owns each piece.
 
 ## Specs
 
@@ -115,9 +145,17 @@ interfaces beyond equality, and the reflection metadata a running program needs.
 [`specs/000-decisions.md`](specs/000-decisions.md), which is normative, then
 [`specs/003-sequencing.md`](specs/003-sequencing.md) for the order of work.
 
-The specs are corrected by the code rather than defended against it. Roughly
-thirty defects have been found by implementing them, and each correction says
-what was wrong and how it was found.
+The specs are corrected by the code rather than defended against it. Each spec
+carries a status: `draft` means nothing is built, `in progress` means part of it
+is, `complete` means its scope is built and gated. Where the code disproved a
+spec, the spec says what was wrong and how it was found, because that record is
+worth more than the claim it replaced.
+
+The numbers in this file and in
+[`specs/003-sequencing.md`](specs/003-sequencing.md) are gated. A test in
+[`internal/hygiene/`](internal/hygiene/) reads them out of the prose and fails
+when they disagree with what the tests measure, because every one of them was
+true on the day it was written and several had stopped being true.
 
 ## Spikes
 

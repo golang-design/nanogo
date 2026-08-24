@@ -15,6 +15,20 @@ The G3 gate of [001](001-bootstrap-gates.md): nanogo compiles the Go source tree
 at `~/dev/go.dev/go`, in the `CGO_ENABLED=0` configuration, and the result passes
 the distribution's own tests.
 
+**Nothing here is built.** No package of the distribution is compiled by nanogo,
+and the requirements in the table below belong to specs that are unbuilt in
+turn: [044](044-plan9-assembler.md), [034](034-write-barriers.md),
+[035](035-goroutines-and-stack-growth.md), [023](023-escape-analysis.md).
+
+The distribution is nevertheless the corpus the front end is already measured
+against, which is why this gate is closer to reachable than it reads. The IR
+builder walks 536 packages of 663, producing 39,947 functions and 4,188,075
+nodes, with 126 packages skipped (31 for `cgo`, 94 with no Go files, 1 with a
+type error) and 72 built partially. [004](004-conformance.md) has the rest of
+the corpus counts. What none of that says is that a package compiles: SSA
+construction accepts one function in five, and [060](060-selfhost.md) has that
+number and the refusals behind it.
+
 ## The scope, bounded honestly
 
 | In | Out |

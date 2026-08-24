@@ -17,11 +17,37 @@ that crashes.
 
 This spec is the complete table, with what nanogo must do and when.
 
+## What is built
+
+**No directive changes generated code today.** The table below is a plan.
+
+What is built is the plumbing, and it is built up to its last step:
+
+| Stage | State |
+| --- | --- |
+| The scanner routes a `//go:` or `// +build` comment to a handler, with its position | built ([010](010-scanner-and-positions.md)) |
+| The parser accumulates directives and binds them to the declaration that follows | built |
+| The parser hands back a directive that no declaration claimed, so the handler can reject it | built |
+| `ir.Func` carries the directives of the declaration it was built from | built |
+| The driver's handler records anything | **not built**: `pragmaHandler` in `driver/compile.go` returns nil |
+| Any pass reads a directive | **not built** |
+
+Because the handler returns nil, `ir.Func.Pragma` is always nil, and the one
+place the type checker tests a pragma, upstream's `Nointerface` check in
+`types2/decl.go`, cannot fire. The chain is complete except at its two ends.
+
 ## Attachment
 
 [010](010-scanner-and-positions.md) routes the comment to the parser with its
-position. The parser attaches it to the declaration that follows, and
-[012](012-type-checking.md) copies it onto the object when the object is created.
+position. The parser attaches it to the declaration that follows.
+
+The spec then had [012](012-type-checking.md) copy the directive onto the object
+when the object is created. That is not what the code does. The directive
+travels on the syntax declaration into `ir.Func.Pragma`, and the checker never
+sees one. This was found by grepping `types2` for `Pragma` during this audit,
+which returns one hit, and that hit is upstream's own code. The IR is the better
+place for the same reason [012](012-type-checking.md) gives for layout: the
+consumers of a directive are all below the checker.
 
 Two rules:
 
@@ -32,6 +58,13 @@ Two rules:
 2. An unrecognised `//go:` directive is an error in nanogo's own source and a
    warning elsewhere, because new directives appear in new Go releases and
    [000](000-decisions.md) decision 11 pins nanogo to one.
+
+Neither rule is enforced yet, and that is a design choice rather than an
+omission. The parser decides neither. It calls the handler a second time with
+the directives no declaration claimed, and the handler decides whether a
+misplaced directive is worth an error. `clearPragma` says so in as many words.
+Both rules therefore remain decisions this spec owns, and the code that will
+carry them is `driver`, not `syntax`.
 
 ## The table
 
@@ -58,6 +91,15 @@ failure mode at run time is a stack overflow in code that cannot grow the stack,
 inside the scheduler. [035](035-goroutines-and-stack-growth.md) owns the
 computation.
 
+It is also the one row where the code contradicts this spec rather than lagging
+it. `ssagen/prologue.go` sets a function's `nosplit` flag from the frame size
+and from whether the function is a leaf, and never from a directive. Omitting
+the check for a function that cannot overflow is sound on its own terms. The
+consequence is that a `//go:nosplit` on any other function is dropped in
+silence, which is the exact failure mode rule 1 above exists to prevent. The
+chain-depth computation does not exist at all. This was found by reading
+`prologue.go` for its use of the word during this audit.
+
 `//go:linkname` deserves another. It breaks the package boundary and the
 standard library uses it heavily, in both directions: pulling a runtime symbol
 into a package, and pushing a package symbol out for the runtime to call. It is
@@ -80,7 +122,7 @@ still *parse* them and must not error on them.
 
 | Directive | Effect if honoured |
 | --- | --- |
-| `//go:noinline` | Suppress inlining. Honoured, because it is trivial and tests depend on it. |
+| `//go:noinline` | Suppress inlining. Not honoured: inlining is not built ([024](024-inlining-and-devirtualization.md)), so there is nothing to suppress. |
 | `//go:norace`, `//go:nocheckptr` | Suppress instrumentation nanogo does not implement. Parsed, no effect. |
 | `//go:notinheap` | Type is not heap-allocated. Parsed; affects write barrier elision only as an optimisation. |
 | `//go:registerparams`, `//go:noabiwrap` | Historical or ABI-transition directives. Parsed, no effect. |
@@ -99,10 +141,19 @@ map is a collector bug that appears as corruption under load.
 [027](027-liveness-and-stackmaps.md) and
 [032](032-type-descriptors-and-itabs.md) carry that obligation.
 
-nanogo's own object writer uses `unsafe`, so this is a G1 requirement and not a
-G3 one.
+The spec said nanogo's own object writer uses `unsafe`, which is what made this
+a G1 requirement. It does not. No package in the repository imports `unsafe`,
+found by grepping for the import during this audit.
+
+The G1 requirement holds for a stronger reason. nanogo compiles the standard
+library and the runtime, which use `unsafe` throughout, and five intrinsics are
+already IR nodes: `ir/build.go` builds `unsafe.Add`, `Slice`, `SliceData`,
+`String` and `StringData`. `Sizeof`, `Alignof` and `Offsetof` never reach the
+builder at all, because the checker folds them to constants.
 
 ## Testing
+
+None of this is built, because no directive is honoured yet.
 
 - A corpus asserting that each correctness-required directive changes generated
   code in the specified way, checked by inspecting the emitted object rather

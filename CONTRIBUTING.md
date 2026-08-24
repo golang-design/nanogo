@@ -1,15 +1,21 @@
 # Contributing
 
-Thanks for looking. nanogo is at the design stage. The
-[spec deck](specs/) is the artifact, three [spikes](spikes/) hold the
-measurements that two decisions rest on, and the compiler is being built
-against them in the order [`specs/003-sequencing.md`](specs/003-sequencing.md)
-sets.
+Thanks for looking. nanogo compiles Go source to a `goobj` file that links and
+runs, and it accepts about one function in five of the standard library. The
+[spec deck](specs/) is the design record and three [spikes](spikes/) hold the
+measurements that two decisions rest on. The compiler is built against the deck
+in the order [`specs/003-sequencing.md`](specs/003-sequencing.md) sets, and the
+deck is corrected when the code disproves it.
 
-That means an argument against a decision is worth as much as a patch right
-now, and patches are welcome.
+Both an argument against a decision and a patch are welcome, and the argument is
+not the cheaper contribution.
 
 ## What is most useful right now
+
+**The forms SSA construction refuses.** The README lists them with the number
+of standard library functions each one blocks. An assignment statement blocks
+24,031 of them, which is the single largest gap in the compiler.
+[`specs/021`](specs/021-ssa-construction.md) owns the pass.
 
 **Tell us where the design is wrong.** Especially if you have written a
 compiler, or a linker, or have fought Go's object format.
@@ -19,8 +25,7 @@ disagreeing with something concrete. Every spec ends with what it leaves open.
 **Break a spike.** The spikes under [`spikes/`](spikes/) are the evidence for
 [decision 3](specs/000-decisions.md) and
 [decision 11](specs/000-decisions.md). If one of them measures the wrong thing,
-a decision built on it is wrong too, and that is worth more than a bug report
-about code that does not exist yet.
+a decision built on it is wrong too.
 
 **Prior art.** If another compiler solved one of the open questions well,
 saying so saves us finding out slowly.
@@ -69,15 +74,44 @@ A package can be excluded in
 [`internal/covercheck/exclusions.txt`](internal/covercheck/exclusions.txt), and
 an entry needs a written reason on the same line. The tool rejects one without.
 An exclusion is a debt with a name on it, and the package's real number is
-still printed on every run, so the debt is visible rather than forgotten. The
-file is empty. Adding the first entry is a review conversation.
+still printed on every run, so the debt is visible rather than forgotten.
+
+Four packages are excluded today: `cmd/nanogo`, whose single statement is a
+process boundary no coverage tool can see, and `types2`, `types2/errors` and
+`types2/gen`, which are the forked checker and its generator. Each entry names
+the gate that replaces coverage. Adding a fifth is a review conversation.
+
+### The numbers in the documentation are gated too
+
+README.md and [`specs/003-sequencing.md`](specs/003-sequencing.md) quote counts
+the tests produce: how many files agree with `go/scanner`, how many functions
+reach SSA, what each package's coverage is. Those numbers were all true when
+they were written and several had stopped being true before anybody noticed.
+
+[`internal/hygiene/`](internal/hygiene/) holds the gate. It reads the numbers
+out of the prose and compares them with
+[`internal/hygiene/testdata/facts.json`](internal/hygiene/testdata/facts.json),
+which is a checked-in record of what the tests measured. That comparison is
+fast and runs on every `go test`.
+
+The facts file itself is re-derived where the corpus already runs, under
+`NANOGO_REQUIRE_CORPUS=1`, so a stale facts file fails CI. Regenerate it after
+a change that moves a number:
+
+```sh
+NANOGO_REFRESH_FACTS=1 go test -timeout 60m -run TestTheFactsAreCurrent ./internal/hygiene/
+```
+
+Then fix whatever document quoted the old number. If you reword a sentence the
+gate reads, the gate fails saying so rather than switching itself off, which is
+deliberate: a check that a prose edit can silently disable protects nothing.
 
 ### Costs go in the docs
 
 Every design choice states what it gives up, not only what it buys. This is
 already the house style of the deck:
-[decision 10](specs/000-decisions.md) records that v1 misses its own line
-budget by five per cent rather than adjusting the budget, and
+[decision 10](specs/000-decisions.md) records what the compiler measures against
+its own line budget, with the rows where the estimate was wrong, and
 [decision 11](specs/000-decisions.md) lists what object compatibility with `gc`
 costs before it lists what it buys.
 
@@ -132,12 +166,23 @@ is [decision 9](specs/000-decisions.md): the host is the first target.
 
 ## How the repository is organised
 
-| Path | What it is | Who it is for |
+| Path | What it is | Spec |
 | --- | --- | --- |
-| `specs/` | The design deck, and the normative decisions | Anyone building or reviewing nanogo |
-| `spikes/` | Small programs that answer a question a spec depends on | Anyone doubting a decision |
-| `internal/covercheck/` | The per-package coverage gate | Anyone whose package is below it |
-| `.github/workflows/` | The gates, each with the reason it exists | Anyone whose build went red |
+| `syntax/` | Positions, scanner, parser, syntax tree | 010, 011 |
+| `types2/` | The forked type checker, and the generator that ports it | 012, 013 |
+| `loader/` | Build constraints, the import graph, `go list` | 014 |
+| `ir/` | The typed tree, and the type layout the backend reads | 020 |
+| `ssa/` | SSA construction, lowering, decomposition, ABI, registers, liveness | 021, 025, 026, 027, 030 |
+| `ssa/rules/` | The lowering rules of each target | 025, 042 |
+| `rtsym/` | The runtime symbols the compiler calls | 031, 032 |
+| `obj/`, `obj/arm64/` | The `goobj` writer and the instruction encoder | 040, 041 |
+| `ssagen/` | SSA to machine code, prologues, relocations, stack maps | 027, 035, 041 |
+| `driver/`, `cmd/nanogo/` | `gc`-compatible flags, `-toolexec` dispatch | 050, 051 |
+| `specs/` | The design deck, and the normative decisions | read 000 first |
+| `spikes/` | Small programs that answer a question a spec depends on | evidence for 000 |
+| `internal/covercheck/` | The per-package coverage gate | |
+| `internal/hygiene/` | Checks over the repository's own source and documentation | |
+| `.github/workflows/` | The gates, each with the reason it exists | |
 
 The compiler's own packages arrive in the order
 [`specs/003-sequencing.md`](specs/003-sequencing.md) sets, and each one names

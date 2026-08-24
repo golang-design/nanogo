@@ -1,6 +1,6 @@
 ---
 title: "The package loader: from a directory to a build list"
-status: draft
+status: in progress
 layer: front end
 gate: "G1 partially, G2 fully"
 depends_on:
@@ -17,6 +17,30 @@ command would give.
 The spec is split because the gates split it ([001](001-bootstrap-gates.md)).
 G1 is allowed to ask the `go` command. G2 is not.
 
+## Where this stands
+
+The G1 half is built and gated. `GoList` implements the interface below,
+`loader` is above the 90% coverage gate, and the constraint evaluator agrees
+with
+`go/build` over the corpora at the end of this file.
+
+The G2 half is not built. There is no `go.mod` reader, no minimal version
+selection, and no import resolution against the module cache or `vendor/`. The
+`Loader` interface exists so that the G2 work is a second implementation rather
+than a refactor, and that is still the plan.
+
+The constraint evaluator is the exception inside the G2 half. It is written and
+tested, in `loader/constraint.go`, because it needs no module graph and because
+it is the piece a differential corpus can exercise with no compiler present. It
+was built in M0 for that reason, ahead of the milestone
+[003](003-sequencing.md) placed it in.
+
+**Nothing above the loader calls it yet.** No package outside `loader` imports
+it. In hosted mode the `go` command has already resolved the graph and hands the
+driver a file list, so the loader's first consumer is whole-world mode. This is
+worth writing down: the package is proved against `go list` and against
+`go/build`, not against a compiler that depends on it.
+
 ## G1: ask the toolchain
 
 At G1 nanogo runs `go list -e -json -deps -export`, which returns the resolved
@@ -32,8 +56,15 @@ to, which is where a compiler can report it.
 
 This is not a placeholder to be embarrassed about. It is the correct dependency
 at G1 and it lets M1 through M6 in [003](003-sequencing.md) proceed without a
-module system. `golang.org/x/tools/go/packages` is a wrapper over the same call
-and is used where its convenience is worth the dependency.
+module system.
+
+**The spec offered `golang.org/x/tools/go/packages` as a wrapper over the same
+call, to be used where its convenience is worth the dependency. It is not used,
+and it should not be.** `go.mod` declares no requirements at all. A front end
+that depends on a tooling module has one more module to compile before it can
+compile itself, which is a cost G1 pays for convenience G1 does not need.
+`GoList` runs the `go` command and decodes the JSON stream itself, in 242 lines.
+This was found by reading `go.mod` during this audit.
 
 The seam is one interface, and it is the whole reason this is a spec:
 
@@ -47,6 +78,9 @@ Nothing above the loader knows which implementation answered. The G2 work is a
 second implementation, not a refactor.
 
 ## G2: resolve it directly
+
+**None of this is built.** The scope below is the plan, and the exclusions are
+the part of it that is normative.
 
 At G2 there is no `go` binary. nanogo resolves the graph itself. The scope is
 deliberately narrower than the `go` command's, and the exclusions are the spec:
@@ -78,6 +112,8 @@ This is the whole algorithm. It is deterministic, it needs no solver, and that
 is why it can be a section rather than a spec.
 
 ### Build constraints
+
+This subsection is built, and it is the one part of the G2 half that is.
 
 Two mechanisms, both required, because the distribution uses both.
 
@@ -162,7 +198,7 @@ and not by a depth counter.
 ## Package identity
 
 A package is identified by its import path, which is also its symbol prefix.
-Test variants — a package compiled with its own `_test.go` files — are a distinct
+Test variants, a package compiled with its own `_test.go` files, are a distinct
 package with a distinct path suffix, because two versions of the same path exist
 in one binary and their symbols must not collide.
 
@@ -193,8 +229,18 @@ Also:
 
 - Constraint evaluation against Go's own `go/build` constraint tests.
 - Minimal version selection against hand-built module graphs with the answer
-  computed by hand.
+  computed by hand. **Not built**, with the algorithm it tests.
 - Determinism: load the same patterns twice and compare the output ordering.
+
+The measured results, with `NANOGO_REQUIRE_CORPUS=1` set:
+
+| Corpus | Result |
+| --- | --- |
+| `GOROOT` `.go` files walked | 8,078 |
+| Per-file constraints against `go/build.MatchFile` | 6,821 files per platform, 0 mismatches, on `linux/amd64` and on `darwin/arm64` |
+| `crypto` under `-tags purego` | 599 files, 0 mismatches |
+| Package-level partition | 765 directories and 6,560 files on `linux/amd64`, 762 and 6,564 on `darwin/arm64` |
+| `go list` agreement | 520 packages, 6,923 files, 0 mismatches: 379 standard library packages and 141 of nanogo's own |
 
 ### One deliberate difference from `go/build`
 

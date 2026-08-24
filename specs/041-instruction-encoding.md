@@ -1,6 +1,6 @@
 ---
 title: "Instruction encoding"
-status: draft
+status: complete
 layer: back end
 gate: G1
 depends_on:
@@ -26,6 +26,12 @@ instructions per target, each with a small number of operand forms.
 
 The set grows only when a rule is added, so the two files change together and a
 rule with no encoder is a build failure rather than a crash.
+
+`obj/arm64` draws its line where the rules draw theirs. It encodes groups 1 to
+6 of [042](042-arm64-backend.md) and no atomic instruction and no inline
+`memmove` form, which are groups 7 and 8. `ssa/macharm64.go` and
+`ssa/rules/arm64.go` stop at the same place, so no operation exists that no
+encoder can take.
 
 ## Structure
 
@@ -77,8 +83,8 @@ rule. They are written once and referenced, never repeated.
 ## Branch ranges and relocation
 
 A branch whose target is too far to encode needs a trampoline. The linker
-inserts them, using the scratch registers [030](030-abi.md) reserves for it —
-R16 and R17 on `arm64` — which is one of the reasons those registers are never
+inserts them, using the scratch registers [030](030-abi.md) reserves for it,
+R16 and R17 on `arm64`, which is one of the reasons those registers are never
 allocated.
 
 The compiler's part is to emit a relocation of the right type and let the linker
@@ -113,11 +119,26 @@ not needed. On `amd64` it is, and [043](043-amd64-backend.md) owns it.
 
 - **Differential disassembly.** For every encoder function, over a generated
   sweep of operand values, compare nanogo's bytes against what `go tool asm`
-  produces for the equivalent instruction. This is an exact oracle and it should
-  be exhaustive over the operand ranges, not sampled. The first pass ran
-  **864,092 comparisons with zero disagreements**, which is the standard to
-  hold. `arm64`'s floating-point forms added **99,368**, for **963,460** in
-  total, still with none.
+  produces for the equivalent instruction. This is an exact oracle and it is
+  exhaustive over the operand ranges, not sampled. The measured total is
+  **963,460 comparisons with zero disagreements**.
+
+  The package counts them itself. `comparisons` is an atomic that every
+  comparison increments, and `TestMain` prints the total when the package
+  finishes. A reader who runs one test sees a much smaller number, because no
+  single test compares more than a fraction of it.
+
+  **This number was corrected twice, and the second correction was wrong.** An
+  audit summed the per-test log lines, got 913,069, and changed this spec to
+  say so. The sum is smaller than the truth because not every comparison
+  happens inside a test that logs a count, and the audit had also double
+  counted `TestMain`'s own line in one variant of the same sum. 963,460 is the
+  figure the package reports and it is the one to quote.
+
+  The lesson is worth more than the number. A total that is reconstructed by
+  adding up log lines is a second implementation of the count, and the two
+  implementations disagreed. `internal/hygiene` now reads `TestMain`'s line,
+  which is the count itself rather than a reconstruction of it.
 
   Two traps in reading `go tool asm -S`, both of which produce a comparison that
   passes while testing nothing:

@@ -1,6 +1,6 @@
 ---
 title: "Liveness, stack maps, and the contract with the collector"
-status: draft
+status: in progress
 layer: middle end
 gate: G1
 depends_on:
@@ -15,6 +15,21 @@ goroutine, at any point where it can stop. The compiler is what tells it where
 they are. This is the most consequential metadata nanogo emits and the least
 visible: a program with wrong stack maps produces correct output for as long as
 it takes for a collection to happen at the wrong moment.
+
+## What is built
+
+The liveness analysis, the frame layout, the two bitmaps and the two pc-value
+streams are built and are written into object files. `ssa/liveness.go`,
+`ssa/frame.go` and `ssa/stackmap.go` hold them, and `ssagen/stackmap.go`
+attaches them to a function.
+
+**The stack objects table is not written.** `ssa.StackMaps.ObjectsSym` builds
+one, but nothing calls it: a record names its type's descriptor, and
+[032](032-type-descriptors-and-itabs.md) has no writer for a descriptor. The
+table is precision rather than coverage, so its absence is safe: an
+address-taken local is in the locals bitmap for the whole of its marked
+lifetime, which is the conservative answer. Read the "Stack objects" section
+below as a design that waits on [032](032-type-descriptors-and-itabs.md).
 
 ## The contract
 
@@ -83,7 +98,7 @@ frames **conservatively**, and the compiler's obligation is only to mark the
 regions where that is not safe:
 
 `PCDATA $PCDATA_UnsafePoint` marks instruction ranges where the frame is not in a
-consistent state — the prologue before the frame is established, the epilogue
+consistent state: the prologue before the frame is established, the epilogue
 after it is torn down, and any sequence where a pointer exists only in a
 half-written form. nanogo marks these ranges rather than trying to produce a
 precise map for every instruction.
@@ -219,5 +234,40 @@ Testing is therefore adversarial rather than exhaustive:
   live across a call, only reachable from the frame, with a finaliser asserting
   it survived.
 - Deep recursion with pointers live across the growth, which exercises the maps
-  during stack copying — a second consumer of the same data, and one that
+  during stack copying, a second consumer of the same data, and one that
   rewrites pointers rather than only reading them.
+
+### What those tests are today
+
+The first four are one test in `ssagen/gc_test.go`. It runs under
+`GODEBUG=gccheckmark=1,clobberfree=1` and `GOGC=1`, and it is the spike's shape:
+one function compiled twice, once with the slot live at the collection and once
+with an `OpVarKill` before it, so the difference between "survives" and "is
+freed" is the bitmap and nothing else. The pointer is in a frame object rather
+than in an argument, because the arguments bitmap would keep the object alive
+whatever the locals bitmap said.
+
+The fifth is `ssagen`'s stack-growth test, and it is weaker than this spec asks
+for. It recurses 200,000 frames under `gccheckmark`, so it does exercise the
+copier, but the value it carries through the growth is an integer. The
+assertion is that the integer arrives unchanged, which catches a bit set on a
+word that holds no pointer. A pointer carried through the growth is not tested
+yet.
+
+### The corpus
+
+`ssa/stackmap_test.go` runs the whole pipeline over 536 packages of the
+distribution. **8,238 functions reach SSA construction, 8,238 lower completely,
+8,237 reach a stack map, 3,412 carry a pointer bit, 43 carry a stack object,
+and there are 8,645 safepoints.**
+
+Two of those numbers need reading with care.
+
+The one function that is built and lowered and never mapped is not a stack map
+failure. The register allocator refuses it, and the map is built from the
+allocation, so the pipeline stops one pass earlier.
+[026](026-register-allocation.md) owns that refusal.
+
+The 43 stack objects are objects the analysis found, not records in an object
+file. Nothing writes `FUNCDATA_StackObjects` yet, for the reason at the top of
+this spec.

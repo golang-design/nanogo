@@ -1,6 +1,6 @@
 ---
 title: "Register allocation"
-status: draft
+status: complete
 layer: middle end
 gate: G1
 depends_on:
@@ -24,7 +24,7 @@ some performance cost."
 Two consequences, and both are large for nanogo:
 
 1. **A value live across a call must be in a stack slot.** There is no register
-   that survives the call, so the allocator does not choose — it spills. The
+   that survives the call, so the allocator does not choose: it spills. The
    allocation problem is therefore bounded by call sites rather than by the whole
    function.
 2. **The garbage collector never needs a register map.** Every live pointer at a
@@ -40,9 +40,9 @@ simplification.
 
 **Linear scan over a reverse postorder linearisation of the blocks.**
 
-Live intervals are computed from the liveness analysis of
-[027](027-liveness-and-stackmaps.md), which runs first for this purpose and again
-afterwards for stack maps, since spill slots are only known after allocation.
+Live intervals are computed by a liveness analysis of this pass, over SSA
+values. It is not [027](027-liveness-and-stackmaps.md)'s analysis. See the
+report below.
 
 For each value in order:
 
@@ -95,15 +95,16 @@ decompose into cycles, and break each cycle with one temporary register or with
 a three-instruction exchange.
 
 A note on when this fires, because it is easy to conclude the code is dead. Under
-the hole-free range model above, a phi's range covers every predecessor's block
-end and every phi argument is live at that same point, so a phi's home is never
+the hole-free range model of the spill-slot section below, a phi's range covers
+every predecessor's block end and every phi argument is live at that same
+point, so a phi's home is never
 an argument's home on that edge: sources and destinations are disjoint and no
 cycle forms. The parallel copy is still implemented and tested directly, because
 it becomes reachable the moment coalescing or hole-aware ranges land, and
 because a permutation bug found then would be found in the wrong place.
 
-**The lost copy problem.** A critical edge — one from a block with several
-successors to a block with several predecessors — has no block to put the copies
+**The lost copy problem.** A critical edge, one from a block with several
+successors to a block with several predecessors, has no block to put the copies
 in. Every critical edge is split by inserting an empty block before allocation.
 This is done once, as a pass, and it is why the pass list of
 [022](022-optimization-passes.md) can treat edges as ordinary.
@@ -113,9 +114,12 @@ This is done once, as a pass, and it is why the pass list of
 Two things this spec did not say, both found by building it.
 
 **A spilled value needs a register to be reloaded into**, and it cannot be one
-the allocator handed out. The target reserves a scratch register per class for
-it. On `arm64` this costs nothing: R16 and R17 were never allocatable, because
-[030](030-abi.md) reserves them for linker trampolines.
+the allocator handed out. The target reserves **two** scratch registers per
+class, because one instruction can read two spilled operands. On `arm64` the
+integer pair is free: R16 and R17 were never allocatable, because
+[030](030-abi.md) reserves them for linker trampolines. The floating-point pair
+is not free. There is no reserved float register, so the target takes F30 and
+F31 from the top of the file and the allocator loses two.
 
 **A block's control value is a use.** Omitting it collapses a branch
 condition's live range to nothing and lets two live conditions share one
@@ -178,13 +182,39 @@ This is why the rule is about the slot's description rather than about which
 value is live. Disjointness answers "can both be read"; the pointer map answers
 "will something else write here".
 
+## The report
+
+Two claims of this spec were wrong and the code is what showed it.
+
+**The spec said one liveness analysis serves both this pass and
+[027](027-liveness-and-stackmaps.md), run twice. The code runs two different
+analyses over two different domains.** This pass computes liveness over SSA
+values, before it knows what has a slot. [027](027-liveness-and-stackmaps.md)
+computes liveness over frame slots and frame objects, from this pass's result,
+so it cannot run first. The two also disagree about what they track: this pass
+drops a rematerialised value, and a frame address is rematerialisable. It was
+found when the stack map pass needed a safepoint set and the allocator's result
+carried none.
+
+**The spec said one scratch register per class. Two are needed.** One
+instruction can read two operands that are both in slots, so one scratch
+register lets the second reload destroy the first. It was found by an
+instruction with two spilled operands.
+
 ## Testing
 
 - The verifier extended with allocation invariants: no value in a clobbered
   register across a call, no two live values in one register, every phi resolved.
 - A stress corpus of functions with more live values than registers, forcing
-  spills, checked by differential execution ([004](004-conformance.md) L3).
+  spills, checked by that verifier. Differential execution
+  ([004](004-conformance.md) L3) is what this spec first named for it, and the
+  verifier is what it has: the pressure corpus is built by hand and is not a Go
+  program that can be run against `gc`.
 - Parallel copy tests over hand-built permutations including cycles of length 2
   and 3.
 - Spill-slot reuse checked for correctness rather than for size. The rule is in
-  the section below.
+  the section above.
+- The distribution corpus, which is [027](027-liveness-and-stackmaps.md)'s and
+  runs this pass on the way through. Of the 8,238 functions that reach SSA
+  construction and lower completely, the allocator places all but one. That one
+  refusal is why 8,237 functions carry a stack map and not 8,238.

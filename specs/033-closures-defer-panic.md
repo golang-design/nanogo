@@ -14,6 +14,33 @@ Four features that share one property: each makes the frame itself a data
 structure that the runtime inspects. They are specified together because their
 interactions are where the bugs are.
 
+## None of the four is built
+
+Everything below this section is a design and not a description. The IR builder
+produces the nodes: `OClosure` for a function literal with its capture list,
+`ODefer`, `OGo`, `OPanic` and `ORecover`. **SSA construction refuses every one
+of them.** They are marked Go-specific, and the builder answers with "reached
+SSA construction" and names the form. Over 536 packages of the distribution
+that refusal accounts for 510 functions on `panic`, 461 on `closure` and 13 on
+`defer`.
+
+So there is no closure object, no context register in use at a call, no
+`_defer` record in any of the three shapes, no `FUNCDATA_OpenCodedDeferInfo`
+(nanogo writes three funcdata indices and that is not one of them), and no call
+to `runtime.deferproc`, `deferreturn`, `gopanic` or `gorecover`. The four
+symbols are in `rtsym` and are checked against the runtime
+([031](031-runtime-lowering.md)); nothing generates a call to any of them.
+
+**One decision below is already contradicted.** The section "Capture by value
+or by reference" hands the choice to [023](023-escape-analysis.md). There is no
+escape analysis, and the IR builder does not wait for one: it makes **every**
+capture a capture by reference. One `ir.Object` is shared by the enclosing
+function and the literal, and the builder sets `Addrtaken` on it
+unconditionally. That is correct and it is slow, and it is what a closure of a
+variable nobody assigns costs today. It was found by reading the builder for
+the decision the spec said belonged to [023](023-escape-analysis.md) and
+finding the decision already taken.
+
 ## Closures
 
 A function literal that references variables from an enclosing function becomes a
@@ -29,8 +56,8 @@ A function literal that references variables from an enclosing function becomes 
 +------------------+
 ```
 
-At a call, the closure object's address is in the context register — R26 on
-`arm64` ([030](030-abi.md)) — and the function body loads captures relative to
+At a call, the closure object's address is in the context register, R26 on
+`arm64` ([030](030-abi.md)), and the function body loads captures relative to
 it.
 
 ### Capture by value or by reference
@@ -41,7 +68,8 @@ neither does anything else after the closure is created. Otherwise it is capture
 cell and both the enclosing function and the closure access it through a pointer.
 
 The decision belongs with [023](023-escape-analysis.md), since a by-reference
-capture is an escape.
+capture is an escape. It is not taken there today. The IR builder captures
+everything by reference, as the note at the top of this spec records.
 
 ### Where the closure object lives
 

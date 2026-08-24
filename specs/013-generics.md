@@ -19,6 +19,29 @@ generic function becomes machine code.
 nanogo's own source uses generics, so [001](001-bootstrap-gates.md)'s G1 cannot
 be reached without this.
 
+## What is built, and what is not
+
+**Instantiation is not built.** There is no stenciler. Nothing in `ir`, `ssa`,
+`ssagen` or `driver` substitutes a type argument through a body, and there is no
+worklist, no naming function for an instantiated symbol, and no deduplication.
+Everything under "Mechanics" below describes work that has not started.
+
+What is built is the half that arrives with the fork in
+[012](012-type-checking.md): inference, constraint satisfaction, core types,
+instantiation of *types*, and the `mono` check that this spec's first argument
+rests on. That half is under test and is part of the 613 subtests
+[012](012-type-checking.md) counts.
+
+In place of a stenciler the IR builder holds a refusal. `ir/build.go` skips a
+generic function or method, and `ir/convert.go` treats a type parameter reaching
+the type converter as a bug, because a type parameter there can only mean an
+uninstantiated body arrived. The property this spec claims at the end therefore
+holds today, that nothing below [020](020-ir.md) sees a type parameter, but it
+holds because the bodies are dropped and not because they were instantiated.
+
+This note is at the top rather than at the end because a reader who takes the
+design below for a description of the code will be wrong about the whole file.
+
 ## The three strategies
 
 ```mermaid
@@ -41,8 +64,8 @@ flowchart TD
 functions. Every type is known at compile time, so every operation is direct: no
 indirection, no dictionary, no boxing.
 
-**GC-shape stenciling**, which `gc` uses, compiles one body per *GC shape* —
-types that are identical in size and pointer layout share a body — and passes a
+**GC-shape stenciling**, which `gc` uses, compiles one body per *GC shape*
+(types that are identical in size and pointer layout share a body) and passes a
 dictionary holding the type descriptors and method tables the body cannot know
 statically. It trades a smaller binary for an indirection on every operation that
 depends on the type argument.
@@ -90,9 +113,9 @@ against a 40,000-line budget, and what it buys is binary size.
 
 ### 3. It is correct by construction
 
-A stenciled body is an ordinary monomorphic function. Everything downstream —
-[020](020-ir.md), [021](021-ssa-construction.md), escape analysis, the register
-allocator — sees no generics at all. There is no second path to be wrong on.
+A stenciled body is an ordinary monomorphic function. Nothing downstream sees a
+generic at all: not [020](020-ir.md), not [021](021-ssa-construction.md), not
+escape analysis, not the register allocator. There is no second path to be wrong on.
 
 ## What it costs, stated plainly
 
@@ -169,7 +192,17 @@ This is the property that pays for the binary size, and it is worth stating as a
 rule: **no spec numbered 020 or above may mention a type parameter.** If one
 needs to, this decision was wrong.
 
+The rule holds today and the enforcement is real, but it sits one level lower
+than the sentence suggests. `ir.Convert` rejects a type parameter outright and a
+test asserts the rejection. That guard is what a stenciler will be measured
+against on the day one is written: it must stop firing because the bodies were
+instantiated, not because they were skipped.
+
 ## Testing
+
+Only the last of these is built. It arrives with the fork: `mono_test.go` is one
+of the ported upstream test files and it runs. The other three wait on a
+stenciler and cannot be written before one exists.
 
 - Go's `test/typeparam` corpus, which is the reference implementation's own
   generics suite, run under [004](004-conformance.md) L2.

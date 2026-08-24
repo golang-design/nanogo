@@ -10,6 +10,21 @@ depends_on:
 
 # Linker
 
+**This spec describes unbuilt work.** There is no `link` package. nanogo's
+objects are linked by `go tool link`, and that is the one external dependency
+this deck most depends on being kept: `ssagen`'s `TestLinkAndRun` calls it 18
+times to turn compiled source into a running process, and
+[040](040-object-format.md)'s whole proof rests on it accepting the object.
+This was found by listing the tree against [002](002-architecture.md)'s package
+layout.
+
+So the reader should hold two facts together. Every claim below about what a Go
+linker must build, `pclntab` and `moduledata` and the ABI wrappers, is
+knowledge nanogo has acted on from the writing side: the object carries the
+`AuxFuncInfo`, the pc-value tables and the funcdata that a linker assembles
+into those structures, and `cmd/link` reads them. None of the reading side
+exists.
+
 The gate for G2 ([001](001-bootstrap-gates.md)): nanogo cannot claim toolchain
 independence while `go tool link` produces its executables.
 
@@ -49,7 +64,9 @@ function to its pc-value tables. Every traceback, every panic message, every
 `runtime.Caller`, every garbage collection stack scan reads it.
 
 It is assembled from the `AuxFuncInfo` records [040](040-object-format.md)
-attaches to each function symbol. The linker's job is to concatenate,
+attaches to each function symbol, and from the pc-value tables that are
+auxiliary symbols of their own rather than contents of that record, which is a
+correction [040](040-object-format.md) carries and which this spec inherits. The linker's job is to concatenate,
 deduplicate the file and function name tables, and build the index the runtime
 binary-searches.
 
@@ -80,7 +97,7 @@ linker generates a wrapper for every mismatch it finds.
 
 A branch whose target is beyond the instruction's displacement range is
 redirected through a trampoline that loads the full address. The scratch
-registers [030](030-abi.md) reserves — R16 and R17 on `arm64`, R12 on `amd64` —
+registers [030](030-abi.md) reserves (R16 and R17 on `arm64`, R12 on `amd64`)
 exist for this, which is why they are never allocatable.
 
 ## Scope, stated as exclusions

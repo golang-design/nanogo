@@ -18,6 +18,32 @@ from [000](000-decisions.md) decision 11 and is what makes the incremental
 bring-up of [051](051-build-integration.md) possible: a package compiled by
 nanogo can be imported by a package compiled by `gc`, and the reverse.
 
+## No reader and no writer exist
+
+There is no `export` package. No reader, no writer, no container. Nothing in the
+repository encodes or decodes export data. Everything below the next heading is
+a plan, and a reader who takes it for a description of the code will be wrong
+about all of it.
+
+Two places in the code name the gap rather than route around it. `checkFiles` in
+`driver/compile.go` fails a package that has an import, with the missing
+importer as the reason, so the failure names this spec instead of arriving later
+as a confusing message about an undefined name. `types2` carries a hand-written
+`srcimporter_test.go`, which type-checks an imported package from source,
+because that is the only importer there is; upstream's `importer_test.go` is
+skipped for the same reason, and the skip carries it as its reason.
+
+The consequence is larger than this spec. It is why
+[012](012-type-checking.md)'s standard library agreement runs over 14 named
+packages rather than a walk, why [013](013-generics.md) cannot begin, and why
+`driver` compiles only a package with no imports.
+
+**The importcfg section below is the exception and it is built.**
+`driver/importcfg.go` parses all four directives, keeps them in separate tables
+as specified, and rejects an unknown directive. It sits in `driver` and not in
+an export package, because the driver is what reads the command line and the
+parser was built with [050](050-driver.md)'s flag handling.
+
 ## What is in it
 
 | Contents | Needed by | Note |
@@ -34,7 +60,7 @@ required data, and a build that drops it fails rather than deoptimises.
 
 ## Why gc's format and not nanogo's own
 
-The alternative — nanogo defines its own format — is simpler to write and is
+The alternative, that nanogo defines its own format, is simpler to write and is
 wrong, for one reason: it makes the two compilers unable to share a build. That
 forfeits the bring-up strategy in which nanogo compiles one package while `gc`
 compiles the other five hundred, which is the only way to get an early milestone
@@ -61,7 +87,7 @@ The costs are real and are accepted:
    backend, and sizing it by assertion would have been a mistake.
 3. **Both directions are required, and the writer comes first.** This is the
    opposite of what it looks like. A leaf package has no imports, so compiling it
-   with nanogo exercises no reader at all — but its test binary is compiled by
+   with nanogo exercises no reader at all, but its test binary is compiled by
    `gc`, which then reads what nanogo *wrote*. So [051](051-build-integration.md)'s
    first allowlist entry proves the **writer**. The reader is first exercised
    when nanogo compiles a package that imports something, which is one step *up*
@@ -75,8 +101,8 @@ decoding the package. That laziness is not a nicety: a large package's export
 data is read by every importer, and eager decoding is a measurable share of
 build time.
 
-Types are interned and referenced by index. A cyclic type graph — a struct with
-a pointer to itself — is expressed by the index reference, which is why the
+Types are interned and referenced by index. A cyclic type graph (a struct with
+a pointer to itself) is expressed by the index reference, which is why the
 format is a graph encoding and not a tree encoding.
 
 ## The importcfg file
@@ -115,6 +141,8 @@ result changes per run. The rule is that **no map is ranged over on the write
 path**, enforced by review and by the drift test below.
 
 ## Testing
+
+None of this is built, because nothing it tests is built.
 
 - Round trip: write nanogo's export data for every standard library package,
   read it back, and compare the reconstructed package surface against the

@@ -1,6 +1,6 @@
 ---
 title: "Sequencing: the order of work, what done means, and where the risk is"
-status: draft
+status: in progress
 layer: foundation
 depends_on:
   - 000-decisions.md
@@ -27,7 +27,7 @@ flowchart LR
   M9 --> M10["M10<br/>GPU target"]
 ```
 
-### M0 — skeleton
+### M0: skeleton
 
 Driver, flag parsing, package layout, CI. The spikes that
 [000](000-decisions.md) decision 3 cites are run and kept.
@@ -41,7 +41,7 @@ The passthrough build is the first real gate. It proves the driver, the flag
 parsing, and the `-V=full` protocol before any compilation exists, and
 [`spikes/toolexec`](../spikes/toolexec) is the reference implementation of it.
 
-### M1 — parser
+### M1: parser
 
 [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md). The whole Go
 grammar including generics. No type checking.
@@ -53,7 +53,7 @@ enumerated, not tolerated.
 This gate is worth its cost. It is a corpus of roughly 14,000 files that exercise
 every corner of the grammar, and it is free.
 
-### M2 — types
+### M2: types
 
 [012](012-type-checking.md), [013](013-generics.md), [015](015-export-data.md),
 and the parts of [014](014-package-loader.md) that G1 needs. `types2` is
@@ -63,7 +63,7 @@ vendored and re-pointed at nanogo's syntax tree.
 `go/types` checks, produces the same errors for `test/`'s `errorcheck` files,
 and round-trips export data for every standard library package.
 
-### M3 — first binary
+### M3: first binary
 
 [020](020-ir.md), [021](021-ssa-construction.md),
 [025](025-lowering-and-rules.md), [026](026-register-allocation.md),
@@ -83,7 +83,7 @@ so a crash has one suspect.
 This is the milestone where the object format decision is proved or disproved in
 practice, so it is deliberately early.
 
-### M4 — runtime interface
+### M4: runtime interface
 
 [027](027-liveness-and-stackmaps.md), [030](030-abi.md),
 [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md),
@@ -102,7 +102,7 @@ The measure of progress inside M4 is the number of standard library packages
 that compile with nanogo in hosted mode and still pass their own tests. It
 starts at one and is tracked.
 
-### M5 — full language
+### M5: full language
 
 Generics instantiation, `select`, complex numbers, the remaining conversions,
 `//go:` pragmas, and everything else the specification requires but nanogo's own
@@ -111,13 +111,13 @@ source does not use.
 **Done when** the `test/` corpus passes: `run`, `runoutput`, `errorcheck`,
 `compile`, and `build` directives all honoured.
 
-### M6 — G1
+### M6: G1
 
 Self-host. [060](060-selfhost.md).
 
 **Done when** $N_2 = N_3$ byte for byte, per [001](001-bootstrap-gates.md).
 
-### M7 — amd64
+### M7: amd64
 
 [043](043-amd64-backend.md). The test of [000](000-decisions.md) decision 5.
 
@@ -125,13 +125,13 @@ Self-host. [060](060-selfhost.md).
 appearing above [025](025-lowering-and-rules.md), and G1 holds on
 `linux/amd64`.
 
-### M8 — G2
+### M8: G2
 
 [045](045-linker.md), the rest of [014](014-package-loader.md).
 
 **Done when** nanogo builds nanogo in a container with no `go` binary present.
 
-### M9 — G3
+### M9: G3
 
 [044](044-plan9-assembler.md), [046](046-debug-info.md),
 [062](062-distribution-build.md).
@@ -139,7 +139,7 @@ appearing above [025](025-lowering-and-rules.md), and G1 holds on
 **Done when** nanogo compiles the `CGO_ENABLED=0` distribution and the
 distribution's tests pass on the result.
 
-### M10 — GPU target
+### M10: GPU target
 
 [070](070-gpu-target.md). Post-v1 and unscheduled.
 
@@ -154,51 +154,131 @@ Risks are listed with the milestone that retires them, not with a probability.
 | GC metadata is wrong in a way that only shows under load | M4 | Allocation stress with `GOGC=1` and `GODEBUG=gccheckmark=1`, not a unit test. |
 | The forked type checker cannot be re-pointed at nanogo's syntax tree cheaply | M2 | [012](012-type-checking.md) names the interface it is re-pointed through. If the fork resists, the fallback is to keep `go/ast` under the checker and translate, at a cost stated in that spec. |
 | Generics instantiation is a rewrite rather than a port | M5 | Deferred deliberately: nanogo's own source uses generics, so M6 cannot be reached without it, and M5 is where it is confronted with the corpus available. |
-| The v1 line budget is exceeded | M4 | [000](000-decisions.md) decision 10's accounting already puts v1 at about 41,800 against 40,000. Counted at every milestone, not at the end, and the two named recovery points are [022](022-optimization-passes.md) and [015](015-export-data.md). |
+| The v1 line budget is exceeded | M4 | The tree measures 31,257 lines against a budget of 40,000, with export data, escape analysis, inlining and generics instantiation still unwritten and estimated at 16,600. [000](000-decisions.md) decision 10 carries the accounting and the two recovery points, [022](022-optimization-passes.md) and [015](015-export-data.md). `internal/hygiene` gates the figure. |
 | `//go:linkname` and `//go:nosplit` semantics are subtler than documented | M9 | The runtime is the only consumer that cares, and M9 is where it is compiled. |
 
 ## Where the work stands
 
-**M0 and M1 are complete. M2 is complete. M3 is partly built.**
+**M0 and M1 are complete. M2 is complete except for the export data half it
+was given and never built. M3 and M4 are partly built and neither gate is
+met.**
 
-| Milestone | State | Gate met |
+| Milestone | State | Gate |
 | --- | --- | --- |
 | M0 skeleton | done | a `go build -a -toolexec=nanogo` completes by delegating |
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
-| M2 types | done | 613 subtests, a 375-package corpus, checks nanogo's own source |
-| M3 first binary | **done** | the whole pipeline is built and gated, and a compiled function links against the real runtime and runs; every function of the distribution's 536 buildable packages compiles |
+| M2 types | done, less its export data half | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source |
+| M3 first binary | **in progress** | the pipeline is built end to end and a compiled function links against the real runtime and runs; a leaf package under `-toolexec` does not compile |
+| M4 runtime interface | **in progress** | liveness, stack maps, the ABI and the stack growth check are built; type descriptors, itabs, closures, `defer`, `panic`, write barriers and goroutines are not |
+| M5 to M10 | not started | |
 
-M3's gate, a leaf package compiled by nanogo under `-toolexec`, is not met. The
-honest measure of how far the pipeline reaches is the corpus: of the Go
-distribution's 536 buildable packages, **8,238 functions reach SSA and 4,755
-lower completely** to arm64 machine operations. The largest single cause of the
-remainder is stated in [025](025-lowering-and-rules.md): values wider than a
-machine register are not yet decomposed. What
-is met is the half of M3 that could be built without the middle end, and it
-retired the milestone's stated risk: **`go tool link` links a nanogo-written
-object against the real Go runtime into a binary that runs.**
-[040](040-object-format.md) records that result. The object format decision of
-[000](000-decisions.md) decision 3 is no longer a judgement call.
+### What M3 reached, and what it did not
 
-Measured coverage:
+The pipeline exists from source text to a `goobj` file. `ssagen`'s
+`TestLinkAndRun` takes 18 programs through all of it to a process that returns
+the right answer, and several of them call into or are called from
+`gc`-compiled code. That retired the milestone's stated risk: **`go tool link`
+links a nanogo-written object against the real Go runtime into a binary that
+runs.** [040](040-object-format.md) records the result, and the object format
+decision of [000](000-decisions.md) decision 3 is no longer a judgement call.
+
+M3's own gate is a leaf package compiled under `-toolexec`, and that is not
+met, because the language nanogo accepts is narrower than any real package.
+
+The corpus says how much narrower, and it is one measurement with two halves.
+The IR builder produces a typed tree for 536 packages of the Go distribution,
+39,947 functions and 4,188,075 nodes.
+**8,238 of those functions reach SSA construction**, and every one of them
+lowers completely to arm64 machine operations. 8,237 of the 8,238 carry a
+stack map, over 8,645 safepoints, and 3,412 of them have a pointer bit set.
+
+The other four functions in five never reach SSA. Construction refuses them by
+name. An assignment statement alone accounts for 24,031 of them, then `len` for
+1,377, a `switch` with non-block clauses for 992, `range` for 984 and a
+composite literal for 903. The README carries the full table.
+[021](021-ssa-construction.md) owns the pass and the gap.
+
+### Why part of M4 was built before M3 was finished
+
+M4 was reached out of order, the same way M3 was. [027](027-liveness-and-stackmaps.md),
+[030](030-abi.md), part of [031](031-runtime-lowering.md) and the prologue half
+of [035](035-goroutines-and-stack-growth.md) were built because M3's binary
+needed them to run at all: a frame that the collector cannot scan and a call
+that disagrees about where its arguments live do not survive `TestLinkAndRun`.
+The rest of M4, [032](032-type-descriptors-and-itabs.md),
+[033](033-closures-defer-panic.md), [034](034-write-barriers.md) and the
+`newproc` half of [035](035-goroutines-and-stack-growth.md), is untouched.
+
+M4's own gate is unchanged and unmet. `fmt.Println` does not compile, because
+`fmt` is a package and no package compiles.
+
+Measured coverage. The figures are rounded down, and the gate is 90% per
+package:
 
 | Package | Coverage | |
 | --- | --- | --- |
-| `syntax` | 99.2% | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) |
+| `syntax` | 99% | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) |
 | `types2` | excluded | [012](012-type-checking.md); gated by upstream's suite |
-| `loader` | 98.8% | [014](014-package-loader.md), G1 half |
-| `ir` | 93.9% | [020](020-ir.md), [030](030-abi.md); builds 536 packages of the distribution |
-| `ssa` | 98.1% | [021](021-ssa-construction.md), with the verifier of that spec |
-| `obj` | 98.1% | [040](040-object-format.md) |
-| `obj/arm64` | 98.8% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
-| `driver` | 97.4% | [050](050-driver.md), [051](051-build-integration.md) |
-| `internal/covercheck` | 97.6% | the gate itself |
+| `loader` | 98% | [014](014-package-loader.md), G1 half |
+| `ir` | 94% | [020](020-ir.md); builds 536 packages of the distribution |
+| `ssa` | 96% | [021](021-ssa-construction.md), with the verifier of that spec |
+| `ssa/rules` | 97% | [025](025-lowering-and-rules.md), [042](042-arm64-backend.md) |
+| `ssagen` | 92% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |
+| `obj` | 98% | [040](040-object-format.md) |
+| `obj/arm64` | 99% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
+| `rtsym` | 100% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |
+| `driver` | 97% | [050](050-driver.md), [051](051-build-integration.md) |
+| `internal/covercheck` | 97% | the gate itself |
 | `cmd/nanogo` | excluded | one statement; the reason is in the exclusions file |
 
 ## Deviations
 
 Each entry records a departure from the plan above with the reason, so that the
 plan stays honest instead of staying accurate.
+
+**M2 was recorded as done and one third of its gate was never built.** M2's
+scope names [015](015-export-data.md) and its gate says "round-trips export data
+for every standard library package". There is no export data reader and no
+writer, and there is no `export` package. The two other parts of the gate, type
+checking the distribution and matching `errorcheck`, are met and gated. The
+consequence is not cosmetic: without an export data reader nanogo cannot compile
+a package that imports anything, which is why M3's gate cannot be met either.
+`driver/importer.go` refuses the import with a message that names this spec, so
+the compiler is honest about it even where this file was not.
+
+**M3 was recorded as done and its gate was never met.** An earlier version of
+this section marked M3 done in the table and said in the same paragraph that
+its gate was not met. Both sentences were written honestly and they contradict
+each other, which is how a status table rots: the table records enthusiasm and
+the prose records the truth. M3 is `in progress` until a leaf package compiles
+under `-toolexec`. The two numbers below say what changed.
+
+**The lowering measurement was stale by a factor of two, in the good
+direction.** This section said 8,238 functions reached SSA and 4,755 lowered
+completely. Decomposition was finished after that was written, and the corpus
+now reports 8,238 of 8,238. The claim that followed it, that the largest cause
+of the remainder is values wider than a machine register, is therefore also
+gone: there is no remainder to explain. What is left undecomposed is 13
+functions holding a wide `SelectN`, 3 holding an array and 10 holding a struct,
+and all of them still lower.
+
+**The reach of the compiler was reported without its denominator.** "Every
+function of the distribution's buildable packages compiles" was true of the
+functions SSA construction accepts and read as a claim about the distribution.
+It is one function in five. The denominator was found during the August 2026
+documentation audit by counting `ssa.Build`'s refusals across the same corpus,
+which nothing had measured because the corpus tests skip a function they cannot
+build rather than counting it. The counts are in the README and the largest is
+the assignment statement, at 24,031 functions.
+
+The lesson is about the measurement and not about the compiler. A corpus test
+that reports what worked, and drops what did not, produces a number that only
+ever goes up.
+
+**The numbers in this file are now gated.** `internal/hygiene` reads them out
+of the prose and compares them against a checked-in record of what the tests
+measured. Every stale number above was correct when it was written, which is
+the whole difficulty: nothing about a stale number looks wrong.
 
 **M0's gate was wrong and was replaced.** It said "`nanogo -V` prints a
 version". The real protocol is `-V=full`, it is parsed by
@@ -223,10 +303,12 @@ the object format seam is this deck's largest untested assumption, and building
 the writer first turned it into a linked binary that runs. A middle end built
 first would have reached the same question three milestones later.
 
-**Eleven IR nodes were added by implementation, not by design.** The node set of
-[020](020-ir.md) had no assignment, no case, no `for` post statement, no
-composite literal, no slice expression, no `close`, `print` or `println`, and no
-`unsafe` intrinsics. Each gap was found by a consumer reaching for a workaround:
+**Twelve IR nodes and one field were added by implementation, not by design.**
+The count in this paragraph said eleven and was itself wrong, because the `for`
+post statement is a field on the `for` node and not a node. The audit of
+[020](020-ir.md) against `ir/node.go` found the real figure. The node set of
+[020](020-ir.md) had no assignment, no case, no composite literal, no slice
+expression, no `close`, `print` or `println`, and no `unsafe` intrinsics. Each gap was found by a consumer reaching for a workaround:
 an assignment encoded as a binary operation with no operator, a literal as
 `new`, an intrinsic as a call to an invented symbol. The nodes exist now, and
 [020](020-ir.md) records that its own claim, that a construct absent from its

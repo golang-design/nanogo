@@ -1,6 +1,6 @@
 ---
 title: "The parser and the syntax tree"
-status: draft
+status: complete
 layer: front end
 gate: G1
 depends_on:
@@ -25,7 +25,7 @@ A compiler wants the opposite tree:
 | `go/ast` | nanogo's tree |
 | --- | --- |
 | comments attached to nodes | comments dropped, except the three kinds [010](010-scanner-and-positions.md) routes |
-| `Object` resolution, partially done and deprecated | no resolution in the parser at all; [012](012-type-checking.md) owns it |
+| `Object` resolution, partially done and deprecated | no name resolution; [012](012-type-checking.md) owns it |
 | source fidelity guaranteed | not guaranteed; the tree is not printed back |
 | node set sized for tooling | node set sized for a compiler |
 
@@ -50,6 +50,15 @@ the first draft of this spec dropped it. It is kept, because the checker uses it
 in a dozen places, because the "no composite literal in a control clause header"
 rule needs to know a parenthesis was there, and because dropping one node to pay
 for a dozen edits in a ported 23,000-line checker is a bad trade.
+
+**The parser does one resolution after all, and the table above overstated the
+rule.** Under `CheckBranches` mode, `checkBranches` resolves the target of every
+`break`, `continue`, `goto` and `fallthrough` and reports one that has none. It
+is here and not in [012](012-type-checking.md) because it needs only the tree,
+and because a branch with no target makes every later statement about control
+flow wrong. Upstream's `syntax` package draws the line in the same place. This
+was found by reading `funcBody` for this audit. The row now says "no name
+resolution", which is the rule that holds.
 
 ## The tree
 
@@ -150,10 +159,17 @@ Two rules keep this from producing error cascades:
 
 1. **At most one error per position.** A second error at a position already
    reported is dropped.
-2. **A node is never nil.** Every production returns a `BadExpr`, `BadStmt`, or
-   `BadDecl` on failure, carrying the position range it consumed. The type
-   checker skips bad nodes silently, so one syntax error produces one message
-   rather than one message plus the type errors that follow from a hole.
+2. **A node is never nil.** Every production returns a `BadExpr` or a `BadStmt`
+   on failure, carrying the position range it consumed. The type checker skips
+   bad nodes silently, so one syntax error produces one message rather than one
+   message plus the type errors that follow from a hole.
+
+   The spec named a third node, `BadDecl`. There is none and none is needed. A
+   declaration that fails is still a `TypeDecl`, `VarDecl` or `FuncDecl`, with a
+   `BadExpr` in the part that could not be read, which is what `typeDecl` builds
+   when it cannot read a type. This was found by searching the node set for
+   `BadDecl` during this audit. `syntax/parser.go`'s package comment still names
+   it, so the stale claim now survives in the code rather than here.
 
 "One mistake, one message" is the goal and it is not always reachable. Three
 inputs produce two messages in nanogo and in the reference parser alike:
@@ -172,18 +188,33 @@ Expression parsing is precedence climbing over the specification's five binary
 precedence levels rather than one method per level, which removes four layers of
 call for every expression parsed.
 
-The parser holds one token of lookahead. The array-against-type-parameter case
-above is the only place that needs more, and it uses a saved scanner state
-restored on the other branch, not a token buffer.
+The parser holds one token of lookahead and no production needs more. The
+array-against-type-parameter case above is decided by re-analysing an expression
+that was already parsed, in `extractName`, not by looking further ahead.
+
+This paragraph used to say that case saves scanner state and restores it on the
+other branch. That contradicted the corrected rule above it, which says there is
+no backtracking, and the code agrees with the corrected rule. The contradiction
+survived because the correction was written into one section and not the other.
+It was found by reading the two sections against `typeDecl` in one pass.
 
 ## Testing
 
+The first three are built and gated. `syntax` is above the 90% coverage gate
+and CI sets
+`NANOGO_REQUIRE_CORPUS=1`, so a missing corpus fails instead of skipping.
+
 - L1 agreement over the distribution, per [004](004-conformance.md): accept the
-  same files, reject the same files, at the same first position.
-- A round-trip test: parse, print positions of every node, and check that node
-  positions are non-decreasing in source order and inside their parent's range.
-  This catches the position bugs that no output comparison sees.
+  same files, reject the same files, at the same first position. 16,293 files
+  compared against `go/parser`, with 14 documented exceptions. Each exception
+  carries its reason, and an exception that stops firing is a failure, so the
+  list cannot become a place to hide a bug.
+- Position invariants over the same corpus: every node's position lies inside
+  its parent's range, and positions do not decrease in source order. This
+  catches the position bugs that no accept-or-reject comparison sees.
 - The `errorcheck` files of Go's `test/` corpus that are syntax errors, checked
   for position and count.
-- Fuzzing against `go/parser` on mutated distribution files, comparing accept
-  and reject only. A crash in either direction is a nanogo bug.
+- Fuzzing against `go/parser` on mutated distribution files is **not built**.
+  `syntax` has no `Fuzz` function. The corpus comparison already covers every
+  file in the distribution, so what fuzzing adds is inputs that no Go program
+  contains, and that has not yet been worth the run time.

@@ -10,7 +10,22 @@ depends_on:
 
 # Inlining and devirtualization
 
-Both run on the IR of [020](020-ir.md), both are optional under
+**Neither is built.** There is no cost model, no substitution, no inline tree,
+and no devirtualization. `ir.Func.Inlinable` is a reserved field assigned
+nowhere. `driver/flags.go` parses `gc`'s `-l` into `Config.NoInline`, and
+nothing reads it, so the flag that disables inlining and the inlining it
+disables are both absent.
+
+Neither pass can be built where it stands. Inlining rewrites the IR tree in
+place, and [020](020-ir.md)'s tree exists; what is missing under it is
+[015](015-export-data.md), which is the only way a body crosses a package
+boundary, and export data is not written either. Intra-package inlining is
+buildable now and is worth having for that reason: it is the half that needs
+nothing new.
+
+The design below stands. It was reviewed and not disproved, only deferred.
+
+Both passes run on the IR of [020](020-ir.md), both are optional under
 [022](022-optimization-passes.md)'s governing rule, and both matter more for what
 they enable than for what they save directly.
 
@@ -29,8 +44,8 @@ nothing on the forbidden list.
 Cost is a weighted node count over the IR, walked once per function and cached.
 Ordinary nodes cost 1. A call costs 57 in the reference implementation against a
 budget of 80, which is the mechanism that stops a function containing two calls
-from being inlined; nanogo uses the same shape of number and tunes it against the
-corpus rather than inventing one.
+from being inlined. nanogo takes the same shape of number and tunes it against
+the corpus rather than inventing one.
 
 The walk stops as soon as the budget is exceeded, so the common case of a large
 function is cheap to reject.
@@ -91,12 +106,12 @@ call.
 | A type assertion or type switch that dominates the call | `if f, ok := w.(*os.File); ok { f.Write(p) }` |
 | An interface with exactly one implementing type in the program | whole-program only; not implemented |
 
-The first two are the ones nanogo implements. Both are local reasoning over the
-IR: a use of an interface value whose definition in the same function is a
+The first two are the ones nanogo is to implement. Both are local reasoning over
+the IR: a use of an interface value whose definition in the same function is a
 conversion from a known concrete type.
 
 The third requires the whole program and a closed world, which conflicts with
-separate compilation, and it is not implemented.
+separate compilation, and it is excluded by design rather than deferred.
 
 ### Why it is worth having
 
@@ -124,6 +139,10 @@ the third round's yield does not pay for its cost.
 
 ## Testing
 
+None of this is written, because neither pass is. The oracles are listed because
+they are external and free, and they should be wired up before the first
+decision the compiler makes is one nobody can check:
+
 - `gc`'s `-m` output annotates inlining decisions, and Go's `test/inline*.go`
   corpus asserts them. Same oracle as [023](023-escape-analysis.md).
 - Differential execution with both passes off.
@@ -131,3 +150,15 @@ the third round's yield does not pay for its cost.
   function and its caller, at the right lines.
 - Devirtualization corpus: each of the two sources above, asserted in generated
   code, plus a negative case where the type is genuinely unknown.
+
+## Deviations
+
+The spec said which of the three devirtualization sources nanogo implements and
+which it does not. It implements none. The state was found by grepping the whole
+repository for `Inlinable` and for `NoInline`: the first has three mentions, a
+doc comment, a declaration, and one assertion in `ir/node_test.go`, and the
+second is parsed by the flag table and read by nobody.
+
+The cost model's numbers, 57 for a call against a budget of 80, are the
+reference implementation's and are recorded as a starting point to tune from.
+Nothing has been tuned, because nothing has been measured.

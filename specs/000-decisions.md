@@ -1,6 +1,6 @@
 ---
 title: "Decisions: what nanogo is, and what it is not allowed to become"
-status: draft
+status: complete
 layer: foundation
 depends_on: []
 ---
@@ -20,9 +20,9 @@ and the compiler it produces is byte-identical to itself.**
 
 The roadmap was first framed as two options that were thought to be sequential:
 
-- **A** — write the whole front end from scratch: scanner, parser, and type
+- **A**: write the whole front end from scratch: scanner, parser, and type
   checker.
-- **B** — use `go/parser` and `go/types` from the standard library.
+- **B**: use `go/parser` and `go/types` from the standard library.
 
 with A named as the goal because bootstrapping was thought to need it.
 
@@ -151,6 +151,22 @@ rule set, a register set, an ABI, and an encoder. Adding `amd64`
 ([043](043-amd64-backend.md)) must not require an edit to the middle end. If it
 does, the middle end is wrong.
 
+**A counterexample is in the tree, and it is recorded rather than argued away.**
+`ssagen` sits between the last SSA pass and the object writer. It encodes
+instructions, builds the prologue and the stack growth tail, emits relocations
+and attaches stack maps, and it is 2,634 lines of which the prologue is arm64
+code. It is above [025](025-lowering-and-rules.md)'s target boundary and it
+names a target. Adding `amd64` will therefore require an edit there, which is
+what this decision says must not happen.
+
+Three separate audits of the deck found this independently, each from a
+different direction: no spec owns `ssagen`, [002](002-architecture.md)'s package
+layout never listed it, and decision 10's budget has no row for it. That is the
+signature of a stage nobody specified. The decision is not weakened by the
+counterexample. The repair is to give the stage a spec and a target interface
+of its own, and [043](043-amd64-backend.md) is the milestone that will force it,
+because that is the first time a second target reads the code.
+
 This is also why the GPU work fits without distorting anything
 ([070](070-gpu-target.md)). A GPU backend is another consumer of the same SSA.
 It is a consumer and never a driver: **no decision in this deck may be taken to
@@ -215,52 +231,81 @@ nanogo is not attempting that and will be slower and will optimize less.
 
 #### The accounting
 
-A budget nobody sums is a slogan. Estimates below are against measured reference
-sizes where one exists.
+A budget nobody sums is a slogan. The table was estimates when it was written.
+It is measurements now, taken with the exclusions this decision names:
 
-| Component | Spec | Reference | nanogo estimate |
-| --- | --- | --- | --- |
-| Positions, scanner, parser | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) | 7,522 (`syntax`) | 7,500 |
-| Type checker | [012](012-type-checking.md) | 23,222 (`types2`) | **excluded**, forked |
-| Package loader, G1 form | [014](014-package-loader.md) | — | 300 |
-| Export data | [015](015-export-data.md) | 1,568 + 8,097 + 1,259 | 7,000 |
-| Typed IR, escape, inlining | [020](020-ir.md), [023](023-escape-analysis.md), [024](024-inlining-and-devirtualization.md) | 10,216 + 3,601 (`ir`, `escape`) | 6,000 |
-| SSA and its passes | [021](021-ssa-construction.md), [022](022-optimization-passes.md) | 11,609 hand-written | 8,000 |
-| Lowering rules, one target | [025](025-lowering-and-rules.md) | 18,704 (`_gen`, all targets) | 3,000 |
-| Register allocation, liveness | [026](026-register-allocation.md), [027](027-liveness-and-stackmaps.md) | — | 3,000 |
-| ABI, runtime symbols, descriptors | [030](030-abi.md)–[032](032-type-descriptors-and-itabs.md) | 2,938 (`reflectdata`) | 2,500 |
-| Object writer | [040](040-object-format.md) | 1,559 (`goobj`) | 1,500 |
-| `arm64` encoder | [041](041-instruction-encoding.md) | 36,224 (`obj/arm64`, whole ISA) | 2,000 |
-| Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | — | 1,000 |
-| | | **v1 total** | **≈41,800** |
+```sh
+find . -name '*.go' -not -name '*_test.go' \
+    -not -path './types2/*' -not -path './spikes/*' | xargs wc -l
+```
 
-**v1 does not fit, by about five per cent.** That is the honest answer and it is
-recorded rather than adjusted, because a budget that moves to accommodate the
-estimate is not a budget. Two specs are the places to recover it if it must be
-recovered: [022](022-optimization-passes.md), whose pass list is the most
-optional thing in the compiler, and [015](015-export-data.md), whose reader can
-be types-only until inlining across packages is wanted.
+The compiler is **31,257** lines of compiler source today.
 
-#### Past v1
-
-The budget is scoped to v1 because the two largest remaining components serve
-gates that v1 does not reach:
-
-| Component | Spec | Gate | Reference | Estimate |
+| Component | Spec | Reference | Estimate | Measured |
 | --- | --- | --- | --- | --- |
-| Linker | [045](045-linker.md) | G2 | 44,067 (`cmd/link`) | 10,000 |
-| Package loader, G2 form | [014](014-package-loader.md) | G2 | — | 1,500 |
-| Plan 9 assembler | [044](044-plan9-assembler.md) | G3 | — | 5,000 |
-| `amd64` backend | [043](043-amd64-backend.md) | — | 3,218 + rules | 5,000 |
-| DWARF | [046](046-debug-info.md) | G3 | — | 3,000 |
+| Positions, scanner, parser | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) | 7,522 (`syntax`) | 7,500 | 6,385 |
+| Type checker | [012](012-type-checking.md) | 23,222 (`types2`) | **excluded**, forked | 25,162, plus 1,311 for its generator |
+| Package loader, G1 form | [014](014-package-loader.md) | | 300 | 1,025 |
+| Export data | [015](015-export-data.md) | 1,568 + 8,097 + 1,259 | 7,000 | **0, not written** |
+| Typed IR | [020](020-ir.md) | 10,216 (`ir`) | 6,000 with escape and inlining | 3,659 |
+| Escape analysis, inlining | [023](023-escape-analysis.md), [024](024-inlining-and-devirtualization.md) | 3,601 (`escape`) | same row | **0, not written** |
+| SSA and its passes | [021](021-ssa-construction.md), [022](022-optimization-passes.md) | 11,609 hand-written | 8,000 | 2,996 |
+| Lowering rules, one target | [025](025-lowering-and-rules.md) | 18,704 (`_gen`, all targets) | 3,000 | 5,231 |
+| Register allocation, liveness | [026](026-register-allocation.md), [027](027-liveness-and-stackmaps.md) | | 3,000 | 3,478 |
+| ABI, runtime symbols, descriptors | [030](030-abi.md) to [032](032-type-descriptors-and-itabs.md) | 2,938 (`reflectdata`) | 2,500 | 1,538 |
+| SSA to machine code | no spec owns it | | **no row existed** | 2,634 |
+| Object writer | [040](040-object-format.md) | 1,559 (`goobj`) | 1,500 | 1,364 |
+| `arm64` encoder | [041](041-instruction-encoding.md) | 36,224 (`obj/arm64`, whole ISA) | 2,000 | 2,040 |
+| Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | | 1,000 | 893 |
+| | | | **≈41,800** | **31,257** |
 
-A complete nanogo is therefore on the order of 65,000 lines, not 40,000. Saying
-so here is the point of the decision: the number is a design pressure with an
-audit attached, and the audit is run at every milestone in
-[003](003-sequencing.md), not at the end.
+The measured column is not a smaller version of the estimate column, and the
+difference between them is the interesting part.
 
-When a spec proposes something that cannot fit, the spec must say what it gives
-up instead of quietly spending the budget.
+#### What the estimates got wrong
+
+**The original verdict is kept because it was the honest answer at the time.**
+This decision said: *v1 does not fit, by about five per cent*, against an
+estimated 41,800. That was recorded rather than adjusted, and it stands as
+written. The measurement says something different, and it does not say the
+budget is safe.
+
+**Four rows are zero because the work is not done.** Export data, escape
+analysis, inlining and generics instantiation are not written. Their estimates
+total 16,600 lines. A tree that is 31,257 lines with 16,600 lines of estimate
+still ahead of it is not under a 40,000 line budget, it is untested against one.
+The two recovery points below are still the two recovery points.
+
+**One component had no row at all.** The pass that turns SSA into machine code
+and writes it through the object writer, `ssagen`, is 2,634 lines and was
+budgeted nowhere. The pipeline of [002](002-architecture.md) has the stage; the
+accounting skipped it, because the estimate was made by listing specs and no
+spec owns that stage. This was found by summing the tree against the table
+during the August 2026 documentation audit. The lesson is the one the table is
+for: a budget built from the spec list inherits the spec list's gaps.
+
+**Two rows were badly estimated in opposite directions.** The G1 package loader
+was estimated at 300 lines and is 1,025, because build-constraint evaluation is
+a real language with a real parser and the estimate treated it as a call to
+`go list`. Lowering was estimated at 3,000 and is 5,231, because the estimate
+compared against `gc`'s rule generator input and nanogo writes rules as Go
+functions with no generator, which [025](025-lowering-and-rules.md) chose
+deliberately and priced at "five lines here for one line there". The scanner and
+parser came in under, at 6,385 against 7,500.
+
+**The forked checker is larger than the fork it came from.** 25,162 lines
+against upstream's 23,222, plus 1,311 lines of generator. It is excluded from
+the budget either way, so this changes nothing, and it is recorded because the
+figure this decision quotes for `types2` is upstream's and a reader would
+otherwise expect nanogo's to match it.
+
+#### Keeping the number honest
+
+The measured total is gated. `internal/hygiene` counts the tree the way the
+command above does and fails when this figure drifts from it by more than five
+per cent, and fails outright if the tree passes 40,000 lines. The tolerance is
+wide on purpose: the line count moves with every commit, and a gate that fired
+on every commit would be deleted.
 
 ### 11. nanogo is object-compatible with `gc`, and has two modes
 
@@ -280,8 +325,8 @@ whole toolchain on a real build: 110 invocations, 59 of them `compile`, and a
 working binary at the end. It also measured the flag set the `go` command
 actually sends and the `-V=full` build-ID protocol, both of which
 [050](050-driver.md) had drafted wrongly from the help text. What is *not*
-spiked is the harder half — that nanogo's objects and export data will
-interoperate with `gc`'s — and that is not testable before there is a compiler.
+spiked is the harder half, that nanogo's objects and export data will
+interoperate with `gc`'s, and that is not testable before there is a compiler.
 M3 in [003](003-sequencing.md) is where it is proved or the fallback is taken.
 
 Without this, the first milestone that runs real code requires the runtime, the

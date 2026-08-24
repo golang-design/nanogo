@@ -19,6 +19,41 @@ This spec also owns the symbol namespace, because the linker's handling of these
 symbols is keyed on their names, and because that keying is what killed the
 text-assembly seam in [000](000-decisions.md) decision 3.
 
+## Nothing in this spec is built
+
+**No type descriptor is emitted, and no itab is emitted.** Nothing computes the
+set of types that need one. No structure in nanogo mirrors `internal/abi.Type`
+or `internal/abi.ITab`: the field names of the two listings below,
+`PtrToThis`, `NameOff`, `TFlag`, `Inter`, appear nowhere in the source. The
+descriptor's `GCData` has one half of its input ready and no consumer:
+`ir.Type.PtrBits` is computed by `ir.Layout` and `ir.Type.PtrBytes` is derived
+from it, and both name this spec in their comments.
+
+Two parts of the namespace section are built, and they are the two that do not
+need a descriptor:
+
+| Prefix | Where it is produced |
+| --- | --- |
+| `go:string.` | `ssa/decompose.go`, for a string literal, named by a hash of the bytes |
+| `gclocals·` | `ssagen/stackmap.go`, for a stack map bitmap, named by `gc`'s own content hash |
+
+The `gclocals·` hash is `gc`'s and not a hash of nanogo's choosing, so a nanogo
+bitmap and a `gc` bitmap that describe the same frame resolve to one symbol in
+the linked binary rather than two.
+
+The object writer knows the rest of the table by name. `obj/write.go` puts a
+`type:` symbol and a `go:itab.` symbol in the classes the linker expects and
+routes a `gclocals` symbol to the funcdata class. That is the linker-facing
+half of the naming rules, tested against symbols the tests construct, and it is
+waiting for a writer that produces such names.
+
+**The consequence for [027](027-liveness-and-stackmaps.md).** A stack object
+record names its type's descriptor, so nothing can write
+`FUNCDATA_StackObjects` until a descriptor can be named.
+`ssa.StackMaps.ObjectsSym` is written and takes the descriptor reference as a
+callback, and `ssagen` passes it nothing. This is the one place where an
+unwritten spec holds back a written one.
+
 ## The type descriptor
 
 ```go
@@ -127,7 +162,8 @@ Deduplication is the linker's, so a descriptor emitted by two packages is not an
 error.
 
 For types defined in another package, the descriptor is emitted by the defining
-package and referenced. For composite types built from them — `[]*pkg.T` — the
+package and referenced. For composite types built from them, such as
+`[]*pkg.T`, the
 descriptor is emitted by whichever package needs it, under the canonical name, and
 merged.
 

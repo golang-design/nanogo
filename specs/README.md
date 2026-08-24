@@ -11,15 +11,37 @@ The decisions everything here is built on live in
 [`000-decisions.md`](000-decisions.md). It is normative: a spec that contradicts
 it is wrong.
 
-**Nothing is built.** Every spec in this directory is `draft`. The repository
-holds the specs, two spikes, and a module identity. A spec being here means its
-scope and current decisions are reviewable, not that its code exists.
+## Reading the deck honestly
+
+The deck was written before the code, and the code disproved a great deal of it.
+Every spec now carries a `status` and the index below repeats it, so that a
+reader knows before opening a spec whether it describes code or a plan:
+
+| Status | Means |
+| --- | --- |
+| `complete` | the spec's scope is built and gated |
+| `in progress` | part of it is built, and the spec says which part |
+| `draft` | nothing in it is built |
+
+41 specs. Well over a third of them are `draft`, which is to say that much of
+this deck is still a plan, and now says so.
+
+Where the code disproved a spec, the spec keeps the record: what it claimed,
+what the code does, and how the difference was found. Those paragraphs are the
+most useful thing in the deck and none of them is deleted when it is superseded.
+An audit in August 2026 went through all 41 against the tree and found stale
+claims in most of them; [003](003-sequencing.md)'s Deviations section carries
+the ones that matter across specs.
+
+The numbers in [003](003-sequencing.md) are gated by `internal/hygiene`, which
+reads them out of the prose and fails when they disagree with what the tests
+measure.
 
 ## Reading order
 
 Start with [000](000-decisions.md). Its first section corrects the framing the
-project began with — that a from-scratch type checker was required for
-bootstrapping — and every other decision follows from that correction.
+project began with, that a from-scratch type checker was required for
+bootstrapping, and every other decision follows from that correction.
 
 Then [001](001-bootstrap-gates.md), which splits "bootstrap" into three gates
 that are reached at different times and need different work. Specs name their
@@ -38,92 +60,93 @@ believed.
 
 ### Foundation
 
-| | | |
-| --- | --- | --- |
-| [000](000-decisions.md) | Decisions | normative; read first |
-| [001](001-bootstrap-gates.md) | Bootstrap gates | G1, G2, G3, and the fixed point |
-| [002](002-architecture.md) | Architecture | pipeline, two IRs, package layout |
-| [003](003-sequencing.md) | Sequencing | milestones M0–M10, risks, deviations |
-| [004](004-conformance.md) | Conformance | four levels of proof |
+| | | | |
+| --- | --- | --- | --- |
+| [000](000-decisions.md) | Decisions | `complete` | normative; read first |
+| [001](001-bootstrap-gates.md) | Bootstrap gates | `draft` | G1, G2, G3, and the fixed point |
+| [002](002-architecture.md) | Architecture | `in progress` | pipeline, two IRs, package layout |
+| [003](003-sequencing.md) | Sequencing | `in progress` | milestones M0 to M10, risks, deviations |
+| [004](004-conformance.md) | Conformance | `in progress` | four levels of proof |
 
 ### Front end
 
-| | | |
-| --- | --- | --- |
-| [010](010-scanner-and-positions.md) | Positions and scanner | `Pos`, `//line`, semicolon insertion |
-| [011](011-parser-and-ast.md) | Parser and syntax tree | the two grammar ambiguities |
-| [012](012-type-checking.md) | Type checking | forking `types2` |
-| [013](013-generics.md) | Generics | full stenciling |
-| [014](014-package-loader.md) | Package loader | `go list` at G1, direct resolution at G2 |
-| [015](015-export-data.md) | Export data | `gc`-compatible |
-| [016](016-directives-and-pragmas.md) | Directives and pragmas | the complete `//go:` table |
+| | | | |
+| --- | --- | --- | --- |
+| [010](010-scanner-and-positions.md) | Positions and scanner | `complete` | `Pos`, `//line`, semicolon insertion |
+| [011](011-parser-and-ast.md) | Parser and syntax tree | `complete` | the two grammar ambiguities |
+| [012](012-type-checking.md) | Type checking | `complete` | forking `types2` |
+| [013](013-generics.md) | Generics | `draft` | full stenciling; the stenciler is not written |
+| [014](014-package-loader.md) | Package loader | `in progress` | `go list` at G1, direct resolution at G2 |
+| [015](015-export-data.md) | Export data | `draft` | `gc`-compatible; no reader and no writer exist |
+| [016](016-directives-and-pragmas.md) | Directives and pragmas | `draft` | the complete `//go:` table; nothing reads one yet |
 
 ### Middle end
 
-| | | |
-| --- | --- | --- |
-| [020](020-ir.md) | Typed IR | the exhaustive lowering table |
-| [021](021-ssa-construction.md) | SSA construction | memory as a value, on-the-fly phis |
-| [022](022-optimization-passes.md) | Optimization passes | the pass list, and the one exception |
-| [023](023-escape-analysis.md) | Escape analysis | |
-| [024](024-inlining-and-devirtualization.md) | Inlining and devirtualization | |
-| [025](025-lowering-and-rules.md) | Lowering | rewrite rules, the target boundary |
-| [026](026-register-allocation.md) | Register allocation | linear scan; no callee-saved registers |
-| [027](027-liveness-and-stackmaps.md) | Liveness and stack maps | the contract with the collector |
+| | | | |
+| --- | --- | --- | --- |
+| [020](020-ir.md) | Typed IR | `in progress` | the node set and the lowering table |
+| [021](021-ssa-construction.md) | SSA construction | `in progress` | memory as a value, on-the-fly phis |
+| [022](022-optimization-passes.md) | Optimization passes | `draft` | the pass list; no pass is written |
+| [023](023-escape-analysis.md) | Escape analysis | `draft` | not written |
+| [024](024-inlining-and-devirtualization.md) | Inlining and devirtualization | `draft` | not written |
+| [025](025-lowering-and-rules.md) | Lowering | `complete` | rewrite rules, the target boundary |
+| [026](026-register-allocation.md) | Register allocation | `complete` | linear scan; no callee-saved registers |
+| [027](027-liveness-and-stackmaps.md) | Liveness and stack maps | `in progress` | the contract with the collector |
 
 ### Runtime interface
 
-| | | |
-| --- | --- | --- |
-| [030](030-abi.md) | ABI | layout and calling convention |
-| [031](031-runtime-lowering.md) | Runtime lowering | the calls the compiler generates |
-| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | and the symbol namespace |
-| [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | |
-| [034](034-write-barriers.md) | Write barriers | |
-| [035](035-goroutines-and-stack-growth.md) | Goroutines and stack growth | prologue, nosplit budget, preemption |
+| | | | |
+| --- | --- | --- | --- |
+| [030](030-abi.md) | ABI | `in progress` | layout and calling convention |
+| [031](031-runtime-lowering.md) | Runtime lowering | `in progress` | the calls the compiler generates |
+| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `draft` | and the symbol namespace; not written |
+| [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | `draft` | not written |
+| [034](034-write-barriers.md) | Write barriers | `draft` | not written |
+| [035](035-goroutines-and-stack-growth.md) | Goroutines and stack growth | `in progress` | prologue built; `newproc` not |
 
 ### Back end
 
-| | | |
-| --- | --- | --- |
-| [040](040-object-format.md) | Object files | `goobj`, and why not assembly text |
-| [041](041-instruction-encoding.md) | Instruction encoding | |
-| [042](042-arm64-backend.md) | arm64 backend | the first target |
-| [043](043-amd64-backend.md) | amd64 backend | the test of target neutrality |
-| [044](044-plan9-assembler.md) | Plan 9 assembler | G3 |
-| [045](045-linker.md) | Linker | G2; `pclntab` and `moduledata` |
-| [046](046-debug-info.md) | Debug information | tracebacks first, DWARF second |
+| | | | |
+| --- | --- | --- | --- |
+| [040](040-object-format.md) | Object files | `in progress` | `goobj`, and why not assembly text |
+| [041](041-instruction-encoding.md) | Instruction encoding | `complete` | 963,460 encodings agree with `go tool asm` |
+| [042](042-arm64-backend.md) | arm64 backend | `in progress` | the first target |
+| [043](043-amd64-backend.md) | amd64 backend | `draft` | the test of target neutrality; not written |
+| [044](044-plan9-assembler.md) | Plan 9 assembler | `draft` | G3; not written |
+| [045](045-linker.md) | Linker | `draft` | G2; `pclntab` and `moduledata`; not written |
+| [046](046-debug-info.md) | Debug information | `in progress` | tracebacks built, DWARF not |
 
 ### Driver
 
-| | | |
-| --- | --- | --- |
-| [050](050-driver.md) | Driver | `gc`-compatible flags |
-| [051](051-build-integration.md) | Build integration | `-toolexec`, the allowlist |
-| [052](052-diagnostics.md) | Diagnostics | |
-| [053](053-determinism.md) | Determinism | what the fixed point depends on |
+| | | | |
+| --- | --- | --- | --- |
+| [050](050-driver.md) | Driver | `in progress` | `gc`-compatible flags |
+| [051](051-build-integration.md) | Build integration | `in progress` | `-toolexec`, the allowlist |
+| [052](052-diagnostics.md) | Diagnostics | `in progress` |  |
+| [053](053-determinism.md) | Determinism | `in progress` | what the fixed point depends on |
 
 ### Gates
 
-| | | |
-| --- | --- | --- |
-| [060](060-selfhost.md) | G1 self-hosting | |
-| [061](061-toolchain-independence.md) | G2 toolchain independence | |
-| [062](062-distribution-build.md) | G3 compiling the distribution | |
+| | | | |
+| --- | --- | --- | --- |
+| [060](060-selfhost.md) | G1 self-hosting | `draft` | not reached |
+| [061](061-toolchain-independence.md) | G2 toolchain independence | `draft` | not reached |
+| [062](062-distribution-build.md) | G3 compiling the distribution | `draft` | not reached |
 
 ### Extension
 
-| | | |
-| --- | --- | --- |
-| [070](070-gpu-target.md) | GPU targets | post-v1; a consumer, never a driver |
+| | | | |
+| --- | --- | --- | --- |
+| [070](070-gpu-target.md) | GPU targets | `draft` | post-v1; a consumer, never a driver |
 
 ## Where the work stands
 
 | | |
 | --- | --- |
-| Done | The spec deck, and the three spikes in [`../spikes`](../spikes) that settle the backend seam and the substitution mechanism |
-| Next | M0 in [003](003-sequencing.md): skeleton, driver, package layout |
-| Blocked on nothing | Every spec is drafted; none waits on another to begin |
+| Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the typed IR, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, the object writer, the arm64 encoder, and the driver |
+| Proved | `go tool link` links a nanogo object against the real Go runtime into a binary that runs, and a real collector honours nanogo's stack maps |
+| The largest gap | SSA construction accepts one function in five of the distribution. It has no case for an assignment statement, which alone blocks 24,031 functions. [021](021-ssa-construction.md) |
+| Not started | Export data, escape analysis, inlining, generics instantiation, type descriptors, itabs, closures, `defer`, `panic`, write barriers, goroutines, the linker, the assembler, DWARF, and the amd64 backend |
 | Decided against | Assembly text as a build path, a from-scratch type checker, GC-shape stenciling with dictionaries |
 
 ## The spikes
@@ -135,15 +158,15 @@ are expressible in text assembly: a hand-written `FUNCDATA` symbol with two
 bitmaps, selected by `PCDATA`, produced the two collection outcomes it declared.
 
 [`symbolnames`](../spikes/symbolnames) shows that the assembler rejects symbol
-names containing a colon, and that the compiler's entire namespace — `type:`,
-`go:itab.`, `go:string.` — uses one.
+names containing a colon, and that the compiler's entire namespace, `type:`,
+`go:itab.` and `go:string.`, uses one.
 
 Together those two are why nanogo writes object files and not assembly
 ([000](000-decisions.md) decision 3).
 
 [`toolexec`](../spikes/toolexec) shows that a foreign compiler can be substituted
 per package by `go build -toolexec`, and measured what the `go` command actually
-sends — a larger flag set than the help text lists, plus the `-V=full` build-ID
+sends: a larger flag set than the help text lists, plus the `-V=full` build-ID
 protocol. It is the evidence for [000](000-decisions.md) decision 11's mechanism,
 and [050](050-driver.md) records the two flags it corrected.
 
@@ -151,5 +174,6 @@ and [050](050-driver.md) records the two flags it corrected.
 
 Frontmatter is `title`, `status`, `layer`, `depends_on`, and, on every spec
 outside the foundation group, `gate`. `status` is `draft`, `in progress`, or
-`complete`. `gate` names which of [001](001-bootstrap-gates.md)'s gates the spec
-serves; the foundation specs serve all of them and omit it.
+`complete`, and `internal/hygiene` rejects a fourth value and a status that
+disagrees with the index above. `gate` names which of [001](001-bootstrap-gates.md)'s
+gates the spec serves; the foundation specs serve all of them and omit it.

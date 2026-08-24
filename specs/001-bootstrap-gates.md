@@ -38,22 +38,22 @@ because it must run with no `go` binary present. It is possible to compile the
 whole distribution while still calling `go tool link`, and it is possible to be
 free of the toolchain while still failing on the runtime.
 
-### G1 — self-compiling
+### G1: self-compiling
 
 nanogo compiles its own source, and the compiler that results is stable.
 
 Allowed at G1: `go tool link` produces the executable. `go list` resolves the
-import graph. `go/types` and any other standard-library package is in nanogo's
-own dependency set. The build runs in **hosted mode**
-([000](000-decisions.md) decision 11), so `gc` still compiles the runtime and the
-packages nanogo has not reached. Only `darwin/arm64` works.
+import graph. Any standard-library package is in nanogo's own dependency set.
+The build runs in **hosted mode** ([000](000-decisions.md) decision 11), so `gc`
+still compiles the runtime and the packages nanogo has not reached. Only
+`darwin/arm64` works.
 
 The hosted-mode allowance is what separates G1 from G3. G1 asks whether nanogo
 can compile *nanogo*. It does not ask whether nanogo can compile *everything*.
 
 Not allowed at G1: any part of nanogo that `gc` can compile but nanogo cannot.
 
-### G2 — toolchain-independent
+### G2: toolchain-independent
 
 nanogo builds nanogo on a machine with no `go` binary, given only nanogo, a
 linker it owns, and the source.
@@ -67,7 +67,7 @@ sounds, because nanogo only has to link what nanogo emits.
 blocker and not a G1 one, and it is the reason the package loader is a spec of
 its own rather than a paragraph.
 
-### G3 — distribution-compiling
+### G3: distribution-compiling
 
 nanogo compiles `~/dev/go.dev/go`, in the `CGO_ENABLED=0` configuration, and the
 result passes the distribution's own tests.
@@ -138,7 +138,7 @@ distinguishable:
    the table.
 2. $N_1$ and $N_2$ disagree on some program. Since both compiled $S$, and $N_2$
    came out of $N_1$, a miscompile in $N_1$ has propagated.
-3. nanogo's output depends on something outside $S$ — a path, an environment
+3. nanogo's output depends on something outside $S$, such as a path, an environment
    variable, a file order.
 
 ### A caveat that must not be skipped
@@ -181,6 +181,29 @@ older Go release.
 The property that matters is not "no other compiler was ever involved". It is
 that after $N_2$, no other compiler is *needed*. That is what the fixed point
 establishes.
+
+## Where the gates stand
+
+No gate is reached, and none has a mechanical test in the repository. The
+three-stage build above is a procedure nobody can run yet, for the reason
+[060](060-selfhost.md) records: nanogo refuses a package that imports another,
+that declares a package-level variable, or that has an `init` function, and
+nanogo's own packages have all three.
+
+What exists is the ladder's first rung. `gc` seeds the build, `go list` resolves
+the import graph ([014](014-package-loader.md)'s G1 half), and `go tool link`
+produces every executable the tests run.
+
+## Corrections
+
+**The G1 allowance named `go/types`, and nanogo does not import it.** The spec
+listed `go/types` as a standard-library package in nanogo's dependency set. The
+checker is the vendored fork `types2` ([000](000-decisions.md) decision 1), so
+it is nanogo source, not a dependency. This was found by auditing the spec
+against the import list of the non-test source: the only `go/*` packages the
+compiler imports are `go/build` in `loader/constraint.go` and `go/constant` and
+`go/token` inside the fork. The allowance still holds for the rest of the
+standard library, which is what the sentence now says.
 
 ## Order
 
