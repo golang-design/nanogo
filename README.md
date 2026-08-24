@@ -15,7 +15,7 @@
 ---
 
 > [!IMPORTANT]
-> **nanogo compiles some Go programs and cannot compile a package yet.** The
+> **nanogo compiles some Go programs, and most of Go is not among them.** The
 > whole pipeline is built, from source text to a `goobj` file that `go tool
 > link` links against the real Go runtime into a binary that runs. What it
 > accepts is far narrower than Go. SSA construction refuses an assignment
@@ -28,6 +28,55 @@ nanogo is a compiler for the Go language as defined by the
 the goal is a compiler that can be read end to end, under a stated budget of
 40,000 lines, and the measure of the project is that it compiles its own source
 to a fixed point.
+
+## Use it
+
+```sh
+go install golang.design/x/nanogo/cmd/nanogo@latest
+```
+
+nanogo runs as the go command's compiler, for the packages you name and no
+others:
+
+```sh
+cat > allowlist <<'EOF'
+# the package nanogo owns in this build. A main package is spelled "main",
+# because that is the name the go command passes in -p.
+main
+EOF
+
+NANOGO_ALLOWLIST=./allowlist go build -toolexec=nanogo ./...
+```
+
+Everything not on the list is handed to `gc`, so a build is part nanogo and
+part the real toolchain. Set `NANOGO_LOG=./log` and nanogo records what it
+compiled, what it delegated, and what it refused:
+
+```
+compiled main /var/folders/.../b001/_pkg_.a
+delegated internal/cpu not on the allowlist
+```
+
+A refusal names the function and the construct rather than emitting something
+wrong:
+
+```
+nanogo: main: cannot compile function main at ./main.go:5:6:
+        ssa.Build: ssa: main: assign: statement is not built yet
+```
+
+That is the honest state of the compiler: this program compiles and runs,
+
+```go
+package main
+
+func compute(a, b int) int { return a*b + 1 }
+
+func main() { compute(20, 3) }
+```
+
+and adding `x := 1` to it does not. `nanogo help` lists the subset. One target,
+`darwin/arm64`.
 
 ## The three gates
 
