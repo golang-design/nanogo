@@ -24,8 +24,9 @@ From [030](030-abi.md), with the allocation view:
 | --- | --- | --- |
 | R0 – R15 | yes | also the integer argument and result registers |
 | R19 – R25 | yes | scratch, no ABI meaning |
-| F0 – F15 | deferred | floating-point arguments and results |
-| F16 – F31 | deferred | scratch |
+| F0 – F15 | yes | also the floating-point argument and result registers |
+| F16 – F29 | yes | scratch, no ABI meaning |
+| F30, F31 | **no** | held back for materialisation, as R16 and R17 are |
 | R16, R17 | **no** | linker trampolines |
 | R18 | **no** | reserved by Darwin |
 | R26 | **no** | closure context at a call |
@@ -39,8 +40,14 @@ From [030](030-abi.md), with the allocation view:
 The zero register is not allocatable but is useful: storing zero, comparing
 against zero, and materialising zero all use it, and the rules should.
 
-The floating-point registers are marked deferred rather than allocatable
-because rule groups 1 to 5 below need none of them. They arrive with group 6.
+The floating-point registers arrived with group 6. An earlier version of this
+table marked them deferred, because rule groups 1 to 5 need none of them.
+
+F30 and F31 are held back for the same reason R16 and R17 are, and it is not
+the linker's: [026](026-register-allocation.md) reserves a pair per class for
+materialisation, so that a spilled value can always be read back without
+spilling something else first. The pair is taken from the top of the file
+because [030](030-abi.md) gives no role to any register above F15.
 
 A note on how the reserved set is checked, because the obvious property is the
 wrong one. The test asserts that **no allocatable register encodes as 18**, not
@@ -149,7 +156,12 @@ order they are worth writing:
 3. Address computation, folding constant offsets and scaled indices.
 4. Branches and the condition-code forms.
 5. Calls, in all four shapes: static, closure, interface, and deferred.
-6. Floating point.
+6. Floating point. Written. The two things in it that are not a transcription
+   of the integer rules are the constant, whose immediate reaches 256 values
+   and nothing else, and the condition codes, which are not the integer ones:
+   `FCMP` has four outcomes and an IEEE 754 comparison has to be false in the
+   unordered one, so `<` is `MI` and `<=` is `LS` where the integer rules use
+   `LT` and `LE`.
 7. Atomics, which the runtime and `sync/atomic` need.
 8. `memmove` and `memclr` inline forms for small constant sizes.
 

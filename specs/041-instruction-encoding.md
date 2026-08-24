@@ -116,7 +116,8 @@ not needed. On `amd64` it is, and [043](043-amd64-backend.md) owns it.
   produces for the equivalent instruction. This is an exact oracle and it should
   be exhaustive over the operand ranges, not sampled. The first pass ran
   **864,092 comparisons with zero disagreements**, which is the standard to
-  hold.
+  hold. `arm64`'s floating-point forms added **99,368**, for **963,460** in
+  total, still with none.
 
   Two traps in reading `go tool asm -S`, both of which produce a comparison that
   passes while testing nothing:
@@ -133,6 +134,15 @@ not needed. On `amd64` it is, and [043](043-amd64-backend.md) owns it.
   cannot, the encoding is checked by recovering the offset from the encoded word
   and sign-extending it back, rather than by restating the encoder's own
   expression.
+
+  There is a third case of that, and it is an assembler defect rather than a
+  syntax gap. `FMOV` with a floating-point immediate encodes an 8-bit field,
+  and `cmd/internal/obj/arm64/obj7.go` chooses the immediate form with
+  `chipfloat7(f64) > 0` where the field's zero is a legal encoding. So the one
+  value whose field is zero, `+2.0`, assembles as a PC-relative load from a
+  constant symbol, while its negative and the other 255 values take the
+  immediate form. That value is checked by recovering the field and expanding
+  it through the manual's `VFPExpandImm`.
 - Range rejection: every immediate form tested one past its limit, asserting the
   encoder reports the overflow rather than truncating.
 - `go tool objdump` on nanogo's objects, checked against the intended
