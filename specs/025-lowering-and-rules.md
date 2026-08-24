@@ -56,14 +56,45 @@ or one of a short list of pseudo-operations that survive to
 | --- | --- | --- |
 | `Phi` | SSA merge | [026](026-register-allocation.md) |
 | `Arg` | An incoming argument in its ABI location | [030](030-abi.md) |
+| `SelectN` | A call result in its ABI location | [030](030-abi.md) |
+| `InitMem` | The root of the memory chain; not an instruction | never; it has no machine form |
 | `Copy` | Value identity, no machine effect | [026](026-register-allocation.md) |
 | `SP`, `SB` | Frame and static base pointers | [027](027-liveness-and-stackmaps.md) |
 | `VarDef`, `VarKill` | Lifetime markers for stack objects | [027](027-liveness-and-stackmaps.md) |
+
+`SelectN` and `InitMem` are a correction. The first version of this table
+omitted both, and both must survive lowering: `SelectN` is the exact mirror of
+`Arg` and is resolved by the same ABI pass, and `InitMem` names the start of the
+memory chain rather than any instruction. The asymmetry that made them look like
+oversights is that `MakeResult`, which sits beside them, *does* have a machine
+form and becomes the target's return instruction.
 
 Anything else remaining is a missing rule and is a compiler crash with the
 operation named, never a silent fallback. A silent fallback in this pass produces
 a function that is missing an operation, which is the hardest class of bug in the
 whole compiler to find.
+
+## Multi-word values
+
+A value wider than a machine register cannot be one machine operation. A string
+is a pointer and a length, a slice adds a capacity, an interface is two words,
+and a struct or array can be any size. `Load` and `Store` of such a type, and a
+string constant, have no single instruction on any target here.
+
+**Splitting them into per-word operations is this pass's work**, and an earlier
+version of this spec did not say so anywhere. That omission was not academic: it
+is the largest single reason a function fails to lower, accounting for 3,164 of
+3,483 refusals over the distribution corpus.
+
+It cannot be pushed into a rule or worked around downstream. A 16-byte `Store`
+cannot become a call to `runtime.memmove`, because `memmove` takes a source
+**address** and a `Store` has a source **value**; there is nothing to take the
+address of. The decomposition has to happen while the value is still a value.
+
+So lowering runs a decomposition step before selection: a value of a multi-word
+type is replaced by one value per machine word, and every operation over it is
+replaced by the corresponding per-word operations. Selection then sees only
+single-register values, which is the property every rule below assumes.
 
 ## Operations that lower to calls
 
@@ -96,6 +127,42 @@ A constant that fits a target's immediate encoding stays an immediate. One that
 does not becomes either a materialising instruction sequence or a load from a
 constant pool, per target. The decision is in the rules, and
 [041](041-instruction-encoding.md) states each target's immediate forms.
+
+**A target's constant and address forms must be rematerialisable**, or
+[026](026-register-allocation.md)'s rematerialisation stops applying to that
+target. It is worth stating here rather than only there, because the two halves
+are written by different people and the failure is silent: nothing breaks, every
+constant is simply spilled and reloaded instead of recomputed. An address form
+cannot be marked constant in the op table, since it takes a frame or static base
+argument and "constant" means "depends on nothing", so the target's
+rematerialisable list is where it goes.
+
+## Where the target's semantics differ from Go's
+
+A rule may not assume the machine does what the language says. The shift
+operators are the example that matters, and nothing in this deck said so before
+one was written.
+
+Go defines a shift by a count at or above the operand width as producing zero,
+and the count is unsigned, so a count of $2^{63}$ is a legal enormous number.
+`arm64`'s `LSLV` takes the count **modulo the width**, so it computes $x \ll 1$
+for a count of 65. A signed comparison against the width is not a correct guard
+either, since a count above $2^{63}$ reads as negative.
+
+The rule therefore computes the mask arithmetically, which is correct for every
+unsigned count:
+
+$$
+u = s \gg \log_2 w, \qquad m = -u \gg 63
+$$
+
+with $m$ then cleared from the result for a left or unsigned right shift, and
+merged into the count for an arithmetic right shift, where the defined result is
+the sign bit rather than zero.
+
+Any rule that maps a Go operator to a machine instruction owes the same
+question: does the instruction agree with the language for every input, or only
+for the ones a test happens to try.
 
 ## Testing
 
