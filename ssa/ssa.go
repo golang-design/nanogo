@@ -305,6 +305,16 @@ type Func struct {
 	// collector and specs/030-abi.md gives them offsets. Neither is done here.
 	Frame []*ir.Object
 
+	// ABI is where specs/030-abi.md puts this function's parameters and
+	// results. AssignABI fills it and it is nil until then.
+	//
+	// It is a field of the function rather than a table the assignment pass
+	// keeps, because two consumers read it and they must read the same
+	// answer: Target.DefReg pre-colours an incoming argument from it, and the
+	// code generator places the arguments from it. Two placements computed
+	// apart are a call that reads its arguments from the wrong place.
+	ABI *ABI
+
 	nextValue ID
 	nextBlock ID
 }

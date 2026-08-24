@@ -417,3 +417,82 @@ func TestRematerialisationSurvivesLowering(t *testing.T) {
 		t.Error("no machine address form is rematerialisable; every address will be spilled")
 	}
 }
+
+// TestArm64FloatRegisterFile pins the floating-point half of the description.
+//
+// One property matters more than the rest: a ssa.Reg and an obj/arm64.Reg are
+// the same number for every register of both classes. The emitter of specs/042
+// hands a Reg straight to an encoder, so if the two numberings drifted a
+// floating-point value would be encoded as an integer register with the same
+// number and the program would read the wrong file with no diagnostic.
+func TestArm64FloatRegisterFile(t *testing.T) {
+	tg := NewArm64Target()
+	for i := 0; i < 32; i++ {
+		r := Arm64FReg(i)
+		if r != Arm64Reg(arm64.F0+arm64.Reg(i)) {
+			t.Fatalf("Arm64FReg(%d) is %d and obj/arm64 numbers F%d as %d",
+				i, r, i, arm64.F0+arm64.Reg(i))
+		}
+		if got, want := tg.RegName(r), arm64.Reg(arm64.F0+arm64.Reg(i)).String(); got != want {
+			t.Errorf("register %d is %q in the target and %q in obj/arm64", r, got, want)
+		}
+		if tg.RegClassOf(r) != ClassFloat {
+			t.Errorf("%v is not in the float class", tg.RegName(r))
+		}
+	}
+	for r := arm64.R0; r <= arm64.RSP; r++ {
+		if tg.RegClassOf(Arm64Reg(r)) != ClassInt {
+			t.Errorf("%v is not in the integer class", r)
+		}
+	}
+
+	// The float allocatable set is obj/arm64's table and not a second copy.
+	want := 0
+	for _, r := range arm64.AllocatableFRegs() {
+		want++
+		if !tg.Allocatable[ClassFloat].Contains(Arm64Reg(r)) {
+			t.Errorf("%v is allocatable in obj/arm64 and not in the target", r)
+		}
+	}
+	if got := tg.Allocatable[ClassFloat].Len(); got != want {
+		t.Errorf("the target has %d allocatable float registers and obj/arm64 has %d", got, want)
+	}
+	if want == 0 {
+		t.Fatal("no floating-point register is allocatable, so specs/042 group 6 has nowhere to put a value")
+	}
+
+	// The two classes must not overlap, or one register would be handed to
+	// two values at once.
+	if !tg.Allocatable[ClassInt].Intersect(tg.Allocatable[ClassFloat]).Empty() {
+		t.Error("a register is allocatable in both classes")
+	}
+	if errs := tg.Validate(); len(errs) != 0 {
+		t.Errorf("the target does not validate: %v", errs)
+	}
+
+	// ClassOfType is what the allocator asks, and a float has to reach the
+	// float class or its value goes to an integer register.
+	for _, c := range []struct {
+		t     *ir.Type
+		class RegClass
+		ok    bool
+	}{
+		{&ir.Type{Kind: ir.Float32, Size: 4, Align: 4}, ClassFloat, true},
+		{&ir.Type{Kind: ir.Float64, Size: 8, Align: 8}, ClassFloat, true},
+		{&ir.Type{Kind: ir.Complex128, Size: 16, Align: 8}, ClassFloat, false},
+		{&ir.Type{Kind: ir.Int64, Size: 8, Align: 8}, ClassInt, true},
+	} {
+		got, ok := ClassOfType(c.t)
+		if got != c.class || ok != c.ok {
+			t.Errorf("ClassOfType(%v) = %v, %v; want %v, %v", c.t.Kind, got, ok, c.class, c.ok)
+		}
+	}
+
+	// A floating-point constant is rematerialised rather than spilled, which
+	// is the property specs/026 relies on to keep it out of the frame.
+	f := NewFunc("f")
+	cf := f.Entry.NewValue(0, OpARM64FMOVconst, &ir.Type{Kind: ir.Float64, Size: 8, Align: 8})
+	if !Rematerialisable(cf) {
+		t.Error("a floating-point constant is not rematerialisable")
+	}
+}

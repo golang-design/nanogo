@@ -1067,6 +1067,10 @@ type decomposeCounts struct {
 	selectNAbove0 int
 
 	verifyNG int
+
+	// abiNG counts the functions specs/030-abi.md's assignment refused, which
+	// today is a result the result registers cannot hold.
+	abiNG int
 }
 
 func decCorpusPaths(t *testing.T, src string, all bool) []string {
@@ -1158,6 +1162,7 @@ func TestDecomposeCorpus(t *testing.T) {
 	decLogCounts(t, "unlowered", c.refused)
 	decLogCounts(t, "still wider than a register: operation", c.undecomposed)
 	decLogCounts(t, "still wider than a register: type", c.wide)
+	t.Logf("the ABI assignment refused %d functions", c.abiNG)
 	t.Logf("composite call results read at an index above zero: %d", c.selectNAbove0)
 	if c.selectNAbove0 != 0 {
 		t.Errorf("%d composite results are read at an index above zero; the part numbering of SelectN is wrong for them",
@@ -1242,6 +1247,21 @@ func decomposeOne(t *testing.T, path string, fn *ir.Func, c *decomposeCounts) {
 		c.verifyNG++
 		if c.verifyNG < 4 {
 			t.Errorf("%s: %s did not verify after decomposition: %v", path, fn.Name, vs)
+		}
+		return
+	}
+	// specs/030-abi.md's assignment walk runs between decomposition and
+	// selection, so the pipeline this measures has it: a value that crosses a
+	// call boundary in registers is split there and nowhere else, and a
+	// measurement taken without it would not be the pipeline that compiles.
+	if err := ssa.AssignABI(f, ssa.NewArm64Target()); err != nil {
+		c.abiNG++
+		return
+	}
+	if vs := ssa.Verify(f); len(vs) != 0 {
+		c.verifyNG++
+		if c.verifyNG < 4 {
+			t.Errorf("%s: %s did not verify after the ABI pass: %v", path, fn.Name, vs)
 		}
 		return
 	}

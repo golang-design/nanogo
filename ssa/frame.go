@@ -47,10 +47,10 @@ package ssa
 // # What is not decided here
 //
 // The incoming and outgoing argument areas are the calling convention's, and
-// specs/030-abi.md's assignment pass does not exist yet. They arrive through
-// FrameConfig rather than being invented here: an argument area whose contents
-// this file guessed would produce an arguments bitmap that describes words the
-// convention put somewhere else, which is the failure the whole spec is about.
+// abi.go assigns them. They arrive through FrameConfig rather than being
+// recomputed here: an argument area whose contents this file guessed would
+// produce an arguments bitmap that describes words the convention put
+// somewhere else, which is the failure the whole spec is about.
 //
 // Where the saved return address and the saved frame pointer physically land
 // is also the target's, and the diagram of

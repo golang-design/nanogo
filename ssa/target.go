@@ -414,16 +414,16 @@ func (t *Target) Validate() []error {
 
 // The arm64 target.
 //
-// The integer registers keep obj/arm64's numbering, so a Reg below numArm64Int
-// converts to an obj/arm64.Reg by a cast and the two packages cannot disagree
-// about which register R7 is. The floating-point registers follow, because
-// obj/arm64 does not encode them yet and a number has to come from somewhere;
-// when that package grows an FReg the offset is the only thing to revisit.
+// The register numbering is obj/arm64's, whole. A Reg converts to an
+// obj/arm64.Reg by a cast in both directions, for the floating-point file as
+// well as the integer one, so the two packages cannot disagree about which
+// register a number names. That identity is what lets the emitter of
+// specs/042 hand a Reg straight to an encoder, and a test below pins it.
 
-// numArm64Int is the number of integer register spellings obj/arm64 has,
-// including the two spellings of register 31. It is computed from that
-// package rather than written as a constant, so the two cannot drift.
-var numArm64Int = func() int {
+// numArm64Reg is the size of obj/arm64's register file, both classes. It is
+// computed from that package rather than written as a constant, so the two
+// cannot drift.
+var numArm64Reg = func() int {
 	n := 0
 	for arm64.Reg(n).Valid() {
 		n++
@@ -431,14 +431,13 @@ var numArm64Int = func() int {
 	return n
 }()
 
-// numArm64Float is the number of floating-point registers, F0 to F31.
-const numArm64Float = 32
-
-// Arm64Reg returns the allocator's number for an obj/arm64 integer register.
+// Arm64Reg returns the allocator's number for an obj/arm64 register, of
+// either class.
 func Arm64Reg(r arm64.Reg) Reg { return Reg(r) }
 
-// Arm64FReg returns the allocator's number for floating-point register n.
-func Arm64FReg(n int) Reg { return Reg(numArm64Int + n) }
+// Arm64FReg returns the allocator's number for floating-point register n,
+// which is F0 to F31 of specs/030-abi.md.
+func Arm64FReg(n int) Reg { return Reg(arm64.F0) + Reg(n) }
 
 // NewArm64Target returns the description of darwin/arm64.
 //
@@ -447,26 +446,29 @@ func Arm64FReg(n int) Reg { return Reg(numArm64Int + n) }
 func NewArm64Target() *Target {
 	t := &Target{Name: "arm64"}
 
-	t.Regs = make([]RegInfo, numArm64Int+numArm64Float)
-	for i := 0; i < numArm64Int; i++ {
-		t.Regs[i] = RegInfo{Name: arm64.Reg(i).String(), Class: ClassInt}
-	}
-	for i := 0; i < numArm64Float; i++ {
-		t.Regs[numArm64Int+i] = RegInfo{Name: "F" + strconv.Itoa(i), Class: ClassFloat}
+	t.Regs = make([]RegInfo, numArm64Reg)
+	for i := 0; i < numArm64Reg; i++ {
+		r := arm64.Reg(i)
+		c := ClassInt
+		if r.IsFloat() {
+			c = ClassFloat
+		}
+		t.Regs[i] = RegInfo{Name: r.String(), Class: c}
 	}
 
-	// The integer allocatable set is obj/arm64's table, not a second copy of
-	// it. R18 is absent there, which is the whole point: darwin reserves it,
-	// and a compiler that allocates it produces a binary that fails for
-	// reasons that have nothing to do with the program
-	// (specs/026-register-allocation.md, specs/030-abi.md).
+	// The allocatable sets are obj/arm64's tables, not a second copy of them.
+	// R18 is absent there, which is the whole point: darwin reserves it, and a
+	// compiler that allocates it produces a binary that fails for reasons that
+	// have nothing to do with the program (specs/026-register-allocation.md,
+	// specs/030-abi.md).
 	for _, r := range arm64.AllocatableRegs() {
 		t.Allocatable[ClassInt] = t.Allocatable[ClassInt].Add(Arm64Reg(r))
 	}
-	// F0 to F29 are allocatable. F30 and F31 are the floating-point scratch
-	// pair, taken from the top of the file because no ABI role uses them.
-	for i := 0; i < numArm64Float-2; i++ {
-		t.Allocatable[ClassFloat] = t.Allocatable[ClassFloat].Add(Arm64FReg(i))
+	// F0 to F29. F30 and F31 are the floating-point materialisation pair,
+	// taken from the top of the file because specs/030-abi.md gives no role to
+	// any register above F15.
+	for _, r := range arm64.AllocatableFRegs() {
+		t.Allocatable[ClassFloat] = t.Allocatable[ClassFloat].Add(Arm64Reg(r))
 	}
 
 	// R16 and R17 are the linker's trampoline scratch, so they are not
@@ -474,7 +476,7 @@ func NewArm64Target() *Target {
 	// is inserted at a branch, and a scratch register here is live only inside
 	// one straight-line materialisation sequence, which contains no branch.
 	t.Scratch[ClassInt] = []Reg{Arm64Reg(arm64.RegTrampLo), Arm64Reg(arm64.RegTrampHi)}
-	t.Scratch[ClassFloat] = []Reg{Arm64FReg(30), Arm64FReg(31)}
+	t.Scratch[ClassFloat] = []Reg{Arm64Reg(arm64.RegFScratchLo), Arm64Reg(arm64.RegFScratchHi)}
 
 	// specs/030-abi.md: R0 to R15 carry integer arguments and results, F0 to
 	// F15 the floating-point ones, and results restart the counters.
@@ -502,13 +504,14 @@ func NewArm64Target() *Target {
 	// source. specs/026-register-allocation.md confines the opposite case to
 	// one flag, and this is the target that does not set it.
 	t.TwoAddress = func(v *Value) bool { return false }
-	// specs/030-abi.md's assignment walk is the ABI pass, which does not exist
-	// yet. Until it does, no value is pre-coloured and the allocator places
-	// arguments and results like any other value. The hooks are here because
-	// adding the policy later must not change the allocator or its output
-	// shape.
-	t.DefReg = func(v *Value) (Reg, bool) { return NoReg, false }
-	t.UseReg = func(v *Value, i int) (Reg, bool) { return NoReg, false }
+	// specs/030-abi.md's assignment walk is abi.go, and these are the two
+	// places its answer reaches the allocator. An incoming argument and a call
+	// result are pre-coloured, and a call's operands and a return's values are
+	// read where the convention says. The walk is target-neutral and reads
+	// ArgRegs, ResultRegs and ClassOf above, so the target names the registers
+	// and the policy stays in one file.
+	t.DefReg = func(v *Value) (Reg, bool) { return ABIDefReg(t, v) }
+	t.UseReg = func(v *Value, i int) (Reg, bool) { return ABIUseReg(t, v, i) }
 
 	return t
 }
