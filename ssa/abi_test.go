@@ -5,7 +5,6 @@
 package ssa
 
 import (
-	"strings"
 	"testing"
 
 	"golang.design/x/nanogo/ir"
@@ -451,19 +450,93 @@ func TestAssignABIHomesALargeArgumentInTheArea(t *testing.T) {
 	}
 }
 
-// TestAssignABIRefusesAResultThatDoesNotFit records the bound: a result the
-// register set cannot hold is written into the caller's frame, and nothing
-// below writes it there yet.
-func TestAssignABIRefusesAResultThatDoesNotFit(t *testing.T) {
-	f, _ := abiFuncWithArg(abiTInt)
-	b := f.Entry
+// TestAssignABIWritesALargeResultIntoTheResultArea is the callee's half of a
+// result the register set cannot hold.
+//
+// Go's convention puts it in the incoming argument area after the arguments
+// the registers could not hold, so the callee writes it there and returns
+// nothing in a register.
+func TestAssignABIWritesALargeResultIntoTheResultArea(t *testing.T) {
+	tg := NewArm64Target()
 	typ := abiStruct("s20", 20, abiTInt)
-	mem := b.Control.Args[0]
-	big := b.NewValue(0, OpLoad, typ, b.NewValue(0, OpSP, abiTPtr), mem)
-	b.Control = b.NewValue(0, OpMakeResult, MemType, big, mem)
-	err := AssignABI(f, NewArm64Target())
-	if err == nil || !strings.Contains(err.Error(), "does not fit the result registers") {
-		t.Errorf("a twenty-word result gave %v", err)
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	o := &ir.Object{Name: "p", Type: abiTInt, Class: ir.ClassLocal}
+	f.Frame = append(f.Frame, o)
+	mem := b.NewValue(0, OpInitMem, MemType)
+	arg := b.NewValue(0, OpArg, abiTInt)
+	arg.Aux = o
+	addr := b.NewValue(0, OpLocalAddr, abiPtrTo(abiTInt), mem)
+	addr.Aux = o
+	st := b.NewValue(0, OpStore, MemType, addr, arg, mem)
+	st.AuxInt = abiTInt.Size
+	src := b.NewValue(0, OpLocalAddr, abiPtrTo(typ), st)
+	src.Aux = &ir.Object{Name: "v", Type: typ, Class: ir.ClassLocal}
+	big := b.NewValue(0, OpLoad, typ, src, st)
+	b.Control = b.NewValue(0, OpMakeResult, MemType, big, st)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	abi := f.ABI
+	if len(abi.Out) != 1 || abi.Out[0].InReg {
+		t.Fatalf("the result is %v and travels in registers (%v)", abi.Out[0].Type, abi.Out[0].InReg)
+	}
+	// The parameter takes one register and one spill slot, so the stack part
+	// of the area is the result alone and the spill slot follows it.
+	if abi.Out[0].Off != 0 {
+		t.Errorf("the result is at %d, and it is the only value the registers could not hold", abi.Out[0].Off)
+	}
+	if av, _ := abi.ArgOf(o); av.Off != 160 {
+		t.Errorf("the parameter's spill slot is at %d, over a result area of 160 bytes", av.Off)
+	}
+	if abi.ArgsSize != 168 {
+		t.Errorf("the area is %d bytes: 160 of result and 8 of spill", abi.ArgsSize)
+	}
+	// The return passes nothing: the value is in the caller's frame.
+	mr := b.Control
+	if len(mr.Args) != 1 || !IsMemory(mr.Args[0]) {
+		t.Errorf("the return passes %d operands, and the result is in memory\n%s", len(mr.Args), f)
+	}
+	// The copy is a block move into a slot the assignment named.
+	var move *Value
+	for _, v := range b.Values {
+		if v.Op == OpMove {
+			move = v
+		}
+	}
+	if move == nil {
+		t.Fatalf("no block move writes the result\n%s", f)
+	}
+	if move.AuxInt != typ.Size {
+		t.Errorf("the move copies %d bytes and the result is %d", move.AuxInt, typ.Size)
+	}
+	dst := move.Args[0]
+	if dst.Op != OpLocalAddr {
+		t.Fatalf("the destination of the move is %v", dst.Op)
+	}
+	ho, _ := dst.Aux.(*ir.Object)
+	found := false
+	for _, h := range abi.Homes {
+		if h.Obj == ho {
+			found = true
+			if !h.Incoming || h.Off != 0 {
+				t.Errorf("the result slot is at %d, incoming %v", h.Off, h.Incoming)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the destination of the move names no argument-area slot")
+	}
+	// The slot is not a local: the frame layout would give it a second one
+	// and the locals bitmap would describe it twice.
+	for _, fo := range f.Frame {
+		if fo == ho {
+			t.Errorf("the result slot is in the frame")
+		}
 	}
 }
 
@@ -597,9 +670,16 @@ func TestABIPlacesACallsOperands(t *testing.T) {
 	}
 }
 
-// TestABIPlacesACallsResults covers the pre-colouring of OpSelectN, which is
-// where a call's results are named.
-func TestABIPlacesACallsResults(t *testing.T) {
+// TestACallsResultsAreNotPreColoured records the one case the convention
+// places and the allocator cannot hold.
+//
+// A call result comes back in a result register, and specs/026's scan spills a
+// value that is live across a call before it looks at the register the
+// convention fixed. The check that runs ahead of the scan does not, so an
+// argument in R0 and a call result in R0 are refused as a pair even when the
+// argument is going to be spilled. The code generator moves each result out of
+// its register at the call instead.
+func TestACallsResultsAreNotPreColoured(t *testing.T) {
 	tg := NewArm64Target()
 	f := NewFunc("f")
 	b := f.Entry
@@ -610,22 +690,21 @@ func TestABIPlacesACallsResults(t *testing.T) {
 	r1 := b.NewValue(0, OpSelectN, abiTPtr, call)
 	r1.AuxInt = 1
 	for i, v := range []*Value{r0, r1} {
-		r, ok := tg.DefReg(v)
-		if !ok || r != tg.ResultRegs[ClassInt][i] {
-			t.Errorf("result %d is fixed to %v (%v), want %v", i, r, ok, tg.ResultRegs[ClassInt][i])
+		if _, ok := tg.DefReg(v); ok {
+			t.Errorf("result %d is pre-coloured, and an argument in the same register is refused", i)
 		}
 	}
-	// A numbering with a hole is not a result list, and guessing which
-	// register the missing one took would place the rest wrongly.
-	gap := b.NewValue(0, OpSelectN, abiTInt, call)
-	gap.AuxInt = 5
-	if _, ok := tg.DefReg(r0); ok {
-		t.Error("a result list with a hole in it was placed")
+	// The placement itself is still the walk, and the code generator reads
+	// it: results restart the counters, so they are the first two result
+	// registers whatever the arguments took.
+	out, _, err := ABIResults(tg, []*ir.Type{abiTInt, abiTPtr})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A selection of nothing has no call to ask.
-	lone := b.NewValue(0, OpSelectN, abiTInt)
-	if _, ok := tg.DefReg(lone); ok {
-		t.Error("a selection with no call was placed")
+	for i := range out {
+		if !out[i].InReg || out[i].Parts[0].Reg != tg.ResultRegs[ClassInt][i] {
+			t.Errorf("result %d comes back in %v, want %v", i, out[i].Parts[0].Reg, tg.ResultRegs[ClassInt][i])
+		}
 	}
 }
 
@@ -792,5 +871,143 @@ func TestABIFlattensAnArray(t *testing.T) {
 	// A pointer to nothing still points at a byte, so it has a width.
 	if p := abiPtrTo(nil); p.Size != ir.PtrSize || p.Elem != abiByte {
 		t.Errorf("a pointer to no type is %v", p)
+	}
+}
+
+// TestAssignABICopiesALargeCallArgumentIntoTheArea is the caller's half of a
+// value the register set cannot hold.
+//
+// The value goes into the outgoing argument area, which nothing names, so the
+// pass makes an object for the slot and copies into it through that object's
+// address. The value stops being an operand: it is in the area before the call
+// runs, and the placement records that so the operands after it still land
+// where the callee reads them.
+func TestAssignABICopiesALargeCallArgumentIntoTheArea(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiStruct("s20", 20, abiTInt)
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	base := b.NewValue(0, OpArg, abiTPtr)
+	base.Aux = &ir.Object{Name: "p", Type: abiTPtr, Class: ir.ClassLocal}
+	load := b.NewValue(0, OpLoad, typ, base, mem)
+	tail := b.NewValue(0, OpArg, abiTInt)
+	tail.Aux = &ir.Object{Name: "q", Type: abiTInt, Class: ir.ClassLocal}
+	call := b.NewValue(0, OpStaticCall, MemType, load, tail, mem)
+	call.Aux = &ir.Object{Name: "main.g"}
+	b.Control = b.NewValue(0, OpMakeResult, MemType, call)
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	// The call passes one operand and memory: the struct is in the area.
+	if len(call.Args) != 2 || call.Args[0] != tail || !IsMemory(call.Args[1]) {
+		t.Fatalf("the call passes %d operands\n%s", len(call.Args), f)
+	}
+	// The memory it reads is the copy's, so the words are written first.
+	mv := call.Args[1]
+	if mv.Op != OpMove || mv.AuxInt != typ.Size {
+		t.Fatalf("the call reads %v, and a block move of %d bytes writes the area", mv.LongString(), typ.Size)
+	}
+	dst := mv.Args[0]
+	if dst.Op != OpLocalAddr {
+		t.Fatalf("the destination of the move is %v", dst.Op)
+	}
+	if mv.Args[1] != base {
+		t.Errorf("the move reads from %v, and the argument was loaded from %v", mv.Args[1], base)
+	}
+	// The slot is in the outgoing area and is not a local.
+	o, _ := dst.Aux.(*ir.Object)
+	found := false
+	for _, h := range f.ABI.Homes {
+		if h.Obj != o {
+			continue
+		}
+		found = true
+		if h.Incoming || h.Off != 0 {
+			t.Errorf("the slot is at %d of the %s area", h.Off, map[bool]string{true: "incoming", false: "outgoing"}[h.Incoming])
+		}
+	}
+	if !found {
+		t.Error("the destination of the move names no argument-area slot")
+	}
+	for _, fo := range f.Frame {
+		if fo == o {
+			t.Error("the outgoing slot is in the frame, and the layout would give it a second one")
+		}
+	}
+
+	// The record is what keeps the operand after it in the right place. The
+	// struct occupies the stack part, so the integer's spill slot follows it
+	// and the integer is still in the first argument register.
+	rec := f.ABI.CallAt(call.ID)
+	if rec == nil {
+		t.Fatal("the call has no recorded placement, and its operand list no longer describes it")
+	}
+	if len(rec.Vals) != 2 || !rec.Vals[0].Copied || rec.Vals[1].Copied {
+		t.Fatalf("the record holds %d values and marks the wrong one copied", len(rec.Vals))
+	}
+	if rec.NumOperands() != 1 {
+		t.Errorf("the record counts %d operands, and the call passes one", rec.NumOperands())
+	}
+	if rec.Vals[0].Off != 0 || rec.Vals[1].Off != 160 {
+		t.Errorf("the struct is at %d and the integer's slot at %d, want 0 and 160",
+			rec.Vals[0].Off, rec.Vals[1].Off)
+	}
+	if rec.Size != 168 {
+		t.Errorf("the area is %d bytes: 160 of struct and 8 of spill", rec.Size)
+	}
+	// Every reader of the placement takes the record, so the walk that used
+	// to compute it does not run and cannot disagree.
+	vals, lo, size, err := ABICallArgs(tg, call)
+	if err != nil || lo != 0 || size != rec.Size || len(vals) != 2 {
+		t.Fatalf("ABICallArgs gave %d values, lo %d, size %d, err %v", len(vals), lo, size, err)
+	}
+	if r, ok := tg.UseReg(call, 0); !ok || r != tg.ArgRegs[ClassInt][0] {
+		t.Errorf("the one operand is read from %v (%v), want the first argument register", r, ok)
+	}
+}
+
+// TestABICallRecordIsIgnoredForACallSelectionMade covers the fallback: a call
+// that lowering creates, runtime.memmove among them, is not in the table and
+// is placed by the walk.
+func TestABICallRecordIsIgnoredForACallSelectionMade(t *testing.T) {
+	tg := NewArm64Target()
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	b.Control = b.NewValue(0, OpMakeResult, MemType, mem)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	// A call made after the pass ran has an identifier past the table.
+	x := b.NewValue(0, OpArg, abiTInt)
+	late := b.NewValue(0, OpARM64CALLstatic, MemType, x, mem)
+	if c := f.ABI.CallAt(late.ID); c != nil {
+		t.Error("a call made after the assignment has a record")
+	}
+	if _, ok := tg.UseReg(late, 0); !ok {
+		t.Error("a call made after the assignment has no placement at all")
+	}
+	if c := f.ABI.CallAt(-1); c != nil {
+		t.Error("a negative identifier found a record")
+	}
+	var nilABI *ABI
+	if c := nilABI.CallAt(0); c != nil {
+		t.Error("a nil assignment found a record")
+	}
+	if _, ok := (*ABICall)(nil).Operand(0); ok {
+		t.Error("a nil record has an operand")
+	}
+	if (&ABICall{}).NumOperands() != 0 {
+		t.Error("an empty record counts operands")
+	}
+	if _, ok := (&ABICall{Vals: []ABIValue{{Copied: true}}}).Operand(0); ok {
+		t.Error("a copied value was returned as an operand")
 	}
 }

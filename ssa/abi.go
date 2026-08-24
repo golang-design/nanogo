@@ -56,6 +56,13 @@ package ssa
 // bitmap, and the code generator takes its offset from the assignment rather
 // than from the frame layout.
 //
+// A call argument and a result have no such name, so the pass makes an
+// *ir.Object for the slot and copies into it. Such an object is not in
+// Func.Frame: the frame layout would give it a second slot in the locals and
+// the locals bitmap would describe it twice, and it is not a local. The words
+// belong to a callee's incoming argument area, which the callee's own bitmap
+// describes.
+//
 // # The bound this pass does not close
 //
 // Decomposition runs before this pass and erases which operands of a call
@@ -118,6 +125,84 @@ type ABIValue struct {
 	// the register set could not hold, which this pass leaves where the caller
 	// wrote it.
 	Home bool
+
+	// Copied reports that the value is in the argument area already, written
+	// there by a block move ahead of the call, and is no longer one of the
+	// call's operands. The placement still describes it, because the words it
+	// occupies are what put every value after it where it is.
+	Copied bool
+}
+
+// ABIHome names a slot of an argument area, so that OpLocalAddr can address it.
+//
+// A value the register set cannot hold travels in memory and the code that
+// reads or writes it needs an address. A parameter has one already, because
+// specs/021-ssa-construction.md gave it a frame slot and this pass moves that
+// slot into the incoming argument area. Nothing names a slot of a call's
+// outgoing area or of the result area, so this pass makes an object for it and
+// the code generator gives that object an offset.
+//
+// The object is never in Func.Frame. The frame layout would give it a second
+// slot and the locals bitmap would describe it twice, and it is not a local:
+// the words belong to the callee's incoming argument area, which the callee's
+// own bitmap describes.
+type ABIHome struct {
+	Obj *ir.Object
+
+	// Off is the byte offset in the area.
+	Off int64
+
+	// Incoming says the area is this function's own, which is where a
+	// parameter and a result live. Otherwise it is the outgoing area of a
+	// call this function makes.
+	Incoming bool
+}
+
+// ABICall is the placement of one call's operands.
+//
+// It is recorded rather than recomputed, because the operand list stops being
+// a faithful description of what the call passes. A value copied into the area
+// leaves the list altogether, and a value split into one operand per register
+// has a spill slot the split parts do not add up to. A walk of what is left
+// would place every value after it at the wrong offset and would size the area
+// too small.
+type ABICall struct {
+	// Vals has one entry per operand the call passes, in operand order, plus
+	// one for each value that was copied into the area and left the list.
+	Vals []ABIValue
+
+	// Size is the area the call needs.
+	Size int64
+}
+
+// Operand returns the placement of the operand at index k of the argument
+// list, skipping the values that are in the area already.
+func (c *ABICall) Operand(k int) (*ABIValue, bool) {
+	if c == nil || k < 0 {
+		return nil, false
+	}
+	n := 0
+	for i := range c.Vals {
+		if c.Vals[i].Copied {
+			continue
+		}
+		if n == k {
+			return &c.Vals[i], true
+		}
+		n++
+	}
+	return nil, false
+}
+
+// NumOperands returns how many of the values are still operands.
+func (c *ABICall) NumOperands() int {
+	n := 0
+	for i := range c.Vals {
+		if !c.Vals[i].Copied {
+			n++
+		}
+	}
+	return n
 }
 
 // ABI is where specs/030-abi.md puts one function's parameters and results.
@@ -126,8 +211,28 @@ type ABI struct {
 	In  []ABIValue
 	Out []ABIValue
 
-	// ArgsSize is the size of the incoming argument area.
+	// ArgsSize is the size of the incoming argument area: the values the
+	// registers could not hold, arguments then results, and then one spill
+	// slot per argument that travelled in a register.
 	ArgsSize int64
+
+	// Homes names the argument-area slots this function addresses.
+	Homes []ABIHome
+
+	// Calls holds the placement of each call's operands, indexed by the
+	// call's value identifier, and nil where the operand list still describes
+	// what the call passes. Selection rewrites a call in place and keeps its
+	// identifier, and a call selection creates is not in the table and is
+	// walked instead.
+	Calls []*ABICall
+}
+
+// CallAt returns the recorded placement of a call, if there is one.
+func (a *ABI) CallAt(id ID) *ABICall {
+	if a == nil || int(id) < 0 || int(id) >= len(a.Calls) {
+		return nil
+	}
+	return a.Calls[id]
 }
 
 // abiMaxParts bounds the recursive walk of one value's type.
@@ -530,21 +635,27 @@ func (a *abiPass) run() error {
 	}
 	argsSize := as.finish(in, spilled)
 
-	for i := range out {
-		if !out[i].InReg && out[i].Type.Size > 0 {
-			// A result the register set cannot hold is written into the
-			// caller's frame by the callee. The code generator has no form
-			// for that, so it is named here rather than placed wrongly.
-			return fmt.Errorf("ssa: abi: %s: result %d is %v, which does not fit the result registers",
-				a.f.Name, i, out[i].Type)
-		}
-	}
-
-	a.f.ABI = &ABI{In: in, Out: out, ArgsSize: argsSize}
+	a.f.ABI = &ABI{In: in, Out: out, ArgsSize: argsSize, Calls: make([]*ABICall, a.f.NumValues())}
 	a.rewriteArgs()
+	a.rewriteResults()
 	a.rewriteBoundaries()
 	a.compact()
 	return nil
+}
+
+// home makes an object that names one slot of an argument area.
+//
+// The name reaches no object file. It is the key the code generator looks the
+// offset up by and the string a dump prints, and it says which area and which
+// value so that a dump of a function with several of them reads.
+func (a *abiPass) home(what string, n int, typ *ir.Type, off int64, incoming bool) *ir.Object {
+	o := &ir.Object{
+		Name:  fmt.Sprintf("%s%d", what, n),
+		Type:  typ,
+		Class: ir.ClassLocal,
+	}
+	a.f.ABI.Homes = append(a.f.ABI.Homes, ABIHome{Obj: o, Off: off, Incoming: incoming})
+	return o
 }
 
 // index builds the reader lists. Value.uses is construction bookkeeping and is
@@ -770,14 +881,122 @@ func (a *abiPass) homeInArgs(arg, st *Value, av *ABIValue) {
 	}
 }
 
-// rewriteBoundaries splits a value that crosses a call boundary whole and
-// travels in registers.
+// rewriteResults writes a result the register set cannot hold into the result
+// area of the caller's frame.
+//
+// Go's convention puts such a result in the incoming argument area, after the
+// arguments the registers could not hold. The callee writes it there, so it
+// returns nothing in a register and the value stops being an operand of the
+// return.
+//
+// The copy is placed directly ahead of the return, and that placement is what
+// makes the arguments bitmap of specs/027-liveness-and-stackmaps.md right. The
+// bitmap describes the result area as holding no pointer, because at every
+// safepoint of this function the result has not been written yet. A safepoint
+// after the copy would see live pointers in words the map calls free. gc's
+// bitmap for such a function is the same all-zero map over the same width.
+func (a *abiPass) rewriteResults() {
+	abi := a.f.ABI
+	n := 0
+	for _, b := range a.f.Blocks {
+		if b.Kind != BlockRet || b.Control == nil || b.Control.Op != OpMakeResult {
+			continue
+		}
+		mr := b.Control
+		args := mr.Args
+		if len(args) > 0 && IsMemory(args[len(args)-1]) {
+			args = args[:len(args)-1]
+		}
+		if len(args) != len(abi.Out) {
+			continue
+		}
+		mem := a.memoryOf(mr)
+		if mem == nil {
+			continue
+		}
+		keep := make([]*Value, 0, len(mr.Args))
+		for i := range abi.Out {
+			av := &abi.Out[i]
+			var src *Value
+			if !av.InReg && av.Type.Size > 0 {
+				src = a.addressOf(mr, args[i])
+			}
+			if src == nil {
+				// Either the result travels in registers, or it is not a
+				// value this pass can take the address of. The second keeps
+				// the operand, and the code generator then refuses the
+				// function, which is a refusal with a place to look rather
+				// than a copy of the wrong bytes.
+				keep = append(keep, args[i])
+				continue
+			}
+			o := a.home("~r", n, av.Type, av.Off, true)
+			n++
+			mem = a.copyInto(mr, b, o, av.Type, src, mem)
+			a.kill(args[i])
+		}
+		if len(keep) == len(args) {
+			continue
+		}
+		setArgs(mr, append(keep, mem)...)
+	}
+}
+
+// addressOf returns the address the value at a boundary can be copied from,
+// or nil when there is none.
+//
+// A value wider than a register reaches a boundary as a load out of memory,
+// which specs/021-ssa-construction.md is the only producer of: an aggregate
+// never lives in a value. The load must have this boundary as its only reader,
+// or the value is wanted elsewhere too and moving the read would be a second
+// copy rather than a placement.
+func (a *abiPass) addressOf(user, v *Value) *Value {
+	if v == nil || v.Op != OpLoad || len(v.Args) != 2 || v.Block != user.Block {
+		return nil
+	}
+	if int(v.ID) >= len(a.users) || len(a.users[v.ID]) != 1 {
+		return nil
+	}
+	return v.Args[0]
+}
+
+// memoryOf returns the memory a value reads.
+func (a *abiPass) memoryOf(v *Value) *Value {
+	if len(v.Args) == 0 {
+		return nil
+	}
+	m := v.Args[len(v.Args)-1]
+	if !IsMemory(m) {
+		return nil
+	}
+	return m
+}
+
+// copyInto inserts a block move of a value into an argument-area slot ahead of
+// anchor, and returns the memory the move produced.
+//
+// The move is a call to runtime.memmove once selection has run
+// (specs/031-runtime-lowering.md), and that call is a safepoint at which the
+// argument area is described by nobody. It is safe for the reason the runtime
+// never stops there: memmove is NOSPLIT and carries no stack map, so it is
+// neither an asynchronous safepoint nor a place the stack can grow. gc reaches
+// the same place by a different road, an inline copy with no call at all,
+// which is what specs/042's group 8 leaves open.
+func (a *abiPass) copyInto(anchor *Value, b *Block, o *ir.Object, typ *ir.Type, src, mem *Value) *Value {
+	dst := a.mk(anchor, b, anchor.Pos, OpLocalAddr, abiPtrTo(typ), mem)
+	dst.Aux = o
+	mv := a.mk(anchor, b, anchor.Pos, OpMove, MemType, dst, src, mem)
+	mv.AuxInt = typ.Size
+	return mv
+}
+
+// rewriteBoundaries places every value that crosses a call boundary whole.
 //
 // A call that passes an aggregate, and a return that returns one, hold it as
-// one operand when decomposition stopped at the bound. The convention gives it
+// one operand when decomposition stopped at its bound. The convention gives it
 // several registers, and one value cannot be in several registers, so the
-// operand becomes one load per register. The address it is loaded from is the
-// one the whole load already used.
+// operand becomes one load per register. When the registers cannot hold it at
+// all, it is copied into the outgoing area instead and stops being an operand.
 func (a *abiPass) rewriteBoundaries() {
 	for _, b := range a.f.Blocks {
 		for _, v := range b.Values {
@@ -792,58 +1011,113 @@ func (a *abiPass) rewriteBoundaries() {
 	}
 }
 
-// splitOperands replaces every whole aggregate operand of v by its parts.
+// splitOperands places the operands of one call or return.
+//
+// It records the placement whenever it changes the operand list, because the
+// list then stops describing what the call passes: a copied value is not in it
+// at all, and a value split into one operand per register has a spill slot the
+// parts do not add up to, since the value's own alignment padding is in it and
+// theirs is not. Every reader of the placement, the register allocator and the
+// code generator both, takes the record rather than walking the list again.
 func (a *abiPass) splitOperands(v *Value) {
 	lo := abiCallPrefix(v)
 	types := abiOperandTypes(v, lo)
 	var place []ABIValue
+	var size int64
 	var err error
 	if v.Op == OpMakeResult {
-		place, _, err = ABIResults(a.t, types)
+		place, size, err = ABIResults(a.t, types)
 	} else {
-		place, _, err = ABIArgs(a.t, types)
+		place, size, err = ABIArgs(a.t, types)
 	}
-	if err != nil {
+	if err != nil || len(place) != len(v.Args)-lo-a.memArgs(v) {
 		return
 	}
+	mem := a.memoryOf(v)
 
+	rec := &ABICall{Size: size, Vals: make([]ABIValue, 0, len(place))}
 	args := make([]*Value, 0, len(v.Args)+len(place))
 	args = append(args, v.Args[:lo]...)
-	split := false
+	changed := false
+	copies := 0
 	for i := range place {
+		av := &place[i]
 		arg := v.Args[lo+i]
-		parts := a.loadParts(v, arg, &place[i])
-		if parts == nil {
+		switch {
+		case av.InReg && len(av.Parts) >= 2 && Multiword(arg.Type):
+			parts := a.loadParts(v, arg, av)
+			if parts == nil {
+				args = append(args, arg)
+				rec.Vals = append(rec.Vals, *av)
+				continue
+			}
+			args = append(args, parts...)
+			// One entry per operand, each one word wide, at the offset the
+			// whole value's slot puts it. That is where the callee spills the
+			// register the word arrived in.
+			for j := range av.Parts {
+				p := &av.Parts[j]
+				rec.Vals = append(rec.Vals, ABIValue{
+					Type:  p.Type,
+					Off:   av.Off + p.Off,
+					Parts: []ABIPart{{Off: 0, Type: p.Type, Reg: p.Reg}},
+					InReg: true,
+				})
+			}
+			changed = true
+
+		case !av.InReg && av.Type.Size > 0 && mem != nil && v.Op != OpMakeResult:
+			src := a.addressOf(v, arg)
+			if src == nil {
+				args = append(args, arg)
+				rec.Vals = append(rec.Vals, *av)
+				continue
+			}
+			o := a.home("~a", copies, av.Type, av.Off, false)
+			copies++
+			mem = a.copyInto(v, v.Block, o, av.Type, src, mem)
+			a.kill(arg)
+			c := *av
+			c.Copied = true
+			rec.Vals = append(rec.Vals, c)
+			changed = true
+
+		default:
 			args = append(args, arg)
-			continue
+			rec.Vals = append(rec.Vals, *av)
 		}
-		args = append(args, parts...)
-		split = true
 	}
-	args = append(args, v.Args[lo+len(place):]...)
-	if !split {
+	if !changed {
 		return
 	}
+	args = append(args, v.Args[lo+len(place):]...)
+	if mem != nil {
+		// The copies wrote into the area, so the call reads the memory they
+		// produced and not the memory they read.
+		args[len(args)-1] = mem
+	}
 	setArgs(v, args...)
+	if int(v.ID) < len(a.f.ABI.Calls) {
+		a.f.ABI.Calls[v.ID] = rec
+	}
+}
+
+// memArgs counts the memory operand a value carries, which is one or none.
+func (a *abiPass) memArgs(v *Value) int {
+	if a.memoryOf(v) != nil {
+		return 1
+	}
+	return 0
 }
 
 // loadParts returns one load per register of a whole aggregate operand, or nil
-// when the operand needs no splitting.
-//
-// The operand must be a load with this value as its only reader. Anything else
-// is a value that is used elsewhere too, and reading it twice would be a
-// second copy rather than a placement.
+// when the operand cannot be split.
 func (a *abiPass) loadParts(user, arg *Value, av *ABIValue) []*Value {
-	if !av.InReg || len(av.Parts) < 2 || arg.Type == nil || !Multiword(arg.Type) {
+	base := a.addressOf(user, arg)
+	if base == nil {
 		return nil
 	}
-	if arg.Op != OpLoad || len(arg.Args) != 2 || arg.Block != user.Block {
-		return nil
-	}
-	if int(arg.ID) >= len(a.users) || len(a.users[arg.ID]) != 1 {
-		return nil
-	}
-	base, mem := arg.Args[0], arg.Args[1]
+	mem := arg.Args[1]
 	out := make([]*Value, 0, len(av.Parts))
 	for i := range av.Parts {
 		p := &av.Parts[i]
@@ -968,63 +1242,29 @@ func ABIDefReg(t *Target, v *Value) (Reg, bool) {
 	case OpArg:
 		return v.Block.Func.ABI.ArgReg(v)
 	case OpSelectN:
-		return abiSelectNReg(t, v)
+		// A call result is not pre-coloured, and the reason is the
+		// allocator rather than the convention.
+		//
+		// specs/026-register-allocation.md spills a value that is live across
+		// a call, because no register survives one, and the scan does that
+		// before it looks at the register the convention fixed. The check
+		// that runs ahead of the scan does not: it refuses two pre-coloured
+		// values whose live ranges meet, even when one of them is going to be
+		// spilled and will never hold the register at the point they meet.
+		// The shape is ordinary, an argument in R0 and a call result in R0
+		// with the argument read after the call, and it refuses 216 functions
+		// of the distribution corpus.
+		//
+		// The code generator moves each result out of its result register at
+		// the call, which is what it did before any of this existed, so
+		// nothing is wrong; the register merely has to be moved out of rather
+		// than kept. ABIResults is still the placement both sides read.
+		// Recovering the case needs the pre-scan check to skip a value the
+		// scan is going to spill, which is a change to a pass this one does
+		// not own.
+		return NoReg, false
 	}
 	return NoReg, false
-}
-
-// abiSelectNReg returns the register one result of a call comes back in.
-//
-// The results of a call are the OpSelectN values that read it, and AuxInt is
-// which one. They are gathered from the block rather than from a table,
-// because there is no table: specs/021-ssa-construction.md names a result by
-// the value that selects it and nothing else records how many there are.
-func abiSelectNReg(t *Target, v *Value) (Reg, bool) {
-	if len(v.Args) == 0 {
-		return NoReg, false
-	}
-	types, ok := abiResultTypesOf(v.Args[0])
-	if !ok {
-		return NoReg, false
-	}
-	out, _, err := ABIResults(t, types)
-	if err != nil {
-		return NoReg, false
-	}
-	i := int(v.AuxInt)
-	if i < 0 || i >= len(out) || !out[i].InReg || len(out[i].Parts) != 1 {
-		return NoReg, false
-	}
-	return out[i].Parts[0].Reg, true
-}
-
-// abiResultTypesOf returns the types a call returns, indexed by result number.
-func abiResultTypesOf(call *Value) ([]*ir.Type, bool) {
-	if call == nil || call.Block == nil {
-		return nil, false
-	}
-	var types []*ir.Type
-	for _, w := range call.Block.Values {
-		if w.Op != OpSelectN || len(w.Args) == 0 || w.Args[0] != call {
-			continue
-		}
-		i := int(w.AuxInt)
-		if i < 0 || i >= abiMaxParts*abiMaxParts {
-			return nil, false
-		}
-		for len(types) <= i {
-			types = append(types, nil)
-		}
-		types[i] = w.Type
-	}
-	for _, t := range types {
-		if t == nil {
-			// A result no value selects. The numbering is then not a list and
-			// nothing here can place it.
-			return nil, false
-		}
-	}
-	return types, len(types) > 0
 }
 
 // ABIUseReg returns the register the convention fixes for argument i of a
@@ -1044,18 +1284,39 @@ func ABIUseReg(t *Target, v *Value, i int) (Reg, bool) {
 	var err error
 	switch {
 	case v.Op.IsCall():
-		lo = abiCallPrefix(v)
-		out, _, err = ABIArgs(t, abiOperandTypes(v, lo))
+		out, lo, _, err = ABICallArgs(t, v)
 	case v.Op == OpMakeResult || v.Op == OpARM64RET:
 		out, _, err = ABIResults(t, abiOperandTypes(v, 0))
 	default:
 		return NoReg, false
 	}
-	k := i - lo
-	if err != nil || k < 0 || k >= len(out) || !out[k].InReg || len(out[k].Parts) != 1 {
+	if err != nil {
 		return NoReg, false
 	}
-	return out[k].Parts[0].Reg, true
+	av, ok := abiOperandAt(out, i-lo)
+	if !ok || !av.InReg || len(av.Parts) != 1 {
+		return NoReg, false
+	}
+	return av.Parts[0].Reg, true
+}
+
+// abiOperandAt returns the placement of operand k, skipping the values that
+// are in the argument area already and are no longer operands.
+func abiOperandAt(vals []ABIValue, k int) (*ABIValue, bool) {
+	if k < 0 {
+		return nil, false
+	}
+	n := 0
+	for i := range vals {
+		if vals[i].Copied {
+			continue
+		}
+		if n == k {
+			return &vals[i], true
+		}
+		n++
+	}
+	return nil, false
 }
 
 // ABICallArgs places the operands of a call and returns the index of the first
@@ -1065,6 +1326,14 @@ func ABIUseReg(t *Target, v *Value, i int) (Reg, bool) {
 // placement rather than two that have to agree.
 func ABICallArgs(t *Target, v *Value) (out []ABIValue, lo int, size int64, err error) {
 	lo = abiCallPrefix(v)
+	if v.Block != nil && v.Block.Func != nil {
+		if c := v.Block.Func.ABI.CallAt(v.ID); c != nil {
+			return c.Vals, lo, c.Size, nil
+		}
+	}
+	// No record, so the operand list still describes what the call passes.
+	// Selection creates calls of its own, runtime.memmove among them, and
+	// they are placed by the walk like any other.
 	out, size, err = ABIArgs(t, abiOperandTypes(v, lo))
 	return out, lo, size, err
 }

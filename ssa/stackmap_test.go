@@ -997,6 +997,15 @@ func smCorpusOne(t *testing.T, path string, fn *ir.Func, c *smCounts) {
 		return // construction is specs/021's corpus test, not this one
 	}
 	c.built++
+	// The pipeline of specs/002-architecture.md: decomposition, then
+	// specs/030-abi.md's assignment, then selection. The assignment is what
+	// puts a value the registers cannot hold in the argument area, and where
+	// it puts one decides which words the collector scans, so a stack map
+	// measured without it is a map of a different program.
+	ssa.Decompose(f)
+	if err := ssa.AssignABI(f, ssa.NewArm64Target()); err != nil {
+		return
+	}
 	ok := func() (ok bool) {
 		defer func() {
 			e := recover()
