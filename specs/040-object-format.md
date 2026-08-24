@@ -44,6 +44,31 @@ So: object files. The encoder is the price and it is a bounded one.
 
 ## The format
 
+### The file wrapper comes first
+
+An earlier version of this spec started the layout at the magic. That is wrong,
+and it is the kind of wrong that produces a linker error with no relation to the
+cause. A real object file begins with a text header:
+
+```
+go object <goos> <arch> <version> [GOARM64=...] X:<experiments>
+main
+!
+```
+
+The `main` line is present only for package main, and the blank line and `!`
+close the header. **The linker compares the header line, not the magic**, and it
+refuses the first object it reads with "not package main" when the `main` line
+is absent.
+
+A consequence for [000](000-decisions.md) decision 11's version pin: the header
+carries the enabled `GOEXPERIMENT` list, and `go env GOEXPERIMENT` does not
+report it. The pin therefore cannot be reconstructed. nanogo probes instead: it
+assembles an empty file with the installed toolchain and reads the header line
+and the magic out of the result. [050](050-driver.md)'s driver calls that probe.
+
+Then the blocks:
+
 ```
 Header      Magic "\x00go120ld", Fingerprint, Flags, block offsets
 Strings     the string table
@@ -74,6 +99,25 @@ what nanogo writes.
 content — a stack map, a string literal, a type descriptor — is written with its
 content hash, and the linker keeps one copy across all object files.
 
+Three details, each of which produces silent corruption if guessed:
+
+**`Hash64` is not a hash.** It is the symbol's content, padded to eight bytes.
+That is sound only because such a symbol must be at most eight bytes, must carry
+no relocations, and must be in the default section. An implementation that reads
+the name and truncates a real hash instead would merge two symbols that share a
+prefix. nanogo rejects all three violations rather than trusting the caller.
+
+**Relocations are hashed before they are sorted.** The reference writer emits
+the hash blocks and only then sorts a symbol's relocations by offset. Hashing
+sorted relocations diverges from `gc` for any symbol whose relocations are not
+already ordered, and a divergent hash for an itab is exactly the pointer
+identity failure [032](032-type-descriptors-and-itabs.md) describes. The order
+is the emission order, and a test locks it.
+
+**A TEXT symbol without `AuxFuncInfo` crashes the linker.** `cmd/link` panics in
+its DWARF pass with no diagnostic. The aux symbol is mandatory for a TEXT
+symbol, not optional.
+
 This is the mechanism [032](032-type-descriptors-and-itabs.md)'s canonical
 naming feeds. Names make two symbols *nominally* the same; hashing makes them
 *actually* the same. Both are needed: the hash merges identical content, and the
@@ -86,18 +130,33 @@ The `Aux` block attaches metadata symbols to a function symbol by type:
 | Aux type | Attached |
 | --- | --- |
 | `AuxGotype` | the function's type descriptor |
-| `AuxFuncInfo` | frame size, arguments size, file table, pcdata offsets |
+| `AuxFuncInfo` | frame size, arguments size, file table |
 | `AuxFuncdata` | one per `FUNCDATA` index: stack maps, stack objects, open-coded defer info |
+| `AuxPcsp`, `AuxPcfile`, `AuxPcline`, `AuxPcinline`, `AuxPcdata` | the pc-value tables |
 | `AuxDwarfInfo`, `AuxDwarfLoc`, `AuxDwarfRanges`, `AuxDwarfLines` | [046](046-debug-info.md) |
 
-`AuxFuncInfo` is where the pc-value tables live, and those tables are the encoded
-form of every `PCDATA` change [027](027-liveness-and-stackmaps.md) produces.
+The pc-value rows are a correction. An earlier version of this spec said
+`AuxFuncInfo` holds the pc-value tables. It does not: each table is its own aux
+symbol, and a writer that packs them into `AuxFuncInfo` produces an object the
+linker reads as having none.
 
 ## PC-value tables
 
 A `PCDATA` stream is a mapping from program counter to a small integer, encoded
-as a delta-compressed sequence: for each change, a varint value delta and a
-varint pc delta. The runtime decodes it linearly.
+as a delta-compressed sequence: for each change, a value delta and a pc delta.
+The runtime decodes it linearly.
+
+Four properties of the encoding that a writer must have exactly right, none of
+which an earlier version of this spec stated:
+
+1. The **value delta is zigzag-signed**. Values go down as well as up.
+2. The **pc delta is unsigned and scaled by `MinLC`**, which is 4 on `arm64`.
+   Writing byte offsets produces a table that decodes to the wrong program
+   counters, four times too far apart.
+3. The **initial value is -1**, so the first entry carries a value delta from
+   -1 and no pc delta.
+4. The stream **ends with a final pc delta and then a zero byte**. A table
+   without the terminator runs into whatever follows it.
 
 nanogo produces one per index it uses:
 
@@ -126,6 +185,30 @@ agree or fail loudly.
 The magic string carries a version. nanogo asserts it at startup against the
 pinned Go release. There is no compatibility range and no negotiation: a
 mismatch is an error naming both versions.
+
+## What the writer proved
+
+The object writer is the first place [000](000-decisions.md) decision 3 is
+tested against reality rather than argued, and it passed:
+
+| Check | Result |
+| --- | --- |
+| `go tool nm -size` on a nanogo object | agrees on names, kinds and sizes |
+| `go tool objdump` | names the TEXT symbol and decodes its instructions |
+| **`go tool link`** | **links a nanogo object against the real Go runtime into a binary that runs** |
+| Content hash against `gc` | byte-identical for a real `go:string.*` symbol |
+| pc-value tables against `-d=pctab` | byte-identical |
+| Determinism | identical bytes across processes, working directories and environments |
+
+The link result is the one that matters. It is the earliest empirical answer to
+whether nanogo's objects are objects the Go toolchain accepts, and it arrived
+before any code generator existed.
+
+The comparison against `go tool asm` is a subset check and not byte equality,
+which is worth stating rather than glossing: the assembler fabricates
+`.arginfo0`, `.args_stackmap` and a `gofile..` symbol that a compiler does not,
+and its string and file tables differ. Byte equality is asserted between nanogo
+and nanogo, which is what [053](053-determinism.md) needs.
 
 ## Writing, not reading
 
