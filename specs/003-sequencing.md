@@ -157,7 +157,43 @@ Risks are listed with the milestone that retires them, not with a probability.
 | The v1 line budget is exceeded | M4 | [000](000-decisions.md) decision 10's accounting already puts v1 at about 41,800 against 40,000. Counted at every milestone, not at the end, and the two named recovery points are [022](022-optimization-passes.md) and [015](015-export-data.md). |
 | `//go:linkname` and `//go:nosplit` semantics are subtler than documented | M9 | The runtime is the only consumer that cares, and M9 is where it is compiled. |
 
+## Where the work stands
+
+**M0 is complete.** The driver answers the `go` command's `-V=full` build-ID
+protocol, a full `go build -a -toolexec=nanogo` completes by delegating every
+invocation, the package tree exists, and all three spikes run.
+
+**M1 is in progress.** The syntax package holds positions, tokens, the tree, the
+walker and the printer; the scanner and the parser are being built against the
+corpus gate.
+
+Measured at the end of M0:
+
+| Package | Coverage | |
+| --- | --- | --- |
+| `driver` | 97.4% | [050](050-driver.md), [051](051-build-integration.md) |
+| `loader` | 98.4% | [014](014-package-loader.md), G1 half |
+| `internal/covercheck` | 97.6% | the gate itself |
+| `syntax` | in progress | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) |
+| `cmd/nanogo` | excluded | one statement; the reason is in the exclusions file |
+
 ## Deviations
 
-None yet. Each entry here records a departure from the plan above with the
-reason, so that the plan stays honest instead of staying accurate.
+Each entry records a departure from the plan above with the reason, so that the
+plan stays honest instead of staying accurate.
+
+**M0's gate was wrong and was replaced.** It said "`nanogo -V` prints a
+version". The real protocol is `-V=full`, it is parsed by
+`cmd/go/internal/work/buildid.go` with requirements the spec did not state, and
+printing a version is not the thing that matters. The gate is now that a
+passthrough `-toolexec` build of a real module completes. That gate exercises
+the flag parser, the tool dispatch and the build-ID protocol before any compiler
+exists, which is what M0 is for.
+
+**M0 absorbed the quality gates.** CI, the per-package coverage tool and
+`CONTRIBUTING.md` were not in any spec's scope and were built in M0 anyway. A
+gate added after the code it measures is a gate calibrated to the code.
+
+**The loader was started in M0, not M2.** [014](014-package-loader.md)'s G1 half
+and its constraint evaluator are independent of the front end, and building them
+early cost nothing and removed a dependency from M2.
