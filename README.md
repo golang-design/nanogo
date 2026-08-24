@@ -83,7 +83,8 @@ That is the point: a compiler's bugs are invisible in its own output.
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
 | [`obj/arm64`](obj/arm64/) | 99% | 864,092 encodings agree with `go tool asm`, with none disagreeing |
 | [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 4.2M nodes |
-| [`ssa`](ssa/) | 97% | construction, lowering and register allocation, each with a verifier that has a negative test per invariant; 4,755 of 8,238 distribution functions lower completely |
+| [`ssa`](ssa/) | 97% | construction, lowering, decomposition, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant; **8,085 of 8,238** distribution functions lower completely |
+| [`ssagen`](ssagen/) | 91% | emits machine code that **links and runs**, and stack maps a real collector honours |
 | [`rtsym`](rtsym/) | 100% | 41 runtime signatures checked against the runtime's own source |
 | [`driver`](driver/) | 97% | a real `go build -toolexec` completes |
 
@@ -92,9 +93,19 @@ That is the point: a compiler's bugs are invisible in its own output.
 is a fork, and the gate that replaces coverage is upstream's own test suite,
 ported with the sources.
 
-**Not built:** liveness and stack maps, code emission, and the decomposition of
-values wider than a machine register. That is what stands between here and a
-program that runs.
+**nanogo compiles Go source to a running program.** `ssagen`'s `TestLinkAndRun`
+takes eight functions from source text through the whole pipeline to a process
+that returns the right answer, including a call into `gc`-compiled code. Its
+stack maps are proved by a collector: an object reachable only from a
+nanogo frame slot survives a collection, the same object with the slot killed is
+freed, and 200,000 frames are grown, copied and unwound.
+
+**Not built:** floating point, which needs registers `obj/arm64` does not yet
+have, and passing a value too large for a register, which needs the ABI
+assignment pass of [`specs/030`](specs/030-abi.md). Those two account for every
+one of the 153 distribution functions that do not lower. Beyond code
+generation, the language features nanogo's own source does not use are the
+distance to [`specs/060`](specs/060-selfhost.md)'s fixed point.
 
 ## Specs
 
