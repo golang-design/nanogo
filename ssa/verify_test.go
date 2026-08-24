@@ -149,7 +149,7 @@ func TestVerifyCatchesOpForm(t *testing.T) {
 		}},
 		{"an operation with no table row", func(f *Func, entry *Block, mem *Value) {
 			v := entry.NewValue(0, OpConstInt, tInt)
-			v.Op = opCount
+			v.Op = opNoRow()
 		}},
 		{"a value in the wrong block", func(f *Func, entry *Block, mem *Value) {
 			v := entry.NewValue(0, OpConstInt, tInt)

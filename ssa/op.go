@@ -215,6 +215,29 @@ var opInfos = [opCount]opInfo{
 	OpMakeResult: {name: "MakeResult", argLen: -1, takesMem: true, makesMem: true},
 }
 
+// extraOpInfos holds the rows of the operations above the target-neutral set:
+// the pseudo-operations lowering introduces and one target's machine
+// operations. specs/025-lowering-and-rules.md puts both below this file, so
+// the rows are registered from there rather than written here. It is indexed
+// by Op - opCount.
+var extraOpInfos []opInfo
+
+// registerOpInfos records the rows of a run of operations that starts at base.
+//
+// base is an explicit constant rather than the current length, so two files
+// that both register cannot depend on which of them ran first
+// (specs/053-determinism.md).
+func registerOpInfos(base Op, rows []opInfo) {
+	i := int(base) - int(opCount)
+	if i < 0 {
+		panic("ssa: registerOpInfos below the target-neutral set")
+	}
+	for len(extraOpInfos) < i+len(rows) {
+		extraOpInfos = append(extraOpInfos, opInfo{})
+	}
+	copy(extraOpInfos[i:], rows)
+}
+
 func (o Op) String() string {
 	if info := infoOf(o); info.name != "" {
 		return info.name
@@ -228,6 +251,9 @@ func (o Op) String() string {
 func infoOf(o Op) opInfo {
 	if int(o) < len(opInfos) {
 		return opInfos[o]
+	}
+	if i := int(o) - int(opCount); i < len(extraOpInfos) {
+		return extraOpInfos[i]
 	}
 	return opInfo{}
 }

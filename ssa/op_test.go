@@ -40,10 +40,10 @@ func TestOpTableIsComplete(t *testing.T) {
 			t.Errorf("%v is commutative with %d arguments", op, info.argLen)
 		}
 	}
-	if got := Op(opCount).String(); got != "op(?)" {
+	if got := opNoRow().String(); got != "op(?)" {
 		t.Errorf("an operation outside the table prints as %q", got)
 	}
-	if info := infoOf(opCount); info.name != "" {
+	if info := infoOf(opNoRow()); info.name != "" {
 		t.Errorf("an operation outside the table has row %v", info)
 	}
 }
@@ -89,7 +89,7 @@ func TestOpAccessors(t *testing.T) {
 		}
 	}
 	// The accessors are safe on an operation outside the table.
-	bad := Op(opCount)
+	bad := opNoRow()
 	if bad.TakesMemory() || bad.MakesMemory() || bad.IsCommutative() ||
 		bad.IsConstant() || bad.IsCall() || bad.ArgLen() != 0 {
 		t.Error("an operation outside the table has properties")
