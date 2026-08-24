@@ -166,9 +166,14 @@ Risks are listed with the milestone that retires them, not with a probability.
 | M0 skeleton | done | a `go build -a -toolexec=nanogo` completes by delegating |
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
 | M2 types | done | 613 subtests, a 375-package corpus, checks nanogo's own source |
-| M3 first binary | **partly** | the IR builder, SSA construction, the object writer and the arm64 encoder are built and gated; lowering, register allocation and liveness are not |
+| M3 first binary | **partly** | the IR builder, SSA construction, lowering, register allocation, the object writer and the arm64 encoder are built and gated; liveness, stack maps and code emission are in progress |
 
-M3's gate, a leaf package compiled by nanogo under `-toolexec`, is not met. What
+M3's gate, a leaf package compiled by nanogo under `-toolexec`, is not met. The
+honest measure of how far the pipeline reaches is the corpus: of the Go
+distribution's 536 buildable packages, **8,238 functions reach SSA and 4,755
+lower completely** to arm64 machine operations. The largest single cause of the
+remainder is stated in [025](025-lowering-and-rules.md): values wider than a
+machine register are not yet decomposed. What
 is met is the half of M3 that could be built without the middle end, and it
 retired the milestone's stated risk: **`go tool link` links a nanogo-written
 object against the real Go runtime into a binary that runs.**
