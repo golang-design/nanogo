@@ -828,10 +828,15 @@ var probeOps = []struct {
 // proves is the one thing left that a byte-exact encoder cannot: that the
 // condition code selected for each Go operator is the right one.
 func TestFloatNaNOnHardware(t *testing.T) {
-	required := os.Getenv("NANOGO_REQUIRE_CORPUS") == "1"
+	// The gate is NANOGO_REQUIRE_LINK, not NANOGO_REQUIRE_CORPUS. The two mean
+	// different things and conflating them made this test fail on the amd64
+	// runner: a corpus is a directory that either exists or does not, while
+	// running arm64 instructions needs an arm64 host. CI sets the link
+	// variable on the arm64 runner alone, which is exactly where this probe
+	// can run.
 	if runtime.GOARCH != "arm64" {
-		if required && runtime.GOOS == "darwin" {
-			t.Fatalf("NANOGO_REQUIRE_CORPUS=1 on %s and the probe needs an arm64 host", runtime.GOARCH)
+		if os.Getenv("NANOGO_REQUIRE_LINK") == "1" {
+			t.Fatalf("NANOGO_REQUIRE_LINK=1 on %s and the probe executes arm64 instructions", runtime.GOARCH)
 		}
 		t.Skipf("the probe runs the instructions, so it needs an arm64 host, not %s", runtime.GOARCH)
 	}
@@ -850,7 +855,7 @@ func TestFloatNaNOnHardware(t *testing.T) {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		if required {
+		if os.Getenv("NANOGO_REQUIRE_LINK") == "1" {
 			t.Fatalf("go run: %v\n%s", err, out)
 		}
 		t.Skipf("the probe did not build or run: %v\n%s", err, out)

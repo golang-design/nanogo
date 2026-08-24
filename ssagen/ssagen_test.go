@@ -335,10 +335,27 @@ var textRe = regexp.MustCompile(`^\s+[^\s]+:\d+\s+0x[0-9a-f]+\s+[0-9a-f]+\s+(.*)
 // where that shows up immediately rather than at run time.
 func disassemble(t *testing.T, r *Result, p *obj.Package) string {
 	t.Helper()
+	// The object carries the host toolchain's header, because
+	// obj.VerifyToolchain probes the installed go command and nanogo has no
+	// way to write a header for a target it is not running on. On an amd64
+	// host that means an object labelled amd64 holding arm64 instructions, and
+	// objdump believes the header rather than the environment.
+	//
+	// That is a real limit of the compiler and not of this test: nanogo cannot
+	// yet produce an object for a host it is not running on. It is recorded in
+	// specs/040-object-format.md. Until it can, reading its own output back is
+	// an arm64 host's job.
+	hostRunsNanogoOutput(t)
 	tc := hostToolchain(t)
 	addFull(t, r, p)
 	path := writeObject(t, p, tc)
-	out, err := exec.Command(goTool(t), "tool", "objdump", path).CombinedOutput()
+	cmd := exec.Command(goTool(t), "tool", "objdump", path)
+	// objdump decodes for the ambient GOARCH, as the assembler does.
+	// nanogo emits arm64 whatever the host is, so an unpinned run
+	// decodes arm64 bytes as some other instruction set and the
+	// comparison is meaningless rather than merely failing.
+	cmd.Env = append(os.Environ(), "GOARCH=arm64", "GOOS=darwin")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go tool objdump rejected the object: %v\n%s", err, out)
 	}

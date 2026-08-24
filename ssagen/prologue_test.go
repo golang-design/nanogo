@@ -69,6 +69,15 @@ func asmText(t *testing.T, lines []string) []uint32 {
 	}
 	out := filepath.Join(dir, "t.o")
 	cmd := exec.Command(goCmd, "tool", "asm", "-p", "test", "-S", "-o", out, src)
+	// The assembler reads GOARCH from the environment and assembles for the
+	// host by default, so on any other architecture it rejects an arm64
+	// listing and the comparison never happens. nanogo emits arm64 whatever
+	// the host is, so the oracle has to be told the same thing.
+	//
+	// Pinning it rather than skipping is the better answer here: the encoding
+	// this test checks does not depend on the host, so there is no reason for
+	// the check to run on one machine and not another.
+	cmd.Env = append(os.Environ(), "GOARCH=arm64", "GOOS=darwin")
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go tool asm rejected the listing: %v\n%s\n%s", err, body, b)

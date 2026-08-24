@@ -232,7 +232,13 @@ func TestObjdumpReadsText(t *testing.T) {
 		Name: "example.com/x.fn", ABI: ABIInternal, Type: STEXT,
 		Size: uint32(len(code)), Align: 4, Flag: SymFlagNoSplit, Data: code,
 	})
-	out, err := exec.Command(goTool(t), "tool", "objdump", writeObject(t, p, tc)).CombinedOutput()
+	dump := exec.Command(goTool(t), "tool", "objdump", writeObject(t, p, tc))
+	// objdump decodes for the ambient GOARCH, as the assembler does.
+	// nanogo emits arm64 whatever the host is, so an unpinned run decodes
+	// arm64 bytes as another instruction set and the comparison becomes
+	// meaningless rather than merely failing.
+	dump.Env = append(os.Environ(), "GOARCH=arm64", "GOOS=darwin")
+	out, err := dump.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go tool objdump rejected the object: %v\n%s", err, out)
 	}

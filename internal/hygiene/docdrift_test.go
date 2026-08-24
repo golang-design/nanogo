@@ -531,6 +531,14 @@ func compilerLines(t *testing.T, root string) int {
 func TestTheFactsAreCurrent(t *testing.T) {
 	skipUnderDerivation(t)
 	refresh := os.Getenv("NANOGO_REFRESH_FACTS") == "1"
+	// Deriving the facts re-runs every corpus, which takes minutes and blows
+	// the default go test timeout when the whole suite runs behind it. Under
+	// -short the documented numbers are still checked against the recorded
+	// facts by TestTheDocumentsAgreeWithTheFacts; what is skipped is only the
+	// re-derivation, which is the slow half.
+	if testing.Short() && !refresh {
+		t.Skip("-short: the facts are checked against the documents, not re-derived")
+	}
 	if os.Getenv("NANOGO_REQUIRE_CORPUS") != "1" && !refresh {
 		t.Skip("NANOGO_REQUIRE_CORPUS is not set, so the facts are taken on trust; " +
 			"CI sets it and re-derives them")
@@ -564,7 +572,20 @@ func TestTheFactsAreCurrent(t *testing.T) {
 		"syntax.scanner.files":    true,
 		"syntax.parser.files":     true,
 		"loader.constraint.files": true,
+		// The IR corpus is every function in every Go source tree on the
+		// machine, so it moves with the trees for the same reason the three
+		// above do.
+		"ir.corpus.functions": true,
+		"ir.corpus.nodes":     true,
 	}
+
+	// Coverage is elastic downward for a different reason. nanogo emits arm64,
+	// so the tests that link and run its output skip on any other host, and a
+	// coverage number measured there is a number for a smaller suite. The
+	// documented figure is what the complete suite produces, so a measurement
+	// below it is a host that ran less, and one above it means the documents
+	// undersell the work.
+	coverage := func(k string) bool { return strings.HasPrefix(k, "cover.") }
 	var keys []string
 	for k := range got {
 		keys = append(keys, k)
@@ -575,6 +596,12 @@ func TestTheFactsAreCurrent(t *testing.T) {
 		switch {
 		case !ok:
 			t.Errorf("%s holds no %s and the tests produce %s", factsPath, k, format(got[k]))
+		case coverage(k):
+			if got[k] > old {
+				t.Errorf("%s says %s is %s and the tests produce %s, which is more.\n"+
+					"Refresh it with NANOGO_REFRESH_FACTS=1 so the documents do not undersell it.",
+					factsPath, k, format(old), format(got[k]))
+			}
 		case elastic[k]:
 			// The corpus is whatever this machine holds. A count above the
 			// documented one means the document undersells the work; a count

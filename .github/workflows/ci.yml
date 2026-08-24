@@ -77,11 +77,15 @@ jobs:
     # instructions and the program dies walking its own pc tables. Those tests
     # skip there and are REQUIRED on the arm64 runner, so a green run is never
     # a run that linked nothing.
+    # The timeout is raised because internal/hygiene re-derives every corpus
+    # to check the numbers the documents quote, and that alone takes minutes.
+    # The default ten minutes kills the whole run part way through, which reads
+    # as a failure of whatever test happened to be running.
     - name: Test
       env:
         NANOGO_REQUIRE_CORPUS: '1'
         NANOGO_REQUIRE_LINK: ${{ runner.arch == 'ARM64' && '1' || '' }}
-      run: go test ./...
+      run: go test -timeout 40m ./...
 
     # Run twice, without and then with the detector. A data race can change
     # the answer rather than crash, and a compiler that compiles functions
@@ -89,7 +93,7 @@ jobs:
     # race reads as a miscompile. The plain run stays because the detector
     # changes timing enough to hide a bug the ordinary schedule shows.
     - name: Test under the race detector
-      run: go test -race ./...
+      run: go test -timeout 60m -race ./...
 
   # A compiler must build from any host: nanogo targets arm64 and amd64, and
   # neither target may need a host of the same architecture. This job exists
@@ -164,7 +168,7 @@ jobs:
       env:
         NANOGO_REQUIRE_CORPUS: '1'
         NANOGO_REQUIRE_LINK: '1'
-      run: go test -coverprofile=cover.out -coverpkg=./... ./...
+      run: go test -timeout 40m -coverprofile=cover.out -coverpkg=./... ./...
 
     # Per package, never one repository average. An average lets a well-tested
     # package carry an untested one and reports a number nobody can act on:
