@@ -83,7 +83,7 @@ That is the point: a compiler's bugs are invisible in its own output.
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
 | [`obj/arm64`](obj/arm64/) | 99% | 864,092 encodings agree with `go tool asm`, with none disagreeing |
 | [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 4.2M nodes |
-| [`ssa`](ssa/) | 97% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant; **8,231 of 8,238** distribution functions compile |
+| [`ssa`](ssa/) | 96% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant; **every function** of the distribution's 536 buildable packages compiles |
 | [`ssagen`](ssagen/) | 91% | emits machine code that **links and runs**, and stack maps a real collector honours |
 | [`rtsym`](rtsym/) | 100% | 41 runtime signatures checked against the runtime's own source |
 | [`driver`](driver/) | 97% | a real `go build -toolexec` completes |
@@ -100,14 +100,14 @@ stack maps are proved by a collector: an object reachable only from a
 nanogo frame slot survives a collection, the same object with the slot killed is
 freed, and 200,000 frames are grown, copied and unwound.
 
-**Seven functions of 8,238 do not compile**, all of them a value too large for
-the register set at a call boundary, needing a name for a slot of the outgoing
-argument area. Everything else in the distribution's 536 buildable packages
-reaches machine code.
+**All 8,238 functions of the distribution's 536 buildable packages compile** to
+arm64 machine code, and 8,237 of them carry stack maps.
 
-That is code generation. It is not a working compiler: the language features
-nanogo's own source does not use, and the ones it does, are the distance to
-[`specs/060`](specs/060-selfhost.md)'s fixed point.
+That is code generation, and it is not a working compiler. What stands between
+here and [`specs/060`](specs/060-selfhost.md)'s fixed point is the language
+itself: generics instantiation, `defer` and `panic`, goroutines and channels,
+interfaces beyond equality, and the reflection metadata a running program needs.
+[`specs/003`](specs/003-sequencing.md) says which milestone owns each.
 
 ## Specs
 

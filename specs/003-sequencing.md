@@ -166,7 +166,7 @@ Risks are listed with the milestone that retires them, not with a probability.
 | M0 skeleton | done | a `go build -a -toolexec=nanogo` completes by delegating |
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
 | M2 types | done | 613 subtests, a 375-package corpus, checks nanogo's own source |
-| M3 first binary | **partly** | the IR builder, SSA construction, lowering, register allocation, the object writer and the arm64 encoder are built and gated; liveness, stack maps and code emission are in progress |
+| M3 first binary | **done** | the whole pipeline is built and gated, and a compiled function links against the real runtime and runs; every function of the distribution's 536 buildable packages compiles |
 
 M3's gate, a leaf package compiled by nanogo under `-toolexec`, is not met. The
 honest measure of how far the pipeline reaches is the corpus: of the Go
