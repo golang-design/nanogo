@@ -65,7 +65,15 @@ jobs:
     - name: Vet
       run: go vet ./...
 
+    # NANOGO_REQUIRE_CORPUS turns a missing corpus into a failure instead of a
+    # skip. The front end is proved against the Go distribution's own source,
+    # which ships inside GOROOT and is therefore present on this runner. Without
+    # this variable a corpus test that found nothing would skip, and a skipped
+    # test reads exactly like a passing one in `go test ./...` output. The gate
+    # would be green having compared no files at all.
     - name: Test
+      env:
+        NANOGO_REQUIRE_CORPUS: '1'
       run: go test ./...
 
     # Run twice, without and then with the detector. A data race can change
@@ -113,6 +121,8 @@ jobs:
     # package tested only through its caller gets the credit it earned. The
     # cost is duplicate blocks, one per binary, which the gate merges.
     - name: Measure
+      env:
+        NANOGO_REQUIRE_CORPUS: '1'
       run: go test -coverprofile=cover.out -coverpkg=./... ./...
 
     # Per package, never one repository average. An average lets a well-tested

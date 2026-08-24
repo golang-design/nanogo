@@ -5,6 +5,7 @@
 package loader
 
 import (
+	"go/build"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -372,7 +373,8 @@ func TestGoListDifferential(t *testing.T) {
 			// The experiment and target feature tags are caller supplied.
 			// The go command sets its own, so the loader is told the same
 			// set. See the Context documentation.
-			c.ToolTags = goEnvToolTags(t)
+			// go/build computes them the same way the go command does.
+			c.ToolTags = build.Default.ToolTags
 
 			var checked, files, mismatches int
 			for _, p := range pkgs {
@@ -462,14 +464,71 @@ func comparePackageFiles(t *testing.T, c *Context, p *Package) (files, mismatche
 	return files, mismatches
 }
 
-// goEnvToolTags returns the experiment tags the go command is using, so that
-// the evaluator is compared against it with the same tag set.
-func goEnvToolTags(t *testing.T) []string {
+// TestGoListTestVariant checks that -test reaches the go command.
+// specs/014-package-loader.md makes a test variant a distinct package, so the
+// loader must be able to ask for one.
+func TestGoListTestVariant(t *testing.T) {
+	needGo(t)
+	g := &GoList{Dir: moduleDir(t), Tests: true, Env: hostEnv()}
+	pkgs, err := g.Load("golang.design/x/nanogo/loader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var variants int
+	for _, p := range pkgs {
+		if strings.HasPrefix(p.ImportPath, "golang.design/x/nanogo/loader") {
+			variants++
+		}
+	}
+	if variants < 2 {
+		t.Errorf("with -test the load returned %d variants of the package, want the package and its tests", variants)
+	}
+}
+
+// fakeGo writes a shell script that stands in for the go command.
+func fakeGo(t *testing.T, script string) string {
 	t.Helper()
-	out, err := exec.Command("go", "list", "-f", "{{.Module}}", "runtime").Output()
-	_ = out
-	_ = err
-	// The go command does not print its tool tags, so take them from go/build,
-	// which computes them the same way.
-	return buildDefaultToolTags()
+	path := filepath.Join(t.TempDir(), "fakego")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestGoListMalformedOutput checks that output the decoder cannot read fails
+// the load with a message, and does not return a half-decoded graph.
+func TestGoListMalformedOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the test uses a shell script")
+	}
+	g := &GoList{Cmd: fakeGo(t, `printf '{"ImportPath":'`)}
+	_, err := g.Load("std")
+	if err == nil {
+		t.Fatal("malformed output gave no error")
+	}
+	if !strings.Contains(err.Error(), "decoding go list output") {
+		t.Errorf("error is %q, want it to name the decoding step", err)
+	}
+}
+
+// TestGoListSilentFailure checks the message when the go command fails and
+// says nothing on stderr.
+func TestGoListSilentFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the test uses a shell script")
+	}
+	g := &GoList{Cmd: fakeGo(t, "exit 3")}
+	_, err := g.Load("std")
+	if err == nil {
+		t.Fatal("a failing go command gave no error")
+	}
+	if !strings.Contains(err.Error(), "list -e -json -deps") {
+		t.Errorf("error is %q, want the command line in it", err)
+	}
+}
+
+func TestConvertErrorNil(t *testing.T) {
+	if got := convertError("a", nil); got != nil {
+		t.Errorf("convertError with no error returned %v", got)
+	}
 }

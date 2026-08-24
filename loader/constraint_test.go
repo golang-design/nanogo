@@ -341,6 +341,13 @@ func TestShouldBuild(t *testing.T) {
 			want:    true,
 		},
 		{
+			// The header can end without a newline when the last line is
+			// blank. The scan must still see the constraint above it.
+			desc:    "plus build with no final newline",
+			content: "// +build windows\n   ",
+			want:    false,
+		},
+		{
 			desc:    "line with +build in prose is not a constraint",
 			content: "// see the +build lines below\n\npackage p\n",
 			want:    true,
@@ -419,18 +426,83 @@ func TestMatchFile(t *testing.T) {
 	}
 }
 
-// goSrcRoot returns the source tree of the Go distribution, or "" when it is
-// not on this machine.
+// goSrcRoot returns the source tree to run a corpus test over, or "" when
+// there is none.
+//
+// It prefers GOROOT's own src, because that ships with every Go installation
+// including a CI runner. An earlier version looked only under a developer's
+// home directory, which meant the corpus tests skipped on every CI run, and a
+// skipped test reads exactly like a passing one in `go test ./...` output.
+//
+// A checkout of the Go repository is used when it is present, because it is a
+// newer tree than the installed toolchain and exercises constraints the
+// release does not carry yet.
 func goSrcRoot() string {
-	home, err := os.UserHomeDir()
+	if home, err := os.UserHomeDir(); err == nil {
+		src := filepath.Join(home, "dev", "go.dev", "go", "src")
+		if fi, err := os.Stat(src); err == nil && fi.IsDir() {
+			return src
+		}
+	}
+	if root := runtime.GOROOT(); root != "" {
+		src := filepath.Join(root, "src")
+		if fi, err := os.Stat(src); err == nil && fi.IsDir() {
+			return src
+		}
+	}
+	return ""
+}
+
+// requireCorpus reports whether a missing corpus must fail rather than skip.
+//
+// CI sets NANOGO_REQUIRE_CORPUS=1. A job that promises a corpus and finds none
+// is a failure, not a skip: the whole value of these tests is that they run.
+func requireCorpus() bool { return os.Getenv("NANOGO_REQUIRE_CORPUS") == "1" }
+
+// skipOrFailWithoutCorpus centralises the decision, so no corpus test can
+// quietly opt out of it.
+func skipOrFailWithoutCorpus(t *testing.T, src string) {
+	t.Helper()
+	if src != "" {
+		return
+	}
+	if requireCorpus() {
+		t.Fatal("NANOGO_REQUIRE_CORPUS=1 and no Go source tree was found under GOROOT or ~/dev/go.dev/go")
+	}
+	t.Skip("no Go source tree under GOROOT or ~/dev/go.dev/go")
+}
+
+// TestCorpusIsReachableFromGOROOT is the test that keeps the corpus tests
+// honest on a machine that is not a developer's.
+//
+// GOROOT's src ships with every Go installation, so a CI runner has the corpus
+// even though it has no checkout of the Go repository. If this ever fails, the
+// corpus tests below are skipping and the gate they provide is gone.
+func TestCorpusIsReachableFromGOROOT(t *testing.T) {
+	root := runtime.GOROOT()
+	if root == "" {
+		t.Skip("no GOROOT reported")
+	}
+	src := filepath.Join(root, "src")
+	fi, err := os.Stat(src)
+	if err != nil || !fi.IsDir() {
+		t.Fatalf("%s is not a directory: %v", src, err)
+	}
+
+	n := 0
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(path, ".go") {
+			n++
+		}
+		return nil
+	})
 	if err != nil {
-		return ""
+		t.Fatalf("walking %s: %v", src, err)
 	}
-	src := filepath.Join(home, "dev", "go.dev", "go", "src")
-	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
-		return ""
+	if n == 0 {
+		t.Fatalf("%s holds no .go files", src)
 	}
-	return src
+	t.Logf("GOROOT corpus: %d .go files under %s", n, src)
 }
 
 // TestConstraintCorpus runs the evaluator over every .go file of the Go
@@ -444,9 +516,7 @@ func TestConstraintCorpus(t *testing.T) {
 		t.Skip("corpus test is slow")
 	}
 	src := goSrcRoot()
-	if src == "" {
-		t.Skip("no Go source tree at ~/dev/go.dev/go/src")
-	}
+	skipOrFailWithoutCorpus(t, src)
 
 	targets := []struct{ goos, goarch string }{
 		{"darwin", "arm64"},
@@ -521,9 +591,7 @@ func TestConstraintCorpusTags(t *testing.T) {
 		t.Skip("corpus test is slow")
 	}
 	src := goSrcRoot()
-	if src == "" {
-		t.Skip("no Go source tree at ~/dev/go.dev/go/src")
-	}
+	skipOrFailWithoutCorpus(t, src)
 	crypto := filepath.Join(src, "crypto")
 
 	bc := build.Default
