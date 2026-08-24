@@ -153,6 +153,16 @@ var syms = []Sym{
 	{Name: "runtime.deferproc", Sig: "func(func())", Group: GroupDefer},
 	{Name: "runtime.deferreturn", Sig: "func()", Group: GroupDefer},
 
+	// Interface and string comparison. specs/031's table names these as the
+	// calls an equality or an ordering lowers to.
+	{Name: "runtime.ifaceeq", Sig: "func(*itab, unsafe.Pointer, unsafe.Pointer) bool", Group: GroupInterface},
+	{Name: "runtime.efaceeq", Sig: "func(*_type, unsafe.Pointer, unsafe.Pointer) bool", Group: GroupInterface},
+	// cmpstring has no declaration in package runtime. It is written in
+	// internal/bytealg and reaches the runtime's symbol namespace through a
+	// //go:linkname, so the checker resolves it there rather than asserting a
+	// signature nothing states.
+	{Name: "runtime.cmpstring", Sig: "func(string, string) int", Group: GroupString},
+
 	// Interfaces.
 	{Name: "runtime.convT64", Sig: "func(uint64) unsafe.Pointer", Group: GroupInterface},
 	{Name: "runtime.convTstring", Sig: "func(string) unsafe.Pointer", Group: GroupInterface},

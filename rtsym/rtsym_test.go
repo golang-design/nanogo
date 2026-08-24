@@ -9,6 +9,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -39,6 +40,15 @@ func runtimeSigs(t *testing.T) map[string]string {
 
 	fset := token.NewFileSet()
 	sigs := make(map[string]string)
+
+	// A symbol whose linker name is runtime.X need not be declared in package
+	// runtime. cmpstring is written in internal/bytealg and reaches the
+	// runtime's namespace through //go:linkname. Resolving those keeps the
+	// table checked against real source rather than against an assertion.
+	for name, sig := range linknamedIntoRuntime(fset) {
+		sigs[name] = sig
+	}
+
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -274,4 +284,71 @@ func TestAssemblySymbolsExist(t *testing.T) {
 		t.Error("no assembly symbol was checked; the table lost its Assembly entries")
 	}
 	t.Logf("checked %d assembly symbols", n)
+}
+
+// linknamedIntoRuntime finds every //go:linkname that pushes a declaration
+// into package runtime's symbol namespace, and returns the runtime-side name
+// mapped to the declaration's signature.
+//
+// The scan is over GOROOT's whole source tree, which is bounded and on disk.
+// The alternative is to record a signature by hand for these symbols, and the
+// point of this package is that no signature is recorded by hand.
+func linknamedIntoRuntime(fset *token.FileSet) map[string]string {
+	out := map[string]string{}
+	root := filepath.Join(runtime.GOROOT(), "src")
+
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == "testdata" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil || !strings.Contains(string(src), "//go:linkname") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, src, parser.ParseComments|parser.SkipObjectResolution)
+		if err != nil {
+			return nil
+		}
+
+		// Collect the directives first: a linkname may sit anywhere in the
+		// file, not only above the declaration it names.
+		local := map[string]string{} // local name -> runtime-side base name
+		for _, cg := range f.Comments {
+			for _, c := range cg.List {
+				fields := strings.Fields(c.Text)
+				if len(fields) != 3 || fields[0] != "//go:linkname" {
+					continue
+				}
+				if !strings.HasPrefix(fields[2], "runtime.") {
+					continue
+				}
+				local[fields[1]] = strings.TrimPrefix(fields[2], "runtime.")
+			}
+		}
+		if len(local) == 0 {
+			return nil
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil {
+				continue
+			}
+			if base, ok := local[fn.Name.Name]; ok {
+				if _, seen := out[base]; !seen {
+					out[base] = normalizeSig(fset, fn.Type)
+				}
+			}
+		}
+		return nil
+	})
+	return out
 }
