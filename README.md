@@ -82,7 +82,8 @@ That is the point: a compiler's bugs are invisible in its own output.
 | [`loader`](loader/) | 99% | 6,821 files on two platforms agree with `go/build`; 467 packages agree with `go list` |
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
 | [`obj/arm64`](obj/arm64/) | 99% | 864,092 encodings agree with `go tool asm`, with none disagreeing |
-| [`ir`](ir/) | 99% | type layout agrees with `reflect` and with the compiler |
+| [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 4.2M nodes |
+| [`ssa`](ssa/) | 98% | SSA construction with a verifier that has a negative test per invariant |
 | [`driver`](driver/) | 97% | a real `go build -toolexec` completes |
 
 `types2` is excluded from the coverage gate, with the reason recorded in
@@ -90,9 +91,8 @@ That is the point: a compiler's bugs are invisible in its own output.
 is a fork, and the gate that replaces coverage is upstream's own test suite,
 ported with the sources.
 
-**Not built:** the IR builder, SSA construction, lowering, register allocation,
-liveness and stack maps. That is the middle of the compiler and it is what
-stands between here and a program that runs.
+**Not built:** lowering to machine operations, register allocation, liveness and
+stack maps. That is what stands between here and a program that runs.
 
 ## Specs
 

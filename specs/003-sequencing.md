@@ -166,7 +166,7 @@ Risks are listed with the milestone that retires them, not with a probability.
 | M0 skeleton | done | a `go build -a -toolexec=nanogo` completes by delegating |
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
 | M2 types | done | 613 subtests, a 375-package corpus, checks nanogo's own source |
-| M3 first binary | **partly** | the object writer and the arm64 encoder are built and gated; the IR builder, SSA, lowering and register allocation are not |
+| M3 first binary | **partly** | the IR builder, SSA construction, the object writer and the arm64 encoder are built and gated; lowering, register allocation and liveness are not |
 
 M3's gate, a leaf package compiled by nanogo under `-toolexec`, is not met. What
 is met is the half of M3 that could be built without the middle end, and it
@@ -182,9 +182,10 @@ Measured coverage:
 | `syntax` | 99.2% | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) |
 | `types2` | excluded | [012](012-type-checking.md); gated by upstream's suite |
 | `loader` | 98.8% | [014](014-package-loader.md), G1 half |
+| `ir` | 93.9% | [020](020-ir.md), [030](030-abi.md); builds 536 packages of the distribution |
+| `ssa` | 98.1% | [021](021-ssa-construction.md), with the verifier of that spec |
 | `obj` | 98.1% | [040](040-object-format.md) |
 | `obj/arm64` | 98.8% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
-| `ir` | 99.3% | [020](020-ir.md), [030](030-abi.md) type layer |
 | `driver` | 97.4% | [050](050-driver.md), [051](051-build-integration.md) |
 | `internal/covercheck` | 97.6% | the gate itself |
 | `cmd/nanogo` | excluded | one statement; the reason is in the exclusions file |
@@ -216,6 +217,20 @@ before the middle end rather than after it. That was worth doing for one reason:
 the object format seam is this deck's largest untested assumption, and building
 the writer first turned it into a linked binary that runs. A middle end built
 first would have reached the same question three milestones later.
+
+**Eleven IR nodes were added by implementation, not by design.** The node set of
+[020](020-ir.md) had no assignment, no case, no `for` post statement, no
+composite literal, no slice expression, no `close`, `print` or `println`, and no
+`unsafe` intrinsics. Each gap was found by a consumer reaching for a workaround:
+an assignment encoded as a binary operation with no operator, a literal as
+`new`, an intrinsic as a call to an invented symbol. The nodes exist now, and
+[020](020-ir.md) records that its own claim, that a construct absent from its
+table does not exist, was false when written.
+
+The lesson is not that the spec was incomplete, which every spec is. It is that
+a workaround inside an IR is invisible: the tree still type-checks, the tests
+still pass, and the cost arrives later as a pass that must recognise an
+intrinsic by matching a string.
 
 **Two platform-divergent cgo bugs, and one data race, were found by CI and
 could not be found locally.** They are recorded because they say something about
