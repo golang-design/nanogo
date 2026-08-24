@@ -271,7 +271,7 @@ What this section asked for and does not have:
 
 - **Differential execution over the whole corpus** ([004](004-conformance.md)
   L3). 18 hand-written cases is not a corpus. The blocker is above this spec:
-  SSA construction accepts one function in five of the distribution, so there
+  SSA construction accepts two functions in five of the distribution, so there
   is no body of programs to run yet.
 - **A debug build asserting RSP is 16-byte aligned at every call.** No such
   build exists. What exists is static: `ssagen`'s `checkFrame` refuses a frame

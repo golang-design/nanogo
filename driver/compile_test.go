@@ -200,9 +200,13 @@ func TestCompileRefusals(t *testing.T) {
 			want: []string{"/pkg/v.a"},
 		},
 		{
-			name: "an assignment names the function and the pass",
-			src:  "package main\n\nfunc f(a int) int {\n\tb := a\n\treturn b\n}\n",
-			want: []string{"function f", "a.go:3:6", "assign"},
+			// The construct this case names has to be one construction still
+			// refuses, and the assignment statement it used to name is built
+			// now. A composite literal is the largest remaining row of
+			// specs/020-ir.md's lowering table.
+			name: "a construct construction refuses names the function and the pass",
+			src:  "package main\n\ntype p struct{ x int }\n\nfunc f(a int) int {\n\treturn p{a}.x\n}\n",
+			want: []string{"function f", "a.go:5:6", "ssa.Build", "compositelit"},
 		},
 		{
 			name: "a package-level variable is refused",

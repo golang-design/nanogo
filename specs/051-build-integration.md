@@ -36,8 +36,8 @@ each one is on.
 
 What that build compiles is small, and the size is set above the driver.
 `driver.Compile` refuses a package that imports another one, because
-[015](015-export-data.md) has no reader, and it refuses an assignment statement,
-because [021](021-ssa-construction.md) does not build one. No allowlist file is
+[015](015-export-data.md) has no reader, and it refuses a composite literal,
+because nobody performs [020](020-ir.md)'s lowering table. No allowlist file is
 committed, so a checkout still compiles nothing until a build names one.
 
 ## `-toolexec`
@@ -121,7 +121,7 @@ as designed. What is missing is a package worth listing: the refusals in
 functions, and a real leaf package has at least one of the three. Until then the
 honest measures are the corpus counts in
 [004](004-conformance.md): 536 packages of the distribution reach the IR builder
-and 8,238 functions reach SSA construction. Neither is a package compiled end to
+and 17,367 functions reach SSA construction. Neither is a package compiled end to
 end, and the allowlist is what will say when one is.
 
 The list is ordered by dependency depth, so early entries are leaves with no

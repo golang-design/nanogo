@@ -28,17 +28,22 @@ What nanogo compiles:
 
 	One target. nanogo emits arm64 machine code. It refuses to compile on
 	any other host.
-	Functions whose bodies are return statements, if, for, switch, labels,
-	goto, break, continue, calls, arithmetic, comparisons, conversions and
+	Functions whose bodies are return statements, assignments and short
+	variable declarations, if, for, switch with fallthrough, labels, goto,
+	break, continue, calls, arithmetic, comparisons, conversions and
 	indexing.
 
 What nanogo refuses, by name, with the reason:
 
 	A package that imports anything. nanogo cannot read gc's export data,
 	so it cannot see what an import declares.
-	An assignment statement, a short variable declaration, and therefore a
-	call nested inside another expression. SSA construction does not build
-	one yet.
+	A composite literal, a range statement, a closure, defer, panic, a
+	slice expression, a conversion to an interface, and most builtins
+	including len, make and append. Nothing performs the lowering
+	specs/020-ir.md describes for them, so each one reaches SSA
+	construction intact and is refused there.
+	A multi-value assignment whose call returns a value wider than a
+	machine register.
 	A package with assembly in it. An assembly definition uses ABI0 and a
 	Go call uses ABIInternal, and nanogo generates no wrapper between them.
 	A package with package-level variables or an init function.

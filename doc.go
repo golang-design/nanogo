@@ -15,9 +15,12 @@
 //
 // What nanogo accepts is far narrower than Go, and it refuses the rest with an
 // error naming the function and the construct rather than emitting something
-// wrong. SSA construction has no assignment statement, which alone stops about
-// four functions in five of the standard library. One target, darwin/arm64.
-// Run "nanogo help" for the current subset. Nothing here is stable.
+// wrong. Nobody performs the lowering specs/020-ir.md's table describes, so a
+// composite literal, a range statement, a closure, defer, panic and most
+// builtins all reach SSA construction intact and are refused there. That stops
+// about three functions in five of the standard library. One target,
+// darwin/arm64. Run "nanogo help" for the current subset. Nothing here is
+// stable.
 //
 // The measure of the project is a fixed point. nanogo compiles its own
 // source, and the compiler that results is byte-identical to itself. See

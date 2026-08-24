@@ -18,10 +18,10 @@
 > **nanogo compiles some Go programs, and most of Go is not among them.** The
 > whole pipeline is built, from source text to a `goobj` file that `go tool
 > link` links against the real Go runtime into a binary that runs. What it
-> accepts is far narrower than Go. SSA construction refuses an assignment
-> statement, a `range`, a composite literal, a closure, `defer`, `panic` and
-> most builtins, so about one function in five of the standard library gets
-> past it. Do not depend on this.
+> accepts is far narrower than Go. SSA construction refuses a composite
+> literal, a `range`, a closure, `defer`, `panic` and most builtins, so about
+> two functions in five of the standard library get past it. Do not depend on
+> this.
 
 nanogo is a compiler for the Go language as defined by the
 [Go language specification](https://go.dev/ref/spec). It is small on purpose:
@@ -62,7 +62,7 @@ wrong:
 
 ```
 nanogo: main: cannot compile function main at ./main.go:5:6:
-        ssa.Build: ssa: main: assign: statement is not built yet
+        ssa.Build: ssa: main: compositelit reached SSA construction
 ```
 
 That is the honest state of the compiler: this program compiles and runs,
@@ -75,8 +75,9 @@ func compute(a, b int) int { return a*b + 1 }
 func main() { compute(20, 3) }
 ```
 
-and adding `x := 1` to it does not. `nanogo help` lists the subset. One target,
-`darwin/arm64`.
+and so does the same program with `x := a * b` in it, which it did not until
+SSA construction learned the assignment statement. Adding `p := point{1, 2}`
+still does not. `nanogo help` lists the subset. One target, `darwin/arm64`.
 
 ## The three gates
 
@@ -161,27 +162,38 @@ with the slot killed is freed, and 200,000 frames are grown, copied and unwound.
 
 The honest measure of reach is the corpus, and it is one number with two halves.
 
-**8,238 of those functions reach SSA construction, and every one of them lowers
-completely** to arm64 machine operations. 8,237 of the 8,238 carry a stack map.
-Nothing is left undecomposed except 13 functions holding a wide `SelectN`, 3
-holding an array and 10 holding a struct.
+**17,367 of those functions reach SSA construction**, and 17,285 of them lower
+completely to arm64 machine operations. 17,239 of the 17,367 carry a stack map.
+What is left undecomposed is 70 functions holding a wide `SelectN`, 9 holding
+an array and 77 holding a struct.
 
-The other four functions in five never reach SSA at all. Construction refuses
+The remaining 22,580 functions never reach SSA at all. Construction refuses
 them by name, and the counts say what is missing:
 
 | Functions refused | Because construction does not build |
 | --- | --- |
-| 24,031 | an assignment statement |
-| 1,377 | `len` |
-| 992 | a `switch` whose clauses are not block nodes |
-| 984 | `range` |
-| 903 | a composite literal |
-| 510 | `panic` |
-| 461 | a closure |
-| 222 | a type switch |
-| 180 | a slice expression |
-| 102 | an index of a map |
-| the rest | type assertions, `append`, `make`, `new`, `select`, `send`, `recv`, `defer`, `print`, and conversions between named types |
+| 4,458 | a composite literal |
+| 2,680 | `len` |
+| 2,191 | a multi-value assignment whose results are wider than a register |
+| 2,009 | a conversion to an interface, which needs a type descriptor |
+| 1,527 | `range` |
+| 1,115 | a method selected out of an interface |
+| 1,074 | a closure |
+| 921 | the address of a composite literal |
+| 911 | `panic` |
+| 832 | a slice expression |
+| 804 | `make` |
+| 588 | `defer` |
+| 493 | `append` |
+| 429 | a multi-value assignment from a type assertion |
+| 331 | an index of a map |
+| the rest | `new`, a two-value map read, type switches, type assertions, `print`, `recover`, `copy`, `min` and `max`, `select`, `send`, `recv`, `cap`, `clear`, and the `unsafe` intrinsics |
+
+Every row of that table except the two multi-value ones is a row of
+[`specs/020`](specs/020-ir.md)'s lowering table that no pass performs. The two
+multi-value rows are a limit one pass below construction: `SelectN` names a
+result before decomposition and a machine word of the result area after it, and
+the renumbering between the two is only correct for the first result.
 
 So the back half of the compiler is real and the front of the middle end is not
 finished. What stands between here and

@@ -215,6 +215,6 @@ instruction with two spilled operands.
 - Spill-slot reuse checked for correctness rather than for size. The rule is in
   the section above.
 - The distribution corpus, which is [027](027-liveness-and-stackmaps.md)'s and
-  runs this pass on the way through. Of the 8,238 functions that reach SSA
-  construction and lower completely, the allocator places all but one. That one
-  refusal is why 8,237 functions carry a stack map and not 8,238.
+  runs this pass on the way through. Of the 17,285 functions that reach SSA
+  construction and lower completely, the allocator places all but 46. Those
+  refusals are why 17,239 functions carry a stack map and not 17,285.

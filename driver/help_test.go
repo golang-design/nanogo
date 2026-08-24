@@ -18,12 +18,12 @@ import (
 // help text still describes it.
 func TestHelpStatesTheLimits(t *testing.T) {
 	for _, want := range []string{
-		"darwin/arm64",         // one target
-		"allowlist",            // how a package is selected
-		"gc",                   // what happens to everything else
-		"export data",          // why a package cannot import or be imported
-		"assignment statement", // the largest gap in SSA construction
-		"assembly",             // the ABI wrapper that is not generated
+		"darwin/arm64",      // one target
+		"allowlist",         // how a package is selected
+		"gc",                // what happens to everything else
+		"export data",       // why a package cannot import or be imported
+		"composite literal", // the largest gap in SSA construction
+		"assembly",          // the ABI wrapper that is not generated
 		"package-level variables",
 		"init function",
 		"go:embed",

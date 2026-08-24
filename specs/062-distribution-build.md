@@ -26,8 +26,8 @@ builder walks 536 packages of 663, producing 39,947 functions and 4,188,075
 nodes, with 126 packages skipped (31 for `cgo`, 94 with no Go files, 1 with a
 type error) and 72 built partially. [004](004-conformance.md) has the rest of
 the corpus counts. What none of that says is that a package compiles: SSA
-construction accepts one function in five, and [060](060-selfhost.md) has that
-number and the refusals behind it.
+construction accepts two functions in five, and [060](060-selfhost.md) has
+that number and the refusals behind it.
 
 ## The scope, bounded honestly
 

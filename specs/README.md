@@ -145,7 +145,7 @@ believed.
 | --- | --- |
 | Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the typed IR, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, the object writer, the arm64 encoder, and the driver |
 | Proved | `go tool link` links a nanogo object against the real Go runtime into a binary that runs, and a real collector honours nanogo's stack maps |
-| The largest gap | SSA construction accepts one function in five of the distribution. It has no case for an assignment statement, which alone blocks 24,031 functions. [021](021-ssa-construction.md) |
+| The largest gap | SSA construction accepts two functions in five of the distribution. Nobody performs [020](020-ir.md)'s lowering table, so a composite literal alone blocks 5,379 functions. [021](021-ssa-construction.md) |
 | Not started | Export data, escape analysis, inlining, generics instantiation, type descriptors, itabs, closures, `defer`, `panic`, write barriers, goroutines, the linker, the assembler, DWARF, and the amd64 backend |
 | Decided against | Assembly text as a build path, a from-scratch type checker, GC-shape stenciling with dictionaries |
 

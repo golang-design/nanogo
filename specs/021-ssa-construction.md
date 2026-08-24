@@ -153,57 +153,143 @@ the next section.
 Construction does not lower a Go construct. It **rejects** one. `ssa.Build`
 tests `ir.Op.IsGoSpecific` at the head of both the statement walk and the
 expression walk, and a node in that set ends the function with the error
-`<op> reached SSA construction`. Twelve further call sites of
+`<op> reached SSA construction`. Thirteen further call sites of
 `builder.unsupported` reject a form construction has no case for, with
 `<op>: <what> is not built yet`.
 
 The two together are the shape of the middle end today, and the number is the
 one fact this spec most needs to carry:
 
-**SSA construction accepts 8,238 of the 39,947 functions the IR builder
-produces for the Go distribution, which is 20.6%.** Every one of those 8,238
-lowers completely to arm64 machine operations. The claim that survives is
-therefore narrow and true: *what construction accepts, the back end finishes.*
+**SSA construction accepts 17,367 of the 39,947 functions the IR builder
+produces for the Go distribution, which is 43.5%.** 17,285 of those lower
+completely to arm64 machine operations, so the older claim that *what
+construction accepts, the back end finishes* is now 99.5% true rather than
+100% true. The 82 exceptions are named below.
 
 The refusals, by reason, over 536 packages:
 
 | Functions refused | Reason |
 | --- | --- |
-| 24,031 | `assign: statement is not built yet` |
-| 1,377 | `len reached SSA construction` |
-| 992 | `switch: a switch whose clauses are not block nodes` |
-| 984 | `range reached SSA construction` |
-| 903 | `compositelit reached SSA construction` |
-| 510 | `panic reached SSA construction` |
-| 461 | `closure reached SSA construction` |
-| 369 | `compositelit: an address is not built yet` |
-| 222 | `typeswitch reached SSA construction` |
-| 180 | `slice reached SSA construction` |
-| 102 | `index: an index of map is not built yet` |
-| 78 | `typeassert reached SSA construction` |
-| 47 to 13 each | `append`, `print`, `new`, `select`, `make`, `send`, `cap`, `copy`, `recv`, `clear`, `close`, `defer` |
-| the rest | conversions between named types, a field of an interface, addresses |
+| 4,458 | `compositelit reached SSA construction` |
+| 2,680 | `len reached SSA construction` |
+| 2,191 | `assign: a multi-value assignment with a result wider than a register` |
+| 2,009 | `convert: a conversion from <T> to <interface>` |
+| 1,527 | `range reached SSA construction` |
+| 1,115 | `field <n> of <interface>` |
+| 1,074 | `closure reached SSA construction` |
+| 921 | `compositelit: an address is not built yet` |
+| 911 | `panic reached SSA construction` |
+| 832 | `slice reached SSA construction` |
+| 804 | `make reached SSA construction` |
+| 588 | `defer reached SSA construction` |
+| 493 | `append reached SSA construction` |
+| 429 | `assign: a multi-value assignment from typeassert` |
+| 331 | `index: an index of map is not built yet` |
+| 320 | `new reached SSA construction` |
+| 292 | `the address of <name> is taken but it lives in a value` |
+| 287 | `assign: a multi-value assignment from index` |
+| 272, 257 | `typeassert`, `typeswitch` |
+| 133 to 9 each | `print`, `recover`, `copy`, `min`, `select`, `println`, `send`, `recv`, `cap`, `max`, `clear`, `real`, `close`, `delete`, `complex`, `imag`, `go`, and the five `unsafe` intrinsics |
+| the rest | addresses of a call result and of a constant |
 
-The first row is not a Go construct at all. `ir.OAssign` exists, and the
-statement switch of `ssa/build.go` has no case for it: it still reads the
-convention that preceded the node, an `ir.OBinary` with no operator. Three in
-five of the distribution's functions contain a plain assignment, so that one
-missing case is 24,031 of the 31,709 refusals. It is the cheapest fix in the
-middle end and the largest.
+Every row of that table except the two multi-value assignment rows and the
+`field <n> of <interface>` row is [020](020-ir.md)'s lowering obligation,
+unpaid. No pass performs it, so every construct in it arrives here intact and
+is refused.
 
-Everything else in the table is [020](020-ir.md)'s lowering obligation, unpaid.
-No pass performs it, so every construct in it arrives here intact and is
-refused.
+The two multi-value rows are not a lowering gap and not a construction gap
+either. They are a limit in `ssa/decompose.go`: `SelectN`'s index means the
+result before decomposition and the machine word of the result area after it,
+and the renumbering between the two states that a part of result $i$ is word
+$i+j$, which holds only when every result before $i$ is one word wide. A wide
+result at index zero expands into the words the later indices already claim,
+and a wide one above zero is not split at all. Construction therefore refuses a
+multi-value assignment with any result wider than a register rather than
+building two reads that name one word. Fixing the renumbering is worth 2,620
+functions and it is that pass's to fix.
+
+### What the assignment case cost and bought
+
+The table above replaced one in which `assign: statement is not built yet` was
+the first row at 24,031 functions, because `ir.OAssign` existed and the
+statement switch had no case for it: it read the convention that preceded the
+node, an `ir.OBinary` with no operator. Two more stale conventions were in the
+same file. `switchCases` required an `ir.OBlock` clause, which `ir.Build` has
+never produced since `ir.OCase` existed, and refused a further 992 functions.
+`forParts` read a `for` statement's post list out of `Else`, and `ir.Build`
+writes it to `Post`.
+
+The third one was not a refusal. It was a miscompile in the 8,238 functions
+construction already accepted: **every post statement of every `for` statement
+in the corpus was silently dropped**, so a counted loop never advanced. A
+second one sat beside it. An expression carries statements in `Init` where
+there is no enclosing statement list to hold them, which `ir.Build`'s
+conventions name as a loop condition and the right operand of `&&` and `||`,
+and construction dropped those too, so every temporary they assign held the
+zero the entry block wrote.
+
+Neither was visible to any gate. The corpus tests measured what built, and both
+faults are in code that builds.
 
 ## What construction builds
 
-Statements: block, if, for, switch over block clauses, return, label, goto,
-break, continue, call, and the assignment convention above. Expressions:
-constant, local, global, field, index, deref, address-of, unary, binary
-including short-circuit and string concatenation, compare, convert, and a
-direct call. Addresses: local, global, deref, field, index.
+Statements: block, if, for including its post list, switch over `ir.OCase`
+clauses with `fallthrough`, return, label, goto, break, continue, call, and
+assignment. Expressions: constant, local, global, field, index, deref,
+address-of, unary, binary including short-circuit and string concatenation,
+compare, convert, and a direct call. Addresses: local, global, deref, field,
+index.
 
-That set is what a fifth of the distribution is written in.
+That set is what two functions in five of the distribution are written in.
+
+A switch clause carries no statements of its own. `ir.Build` writes `Init` on a
+clause only for a `select`, whose communication statement has to be evaluated
+on entry to the `select`, and a `select` is refused here. A plain switch clause
+and a type switch clause both carry case expressions and a body and nothing
+else, so building the body is building the clause.
+
+### Assignment
+
+Every form of `ir.OAssign`. A destination that lives in an SSA value is written
+into the variable map of Braun et al., and one that lives in the frame is
+reached by an address and a store. Everything else follows from where the
+address comes from: a pointer dereference, a field offset, an index with the
+bounds check in front of it, or a global's symbol.
+
+A multi-value assignment leaves `X` nil and lists its destinations in `Args`.
+Only the call form is built. A two-value map read, a type assertion and a
+channel receive are three rows of [020](020-ir.md)'s lowering table, and they
+arrive here intact. The call form reads every result before it writes any
+destination, and both halves of that matter: `SelectN` reads the call, which is
+a memory value, so a read placed after a store would name a memory the store
+has already superseded. It is also the order the specification requires.
+
+Every result is read, including one assigned to the blank identifier. The code
+generator places the results of a call together and names each one by the
+`SelectN` that reads it, so a gap in the sequence is a result it cannot place.
+
+### The per-iteration loop variable
+
+Go 1.22 makes a variable a loop declares a new instance on each iteration.
+`ir.Build` performs the transform: a loop variable whose address is taken is
+replaced in the loop control by a carrier, the body opens by declaring the
+variable again from the carrier, and the post list opens by copying it back.
+Construction's obligation is to build that declaration where it stands, so it
+runs on every iteration.
+
+`syntax.Def` therefore builds the same thing a plain assignment builds. Treating
+it as work the entry block's zeroing already did is what would put the pre-1.22
+semantics back, because the body would then read whatever the previous
+iteration left.
+
+What construction does not emit is the lifetime marker. `OpVarDef` states that
+a frame slot's previous contents are dead, which is the other half of "a new
+instance each time";
+[025](025-lowering-and-rules.md) owns the markers and `ssa/liveness.go` reads
+them, so an object with no `OpVarDef` anywhere is live from the entry, which is
+the conservative answer. An address-taken loop variable that outlives its
+iteration still needs [023](023-escape-analysis.md), because one frame slot
+serves every iteration and only a heap allocation per iteration separates them.
 
 ## Invariants
 
@@ -240,11 +326,18 @@ the pass that caused it rather than in the register allocator.
 `ssa` is above the 90% coverage gate.
 
 - The verifier, on every function of every package in [004](004-conformance.md)
-  L1's corpus. Partly built: `ssa/decompose_test.go` and `ssa/stackmap_test.go`
-  both walk 536 packages and verify every function they build. Neither counts
-  what `ssa.Build` refused; both return silently on the error. **There is no
-  corpus test for construction itself**, which is why the acceptance rate above
-  had to be measured by hand rather than read off a gate.
+  L1's corpus. Built. `ssa/build_test.go`'s `TestBuildCorpus` walks 536
+  packages, builds all 39,947 functions, verifies every one it accepts and
+  counts every one it refuses by cause. The table above is that test's output.
+  `ssa/decompose_test.go` and `ssa/stackmap_test.go` count the refusals too,
+  which they did not before: both returned silently on the error, so both
+  reported a number that could only ever go up and neither said what it was
+  measured out of.
+- Per form of assignment, the exact SSA produced, so that a local in a value
+  and a local in the frame cannot be exchanged without a failure.
+- The per-iteration loop variable, on the shape `ir.Build` produces, failing
+  both when the declaration is hoisted into the entry block and when the post
+  list is dropped.
 - Phi minimality on a corpus of loop and branch shapes, compared against a
   hand-computed expected set. Not written.
 - `goto` and label programs from Go's `test/` corpus, which are the cases that
@@ -258,10 +351,53 @@ Go-specific operation remains by the end. Construction refuses one instead:
 that is not is an error naming InvGoSpecific". Nothing makes them gone. This
 was found by reading the two `IsGoSpecific` guards and the twelve
 `b.unsupported` call sites in `ssa/build.go`, then counting the errors over the
-IR corpus, which is where 8,238 of 39,947 comes from.
+IR corpus, which is where 8,238 of 39,947 came from. It is 17,367 of 39,947
+now, and construction still refuses rather than lowers.
+
+**Three of the refusals were stale conventions in this pass, not gaps in the
+language it accepts.** `ir.OAssign`, `ir.OCase` and `Node.Post` all existed and
+`ssa/build.go` read the conventions that preceded them. Two of the three
+mattered only as refusals, at 24,031 and 992 functions. The third was a
+miscompile: `forParts` read a `for` statement's post list out of `Else`, so
+every counted loop of the corpus lost its post statement and never advanced.
+Beside it, `expr` dropped the statements an expression carries in `Init`, which
+are a loop condition's temporaries and the right operand of `&&` and `||`, so
+each of those held the entry block's zero.
+
+Neither miscompile was visible to a gate, and the reason is worth writing down.
+`ssagen`'s `TestLinkAndRun` is the end-to-end test, and its own comment says
+its programs contain no assignment statement, because construction refused one.
+A program with no assignment has no counted loop, so nothing in the repository
+ever ran one. The gap in the language and the gap in the gate were the same
+gap: the constructs a compiler refuses are also the constructs its end-to-end
+tests cannot use.
+
+**The claim that what construction accepts the back end finishes is now 99.5%
+rather than 100%.** `reached == lowered == 8,238` held because the accepted set
+was small enough to be uniform. It is 17,285 of 17,367 now. Seventy of the 82
+exceptions hold an array or a struct that decomposition leaves whole and the
+other twelve name no operation the corpus test can resolve. They were always
+going to appear as the accepted set widened.
+
+**A multi-value assignment is bounded by a pass below this one.** Construction
+refuses one whose call has any result wider than a register, which is 2,620
+functions across two rows of the table. `ssa/decompose.go` renumbers a part of
+result $i$ as word $i+j$, which holds only when every result before $i$ is one
+word. Building the reads anyway would produce two of them naming one word, and
+the code generator would then place one result over another. This is recorded
+here rather than fixed here because the renumbering is that pass's.
+
+**Map assignment and the two-value map read are refused for a reason outside
+both specs.** `ir.Build` emits a plain `ir.OIndex` over a map-typed operand,
+[020](020-ir.md)'s table says it becomes `runtime.mapassign` and
+`runtime.mapaccess2`, and `rtsym` carries neither, nor any other map symbol,
+nor the `*maptype` descriptor both take.
+[032](032-type-descriptors-and-itabs.md) owns the descriptor and
+[031](031-runtime-lowering.md) owns the symbol table, so the row cannot be
+performed anywhere until both exist.
 
 The deck read that number the other way round for a while. The reading to
 avoid is "every function of the distribution compiles", which is true only of
-the functions construction accepts and false of the distribution. One in five
-is the honest fraction, and the missing `case ir.OAssign` is most of the other
-four.
+the functions construction accepts and false of the distribution. Two in five
+is the honest fraction, and [020](020-ir.md)'s unpaid lowering table is almost
+all of the other three.

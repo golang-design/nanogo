@@ -22,10 +22,12 @@ operation has neither a rule nor a stated reason to be deferred; one operation
 is deferred and none is missing.
 
 What lowering sees is narrower than the language, and the narrowing happens
-above it. SSA construction accepts 8,238 of the 39,947 functions the IR builder
-produces for the Go distribution, and [021](021-ssa-construction.md) counts the
-refusals. **All 8,238 lower completely.** Read the two numbers together: this
-pass finishes everything that reaches it, over one fifth of the distribution.
+above it. SSA construction accepts 17,367 of the 39,947 functions the IR
+builder produces for the Go distribution, and [021](021-ssa-construction.md)
+counts the refusals. **17,285 of the 17,367 lower completely.** Read the two
+numbers together: this pass finishes all but 82 of what reaches it, which is
+two fifths of the distribution. Seventy of the 82 hold an array or a struct
+that decomposition leaves whole.
 
 ## Rewrite rules
 
@@ -112,12 +114,12 @@ When it was written, splitting was the largest single reason a function failed
 to lower, at 3,164 of 3,483 refusals over the distribution corpus.
 
 That is discharged. `ssa/decompose.go` exists, and the corpus of
-`ssa/decompose_test.go` now reports 8,238 functions reaching SSA and 8,238
-lowering completely, against 4,755 before the pass. Lowering refuses nothing.
-What is left is residue rather than refusal: after decomposition and the ABI
-assignment, 13 functions still hold a `SelectN` of multi-word type, 3 hold a
-value of array type, and 10 hold a value of struct type. Every one of those
-functions lowers anyway, and no composite call result is read at an index above
+`ssa/decompose_test.go` now reports 17,367 functions reaching SSA and 17,285
+lowering completely, against 4,755 of 8,238 before the pass. What is left is
+residue rather than the old refusal: after decomposition and the ABI
+assignment, 70 functions still hold a `SelectN` of multi-word type, 9 hold a
+value of array type, and 77 hold a value of struct type. All but 82 of those
+functions lower anyway, and no composite call result is read at an index above
 zero, which is the part-numbering error the test exists to catch.
 
 Anything in the deck that still names undecomposed wide values as the largest
@@ -243,9 +245,11 @@ for the ones a test happens to try.
 ## Deviations
 
 The spec said splitting wide values is the largest single reason a function
-fails to lower, at 3,164 of 3,483. The pass was then written, and the number is
-now zero: `ssa/decompose_test.go`'s corpus reports 8,238 of 8,238 lowering
-completely. The note is kept rather than deleted because the claim it makes
+fails to lower, at 3,164 of 3,483. The pass was then written and the number
+went to zero. It is 82 of 17,367 today, because SSA construction learned the
+assignment statement and the shapes that arrived with it include an array and a
+struct that decomposition leaves whole. The note is kept rather than deleted
+because the claim it makes
 about *where* the split belongs, above selection and while the value is still a
 value, is what the pass then proved.
 

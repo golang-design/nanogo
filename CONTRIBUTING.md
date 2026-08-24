@@ -1,7 +1,7 @@
 # Contributing
 
 Thanks for looking. nanogo compiles Go source to a `goobj` file that links and
-runs, and it accepts about one function in five of the standard library. The
+runs, and it accepts about two functions in five of the standard library. The
 [spec deck](specs/) is the design record and three [spikes](spikes/) hold the
 measurements that two decisions rest on. The compiler is built against the deck
 in the order [`specs/003-sequencing.md`](specs/003-sequencing.md) sets, and the
@@ -13,9 +13,11 @@ not the cheaper contribution.
 ## What is most useful right now
 
 **The forms SSA construction refuses.** The README lists them with the number
-of standard library functions each one blocks. An assignment statement blocks
-24,031 of them, which is the single largest gap in the compiler.
-[`specs/021`](specs/021-ssa-construction.md) owns the pass.
+of standard library functions each one blocks. A composite literal blocks 5,379
+of them, `len` blocks 2,680 and `range` blocks 1,527, and every one of those is
+a row of [`specs/020`](specs/020-ir.md)'s lowering table that no pass performs.
+[`specs/021`](specs/021-ssa-construction.md) owns the pass and
+[`specs/020`](specs/020-ir.md) owns the table.
 
 **Tell us where the design is wrong.** Especially if you have written a
 compiler, or a linker, or have fought Go's object format.

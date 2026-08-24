@@ -188,15 +188,15 @@ met, because the language nanogo accepts is narrower than any real package.
 The corpus says how much narrower, and it is one measurement with two halves.
 The IR builder produces a typed tree for 536 packages of the Go distribution,
 39,947 functions and 4,188,075 nodes.
-**8,238 of those functions reach SSA construction**, and every one of them
-lowers completely to arm64 machine operations. 8,237 of the 8,238 carry a
-stack map, over 8,645 safepoints, and 3,412 of them have a pointer bit set.
+**17,367 of those functions reach SSA construction**, and 17,285 of them
+lower completely to arm64 machine operations. 17,239 of the 17,367 carry a
+stack map, over 117,228 safepoints, and 10,242 of them have a pointer bit set.
 
-The other four functions in five never reach SSA. Construction refuses them by
-name. An assignment statement alone accounts for 24,031 of them, then `len` for
-1,377, a `switch` with non-block clauses for 992, `range` for 984 and a
-composite literal for 903. The README carries the full table.
-[021](021-ssa-construction.md) owns the pass and the gap.
+The remaining 22,580 functions never reach SSA. Construction refuses them by
+name. A composite literal accounts for 4,458 of them, then `len` for 2,680, a
+multi-value assignment with a result wider than a register for 2,191, a
+conversion to an interface for 2,009 and `range` for 1,527. The README carries
+the full table. [021](021-ssa-construction.md) owns the pass and the gap.
 
 ### Why part of M4 was built before M3 was finished
 
@@ -256,24 +256,41 @@ under `-toolexec`. The two numbers below say what changed.
 **The lowering measurement was stale by a factor of two, in the good
 direction.** This section said 8,238 functions reached SSA and 4,755 lowered
 completely. Decomposition was finished after that was written, and the corpus
-now reports 8,238 of 8,238. The claim that followed it, that the largest cause
-of the remainder is values wider than a machine register, is therefore also
-gone: there is no remainder to explain. What is left undecomposed is 13
-functions holding a wide `SelectN`, 3 holding an array and 10 holding a struct,
-and all of them still lower.
+reported 8,238 of 8,238. The claim that followed it, that the largest cause of
+the remainder is values wider than a machine register, went with it.
+
+**Then construction learned the assignment statement and both numbers moved
+again.** `ssa/build.go` had no case for `ir.OAssign`, none for `ir.OCase`, and
+read a `for` statement's post list out of `Else` rather than `Post`. The three
+were 25,036 refusals and one miscompile. The corpus now reports 17,367 reaching
+SSA and 17,285 lowering, so the identity that held while the accepted set was
+small is gone: what is left undecomposed is 70 functions holding a wide
+`SelectN`, 9 holding an array and 77 holding a struct, and 82 of them do not
+lower.
+
+**The end-to-end test could not have caught the miscompile, and the reason
+generalises.** `ssagen`'s `TestLinkAndRun` says in its own comment that its
+programs hold no assignment statement, because construction refused one. A
+program with no assignment has no counted loop, so nothing in the repository
+ever ran one, and the dropped post list was invisible. A compiler's end-to-end
+tests are written in the language the compiler accepts, so a construct it
+refuses is a construct its gates cannot exercise. Widening what is accepted has
+to be followed by widening what is run.
 
 **The reach of the compiler was reported without its denominator.** "Every
 function of the distribution's buildable packages compiles" was true of the
 functions SSA construction accepts and read as a claim about the distribution.
-It is one function in five. The denominator was found during the August 2026
-documentation audit by counting `ssa.Build`'s refusals across the same corpus,
-which nothing had measured because the corpus tests skip a function they cannot
-build rather than counting it. The counts are in the README and the largest is
-the assignment statement, at 24,031 functions.
+It was one function in five and is two in five. The denominator was found
+during the August 2026 documentation audit by counting `ssa.Build`'s refusals
+across the same corpus, which nothing had measured because the corpus tests
+skip a function they cannot build rather than counting it. The counts are in
+the README and the largest is now a composite literal, at 5,379 functions.
 
 The lesson is about the measurement and not about the compiler. A corpus test
 that reports what worked, and drops what did not, produces a number that only
-ever goes up.
+ever goes up. `ssa/build_test.go` now holds a corpus test for construction that
+counts the refusals by cause, and `ssa/decompose_test.go` and
+`ssa/stackmap_test.go` count them too rather than returning silently.
 
 **The numbers in this file are now gated.** `internal/hygiene` reads them out
 of the prose and compares them against a checked-in record of what the tests

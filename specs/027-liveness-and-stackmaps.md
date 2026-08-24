@@ -257,17 +257,17 @@ yet.
 ### The corpus
 
 `ssa/stackmap_test.go` runs the whole pipeline over 536 packages of the
-distribution. **8,238 functions reach SSA construction, 8,238 lower completely,
-8,237 reach a stack map, 3,412 carry a pointer bit, 43 carry a stack object,
-and there are 8,645 safepoints.**
+distribution. **17,367 functions reach SSA construction, 17,285 lower
+completely, 17,239 reach a stack map, 10,242 carry a pointer bit, 146 carry a
+stack object, and there are 117,228 safepoints.**
 
 Two of those numbers need reading with care.
 
-The one function that is built and lowered and never mapped is not a stack map
-failure. The register allocator refuses it, and the map is built from the
+The 46 functions that are built and lowered and never mapped are not stack map
+failures. The register allocator refuses them, and the map is built from the
 allocation, so the pipeline stops one pass earlier.
-[026](026-register-allocation.md) owns that refusal.
+[026](026-register-allocation.md) owns those refusals.
 
-The 43 stack objects are objects the analysis found, not records in an object
+The 146 stack objects are objects the analysis found, not records in an object
 file. Nothing writes `FUNCDATA_StackObjects` yet, for the reason at the top of
 this spec.

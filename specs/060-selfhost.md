@@ -30,16 +30,19 @@ compiles today is zero, and no arithmetic over the language subset changes that.
 
 The second-order measure is the language, and it says the same thing more
 slowly. The IR builder produces 39,947 functions for 536 packages of the
-distribution. SSA construction accepts 8,238 of them, one in five. Every
-accepted function lowers completely to arm64 machine operations and 8,237 carry
-a stack map, so the back half of the pipeline is in better shape than the front
-of it. The largest single refusal is the assignment statement: 24,031 functions
-are refused with `assign: statement is not built yet`. `ssagen`'s link-and-run
-tests say the same in a comment, that their sources contain no assignment
-because `ssa.Build` refuses one, and that this is the widest program the
-pipeline compiles.
+distribution. SSA construction accepts 17,367 of them, two in five. 17,285 of
+those lower completely to arm64 machine operations and 17,239 carry a stack
+map, so the back half of the pipeline is in better shape than the front of it.
+The largest single refusal is now the composite literal, at 5,379 functions,
+and every large refusal after it is a row of [020](020-ir.md)'s lowering table
+that no pass performs. `ssagen`'s link-and-run tests still say in a comment
+that their sources contain no assignment statement because `ssa.Build` refuses
+one, which stopped being true and is the next thing to widen: the programs the
+end-to-end gate runs are written in the language the compiler accepts, so they
+grow only when it does.
 
-A compiler that cannot compile `x = 1` is a long way from compiling itself. The
+A compiler that cannot build a composite literal is a long way from compiling
+itself. The
 sections below are the procedure for the day it is not, and they are unchanged
 because the procedure is not what was wrong.
 

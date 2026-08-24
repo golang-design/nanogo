@@ -182,14 +182,45 @@ func compiled(lines []string, pkg string) bool {
 // main package is the one package in a build that neither imports nor is
 // imported, so it is the only one a whole `go build` can hand to nanogo today.
 //
-// The body avoids an assignment statement, a short variable declaration and a
-// call nested in another expression, because SSA construction builds none of
-// them yet. What is left is enough for arithmetic, branches and calls.
+// The body is a counted loop, and it is the end-to-end check on the two things
+// SSA construction learned along with the assignment statement: a short
+// variable declaration inside a loop body, and a for statement's post list.
+// Construction read the post list out of the wrong field until recently, so a
+// counted loop never advanced, and no test in the repository could catch it
+// because no program in the repository had one: the programs are written in
+// the language the compiler accepts, and it accepted no assignment.
+//
+// The exit status is the assertion. A wrong sum divides by zero and the
+// process dies, and the guard is what makes a loop that does not advance fail
+// in a second rather than hang until the test times out.
+//
+// It is a main package with no imports, and that is not a simplification. A
+// package nanogo compiles cannot be imported, because the archive it writes
+// carries no export data (specs/015-export-data.md has no writer), and a
+// package nanogo compiles cannot import, because there is no reader either. A
+// main package is the one package in a build that neither imports nor is
+// imported, so it is the only one a whole `go build` can hand to nanogo today.
 const helloProgram = `package main
 
-func compute(a, b int) int { return a*b + 1 }
+func compute(a, b int) int {
+	sum := 0
+	guard := 0
+	for i := 0; i < b; i++ {
+		guard = guard + 1
+		if guard > 100 {
+			return 0
+		}
+		sum = sum + a
+	}
+	return sum
+}
 
-func main() { compute(20, 3) }
+func main() {
+	d := compute(20, 3) - 60
+	if d != 0 {
+		d = d / (d - d)
+	}
+}
 `
 
 // The program that prints.
@@ -386,7 +417,7 @@ func TestInstalledBinaryAnswersTheProtocols(t *testing.T) {
 	}
 	// The help states the limits. A user must not have to discover them by
 	// hitting them, so the test names the ones that stop a real build.
-	for _, want := range []string{"darwin/arm64", "export data", "allowlist", "assignment statement", "gc"} {
+	for _, want := range []string{"darwin/arm64", "export data", "allowlist", "composite literal", "gc"} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("nanogo help does not mention %q", want)
 		}
