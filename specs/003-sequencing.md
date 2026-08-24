@@ -159,22 +159,34 @@ Risks are listed with the milestone that retires them, not with a probability.
 
 ## Where the work stands
 
-**M0 is complete.** The driver answers the `go` command's `-V=full` build-ID
-protocol, a full `go build -a -toolexec=nanogo` completes by delegating every
-invocation, the package tree exists, and all three spikes run.
+**M0 and M1 are complete. M2 is complete. M3 is partly built.**
 
-**M1 is in progress.** The syntax package holds positions, tokens, the tree, the
-walker and the printer; the scanner and the parser are being built against the
-corpus gate.
+| Milestone | State | Gate met |
+| --- | --- | --- |
+| M0 skeleton | done | a `go build -a -toolexec=nanogo` completes by delegating |
+| M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
+| M2 types | done | 613 subtests, a 375-package corpus, checks nanogo's own source |
+| M3 first binary | **partly** | the object writer and the arm64 encoder are built and gated; the IR builder, SSA, lowering and register allocation are not |
 
-Measured at the end of M0:
+M3's gate, a leaf package compiled by nanogo under `-toolexec`, is not met. What
+is met is the half of M3 that could be built without the middle end, and it
+retired the milestone's stated risk: **`go tool link` links a nanogo-written
+object against the real Go runtime into a binary that runs.**
+[040](040-object-format.md) records that result. The object format decision of
+[000](000-decisions.md) decision 3 is no longer a judgement call.
+
+Measured coverage:
 
 | Package | Coverage | |
 | --- | --- | --- |
+| `syntax` | 99.2% | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) |
+| `types2` | excluded | [012](012-type-checking.md); gated by upstream's suite |
+| `loader` | 98.8% | [014](014-package-loader.md), G1 half |
+| `obj` | 98.1% | [040](040-object-format.md) |
+| `obj/arm64` | 98.8% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
+| `ir` | 99.3% | [020](020-ir.md), [030](030-abi.md) type layer |
 | `driver` | 97.4% | [050](050-driver.md), [051](051-build-integration.md) |
-| `loader` | 98.4% | [014](014-package-loader.md), G1 half |
 | `internal/covercheck` | 97.6% | the gate itself |
-| `syntax` | in progress | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) |
 | `cmd/nanogo` | excluded | one statement; the reason is in the exclusions file |
 
 ## Deviations
@@ -197,3 +209,19 @@ gate added after the code it measures is a gate calibrated to the code.
 **The loader was started in M0, not M2.** [014](014-package-loader.md)'s G1 half
 and its constraint evaluator are independent of the front end, and building them
 early cost nothing and removed a dependency from M2.
+
+**M3 was started from the back.** [040](040-object-format.md) and
+[041](041-instruction-encoding.md) need nothing above them, so they were built
+before the middle end rather than after it. That was worth doing for one reason:
+the object format seam is this deck's largest untested assumption, and building
+the writer first turned it into a linked binary that runs. A middle end built
+first would have reached the same question three milestones later.
+
+**Two platform-divergent cgo bugs, and one data race, were found by CI and
+could not be found locally.** They are recorded because they say something about
+the test strategy rather than about the bugs: cgo file selection differs by
+`GOOS`, so any code that decides which files are in a package is untested until
+it runs on both platforms; and a concurrency contract stated only in a comment
+is one the race detector finds violated. Both are now gated.
+[014](014-package-loader.md) carries the first; [010](010-scanner-and-positions.md)
+carries the second.
