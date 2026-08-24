@@ -96,6 +96,16 @@ type is replaced by one value per machine word, and every operation over it is
 replaced by the corresponding per-word operations. Selection then sees only
 single-register values, which is the property every rule below assumes.
 
+The step has a bound on how many parts it will produce, because decomposition
+trades one memory object for that many simultaneously live values and stops
+paying when the number approaches the register file. **That bound is not a
+bound at a call boundary**, and an earlier version of this spec justified it by
+claiming an aggregate that large "is passed through memory by every calling
+convention". That is false for Go's internal ABI, which passes a five-field
+struct in five registers. The ABI pass of [030](030-abi.md) therefore finishes
+the split for whatever the convention says travels in registers, and a test
+pins that its walk and this one produce identical offsets and widths.
+
 ## Operations that lower to calls
 
 Some target-neutral operations have no machine instruction. On both targets these
