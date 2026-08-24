@@ -206,6 +206,12 @@ func (e *LowerError) Error() string {
 // leaves a target-neutral operation behind, or when a block does not converge.
 // specs/025 requires the crash and names the operation in it.
 func Lower(f *Func, rs *RuleSet) {
+	// Decomposition first, so that selection only ever sees a value that fits
+	// one register. Every rule below assumes that, and specs/025's multi-word
+	// section says why it cannot be done any later: a store of a wide value
+	// has a source value and not a source address, so there is nothing for a
+	// block move to read.
+	Decompose(f)
 	l := &lowerer{f: f, rs: rs}
 	l.run()
 }
