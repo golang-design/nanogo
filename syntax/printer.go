@@ -71,6 +71,13 @@ func (p *printer) printf(format string, args ...any) {
 }
 
 // short reports whether an interior should be abbreviated.
+//
+// Only two constructs abbreviate, and the list is upstream's rather than a
+// choice: a function literal's body and a composite literal's elements. An
+// earlier version also abbreviated call arguments, struct fields and interface
+// methods, which made the type checker print `cannot use f(…)` where the
+// corpus expects `cannot use f(x)`. Abbreviating more is not a nicety; it
+// breaks pattern matching in specs/004's errorcheck level.
 func (p *printer) short() bool { return p.form == ShortForm }
 
 func (p *printer) printList(list []Expr, sep string) {
@@ -82,19 +89,59 @@ func (p *printer) printList(list []Expr, sep string) {
 	}
 }
 
-func (p *printer) printFields(list []*Field, sep string) {
+// printFieldList prints a field list, grouping consecutive named fields that
+// share one type expression.
+//
+// The grouping is not cosmetic. The type checker names a signature in an error
+// message through this printer, and upstream prints `func() (_, _ int)` where
+// an ungrouped printer prints `func() (_ int, _ int)`. The conformance corpus
+// matches against the first.
+//
+// Fields are grouped when they share the same Type node by identity, which is
+// exactly what the parser produces for `a, b int`. Two fields that were written
+// separately hold two nodes and are not grouped, even when the types are equal.
+func (p *printer) printFieldList(list []*Field, tags []*BasicLit, sep string) {
+	i0 := 0
+	var typ Expr
 	for i, f := range list {
-		if i > 0 {
-			p.str(sep)
-		}
 		if f == nil {
 			continue
 		}
-		if f.Name != nil {
-			p.print(f.Name)
-			p.str(" ")
+		if f.Name == nil || f.Type != typ {
+			if i0 < i {
+				p.printFieldGroup(list, tags, i0, i)
+				p.str(sep)
+				i0 = i
+			}
+			typ = f.Type
 		}
-		p.print(f.Type)
+	}
+	if len(list) > 0 {
+		p.printFieldGroup(list, tags, i0, len(list))
+	}
+}
+
+func (p *printer) printFieldGroup(list []*Field, tags []*BasicLit, i, j int) {
+	if i+1 == j && list[i] != nil && list[i].Name == nil {
+		// An embedded field or an unnamed parameter prints as its type alone.
+		p.print(list[i].Type)
+	} else {
+		for k, f := range list[i:j] {
+			if k > 0 {
+				p.str(", ")
+			}
+			if f != nil {
+				p.print(f.Name)
+			}
+		}
+		p.str(" ")
+		if list[i] != nil {
+			p.print(list[i].Type)
+		}
+	}
+	if i < len(tags) && tags[i] != nil {
+		p.str(" ")
+		p.print(tags[i])
 	}
 }
 
@@ -174,13 +221,9 @@ func (p *printer) print(n Node) {
 	case *CallExpr:
 		p.print(n.Fun)
 		p.str("(")
-		if p.short() && len(n.ArgList) > 0 {
-			p.str("…")
-		} else {
-			p.printList(n.ArgList, ", ")
-			if n.HasDots {
-				p.str("...")
-			}
+		p.printList(n.ArgList, ", ")
+		if n.HasDots {
+			p.str("...")
 		}
 		p.str(")")
 
@@ -208,7 +251,11 @@ func (p *printer) print(n Node) {
 
 	case *FuncLit:
 		p.print(n.Type)
-		p.str(" {…}")
+		p.str(" {")
+		if n.Body != nil && len(n.Body.List) > 0 {
+			p.str("…")
+		}
+		p.str("}")
 
 	// Types.
 
@@ -232,29 +279,17 @@ func (p *printer) print(n Node) {
 
 	case *StructType:
 		p.str("struct{")
-		if len(n.FieldList) > 0 {
-			if p.short() {
-				p.str("…")
-			} else {
-				p.printFields(n.FieldList, "; ")
-			}
-		}
+		p.printFieldList(n.FieldList, n.TagList, "; ")
 		p.str("}")
 
 	case *InterfaceType:
 		p.str("interface{")
-		if len(n.MethodList) > 0 {
-			if p.short() {
-				p.str("…")
-			} else {
-				p.printFields(n.MethodList, "; ")
-			}
-		}
+		p.printFieldList(n.MethodList, nil, "; ")
 		p.str("}")
 
 	case *FuncType:
 		p.str("func(")
-		p.printFields(n.ParamList, ", ")
+		p.printFieldList(n.ParamList, nil, ", ")
 		p.str(")")
 		switch len(n.ResultList) {
 		case 0:
@@ -267,7 +302,7 @@ func (p *printer) print(n Node) {
 			fallthrough
 		default:
 			p.str(" (")
-			p.printFields(n.ResultList, ", ")
+			p.printFieldList(n.ResultList, nil, ", ")
 			p.str(")")
 		}
 

@@ -53,48 +53,130 @@ func TestPrintExpressions(t *testing.T) {
 	}
 }
 
-// TestShortFormAbbreviates is the property the type checker depends on. An
-// error message names an expression so the reader recognises it, and quoting a
-// whole composite literal instead makes the message unreadable.
-func TestShortFormAbbreviates(t *testing.T) {
-	call := &CallExpr{Fun: name("f"), ArgList: []Expr{name("a"), name("b")}}
-	if got, want := String(call), "f(…)"; got != want {
-		t.Errorf("short form of a call is %q, want %q", got, want)
+// TestShortFormAbbreviatesExactlyTwoConstructs pins the abbreviation set
+// against upstream's.
+//
+// Upstream's ShortForm is documented as "print … for non-empty function or
+// composite literal bodies", and that is the whole list. An earlier version of
+// this printer also abbreviated call arguments, struct fields and interface
+// methods. The type checker names every expression in every error message
+// through this printer, so that made it print `cannot use f(…)` where the
+// conformance corpus expects `cannot use f(x)`. It broke pattern matching in
+// specs/004's errorcheck level, not merely appearance.
+func TestShortFormAbbreviatesExactlyTwoConstructs(t *testing.T) {
+	full := func(n Node) string {
+		var buf strings.Builder
+		if _, err := Fprint(&buf, n, FullForm); err != nil {
+			t.Fatalf("Fprint: %v", err)
+		}
+		return buf.String()
 	}
 
-	var buf strings.Builder
-	if _, err := Fprint(&buf, call, FullForm); err != nil {
-		t.Fatalf("Fprint: %v", err)
-	}
-	if got, want := buf.String(), "f(a, b)"; got != want {
-		t.Errorf("full form of a call is %q, want %q", got, want)
-	}
-
+	// The two that do abbreviate.
 	cl := &CompositeLit{Type: name("T"), ElemList: []Expr{name("x")}}
 	if got, want := String(cl), "T{…}"; got != want {
 		t.Errorf("short form of a composite literal is %q, want %q", got, want)
 	}
-	buf.Reset()
-	Fprint(&buf, cl, FullForm)
-	if got, want := buf.String(), "T{x}"; got != want {
+	if got, want := full(cl), "T{x}"; got != want {
 		t.Errorf("full form of a composite literal is %q, want %q", got, want)
 	}
-
-	st := &StructType{FieldList: []*Field{{Name: name("A"), Type: name("int")}}}
-	if got, want := String(st), "struct{…}"; got != want {
-		t.Errorf("short form of a struct is %q, want %q", got, want)
-	}
-	buf.Reset()
-	Fprint(&buf, st, FullForm)
-	if got, want := buf.String(), "struct{A int}"; got != want {
-		t.Errorf("full form of a struct is %q, want %q", got, want)
+	if got, want := String(&CompositeLit{Type: name("T")}), "T{}"; got != want {
+		t.Errorf("an empty composite literal is %q, want %q", got, want)
 	}
 
-	it := &InterfaceType{MethodList: []*Field{{Type: name("error")}}}
-	buf.Reset()
-	Fprint(&buf, it, FullForm)
-	if got, want := buf.String(), "interface{error}"; got != want {
-		t.Errorf("full form of an interface is %q, want %q", got, want)
+	fl := &FuncLit{Type: &FuncType{}, Body: &BlockStmt{List: []Stmt{&EmptyStmt{}}}}
+	if got, want := String(fl), "func() {…}"; got != want {
+		t.Errorf("short form of a function literal is %q, want %q", got, want)
+	}
+	if got, want := String(&FuncLit{Type: &FuncType{}, Body: &BlockStmt{}}), "func() {}"; got != want {
+		t.Errorf("an empty function literal is %q, want %q", got, want)
+	}
+
+	// The three that must not, in either form.
+	for _, tc := range []struct {
+		what string
+		n    Node
+		want string
+	}{
+		{"call", &CallExpr{Fun: name("f"), ArgList: []Expr{name("a"), name("b")}}, "f(a, b)"},
+		{"struct", &StructType{FieldList: []*Field{{Name: name("A"), Type: name("int")}}}, "struct{A int}"},
+		{"interface", &InterfaceType{MethodList: []*Field{{Type: name("error")}}}, "interface{error}"},
+	} {
+		if got := String(tc.n); got != tc.want {
+			t.Errorf("short form of a %s is %q, want %q", tc.what, got, tc.want)
+		}
+		if got := full(tc.n); got != tc.want {
+			t.Errorf("full form of a %s is %q, want %q", tc.what, got, tc.want)
+		}
+	}
+}
+
+// TestFieldGrouping pins the other printer rule the checker depends on.
+// Upstream prints `func() (_, _ int)`; an ungrouped printer prints
+// `func() (_ int, _ int)`, and the corpus matches against the first.
+func TestFieldGrouping(t *testing.T) {
+	intType := name("int")
+	strType := name("string")
+
+	for _, tc := range []struct {
+		what string
+		n    Node
+		want string
+	}{
+		{
+			"two results sharing a type",
+			&FuncType{ResultList: []*Field{{Name: name("_"), Type: intType}, {Name: name("_"), Type: intType}}},
+			"func() (_, _ int)",
+		},
+		{
+			"two results with different types",
+			&FuncType{ResultList: []*Field{{Name: name("a"), Type: intType}, {Name: name("b"), Type: strType}}},
+			"func() (a int, b string)",
+		},
+		{
+			"three params, two grouped",
+			&FuncType{ParamList: []*Field{
+				{Name: name("a"), Type: intType},
+				{Name: name("b"), Type: intType},
+				{Name: name("c"), Type: strType},
+			}},
+			"func(a, b int, c string)",
+		},
+		{
+			"unnamed params are not grouped",
+			&FuncType{ParamList: []*Field{{Type: intType}, {Type: intType}}},
+			"func(int, int)",
+		},
+		{
+			"struct fields sharing a type",
+			&StructType{FieldList: []*Field{{Name: name("A"), Type: intType}, {Name: name("B"), Type: intType}}},
+			"struct{A, B int}",
+		},
+		{
+			"an embedded field prints as its type",
+			&StructType{FieldList: []*Field{{Type: name("Base")}}},
+			"struct{Base}",
+		},
+		{
+			"equal but distinct type nodes are not grouped",
+			&StructType{FieldList: []*Field{{Name: name("A"), Type: name("int")}, {Name: name("B"), Type: name("int")}}},
+			"struct{A int; B int}",
+		},
+	} {
+		if got := String(tc.n); got != tc.want {
+			t.Errorf("%s: printed %q, want %q", tc.what, got, tc.want)
+		}
+	}
+}
+
+// TestFieldTagsArePrinted covers the tag path, which only a struct uses.
+func TestFieldTagsArePrinted(t *testing.T) {
+	st := &StructType{
+		FieldList: []*Field{{Name: name("A"), Type: name("int")}},
+		TagList:   []*BasicLit{{Value: "`json:\"a\"`", Kind: StringLit}},
+	}
+	if got, want := String(st), "struct{A int `json:\"a\"`}"; got != want {
+		t.Errorf("printed %q, want %q", got, want)
 	}
 }
 
@@ -162,7 +244,7 @@ func TestPrintDeclarations(t *testing.T) {
 		{"func", &FuncDecl{Name: name("f")}, "func f"},
 		{"method", &FuncDecl{Recv: &Field{Name: name("r"), Type: name("T")}, Name: name("m")}, "func (r T) m"},
 		{"file", &File{PkgName: name("p")}, "package p"},
-		{"func literal", &FuncLit{Type: &FuncType{}}, "func() {…}"},
+		{"empty func literal", &FuncLit{Type: &FuncType{}}, "func() {}"},
 	} {
 		if got := String(tc.n); got != tc.want {
 			t.Errorf("%s: printed %q, want %q", tc.what, got, tc.want)
