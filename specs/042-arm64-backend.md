@@ -24,8 +24,8 @@ From [030](030-abi.md), with the allocation view:
 | --- | --- | --- |
 | R0 – R15 | yes | also the integer argument and result registers |
 | R19 – R25 | yes | scratch, no ABI meaning |
-| F0 – F15 | yes | floating-point arguments and results |
-| F16 – F31 | yes | scratch |
+| F0 – F15 | deferred | floating-point arguments and results |
+| F16 – F31 | deferred | scratch |
 | R16, R17 | **no** | linker trampolines |
 | R18 | **no** | reserved by Darwin |
 | R26 | **no** | closure context at a call |
@@ -38,6 +38,14 @@ From [030](030-abi.md), with the allocation view:
 
 The zero register is not allocatable but is useful: storing zero, comparing
 against zero, and materialising zero all use it, and the rules should.
+
+The floating-point registers are marked deferred rather than allocatable
+because rule groups 1 to 5 below need none of them. They arrive with group 6.
+
+A note on how the reserved set is checked, because the obvious property is the
+wrong one. The test asserts that **no allocatable register encodes as 18**, not
+that no encoder can emit 18. The second would be false: the prologue above
+legitimately names R16 and `g`, which are also not allocatable.
 
 ## What makes arm64 the easy target
 
@@ -55,7 +63,7 @@ that tests whether the middle end is genuinely target-neutral.
 ## The prologue and epilogue
 
 ```
-    MOVD  16(R28), R16          // stackguard, unless nosplit or a small leaf
+    MOVD  16(g), R16            // stackguard, unless nosplit or a small leaf
     CMP   R16, RSP
     BLS   growstack
     MOVD.W R30, -framesize(RSP) // push link register, adjust SP
@@ -72,7 +80,21 @@ growstack:
     JMP   0                     // re-execute the function
 ```
 
-Two details are load-bearing and are stated because they are easy to lose:
+Three details are load-bearing and are stated because they are easy to lose.
+All three were found by writing the encoder, and the first two mean an earlier
+version of this listing did not assemble:
+
+- **The goroutine register is spelled `g`, not `R28`.** Plan 9 arm64 syntax
+  names it that way, and `MOVD 16(R28), R16` is not accepted. This matters again
+  in [044](044-plan9-assembler.md), which has to parse the spelling.
+- **`CMP R16, RSP` needs the add-and-subtract extended-register class.** In the
+  shifted-register class, register 31 reads as the zero register, so there is no
+  encoding of that instruction there. The extended-register class is the one
+  where 31 means the stack pointer. Neither this spec nor
+  [041](041-instruction-encoding.md) mentioned the class existed, and the
+  prologue cannot be encoded without it. There is now a test that walks every
+  line of this listing and asserts each one encodes.
+
 
 - The frame pointer is saved **below** the new stack pointer, at `-8(RSP)`. It is
   in the reserved region below SP, not in the frame. This is Go's convention on

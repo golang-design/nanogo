@@ -32,9 +32,14 @@ rule with no encoder is a build failure rather than a crash.
 One package per target, with one function per instruction form:
 
 ```go
-func addRegReg(dst, a, b Reg) uint32
-func addRegImm(dst, a Reg, imm int64) (uint32, bool)   // false if imm does not fit
+func AddRegReg(size Size, dst, a, b Reg) uint32
+func AddRegImm(size Size, dst, a Reg, imm int64) (uint32, bool)  // false if imm does not fit
 ```
+
+The leading `size` is a correction. An earlier version of this spec omitted it,
+and a code generator needs both the 32-bit and 64-bit form of every arithmetic
+and logical instruction. Carrying the width as a parameter rather than doubling
+the function count is the cheaper of the two ways to fix it.
 
 Returning "does not fit" rather than panicking is deliberate.
 [025](025-lowering-and-rules.md)'s rules are responsible for choosing a form that
@@ -47,11 +52,24 @@ instruction and the value named.
 Immediate ranges are the most common source of encoder bugs because they differ
 per instruction in ways that are easy to assume away.
 
-On `arm64`, for example: arithmetic immediates are 12 bits with an optional
-12-bit left shift; logical immediates use a bitmask encoding that can represent
-only certain patterns; load and store offsets are 12 bits scaled by the access
-size, or 9 bits unscaled and signed; branch offsets are 26 bits for `B` and 19
-bits for conditional branches.
+On `arm64`: arithmetic immediates are 12 bits with an optional 12-bit left
+shift; load and store offsets are 12 bits scaled by the access size, or 9 bits
+unscaled and signed; branch offsets are 26 bits for `B`, 19 bits for conditional
+branches and `CBZ`, and **14 bits for `TBZ` and `TBNZ`**.
+
+The 14-bit range is the tightest branch on the target and is the one a lowering
+rule is most likely to violate. An earlier version of this spec did not name it.
+
+**Logical immediates** deserve more than "only certain patterns". The encoding
+is a replicated run of ones described by `N`, `immr` and `imms`, and three
+consequences bind the rules that use it:
+
+- **Zero and all-ones are not representable.** The run of ones can be neither
+  empty nor fill the element.
+- **The 32-bit forms require `N = 0`**, which removes the 64-bit-only patterns.
+- **`BIC` and `TST` with an immediate do not exist.** `BIC` immediate is `AND`
+  of the complement, so a rule must range-check the **complement's**
+  representability, not the value's. `TST` is `ANDS` into the zero register.
 
 Each range is a constant in the encoder and a condition in the corresponding
 rule. They are written once and referenced, never repeated.
@@ -96,7 +114,25 @@ not needed. On `amd64` it is, and [043](043-amd64-backend.md) owns it.
 - **Differential disassembly.** For every encoder function, over a generated
   sweep of operand values, compare nanogo's bytes against what `go tool asm`
   produces for the equivalent instruction. This is an exact oracle and it should
-  be exhaustive over the operand ranges, not sampled.
+  be exhaustive over the operand ranges, not sampled. The first pass ran
+  **864,092 comparisons with zero disagreements**, which is the standard to
+  hold.
+
+  Two traps in reading `go tool asm -S`, both of which produce a comparison that
+  passes while testing nothing:
+
+  1. **The listing prints one line per source instruction, before expansion.**
+     `ADD $4097, R2, R3` is one line and eight bytes. Instruction size must be
+     computed as the distance to the next instruction's offset, and each
+     comparison must assert the source line produced exactly four bytes.
+     Counting listing lines compares against the first quarter of an expansion.
+  2. **The `TEXT` flags matter.** `NOSPLIT|NOFRAME` is needed, or a body
+     containing a call grows a prologue in front of the instruction under test.
+
+  Where a range cannot be reached through the assembler, and `B`'s 26-bit range
+  cannot, the encoding is checked by recovering the offset from the encoded word
+  and sign-extending it back, rather than by restating the encoder's own
+  expression.
 - Range rejection: every immediate form tested one past its limit, asserting the
   encoder reports the overflow rather than truncating.
 - `go tool objdump` on nanogo's objects, checked against the intended
