@@ -90,9 +90,16 @@ precise map for every instruction.
 
 ## Stack objects
 
-A local whose address is taken lives in the frame, and a pointer to it can be
-held anywhere. The collector needs to know the object's extent and its type, not
-just that a word is a pointer.
+A local whose address is taken **and whose type holds pointers** lives in the
+frame as a stack object. The collector needs to know the object's extent and its
+type, not just that a word is a pointer.
+
+The pointer condition is a correction, and the corpus found the reason. This
+spec first said "an address-taken local is a stack object", which is too broad.
+A zero-sized address-taken local gets offset 0 from `Varp`, and the runtime
+reads a non-negative offset as one into the **incoming argument area**, so the
+record points at an argument. An address-taken local whose type holds no
+pointers is covered by the locals bitmap anyway, which is where it belongs.
 
 `FUNCDATA_StackObjects` carries a table of offset, size, and type descriptor for
 each. `VarDef` and `VarKill` from [025](025-lowering-and-rules.md) mark the
@@ -104,7 +111,15 @@ This is also the constraint that limits spill slot reuse in
 
 ## Frame layout
 
-The layout is fixed here, after allocation, because spill slots are part of it:
+The layout is fixed here, after allocation, because spill slots are part of it.
+
+The diagram below is the shape, not any target's frame. It was written as though
+every target saves the return address above the locals, and neither of this
+deck's targets does that: `arm64` saves the link register at the **bottom** of
+the frame and the frame pointer **below** the stack pointer, outside the frame
+entirely ([042](042-arm64-backend.md)), while `amd64` has the return address
+pushed by the call instruction above it. The layout pass therefore takes the
+saved-word placement as configuration rather than assuming it.
 
 ```
 higher addresses
@@ -124,9 +139,51 @@ higher addresses
 lower addresses
 ```
 
-Pointer-containing slots are grouped and placed together, so the bitmap is dense
-and short. This is a size optimisation with a correctness benefit: a shorter
-bitmap is one that can be checked by reading it.
+Pointer-containing slots are grouped and placed together, **directly below
+`Varp`**. An earlier version of this spec called that a size optimisation. It is
+not. The runtime scans exactly the region
+
+$$
+[\, \mathit{Varp} - \mathit{nbit} \times \mathit{PtrSize},\ \mathit{Varp} \,)
+$$
+
+so a pointer slot outside that run is a pointer the collector never sees. The
+grouping is a correctness constraint on the frame layout, and it places an
+obligation on the code emitter: `Varp` must end up where the layout pass put it.
+
+The bitmap being short is the benefit that follows, not the reason.
+
+## Two analyses, not one
+
+Spill slots and frame objects need different analyses, and running one over both
+is unsound.
+
+A **spill slot** is described by the backward may-analysis above. Its uses are
+all visible: the value is defined into the slot and read from it, and nothing
+else can reach it.
+
+A **frame object** cannot be. Its address escaped, which is why it is in the
+frame, so the compiler cannot enumerate its uses. It is described instead by a
+**forward** may-analysis over the `VarDef` and `VarKill` markers, seeded at
+entry with every object that has no `VarDef` anywhere. Running the backward
+analysis over an object's uses would report it dead while a pointer to it is
+live in another function.
+
+## What is exact and what is approximate
+
+The two are easy to run together and must not be.
+
+**Pointerness is exact.** Whether a word holds a pointer comes from
+[020](020-ir.md)'s `PtrBits` and never from liveness. A bit that `PtrBits` does
+not justify is a word [035](035-goroutines-and-stack-growth.md) will rewrite
+during stack copying.
+
+**Liveness is a may-analysis.** Whether a slot is live at a safepoint errs
+toward live, which wastes memory and is safe.
+
+Setting a bit because a slot is live, without checking that the slot's type has
+a pointer there, is the mistake this section exists to prevent. It produces a
+map that is conservative in the wrong dimension.
 
 ## The failure mode, and testing
 

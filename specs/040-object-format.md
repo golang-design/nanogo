@@ -158,6 +158,18 @@ which an earlier version of this spec stated:
 4. The stream **ends with a final pc delta and then a zero byte**. A table
    without the terminator runs into whatever follows it.
 
+One limit of the encoder, found by its first real consumer and recorded rather
+than fixed: **it cannot express a leading region whose value is the initial
+value.** An entry equal to the initial value at offset 0 is skipped, so a table
+that starts at $-1$ and changes later encodes as though it held the later value
+from the start. The reference implementation emits a zero value delta as its
+first pair instead, which the runtime accepts only in first position.
+
+This is benign for the two streams nanogo emits today: the runtime substitutes
+zero for $-1$ in the stack map index, and a leading unsafe-point region only
+costs preemption opportunities. It is a real divergence from `gc`'s bytes, and
+it would corrupt any table that genuinely needs a $-1$ prefix.
+
 nanogo produces one per index it uses:
 
 | Index | Contents |
