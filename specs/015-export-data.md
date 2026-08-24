@@ -79,6 +79,29 @@ Types are interned and referenced by index. A cyclic type graph — a struct wit
 a pointer to itself — is expressed by the index reference, which is why the
 format is a graph encoding and not a tree encoding.
 
+## The importcfg file
+
+The compiler is told where each import's export data lives by `-importcfg`
+([050](050-driver.md)). The file is lines of directives, and which directives
+belong to which tool is easy to get wrong:
+
+| Directive | Consumer |
+| --- | --- |
+| `packagefile <path>=<file>` | the compiler |
+| `importmap <old>=<new>` | the compiler |
+| `packageshlib <path>=<file>` | the **linker** only |
+| `modinfo <data>` | the **linker** only |
+
+nanogo parses all four and keeps them in **separate** tables. Folding
+`packageshlib` into the `packagefile` table, which is the obvious shortcut since
+the compiler never reads it, makes a file carrying both for one path resolve to
+whichever came last. The linker keeps them apart and so does nanogo, so that the
+day nanogo has a linker ([045](045-linker.md)) the parser does not have to
+change underneath it.
+
+An unknown directive is an error. A new one in a new Go release must be a build
+failure, not a line nanogo skips.
+
 ## Determinism
 
 Export data is part of a compiled package's bytes, so [053](053-determinism.md)

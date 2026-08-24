@@ -96,6 +96,22 @@ changed. Without it, a nanogo change would reuse objects built by the previous
 nanogo, and [051](051-build-integration.md)'s claim that the cache is correct in
 hosted mode would be false.
 
+Two rules that the first draft of this spec left unstated, and that a build gets
+wrong silently if they are not followed:
+
+1. **Only `compile` is answered.** For `asm`, `link` and every other tool,
+   nanogo execs the real tool and lets it answer for itself. Answering on their
+   behalf would pin their cache keys to nanogo's `PinnedGoVersion`, so a host
+   toolchain moving from go1.27.0 to go1.27.1 would silently reuse stale
+   assembly objects. That is the failure this whole section exists to prevent,
+   reintroduced one tool over.
+2. **The identity must be real.** It is nanogo's own VCS revision, plus a
+   dirty marker when the tree is modified. A build with no version stamp, from
+   `-buildvcs=false` or from outside a repository, has no identity to report and
+   nanogo **must refuse to compile** rather than report a constant. A constant
+   identity is a cache that never invalidates, which is worse than no cache.
+   Passing through to `gc` in that state is the correct behaviour.
+
 ## Flags nanogo defines
 
 | Flag | Meaning |
@@ -105,7 +121,6 @@ hosted mode would be false.
 | `-S` | print an assembly listing; the textual form of [041](041-instruction-encoding.md)'s output, not a build path |
 | `-m` | print optimization decisions, in `gc`'s format so that Go's own corpus can check them ([023](023-escape-analysis.md), [024](024-inlining-and-devirtualization.md)) |
 | `-d list` | debugging settings, including per-pass disable for [022](022-optimization-passes.md) |
-| `-c n` | concurrency, per [053](053-determinism.md) |
 | `-fallback` | exec `gc` instead of compiling; the mechanism of [051](051-build-integration.md) |
 
 ## Rejecting rather than ignoring

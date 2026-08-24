@@ -71,6 +71,21 @@ list because it is mechanical:
 The list is ordered by dependency depth, so early entries are leaves with no
 imports and no assembly. `runtime` is last, and reaching it is G3.
 
+### `-p main` is not a package name
+
+The `go` command sends `-p main` for **every** main package, in every module.
+This was found by building with the driver in place, not by reading the flags.
+
+So an allowlist of import paths cannot name one main package without claiming
+all of them. The rule is therefore: **`main` is never matched by an allowlist
+entry.** A main package is compiled by `gc` until nanogo can compile every main
+package, which is a later and separate switch.
+
+The cost is that the program's own top-level package is the last thing nanogo
+compiles rather than a convenient early target. The alternative, matching on the
+output path or the source directory, makes the allowlist depend on the build's
+temporary directory layout, which is not something to build a gate on.
+
 Note which half of [015](015-export-data.md) each step proves. A leaf package
 reads no export data, but `gc` compiles its test binary and therefore reads what
 nanogo wrote — so the first entry proves the **writer**. The reader is first

@@ -182,7 +182,6 @@ func TestWalkDescendsThroughEveryCompositeNode(t *testing.T) {
 		{"SliceType.Elem", &SliceType{Elem: marker}},
 		{"DotsType.Elem", &DotsType{Elem: marker}},
 		{"StructType.FieldList", &StructType{FieldList: []*Field{{Type: marker}}}},
-		{"StructType.TagList", &StructType{TagList: []*BasicLit{{Value: `"t"`}}}},
 		{"InterfaceType.MethodList", &InterfaceType{MethodList: []*Field{{Type: marker}}}},
 		{"FuncType.ResultList", &FuncType{ResultList: []*Field{{Type: marker}}}},
 		{"MapType.Key", &MapType{Key: marker, Value: name("V")}},
@@ -209,6 +208,21 @@ func TestWalkDescendsThroughEveryCompositeNode(t *testing.T) {
 		{"RangeClause.X", &RangeClause{X: marker}},
 		{"CaseClause.Body", &CaseClause{Body: []Stmt{&ExprStmt{X: marker}}}},
 		{"CommClause.Body", &CommClause{Body: []Stmt{&ExprStmt{X: marker}}}},
+	}
+
+	// A struct's tags are *BasicLit, so the *Name marker cannot stand in for
+	// one. The tag node itself is the marker instead.
+	tag := &BasicLit{Value: `"t"`, Kind: StringLit}
+	foundTag := false
+	Inspect(&StructType{FieldList: []*Field{{Type: name("A")}}, TagList: []*BasicLit{tag}},
+		func(n Node) bool {
+			if n == Node(tag) {
+				foundTag = true
+			}
+			return true
+		})
+	if !foundTag {
+		t.Error("StructType.TagList: the walk did not reach the tag")
 	}
 
 	for _, tc := range cases {
