@@ -115,11 +115,27 @@ The layout is fixed here, after allocation, because spill slots are part of it.
 
 The diagram below is the shape, not any target's frame. It was written as though
 every target saves the return address above the locals, and neither of this
-deck's targets does that: `arm64` saves the link register at the **bottom** of
-the frame and the frame pointer **below** the stack pointer, outside the frame
-entirely ([042](042-arm64-backend.md)), while `amd64` has the return address
-pushed by the call instruction above it. The layout pass therefore takes the
-saved-word placement as configuration rather than assuming it.
+deck's targets does that. The layout pass takes the saved-word placement as
+configuration rather than assuming it.
+
+On `arm64` the link register is saved at the **bottom** of the frame, inside the
+outgoing argument area. The word at the **top** holds the *caller's* saved frame
+pointer, and it must be reserved. The runtime's traceback computes
+
+$$
+\mathit{varp} = \mathit{fp} - \mathit{PtrSize}, \qquad
+\mathit{argp} = \mathit{fp} + \mathit{MinFrameSize}
+$$
+
+for a non-empty frame, so `Varp` sits one word below the top of the frame.
+
+An earlier version of this spec said an `arm64` frame reserves neither word.
+That is wrong, and it is the most dangerous error the deck has carried: it
+gives `Varp == Size`, which puts a local on top of the caller's saved frame
+pointer and places `Varp` one word above where the runtime looks. **The stack
+map is then well formed, the collector reads it, and it scans the wrong
+slots.** Nothing reports it. It was found by running a collector against a
+compiled function, which is the only thing that could have found it.
 
 ```
 higher addresses

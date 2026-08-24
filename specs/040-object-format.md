@@ -121,7 +121,22 @@ pass with no diagnostic; without the other three, `generatePctab` calls
 `SymSize` on an unchecked index and faults on symbol 0. An earlier version of
 this spec named only the first.
 
-**An auxiliary symbol must be unnamed.** `cmd/link`'s loader decides whether a
+**A pc-value table must be unnamed; a FUNCDATA bitmap must be named.** The rule
+is not uniform and an earlier version of this spec stated only half of it.
+
+A stack map bitmap is named `gclocals·<base64>`, which is `gc`'s scheme, and the
+name is load-bearing: the content-hash class is derived from the name, and only
+that prefix selects the class that keeps a bitmap from merging with unrelated
+read-only data. A `{n=1, nbit=0}` bitmap is eight mostly-zero bytes, so a merge
+is not hypothetical. When it happens, the linker's pclntab pass sets the
+symbol's value to an offset in another section and marks it special, `dodata`
+skips it, and the other reference resolves to a bogus address.
+
+Naming a FUNCDATA symbol is safe for the reason the next paragraph makes
+dangerous for a pc-value table: funcdata never enters the data layout, because
+the linker claims it before that pass runs.
+
+**A pc-value table must be unnamed.** `cmd/link`'s loader decides whether a
 symbol takes part in the data layout by asking whether it has a name, so a
 *named* pc-value table is placed into the read-only section, its offset in
 `runtime.pctab` is overwritten by that placement, and the linker faults while
