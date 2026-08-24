@@ -18,10 +18,30 @@ fixed contract.
 
 ## The symbol table
 
-Symbol names and signatures are held in one package, `rtsym`, generated from the
-runtime source of the pinned Go release rather than typed in. A signature that
-drifts from the runtime is a crash with no diagnostic, and a generated table
+Symbol names and signatures are held in one package, `rtsym`, and **checked
+against the runtime's source** rather than typed in and trusted. A signature
+that drifts from the runtime is a crash with no diagnostic, and a checked table
 turns that into a build failure.
+
+Two things the first draft of this spec did not say, both found by building it:
+
+**The oracle can only be the runtime's source.** Every symbol here is
+unexported, so none appears in export data and `go/importer` finds none of them:
+a probe against the installed toolchain returns nothing for all forty-one. The
+test parses `GOROOT/src/runtime` directly.
+
+**Signatures are recorded in the runtime's own vocabulary**, as `*tmpBuf` and
+`*itab` rather than as what those resolve to. Writing `*[32]byte` for `tmpBuf`
+compares equal today and stops comparing the day the runtime changes the
+buffer's size, which is exactly the silent drift the table exists to catch.
+
+The check earns its place. The first draft of the table was written from this
+spec by hand, and **thirteen of its thirty-nine entries were wrong**: `tmpBuf`
+written as `[32]byte`, `gorecover` given a parameter it does not take,
+`deferproc` given `*funcval` where it takes `func()`, `typeAssert` returning
+`*abi.ITab` where it returns `*itab`, and one symbol, `goPanicSliceLen`, that
+does not exist at all. Every one would have compiled and produced a call that
+corrupts the stack.
 
 ### Allocation
 
