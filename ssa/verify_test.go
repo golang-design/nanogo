@@ -557,3 +557,44 @@ func TestCheckReportsTheFirstInvariant(t *testing.T) {
 		t.Errorf("the error does not name the invariant: %v", e)
 	}
 }
+
+// TestVerifyStringConcatReachedSSA is the check that was missing.
+//
+// specs/002-architecture.md says no Go construct survives into SSA and
+// specs/020-ir.md's table sends string concatenation to the runtime, and
+// nothing checked it: an Add over two strings built, verified, and then failed
+// to lower in 49 functions of the distribution corpus, every one of which
+// looked like a gap in lowering rather than a construct the builder did not
+// build.
+func TestVerifyStringConcatReachedSSA(t *testing.T) {
+	str := &ir.Type{Kind: ir.String, Size: 16, Align: 8, Name: "string"}
+	f, entry, mem := minimalFunc()
+	a := entry.NewValue(0, OpConstString, str)
+	b := entry.NewValue(0, OpConstString, str)
+	entry.NewValue(0, OpAdd, str, a, b)
+	setRet(entry, mem)
+	wantOnly(t, f, Verify(f), InvGoSpecific)
+}
+
+// TestVerifyAcceptsStringsThatAreNotConcatenated is the other half: the
+// invariant must not fire on the operations a string legitimately reaches.
+//
+// The comparison rows of the same table also become runtime calls, and
+// lowering is where they become them, because runtime.memequal takes the data
+// pointer and the length and neither exists as a value until the string is
+// split. An invariant that flagged them would be false from construction until
+// decomposition.
+func TestVerifyAcceptsStringsThatAreNotConcatenated(t *testing.T) {
+	str := &ir.Type{Kind: ir.String, Size: 16, Align: 8, Name: "string"}
+	boolean := &ir.Type{Kind: ir.Bool, Size: 1, Align: 1, Name: "bool"}
+	f, entry, mem := minimalFunc()
+	a := entry.NewValue(0, OpConstString, str)
+	b := entry.NewValue(0, OpConstString, str)
+	entry.NewValue(0, OpEq, boolean, a, b)
+	entry.NewValue(0, OpLess, boolean, a, b)
+	entry.NewValue(0, OpCopy, str, a)
+	setRet(entry, mem)
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("Verify reported %v on strings that are compared, not concatenated\n%s", vs, f)
+	}
+}

@@ -102,6 +102,21 @@ func (v Violation) String() string {
 	return fmt.Sprintf("%s: %s: %s", where, v.Invariant, v.Detail)
 }
 
+// isArithmetic reports whether o computes a value from operands of its own
+// type, rather than moving one or comparing two.
+//
+// It is the set an operation over a string can only be a Go construct in. A
+// load, a phi, a call argument and a comparison all take a string legitimately
+// and are not here.
+func isArithmetic(o Op) bool {
+	switch o {
+	case OpAdd, OpSub, OpMul, OpDiv, OpMod,
+		OpAnd, OpOr, OpXor, OpAndNot, OpShl, OpShr, OpNeg, OpCom:
+		return true
+	}
+	return false
+}
+
 // Error is a failure reported by Build or by Check.
 //
 // Invariant names which property failed, and is InvNone when the failure is
@@ -264,6 +279,22 @@ func (v *verifier) checkValue(b *Block, val *Value) {
 	}
 	if op, ok := val.Aux.(ir.Op); ok && op.IsGoSpecific() {
 		v.add(InvGoSpecific, b, val, "operation %v reached SSA", op)
+	}
+	if isArithmetic(val.Op) && val.Type != nil && val.Type.Kind == ir.String {
+		// Concatenation is the only arithmetic Go has over a string, and
+		// specs/020-ir.md's table makes it runtime.concatstring{2,3,4,5}. An
+		// Add of two strings here is that call not built, which
+		// specs/002-architecture.md forbids: no Go construct survives into
+		// SSA. It cost the corpus 49 functions before the builder built it,
+		// and every one of them looked like a lowering gap.
+		//
+		// The comparison rows of the same table are deliberately not checked.
+		// They become calls too, and lowering is where they become them,
+		// because runtime.memequal takes the data pointer and the length of a
+		// string and neither exists as a value until decomposition splits it.
+		// This invariant holds from construction onwards, so it can only name
+		// what the builder itself owes.
+		v.add(InvGoSpecific, b, val, "%v over a string reached SSA; specs/020's table makes it a runtime call", val.Op)
 	}
 
 	info := infoOf(val.Op)

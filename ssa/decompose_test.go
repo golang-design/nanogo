@@ -1773,3 +1773,91 @@ func TestDecomposeStringEqualAsControl(t *testing.T) {
 	}
 	decVerified(t, f)
 }
+
+// ---------------------------------------------------------------------------
+// String ordering, which is runtime.cmpstring and a comparison against zero
+
+// TestDecomposeStringOrderForm asserts the whole expansion of <, and that the
+// comparison keeps its operation so that <= differs by nothing else.
+func TestDecomposeStringOrderForm(t *testing.T) {
+	p := newDecFn()
+	lt := p.v(ssa.OpLess, decBool, p.load(decStr), p.load(decStr))
+	f := p.ret(lt)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	decWantForm(t, f, `
+b0:
+    v0 = InitMem <mem>
+    v1 = Arg <*int> {p}
+    v8 = OffPtr <*int> [8] v1
+    v7 = Load <*uint8> v1 v0
+    v9 = Load <int> v8 v0
+    v3 = Arg <*int> {p}
+    v11 = OffPtr <*int> [8] v3
+    v10 = Load <*uint8> v3 v0
+    v12 = Load <int> v11 v0
+    v13 = StaticCall <mem> {runtime.cmpstring} v7 v9 v10 v12 v0
+    v14 = SelectN <int> [0] v13
+    v15 = ConstInt <int> [0]
+    v5 = Less <bool> v14 v15
+    v6 = MakeResult <mem> v5 v13
+  Ret v6`)
+	if vs := ssa.CheckDecomposed(f); len(vs) != 0 {
+		t.Errorf("a value wider than a register survived: %v", vs)
+	}
+}
+
+// TestDecomposeStringOrderLowers takes both spellings through selection.
+//
+// specs/021 canonicalises a comparison, so > and >= arrive here as < and <=
+// with the arguments exchanged and need no rule of their own. The comparison
+// against zero is signed, which is what cmpstring's result requires: it
+// answers a negative number, zero, or a positive one.
+func TestDecomposeStringOrderLowers(t *testing.T) {
+	for _, op := range []ssa.Op{ssa.OpLess, ssa.OpLeq} {
+		p := newDecFn()
+		cmp := p.v(op, decBool, p.load(decStr), p.load(decStr))
+		f := p.ret(cmp)
+		ssa.Lower(f, rules.ARM64)
+		decVerified(t, f)
+		if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
+			t.Fatalf("%v: %v", op, vs)
+		}
+		calls := 0
+		for _, b := range f.Blocks {
+			for _, v := range b.Values {
+				if v.Op != ssa.OpARM64CALLstatic {
+					continue
+				}
+				calls++
+				o, _ := v.Aux.(*ir.Object)
+				if o == nil || o.Name != "runtime.cmpstring" {
+					t.Errorf("%v: the call is to %v", op, v.Aux)
+				}
+				// The two string headers, four words, and memory.
+				if len(v.Args) != 5 {
+					t.Errorf("%v: the call takes %d arguments, want 5: %s", op, len(v.Args), v.LongString())
+				}
+			}
+		}
+		if calls != 1 {
+			t.Errorf("%v: %d calls, want one", op, calls)
+		}
+	}
+}
+
+// TestDecomposeStringOrderIsNotPerPart is the miscompile this expansion
+// replaces.
+//
+// A per-part < would compare the two data pointers, which orders strings by
+// where they happen to sit in memory. The pass must build the call or leave
+// the operands whole for lowering to refuse; it must never compare a part.
+func TestDecomposeStringOrderIsNotPerPart(t *testing.T) {
+	p := newDecFn()
+	lt := p.v(ssa.OpLess, decBool, p.load(decStr), p.load(decStr))
+	f := p.ret(lt)
+	ssa.Decompose(f)
+	if lt.Args[0].Type.Kind != ir.Int64 || lt.Args[1].Op != ssa.OpConstInt {
+		t.Fatalf("< compares %s", lt.LongString())
+	}
+}

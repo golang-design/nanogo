@@ -1211,3 +1211,173 @@ func distinctArgs(v *Value) int {
 	}
 	return n
 }
+
+// ---------------------------------------------------------------------------
+// String concatenation, which specs/020-ir.md's table makes a runtime call
+
+// concatCallOf returns the single static call in f and the symbol it names.
+func concatCallOf(t *testing.T, f *Func) (*Value, string) {
+	t.Helper()
+	var call *Value
+	n := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpStaticCall {
+				continue
+			}
+			n++
+			call = v
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d calls, want one\n%s", n, f)
+	}
+	o, _ := call.Aux.(*ir.Object)
+	if o == nil {
+		t.Fatalf("the call names %v", call.Aux)
+	}
+	return call, o.Name
+}
+
+// TestBuildStringConcat asserts the row of specs/020-ir.md's table: a + b over
+// two strings is runtime.concatstring2 and never an Add.
+//
+// The builder is where the table puts it. Nothing below it can build the call
+// as well: lowering would have to invent the operand order that Go's
+// evaluation rules fix, and the corpus measured the cost of not building it
+// here at 49 functions that could not lower.
+func TestBuildStringConcat(t *testing.T) {
+	s := obj("s", tString, ir.ClassLocal)
+	a := obj("a", tString, ir.ClassLocal)
+	c := obj("c", tString, ir.ClassLocal)
+	fn := fun("cat", []*ir.Object{s, a, c},
+		asn(local(s), bin(syntax.Add, local(a), local(c))),
+		ret(local(s)),
+	)
+	f := build(t, fn)
+
+	if n := countOp(f, OpAdd); n != 0 {
+		t.Errorf("%d string adds survived construction, want none\n%s", n, f)
+	}
+	call, name := concatCallOf(t, f)
+	if name != "runtime.concatstring2" {
+		t.Errorf("the call is to %s", name)
+	}
+	// The temporary buffer, the two operands, and the memory the call is
+	// ordered after.
+	if len(call.Args) != 4 {
+		t.Fatalf("the call takes %d arguments, want 4: %s", len(call.Args), call.LongString())
+	}
+	if call.Args[0].Op != OpConstNil {
+		t.Errorf("the buffer is %s, want nil so that the runtime allocates", call.Args[0].LongString())
+	}
+	if !IsMemory(call.Args[3]) {
+		t.Errorf("the last argument is %s, want memory", call.Args[3].LongString())
+	}
+	sel := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpSelectN && v.Args[0] == call {
+				sel++
+				if v.AuxInt != 0 || v.Type != tString {
+					t.Errorf("the result is %s", v.LongString())
+				}
+			}
+		}
+	}
+	if sel != 1 {
+		t.Errorf("%d reads of the result, want one", sel)
+	}
+}
+
+// TestBuildStringConcatChain asserts a chain is one call per runtime symbol
+// and not one call per +.
+//
+// a + b + c allocates twice as two calls and once as one, and the runtime has
+// a symbol for each width up to five. The sixth operand is the interesting
+// one: there is no concatstring6, so the chain nests, and the bound is what
+// rtsym carries rather than what the parser produced.
+func TestBuildStringConcatChain(t *testing.T) {
+	tests := []struct {
+		operands int
+		want     string
+		calls    int
+	}{
+		{2, "runtime.concatstring2", 1},
+		{3, "runtime.concatstring3", 1},
+		{4, "runtime.concatstring4", 1},
+		{5, "runtime.concatstring5", 1},
+		{6, "", 2},
+	}
+	for _, tc := range tests {
+		locals := []*ir.Object{obj("s", tString, ir.ClassLocal)}
+		var sum ir.Expr
+		for i := 0; i < tc.operands; i++ {
+			o := obj("a", tString, ir.ClassLocal)
+			locals = append(locals, o)
+			if sum == nil {
+				sum = local(o)
+				continue
+			}
+			sum = bin(syntax.Add, sum, local(o))
+		}
+		fn := fun("cat", locals, asn(local(locals[0]), sum), ret(local(locals[0])))
+		f := build(t, fn)
+
+		if n := countOp(f, OpAdd); n != 0 {
+			t.Errorf("%d operands: %d adds survived\n%s", tc.operands, n, f)
+		}
+		if n := countOp(f, OpStaticCall); n != tc.calls {
+			t.Errorf("%d operands: %d calls, want %d\n%s", tc.operands, n, tc.calls, f)
+		}
+		if tc.calls != 1 {
+			continue
+		}
+		call, name := concatCallOf(t, f)
+		if name != tc.want {
+			t.Errorf("%d operands: the call is to %s, want %s", tc.operands, name, tc.want)
+		}
+		// The buffer, one argument per operand, and memory.
+		if len(call.Args) != tc.operands+2 {
+			t.Errorf("%d operands: the call takes %d arguments: %s",
+				tc.operands, len(call.Args), call.LongString())
+		}
+	}
+}
+
+// TestBuildStringConcatEvaluationOrder asserts the operands are evaluated left
+// to right and before the call.
+//
+// Go evaluates the operands of an expression in source order, and a call in
+// one of them is observable. Flattening a chain moves operands into one
+// argument list, which is exactly where that order can be lost.
+func TestBuildStringConcatEvaluationOrder(t *testing.T) {
+	s := obj("s", tString, ir.ClassLocal)
+	f1 := obj("f1", tFunc, ir.ClassFunc)
+	f2 := obj("f2", tFunc, ir.ClassFunc)
+	f3 := obj("f3", tFunc, ir.ClassFunc)
+	fn := fun("cat", []*ir.Object{s},
+		asn(local(s), bin(syntax.Add,
+			bin(syntax.Add, call(f1, tString), call(f2, tString)),
+			call(f3, tString))),
+		ret(local(s)),
+	)
+	f := build(t, fn)
+
+	var order []string
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpStaticCall {
+				continue
+			}
+			o, _ := v.Aux.(*ir.Object)
+			if o != nil {
+				order = append(order, o.Name)
+			}
+		}
+	}
+	want := "f1 f2 f3 runtime.concatstring3"
+	if got := strings.Join(order, " "); got != want {
+		t.Errorf("call order\ngot:  %s\nwant: %s\n%s", got, want, f)
+	}
+}

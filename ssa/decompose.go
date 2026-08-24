@@ -518,6 +518,10 @@ func (d *decomposer) readersOK(v *Value) bool {
 			if !d.equalityOK(u) {
 				return false
 			}
+		case OpLess, OpLeq:
+			if !d.orderOK(u) {
+				return false
+			}
 		default:
 			return false
 		}
@@ -591,6 +595,29 @@ func (d *decomposer) equalityOK(u *Value) bool {
 	// map and a function are the same question and never reach here, because
 	// both are one word and are compared whole.
 	return x.Type.Kind == ir.Interface || x.Type.Kind == ir.Slice
+}
+
+// orderOK reports whether < and <= over this type are a runtime call this
+// pass can build.
+//
+// Only a string is ordered and wider than a register. Go orders nothing else
+// that this pass sees whole: a slice, a map, an interface and a struct are not
+// ordered at all, and every ordered type below a string fits one register.
+func (d *decomposer) orderOK(u *Value) bool {
+	if len(u.Args) != 2 {
+		return false
+	}
+	x, y := u.Args[0], u.Args[1]
+	if x.Type == nil || y.Type == nil {
+		return false
+	}
+	if x.Type.Kind != ir.String || y.Type.Kind != ir.String {
+		return false
+	}
+	if !d.isSplit(x) || !d.isSplit(y) {
+		return false
+	}
+	return d.someMem() != nil && d.memInsertSafe(u.Block, valueIndex(u.Block, u))
 }
 
 // comparableByParts reports whether == over t is == over each of its parts.
@@ -800,6 +827,10 @@ func (d *decomposer) rewrite() {
 					default:
 						d.expandEqual(b, v, &out)
 					}
+				}
+			case OpLess, OpLeq:
+				if len(v.Args) == 2 && d.isSplit(v.Args[0]) {
+					d.expandStringOrder(b, v, &out)
 				}
 			case OpStaticCall, OpClosureCall, OpInterCall, OpMakeResult:
 				d.spliceArgs(v)
@@ -1080,6 +1111,29 @@ func (d *decomposer) expandStringEqual(b *Block, v *Value, out *[]*Value) {
 	*out = append(*out, both)
 	v.Op = OpNot
 	setArgs(v, both)
+}
+
+// expandStringOrder builds < and <= over two strings.
+//
+// specs/020-ir.md's table does not have a row for it, which is a gap in the
+// table rather than a construct that has no answer: the runtime compares two
+// strings with cmpstring, which returns a negative number, zero or a positive
+// number, and the comparison against zero is then an ordinary integer one.
+//
+// Unlike equality this needs no mask and no guard. cmpstring reads only what
+// both strings hold, so there is no length to make safe, and it is called with
+// the four words the two headers are.
+func (d *decomposer) expandStringOrder(b *Block, v *Value, out *[]*Value) {
+	xs, ys := d.parts[v.Args[0].ID], d.parts[v.Args[1].ID]
+	call := d.mk(b, v.Pos, OpStaticCall, MemType, xs[0], xs[1], ys[0], ys[1], d.someMem())
+	call.Aux = RuntimeFunc("runtime.cmpstring")
+	sign := d.mk(b, v.Pos, OpSelectN, d.intType(), call)
+	zero := d.mk(b, v.Pos, OpConstInt, d.intType())
+	*out = append(*out, call, sign, zero)
+	d.memAdded = true
+	// v keeps its operation, so < stays < and <= stays <=, and nothing that
+	// reads the result is redirected.
+	setArgs(v, sign, zero)
 }
 
 // stringEqualOK reports whether the equality of two strings can be built where

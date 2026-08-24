@@ -925,6 +925,9 @@ func (b *builder) expr(n ir.Expr) *Value {
 		if n.Op1 == syntax.AndAnd || n.Op1 == syntax.OrOr {
 			return b.shortCircuit(n)
 		}
+		if isStringConcat(n) {
+			return b.concat(n)
+		}
 		op, ok := binaryOp(n.Op1)
 		if !ok {
 			b.unsupported(n, "operator "+n.Op1.String())
@@ -1276,6 +1279,98 @@ func (b *builder) call(n ir.Expr) *Value {
 	r := b.value(OpSelectN, n.Type, n.Pos, c)
 	r.AuxInt = 0
 	return r
+}
+
+// String concatenation.
+
+// maxConcatOperands is the largest concatenation the runtime has a symbol for.
+//
+// concatstring5 is the last of the family, so a longer chain becomes nested
+// calls. That is correct and it allocates once per call: runtime.concatstrings
+// takes the operands as a slice and would do it in one, and rtsym does not
+// carry it.
+const maxConcatOperands = 5
+
+// concatSyms names the runtime symbol for each operand count. Indexed by the
+// count, so the entries below two are empty and unreachable.
+var concatSyms = [maxConcatOperands + 1]string{
+	2: "runtime.concatstring2",
+	3: "runtime.concatstring3",
+	4: "runtime.concatstring4",
+	5: "runtime.concatstring5",
+}
+
+// isStringConcat reports whether n is the + of specs/020-ir.md's string
+// concatenation row.
+func isStringConcat(n ir.Expr) bool {
+	return n != nil && n.Op == ir.OBinary && n.Op1 == syntax.Add &&
+		n.Type != nil && n.Type.Kind == ir.String
+}
+
+// concat builds the runtime call specs/020-ir.md's table gives to string
+// concatenation.
+//
+// It is here and not in lowering, which is the correction this function is.
+// The table says the construct becomes runtime.concatstring{2,3,4,5}, and a +
+// over two strings that reaches the operation set instead is a Go construct
+// that survived into SSA, which specs/002-architecture.md forbids. Lowering
+// could have compensated, and it would have been the wrong place: a
+// concatenation needs no machine fact and no decomposed part, only the symbol
+// and the operands, and both are here.
+//
+// A chain is one call rather than one call per +. a + b + c allocates twice as
+// two calls and once as one, and the runtime has a symbol for each width up to
+// five. Beyond that the chain nests, because the flattening is bounded by what
+// rtsym carries rather than by what the parser produced.
+//
+// The temporary buffer is nil, which asks the runtime to allocate the result.
+// A buffer in the frame is what makes a concatenation that does not escape
+// allocation free, and it needs the escape analysis of
+// specs/023-escape-analysis.md to say which concatenation that is.
+func (b *builder) concat(n ir.Expr) *Value {
+	parts := []ir.Expr{n.X, n.Y}
+	if concatLen(n) <= maxConcatOperands {
+		parts = concatParts(n, nil)
+	}
+	// The operands are evaluated in source order, before the call, because Go
+	// evaluates the operands of an expression left to right and a call in one
+	// of them is observable.
+	args := make([]*Value, 0, len(parts)+2)
+	args = append(args, b.value(OpConstNil, b.ptrTo(nil), n.Pos))
+	for _, p := range parts {
+		args = append(args, b.expr(p))
+	}
+	if b.err != nil {
+		return b.zeroValue(n.Type)
+	}
+	args = append(args, b.memory())
+	c := b.value(OpStaticCall, MemType, n.Pos, args...)
+	c.Aux = RuntimeFunc(concatSyms[len(parts)])
+	b.setMemory(c)
+	r := b.value(OpSelectN, n.Type, n.Pos, c)
+	r.AuxInt = 0
+	return r
+}
+
+// concatParts appends the operands of a concatenation chain, left to right.
+func concatParts(n ir.Expr, out []ir.Expr) []ir.Expr {
+	if !isStringConcat(n) {
+		return append(out, n)
+	}
+	return concatParts(n.Y, concatParts(n.X, out))
+}
+
+// concatLen counts the operands of a chain, saturating at one past the largest
+// symbol so that a chain of a thousand costs the bound rather than a thousand.
+func concatLen(n ir.Expr) int {
+	if !isStringConcat(n) {
+		return 1
+	}
+	x := concatLen(n.X)
+	if x > maxConcatOperands {
+		return x
+	}
+	return x + concatLen(n.Y)
 }
 
 // Constants.

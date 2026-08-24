@@ -151,10 +151,10 @@ func arm64Essential(op ssa.Op) bool { return op == ssa.OpARM64LoweredNilCheck }
 //
 // The multi-word operations are not deferred by any spec. They need a value
 // that does not fit a register to be split into the registers that hold it,
-// and ssa/build.go's classify comment assigns that work to
-// specs/025-lowering-and-rules.md, which never mentions it. It cannot be
-// worked around here: a 16-byte Store cannot become a memmove, because memmove
-// needs a source address and Store has a source value.
+// which specs/025-lowering-and-rules.md's multi-word section now owns and the
+// decomposition pass performs. It cannot be worked around here: a 16-byte
+// Store cannot become a memmove, because memmove needs a source address and
+// Store has a source value.
 var Deferred = []struct {
 	Op     ssa.Op
 	Reason string
@@ -163,7 +163,7 @@ var Deferred = []struct {
 	{ssa.OpCvtIntToFloat, "floating point is specs/042 group 6"},
 	{ssa.OpCvtFloatToInt, "floating point is specs/042 group 6"},
 	{ssa.OpCvtFloatToFloat, "floating point is specs/042 group 6"},
-	{ssa.OpConstString, "a string constant is two words and needs value decomposition, which no spec owns"},
+	{ssa.OpConstString, "a string constant is two words, and specs/025's decomposition splits it into its symbol and its length before selection sees it"},
 }
 
 // ---------------------------------------------------------------------------
