@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"golang.design/x/nanogo/syntax"
 )
 
 // goReleaseMinor is the minor version of the Go release nanogo targets.
@@ -436,4 +438,82 @@ func (c *Context) MatchFile(dir, name string) (bool, error) {
 		return false, fmt.Errorf("%s: %v", name, err)
 	}
 	return ok, nil
+}
+
+// IncludeFile reports whether the named file in dir is part of the package.
+//
+// This is MatchFile plus one rule that no build constraint expresses: a file
+// that imports "C" is a cgo file, and with cgo disabled the go command reports
+// it as ignored rather than as part of the package.
+//
+// The two are separate methods on purpose. MatchFile answers exactly the
+// question go/build.MatchFile answers, so it stays usable as a differential
+// oracle. IncludeFile answers the question a compiler actually has, and it is
+// the one the loader uses. Folding the cgo rule into MatchFile made 45 files in
+// the distribution disagree with go/build, all of them cgo files that go/build
+// matches and does not include.
+//
+// CI on linux found the missing rule and CI on darwin could not. The file that
+// exposed it is crypto/internal/sysrand/internal/seccomp/seccomp_linux.go,
+// whose _linux suffix excludes it on darwin before its imports are ever read.
+// A single-platform gate would have shipped this.
+func (c *Context) IncludeFile(dir, name string) (bool, error) {
+	ok, err := c.MatchFile(dir, name)
+	if err != nil || !ok {
+		return false, err
+	}
+	if c.CgoEnabled || !strings.HasSuffix(name, ".go") {
+		return true, nil
+	}
+	content, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return false, err
+	}
+	return !importsC(content), nil
+}
+
+// importsC reports whether the file imports "C".
+//
+// It parses the file rather than searching its text, because "C" can appear in
+// a grouped import, behind a comment, inside another string, or with a blank or
+// dot name, and a text search gets at least one of those wrong.
+//
+// The parse is not wasted work in the compiler proper: a file that reaches this
+// point is a file nanogo is about to compile, so it is parsed either way. It is
+// only an extra cost to a caller that wants file lists alone.
+//
+// A file that does not parse is reported as not importing "C". A syntax error
+// belongs to the parser, which has positions and can say where; a loader that
+// reported it would report it worse.
+func importsC(src []byte) bool {
+	fset := syntax.NewFileSet()
+	f := fset.AddFile("", len(src))
+	file, _ := syntax.Parse(f, src, func(syntax.Error) {}, nil, 0)
+	if file == nil {
+		return false
+	}
+	for _, d := range file.DeclList {
+		imp, ok := d.(*syntax.ImportDecl)
+		if !ok {
+			// An import cannot follow any other declaration, so there is
+			// nothing further to find.
+			break
+		}
+		if imp.Path != nil && importPath(imp.Path.Value) == "C" {
+			return true
+		}
+	}
+	return false
+}
+
+// importPath returns the path an import literal denotes, or "" when the
+// literal is not a well formed string.
+func importPath(lit string) string {
+	if len(lit) >= 2 && lit[0] == '"' && lit[len(lit)-1] == '"' {
+		return lit[1 : len(lit)-1]
+	}
+	if len(lit) >= 2 && lit[0] == '`' && lit[len(lit)-1] == '`' {
+		return lit[1 : len(lit)-1]
+	}
+	return ""
 }

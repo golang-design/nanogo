@@ -656,3 +656,171 @@ func TestReleaseTagsOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestImportsC covers the rule that no build constraint expresses: a file that
+// imports "C" is not part of the package when cgo is disabled.
+//
+// CI on linux found this and CI on darwin could not. The file that exposed it,
+// crypto/internal/sysrand/internal/seccomp/seccomp_linux.go, is excluded on
+// darwin by its _linux suffix before its imports are ever read.
+func TestImportsC(t *testing.T) {
+	for _, tc := range []struct {
+		what string
+		src  string
+		want bool
+	}{
+		{"single import", "package p\n\nimport \"C\"\n", true},
+		{"grouped import", "package p\n\nimport (\n\t\"fmt\"\n\t\"C\"\n)\n", true},
+		{"grouped, C first", "package p\n\nimport (\n\t\"C\"\n\t\"fmt\"\n)\n", true},
+		{"with the cgo preamble", "package p\n\n/*\n#include <stdio.h>\n*/\nimport \"C\"\n", true},
+		{"no imports", "package p\n\nvar x = 1\n", false},
+		{"other imports", "package p\n\nimport \"fmt\"\n", false},
+		{"a string that says C", "package p\n\nvar s = \"C\"\n", false},
+		{"a package named C", "package C\n\nvar x = 1\n", false},
+		{"an import path ending in C", "package p\n\nimport \"a/C\"\n", false},
+		{"a comment that says import \"C\"", "package p\n\n// import \"C\"\nvar x = 1\n", false},
+		{"unparseable", "package p\n\nimport \"C\"\nfunc (\n", true},
+		{"empty", "", false},
+	} {
+		if got := importsC([]byte(tc.src)); got != tc.want {
+			t.Errorf("%s: importsC = %v, want %v", tc.what, got, tc.want)
+		}
+	}
+}
+
+// TestMatchFileExcludesCgoWhenDisabled is the end-to-end form of the rule, over
+// the real file that found it if this machine has it.
+func TestMatchFileExcludesCgoWhenDisabled(t *testing.T) {
+	dir := t.TempDir()
+	const src = "//go:build linux\n\npackage p\n\n/*\n#include <stdio.h>\n*/\nimport \"C\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "cgo_linux.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := testContext("linux", "amd64")
+
+	// MatchFile answers the constraint question only, which is what
+	// go/build.MatchFile answers, so it keeps the file either way.
+	for _, cgo := range []bool{false, true} {
+		c.CgoEnabled = cgo
+		if ok, err := c.MatchFile(dir, "cgo_linux.go"); err != nil || !ok {
+			t.Errorf("cgo=%v: MatchFile = %v (err %v), want true", cgo, ok, err)
+		}
+	}
+
+	// IncludeFile answers the package-membership question, and that is where
+	// the cgo rule lives.
+	c.CgoEnabled = false
+	if ok, err := c.IncludeFile(dir, "cgo_linux.go"); err != nil || ok {
+		t.Errorf("with cgo disabled IncludeFile = %v (err %v), want false", ok, err)
+	}
+	c.CgoEnabled = true
+	if ok, err := c.IncludeFile(dir, "cgo_linux.go"); err != nil || !ok {
+		t.Errorf("with cgo enabled IncludeFile = %v (err %v), want true", ok, err)
+	}
+
+	// A file the constraints reject is excluded whatever cgo says.
+	c.CgoEnabled = true
+	if ok, err := c.IncludeFile(dir, "nosuchfile_windows.go"); err != nil || ok {
+		t.Errorf("IncludeFile on a constrained-out name = %v (err %v), want false", ok, err)
+	}
+	if _, err := c.IncludeFile(dir, "absent.go"); err == nil {
+		t.Error("IncludeFile on a missing file returned no error")
+	}
+}
+
+// TestIncludeFileAgainstGoBuildPartition is the local reproduction of a failure
+// that only CI on linux could produce.
+//
+// go/build.MatchFile answers "do the constraints match". go/build.ImportDir
+// answers "is the file in the package", and those differ for a cgo file when
+// cgo is disabled. The corpus test above uses the first as its oracle, so it
+// cannot see the difference. This one uses the second, and it runs for linux on
+// any host, so the next rule of this shape is found before the push and not
+// after it.
+func TestIncludeFileAgainstGoBuildPartition(t *testing.T) {
+	if testing.Short() {
+		t.Skip("corpus test is slow")
+	}
+	src := goSrcRoot()
+	skipOrFailWithoutCorpus(t, src)
+
+	for _, target := range []struct{ goos, goarch string }{
+		{"linux", "amd64"},
+		{"darwin", "arm64"},
+	} {
+		t.Run(target.goos+"_"+target.goarch, func(t *testing.T) {
+			bc := build.Default
+			bc.GOOS = target.goos
+			bc.GOARCH = target.goarch
+			bc.CgoEnabled = false
+			bc.Compiler = "gc"
+
+			c := testContext(target.goos, target.goarch)
+			c.CgoEnabled = false
+			c.ToolTags = build.Default.ToolTags
+
+			var dirs, files, mismatches int
+			err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+				if err != nil || !d.IsDir() {
+					return nil
+				}
+				base := d.Name()
+				if base == "testdata" || strings.HasPrefix(base, "_") || strings.HasPrefix(base, ".") {
+					return fs.SkipDir
+				}
+
+				pkg, perr := bc.ImportDir(path, 0)
+				if perr != nil {
+					// A directory with no Go files for this target, or one the
+					// go command itself cannot read, proves nothing.
+					return nil
+				}
+				dirs++
+
+				in := make(map[string]bool)
+				for _, list := range [][]string{pkg.GoFiles, pkg.TestGoFiles, pkg.XTestGoFiles} {
+					for _, name := range list {
+						in[name] = true
+					}
+				}
+
+				entries, rerr := os.ReadDir(path)
+				if rerr != nil {
+					return nil
+				}
+				for _, e := range entries {
+					name := e.Name()
+					if e.IsDir() || !strings.HasSuffix(name, ".go") {
+						continue
+					}
+					if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
+						continue
+					}
+					got, gerr := c.IncludeFile(path, name)
+					if gerr != nil {
+						t.Errorf("%s/%s: %v", path, name, gerr)
+						continue
+					}
+					files++
+					if got != in[name] {
+						mismatches++
+						if mismatches <= 10 {
+							t.Errorf("%s/%s: nanogo says %v, go/build's partition says %v",
+								path, name, got, in[name])
+						}
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("walking %s: %v", src, err)
+			}
+			if files == 0 {
+				t.Fatal("no file was compared")
+			}
+			t.Logf("%s/%s: %d directories, %d files, %d mismatches",
+				target.goos, target.goarch, dirs, files, mismatches)
+		})
+	}
+}

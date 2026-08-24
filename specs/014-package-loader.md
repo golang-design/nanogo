@@ -117,6 +117,37 @@ branches on `gc` against `gccgo` in several places, and a third value would
 select neither branch. nanogo claims to be `gc`-compatible everywhere else
 ([000](000-decisions.md) decision 11); here too.
 
+### Two questions, two methods
+
+"Do this file's build constraints match" and "is this file in the package" are
+different questions, and conflating them cost a red CI run.
+
+| Method | Question | Oracle |
+| --- | --- | --- |
+| `MatchFile` | do the constraints match | `go/build.MatchFile` |
+| `IncludeFile` | is the file in the package | `go/build.ImportDir`'s partition |
+
+The difference is one rule that no build constraint expresses: **a file that
+imports `"C"` is a cgo file, and with cgo disabled the `go` command reports it
+as ignored rather than as part of the package.** Nothing in the file says so.
+
+The loader uses `IncludeFile`. `MatchFile` is kept separate because it is the
+differential oracle, and folding the cgo rule into it made 45 files in the
+distribution disagree with `go/build`, all of them cgo files that `go/build`
+matches and does not include.
+
+Detecting the import is done by parsing, not by searching the text. `"C"` can
+appear in a grouped import, behind a comment, inside another string, or with a
+blank or dot name, and a text search gets at least one of those wrong. The parse
+is not wasted in the compiler proper, since a file that reaches this point is
+one nanogo is about to parse anyway.
+
+**This was found by CI on linux and could not be found on darwin.** The file
+that exposed it is
+`crypto/internal/sysrand/internal/seccomp/seccomp_linux.go`, whose `_linux`
+suffix excludes it on darwin before its imports are ever read. It is the
+argument for the two-platform test matrix, written down.
+
 ### Import resolution order
 
 1. `unsafe`, which has no files.

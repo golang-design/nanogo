@@ -211,7 +211,7 @@ func TestGoListTags(t *testing.T) {
 	c := DefaultContext()
 	c.BuildTags = []string{"extra"}
 	for _, name := range on.GoFiles {
-		ok, err := c.MatchFile(dir, name)
+		ok, err := c.IncludeFile(dir, name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -221,7 +221,7 @@ func TestGoListTags(t *testing.T) {
 	}
 	c.BuildTags = nil
 	for _, name := range []string{"tagged.go", "legacy.go"} {
-		ok, err := c.MatchFile(dir, name)
+		ok, err := c.IncludeFile(dir, name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -449,7 +449,7 @@ func comparePackageFiles(t *testing.T, c *Context, p *Package) (files, mismatche
 		}
 
 		files++
-		got, err := c.MatchFile(p.Dir, name)
+		got, err := c.IncludeFile(p.Dir, name)
 		if err != nil {
 			t.Errorf("%s: %s: %v", p.ImportPath, name, err)
 			mismatches++
