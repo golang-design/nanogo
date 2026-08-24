@@ -83,6 +83,14 @@ const (
 	OMin
 	OMax
 
+	// Added after the first consumers were written. specs/020-ir.md's node set
+	// omitted them, and both the SSA builder and the IR builder had to invent a
+	// local convention to stand in. A convention in two packages is two
+	// conventions, so they are ops.
+	OAssign // Lhs = Rhs, or Lhs := Rhs when Op1 is syntax.Def
+	OCase   // one clause of an OSwitch or OSelect; Args are the case
+	//	expressions and no Args means default
+
 	opCount
 )
 
@@ -133,6 +141,8 @@ var opNames = [...]string{
 	OClear:      "clear",
 	OMin:        "min",
 	OMax:        "max",
+	OAssign:     "assign",
+	OCase:       "case",
 }
 
 func (o Op) String() string {
@@ -245,8 +255,12 @@ type Node struct {
 	// Val is the value of an OConst.
 	Val Value
 
-	// Body, Else and Init carry statements for the control forms.
-	Init, Body, Else []Stmt
+	// Body, Else, Init and Post carry statements for the control forms.
+	//
+	// Post is the post statement of an OFor. It was added after the fact: the
+	// node set had no place for it, and the first consumer put it in Else,
+	// which is the field an OIf uses for something else entirely.
+	Init, Body, Else, Post []Stmt
 
 	// Label is the target name for OGoto, OLabel, OBreak and OContinue.
 	Label string
@@ -269,6 +283,36 @@ type (
 type Value interface {
 	// String returns the value in Go syntax.
 	String() string
+}
+
+// ConstValue is a Value a consumer can read numerically.
+//
+// String alone is not enough, and this was found rather than foreseen: the SSA
+// builder had to parse the printed Go syntax back into an integer, and the
+// constant folding of specs/022-optimization-passes.md cannot fold what it
+// cannot read. Printing and reparsing a float is also lossy, which would make
+// a folded constant differ from an unfolded one.
+//
+// It is a second interface rather than a wider Value so that carrying a
+// constant stays cheap for anything that only prints it. A consumer that needs
+// a number type-asserts, and the assertion failing is a real answer: the
+// constant is not one this consumer can use.
+type ConstValue interface {
+	Value
+
+	// Int64 returns the value as an int64 and whether it fits exactly.
+	Int64() (int64, bool)
+
+	// Uint64 returns the value as a uint64 and whether it fits exactly.
+	Uint64() (uint64, bool)
+
+	// Float64 returns the value as a float64 and whether it is exact.
+	Float64() (float64, bool)
+
+	// IsZero reports whether the value is the zero of its type. This is the
+	// question asked most often and the one most easily got wrong through a
+	// conversion, so it is answered directly.
+	IsZero() bool
 }
 
 // Func is one function to be compiled.
@@ -317,7 +361,7 @@ func Walk(n *Node, f func(*Node) bool) {
 	for _, a := range n.Args {
 		Walk(a, f)
 	}
-	for _, list := range [][]Stmt{n.Init, n.Body, n.Else} {
+	for _, list := range [][]Stmt{n.Init, n.Body, n.Post, n.Else} {
 		for _, s := range list {
 			Walk(s, f)
 		}

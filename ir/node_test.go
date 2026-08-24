@@ -53,6 +53,7 @@ func TestGoSpecificSetIsTheLoweringTable(t *testing.T) {
 		OConst, OLocal, OGlobal, OField, OIndex, ODeref, OAddr,
 		OUnary, OBinary, OCompare, OConvert, OCall,
 		OIf, OFor, OSwitch, OBlock, OGoto, OLabel, OReturn, OBreak, OContinue,
+		OAssign, OCase,
 	} {
 		if op.IsGoSpecific() {
 			t.Errorf("%s is marked Go-specific and must survive into SSA", op)
@@ -71,6 +72,7 @@ func TestWalkVisitsEveryChildList(t *testing.T) {
 		{"Args", &Node{Op: OCall, Args: []Expr{marker}}},
 		{"Init", &Node{Op: OIf, Init: []Stmt{marker}}},
 		{"Body", &Node{Op: OFor, Body: []Stmt{marker}}},
+		{"Post", &Node{Op: OFor, Post: []Stmt{marker}}},
 		{"Else", &Node{Op: OIf, Else: []Stmt{marker}}},
 		{"nested", &Node{Op: OBlock, Body: []Stmt{{Op: OIf, Body: []Stmt{marker}}}}},
 	} {
@@ -133,6 +135,7 @@ func TestHasGoSpecific(t *testing.T) {
 	for _, root := range []*Node{
 		{Op: OCall, Args: []Expr{{Op: ORecover}}},
 		{Op: OIf, Init: []Stmt{{Op: ODefer}}},
+		{Op: OFor, Post: []Stmt{{Op: OAppend}}},
 		{Op: OIf, Else: []Stmt{{Op: OGo}}},
 		{Op: OUnary, X: &Node{Op: OMake}},
 		{Op: OBinary, X: &Node{Op: OConst}, Y: &Node{Op: OLen}},
@@ -155,5 +158,61 @@ func TestObjectAndFuncCarryTheirFacts(t *testing.T) {
 	f := &Func{Name: "f"}
 	if f.Inlinable {
 		t.Error("a function starts inlinable; the decision belongs to specs/024")
+	}
+}
+
+// constFor is a ConstValue for the tests below.
+type constFor struct {
+	text string
+	i    int64
+	ok   bool
+}
+
+func (c constFor) String() string           { return c.text }
+func (c constFor) Int64() (int64, bool)     { return c.i, c.ok }
+func (c constFor) Uint64() (uint64, bool)   { return uint64(c.i), c.ok && c.i >= 0 }
+func (c constFor) Float64() (float64, bool) { return float64(c.i), c.ok }
+func (c constFor) IsZero() bool             { return c.ok && c.i == 0 }
+
+// TestConstValueIsOptional pins the reason ConstValue is a second interface
+// rather than a wider Value: a consumer that only prints a constant must not
+// have to implement four more methods, and a consumer that needs a number
+// learns from the assertion that it cannot have one.
+func TestConstValueIsOptional(t *testing.T) {
+	var plain Value = constString("x")
+	if _, ok := plain.(ConstValue); ok {
+		t.Error("a plain Value satisfied ConstValue")
+	}
+
+	var rich Value = constFor{text: "42", i: 42, ok: true}
+	cv, ok := rich.(ConstValue)
+	if !ok {
+		t.Fatal("a ConstValue did not satisfy ConstValue")
+	}
+	if n, exact := cv.Int64(); n != 42 || !exact {
+		t.Errorf("Int64 = %d, %v", n, exact)
+	}
+	if cv.IsZero() {
+		t.Error("42 reported as zero")
+	}
+	if zero := (constFor{text: "0", i: 0, ok: true}); !zero.IsZero() {
+		t.Error("0 did not report as zero")
+	}
+}
+
+// constString is a Value that can only be printed.
+type constString string
+
+func (c constString) String() string { return string(c) }
+
+// TestAssignAndCaseAreOps guards the two ops that were added after their first
+// consumers had invented conventions for them. A convention in two packages is
+// two conventions.
+func TestAssignAndCaseAreOps(t *testing.T) {
+	if OAssign.String() != "assign" || OCase.String() != "case" {
+		t.Errorf("OAssign prints %q and OCase prints %q", OAssign, OCase)
+	}
+	if OAssign.IsGoSpecific() || OCase.IsGoSpecific() {
+		t.Error("an assignment or a case was marked Go-specific and would be rejected after lowering")
 	}
 }
