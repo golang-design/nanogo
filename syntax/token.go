@@ -32,12 +32,12 @@ const (
 	_Literal // an integer, float, imaginary, rune or string literal
 
 	// Operators and delimiters. _Operator carries its identity in Scanner.Op.
-	_Operator // + - * / % & | ^ &^ << >> && || ! < <= > >= == != ~ <-
+	_Operator // + - * / % & | ^ &^ << >> && || ! < <= > >= == != ~
 	_AssignOp // += -= *= /= %= &= |= ^= &^= <<= >>=
 	_IncOp    // ++ --
 	_Assign   // =
 	_Define   // :=
-	_Arrow    // <- as a channel direction
+	_Arrow    // <-, both as a channel direction and as a receive; Op is Recv
 	_Star     // * as a pointer type or a dereference
 
 	_Lparen
