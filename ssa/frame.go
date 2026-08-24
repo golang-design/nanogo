@@ -55,14 +55,25 @@ package ssa
 // Where the saved return address and the saved frame pointer physically land
 // is also the target's, and the diagram of
 // specs/027-liveness-and-stackmaps.md is not every target's answer.
-// specs/042-arm64-backend.md saves the link register at the bottom of the
-// frame, at 0(RSP), and the frame pointer below SP, outside the frame
-// altogether; the runtime then takes Varp as the top of the frame. So an arm64
-// caller sets SaveRA and SaveFP false and reserves the link register word at
-// the bottom, inside OutArgs. specs/043-amd64-backend.md is the other case:
-// the call instruction pushes the return address above the frame, and the
-// runtime moves Varp down by one word for it. The two words are optional here
-// for that reason.
+//
+// On arm64 the link register is saved at the bottom of the frame, at 0(RSP),
+// inside OutArgs, so SaveRA is false. **SaveFP is true.** The word at the top
+// of the frame holds the *caller's* saved frame pointer, and the runtime's
+// traceback computes
+//
+//	varp = fp - PtrSize   (for a non-empty frame)
+//	argp = fp + MinFrameSize
+//
+// so Varp sits one word below the top. An earlier version of this comment, and
+// of specs/027, said an arm64 caller sets both false. That gives Varp == Size,
+// which places a local on top of the caller's saved frame pointer and puts
+// Varp one word above where the runtime looks. The stack map then describes
+// the wrong words, and nothing reports it: the map is well formed, the
+// collector reads it, and it scans the wrong slots.
+//
+// specs/043-amd64-backend.md is the other case: the call instruction pushes
+// the return address above the frame, and the runtime moves Varp down by one
+// word for it. The two words are optional here for that reason.
 
 import (
 	"fmt"

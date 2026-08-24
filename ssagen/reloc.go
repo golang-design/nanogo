@@ -42,18 +42,30 @@ type callee struct {
 	abi  uint16
 }
 
-// morestack is the runtime function the stack-growth tail calls.
+// morestackName is the runtime function the stack-growth tail calls.
 //
-// It is spelled here and not taken from rtsym, because rtsym does not have it.
-// specs/031-runtime-lowering.md requires the runtime table to be checked
-// against the runtime's source, and rtsym does that for the symbols lowering
-// emits; the prologue's symbol was not in that set. The name is checked
-// against the runtime in ssagen's own test until rtsym carries it.
+// runtime.morestack_noctxt has no Go declaration: it exists only in
+// runtime/asm_<arch>.s. rtsym carries it with Assembly set, so the name is
+// checked against the runtime's own source there rather than typed in here,
+// which is what specs/031-runtime-lowering.md requires of every runtime symbol
+// the compiler generates a call to.
+const morestackName = "runtime.morestack_noctxt"
+
+// morestackCallee returns the callee record for the stack-growth call, and
+// reports whether rtsym has the symbol.
 //
-// The ABI is ABI0. runtime.morestack_noctxt is written in assembly, and
-// cmd/internal/obj looks it up in the ABI0 table, so a reference under
-// ABIInternal names a symbol that does not exist.
-var morestack = callee{name: "runtime.morestack_noctxt", abi: obj.ABI0}
+// The ABI is not rtsym's to state and it is not a default either. The symbol
+// is defined in assembly, which cmd/internal/obj looks up in the ABI0 table,
+// so a reference under ABIInternal names a symbol that does not exist and the
+// call reaches nothing. Assembly is what justifies the ABI, so a table entry
+// without it is refused rather than called.
+func morestackCallee() (callee, bool) {
+	s := rtsym.Lookup(morestackName)
+	if s == nil || !s.Assembly {
+		return callee{}, false
+	}
+	return callee{name: s.Name, abi: obj.ABI0}, true
+}
 
 // runtimeCallee returns the callee record for a runtime symbol, and reports
 // whether rtsym knows the name.

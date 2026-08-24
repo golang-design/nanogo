@@ -448,6 +448,11 @@ func TestAssignFollowsTheConvention(t *testing.T) {
 
 // TestFrameArithmetic checks the sizes against the numbers gc prints for the
 // same shape, which are the ones the runtime reads.
+//
+// The rule is stated here and applied by ssa.LayoutFrame, which pads the
+// locals area until the frame is a multiple of the alignment layout gives it.
+// What this checks is the rule and the number FuncInfo carries, which is the
+// frame without the link register word.
 func TestFrameArithmetic(t *testing.T) {
 	tests := []struct {
 		body    int64 // the outgoing arguments and the slots

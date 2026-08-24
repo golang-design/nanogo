@@ -24,20 +24,26 @@
 //
 // # What it does that no pass above it does yet
 //
-// Two jobs land here because the passes that own them do not exist.
+// specs/030-abi.md's assignment walk lands here, because the pass that owns it
+// does not exist. ssa.Target has DefReg and UseReg hooks for it and both
+// return "no register", so nothing is pre-coloured: an incoming argument, a
+// call's operands, a call's results and a return's values are placed here
+// instead. The placement is a parallel move, because the home of argument 0
+// can be the register argument 1 arrives in.
 //
-// specs/030-abi.md's assignment walk is one. ssa.Target has DefReg and UseReg
-// hooks for it and both return "no register", so nothing is pre-coloured: an
-// incoming argument, a call's operands, a call's results and a return's values
-// are placed here instead. The placement is a parallel move, because the home
-// of argument 0 can be the register argument 1 arrives in.
+// # The frame and the collector's tables
 //
-// specs/027-liveness-and-stackmaps.md's frame layout is the other. ssa.Alloc
-// carries slot sizes and no offsets, so the offsets are assigned in
-// prologue.go. The pointer-slot grouping that makes a stack map short is not
-// done, and neither are the stack maps: this package emits no FUNCDATA, so a
-// collection that lands in a nanogo frame has no map to read. That is the next
-// thing to build and it is not built here.
+// The frame is specs/027-liveness-and-stackmaps.md's and this package does not
+// compute one of its own. ssa.LayoutFrame places every item and this package
+// supplies the target's part of the geometry: which word holds the saved link
+// register, how large the outgoing argument area is, and where the incoming
+// arguments are. prologue.go asserts that the frame the prologue builds is the
+// frame the layout described, because the collector reads the layout's answer
+// through a bitmap and the generator's answer through the stack pointer.
+//
+// The tables the collector reads are in stackmap.go. A function whose tables
+// cannot be built is not emitted: a text symbol with a partial map is a
+// program that runs until a collection happens at the wrong moment.
 package ssagen
 
 import (
@@ -107,9 +113,23 @@ type Result struct {
 	// a FuncInfo and no pc-value table faults in the pclntab pass.
 	Pcsp, Pcfile, Pcline *obj.Symbol
 
+	// Funcdata and Pcdata are the tables the garbage collector reads, indexed
+	// by the FUNCDATA and PCDATA index the runtime defines.
+	//
+	// The position is the index. The object format carries no index with an
+	// entry: the linker reads them in order, so a table that is absent is an
+	// empty entry and never a missing one.
+	Funcdata []*obj.Symbol
+	Pcdata   []*obj.Symbol
+
 	// Gotype is the type descriptor reference the symbol carries, if the
 	// caller gave one.
 	Gotype obj.SymRef
+
+	// maps is what the bitmaps above were built from. A caller reads the
+	// symbols; this is here so that a test of this package can ask which
+	// bitmap a safepoint selected, which the bytes alone do not say.
+	maps *ssa.StackMaps
 
 	// Frame is the number of bytes the prologue subtracts from the stack
 	// pointer, Locals is what FuncInfo carries, and Args is the size of the
@@ -160,15 +180,6 @@ func (r *Result) Add(p *obj.Package) (obj.SymRef, error) {
 	if r == nil || r.Text == nil {
 		return obj.SymRef{}, errors.New("ssagen: empty result")
 	}
-	aux := []struct {
-		typ obj.AuxType
-		sym *obj.Symbol
-	}{
-		{obj.AuxFuncInfo, r.FuncInfo},
-		{obj.AuxPcsp, r.Pcsp},
-		{obj.AuxPcfile, r.Pcfile},
-		{obj.AuxPcline, r.Pcline},
-	}
 	// Aux entries are written in the order they are given and gc's order is
 	// Gotype, FuncInfo, Funcdata, DWARF, Pcsp, Pcfile, Pcline, Pcinline,
 	// Pcdata.
@@ -176,12 +187,39 @@ func (r *Result) Add(p *obj.Package) (obj.SymRef, error) {
 	if !r.Gotype.IsZero() {
 		entries = append(entries, obj.Aux{Type: obj.AuxGotype, Sym: r.Gotype})
 	}
-	for _, x := range aux {
+	if r.FuncInfo == nil {
+		return obj.SymRef{}, errors.New("ssagen: the result carries no FuncInfo")
+	}
+	// A plain definition, not a content-addressable one: cmd/link reads the
+	// FuncInfo of a text symbol at the symbol index the auxiliary entry names,
+	// without resolving which index space that is.
+	entries = append(entries, obj.Aux{Type: obj.AuxFuncInfo, Sym: p.AddDef(r.FuncInfo)})
+	for i, s := range r.Funcdata {
+		if s == nil {
+			return obj.SymRef{}, fmt.Errorf("ssagen: funcdata %d is absent, and the position of an entry is its index", i)
+		}
+		entries = append(entries, obj.Aux{Type: obj.AuxFuncdata, Sym: p.AddHashedDef(s)})
+	}
+	// The pc-value tables are content-addressable, as gc makes them: two
+	// functions with the same table are one symbol in the linked binary.
+	for _, x := range []struct {
+		typ obj.AuxType
+		sym *obj.Symbol
+	}{
+		{obj.AuxPcsp, r.Pcsp},
+		{obj.AuxPcfile, r.Pcfile},
+		{obj.AuxPcline, r.Pcline},
+	} {
 		if x.sym == nil {
 			continue
 		}
-		ref := p.AddDef(x.sym)
-		entries = append(entries, obj.Aux{Type: x.typ, Sym: ref})
+		entries = append(entries, obj.Aux{Type: x.typ, Sym: p.AddHashedDef(x.sym)})
+	}
+	for i, s := range r.Pcdata {
+		if s == nil {
+			return obj.SymRef{}, fmt.Errorf("ssagen: pcdata %d is absent, and the position of an entry is its index", i)
+		}
+		entries = append(entries, obj.Aux{Type: obj.AuxPcdata, Sym: p.AddHashedDef(s)})
 	}
 	r.Text.Aux = entries
 	return p.AddDef(r.Text), nil
@@ -219,11 +257,26 @@ type emitter struct {
 	frame  frame
 	frames map[*ir.Object]int64 // the offset of each frame object
 
+	// items, fr and slotOff are specs/027-liveness-and-stackmaps.md's frame,
+	// which this package reads and does not compute. slotOff is indexed as
+	// ssa.Alloc.Slots is and holds -1 for a slot the layout did not place.
+	items   []ssa.FrameItem
+	fr      *ssa.Frame
+	slotOff []int64
+
 	text    []uint32
 	relocs  []obj.Reloc
 	blockPC []int32
 	fixups  []fixup
 	growPC  int32
+
+	// pcStart and pcEnd are the half-open range of program counters each
+	// value's instructions occupy, indexed by value identifier, with -1 for a
+	// value that produced none. The stack maps are indexed by program
+	// counter and this is the only record of where a value landed.
+	pcStart, pcEnd []int64
+	prologueEnd    int64
+	unsafe         []ssa.PCRange
 
 	spDelta int64
 	pcsp    []obj.PCEntry
@@ -352,9 +405,19 @@ func (e *emitter) run() {
 	for i := range e.blockPC {
 		e.blockPC[i] = -1
 	}
+	e.pcStart = make([]int64, e.f.NumValues())
+	e.pcEnd = make([]int64, e.f.NumValues())
+	for i := range e.pcStart {
+		e.pcStart[i] = -1
+		e.pcEnd[i] = -1
+	}
 	e.markLine(e.f.Pos)
 	e.markSP()
 	e.prologue()
+	// The frame exists from here. Everything before it is a range no
+	// asynchronous preemption may stop in, because the frame it would read is
+	// half built (specs/027-liveness-and-stackmaps.md).
+	e.prologueEnd = int64(e.pc())
 	e.entryArgs()
 
 	for i, b := range e.f.Blocks {
@@ -372,7 +435,9 @@ func (e *emitter) run() {
 			if e.skip(b, v) {
 				continue
 			}
+			at := int64(e.pc())
 			e.value(v)
+			e.mark(v, at)
 		}
 		var next *ssa.Block
 		if i+1 < len(e.f.Blocks) {
@@ -382,6 +447,20 @@ func (e *emitter) run() {
 	}
 	e.growstack()
 	e.patch()
+}
+
+// mark records where a value's instructions landed.
+//
+// The stack maps are indexed by program counter and this is the only record
+// of the mapping: a safepoint is a value here and a program counter there.
+// A value that produced nothing keeps the -1 it started with, so an empty
+// range is not confused with a range at offset zero.
+func (e *emitter) mark(v *ssa.Value, at int64) {
+	if int(v.ID) >= len(e.pcStart) || int64(e.pc()) == at {
+		return
+	}
+	e.pcStart[v.ID] = at
+	e.pcEnd[v.ID] = int64(e.pc())
 }
 
 // skip reports whether a value produces no instruction here.
@@ -615,7 +694,7 @@ func (e *emitter) load(dst arm64.Reg, slot int32, t *ir.Type) {
 		e.fail("no load for type %v", t)
 		return
 	}
-	e.mem(op, dst, arm64.RSP, e.slotOff(slot))
+	e.mem(op, dst, arm64.RSP, e.slotOffset(slot))
 }
 
 // store writes a register into a spill slot.
@@ -625,15 +704,15 @@ func (e *emitter) store(src arm64.Reg, slot int32, t *ir.Type) {
 		e.fail("no store for type %v", t)
 		return
 	}
-	e.mem(op, src, arm64.RSP, e.slotOff(slot))
+	e.mem(op, src, arm64.RSP, e.slotOffset(slot))
 }
 
-func (e *emitter) slotOff(slot int32) int64 {
-	if slot < 0 || int(slot) >= len(e.frame.slot) {
+func (e *emitter) slotOffset(slot int32) int64 {
+	if slot < 0 || int(slot) >= len(e.slotOff) || e.slotOff[slot] < 0 {
 		e.fail("slot %d is not in the frame", slot)
 		return 0
 	}
-	return e.frame.slot[slot]
+	return e.slotOff[slot]
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +762,7 @@ func (e *emitter) incoming() error {
 // register is occupied from the entry and never gives it to another value
 // first.
 func (e *emitter) entryArgs() {
+	e.spillPointerArgs()
 	x := make([]xfer, 0, len(e.args))
 	seen := make(map[ssa.Loc]bool, len(e.args))
 	for i, v := range e.args {
@@ -725,7 +805,10 @@ func (e *emitter) entryArgs() {
 			continue
 		}
 		e.done[e.args[i].ID] = false
-		if !p.inReg {
+		if !p.inReg || (p.typ != nil && p.typ.HasPointers()) {
+			// A pointer-holding argument is in the area already:
+			// spillPointerArgs put it there, because the arguments bitmap
+			// describes that word whether or not this shape is taken.
 			continue
 		}
 		op, ok := memOpFor(p.typ, true)
@@ -738,6 +821,36 @@ func (e *emitter) entryArgs() {
 	e.markLine(e.f.Entry.Pos)
 }
 
+// spillPointerArgs writes every pointer-holding argument that arrived in a
+// register into its slot in the argument area.
+//
+// The arguments bitmap of specs/027-liveness-and-stackmaps.md is exact and it
+// is the same at every safepoint: it says which words of the incoming
+// argument area hold pointers, and the collector reads that word. An argument
+// that travelled in a register leaves the word holding whatever the last
+// frame at that address left there, so without this store the collector
+// follows a stale value. gc writes the same store, for the narrower case of
+// an argument that is live across a call; the condition here is the type
+// rather than the liveness, because the bitmap this package emits is not
+// narrowed by liveness either.
+//
+// It runs before anything is placed, because a placement move may overwrite
+// the register the argument arrived in.
+func (e *emitter) spillPointerArgs() {
+	for i := range e.frame.in {
+		p := &e.frame.in[i]
+		if !p.inReg || p.typ == nil || !p.typ.HasPointers() {
+			continue
+		}
+		op, ok := memOpFor(p.typ, true)
+		if !ok {
+			e.fail("an argument of type %v has no store", p.typ)
+			continue
+		}
+		e.mem(op, p.reg, arm64.RSP, e.argOff(i))
+	}
+}
+
 // argOff returns the offset of an incoming argument from the current stack
 // pointer.
 //
@@ -746,7 +859,7 @@ func (e *emitter) entryArgs() {
 // The prologue has already moved the stack pointer by then, so the frame is
 // added back.
 func (e *emitter) argOff(i int) int64 {
-	return e.frame.size + 8 + e.frame.in[i].off
+	return e.frame.size + linkSlot + e.frame.in[i].off
 }
 
 // loadArg reads one incoming argument out of the argument area into its home.
@@ -957,9 +1070,10 @@ func (e *emitter) callValue(v *ssa.Value) {
 		}
 		p := places[i]
 		if !p.inReg {
-			// The outgoing area is at the bottom of the frame, and the
-			// callee reads it at its own stack pointer plus eight.
-			e.storeArg(a, 8+p.off)
+			// The outgoing area is at the bottom of the frame, above
+			// the word the callee saves its link register in, which is
+			// where the callee reads its arguments from.
+			e.storeArg(a, linkSlot+p.off)
 			continue
 		}
 		x = append(x, xfer{dst: ssa.RegLoc(ssa.Reg(p.reg)), src: e.home(a), v: a,
@@ -1361,6 +1475,13 @@ func (e *emitter) result() (*Result, error) {
 		Locals: e.frame.locals(),
 		Args:   e.frame.args,
 	}
+	// The collector's tables come before anything else can go wrong with
+	// them: a function whose maps cannot be built is not emitted at all.
+	t, err := e.buildTables(size)
+	if err != nil {
+		return nil, fmt.Errorf("ssagen: %s: %w", e.opt.Sym, err)
+	}
+	r.Funcdata, r.Pcdata, r.maps = t.funcdata, t.pcdata, t.maps
 	info := funcInfoBytes(uint32(r.Args), uint32(r.Locals), e.opt.Line, files)
 	r.FuncInfo = &obj.Symbol{
 		// Unnamed, for the reason the pc-value tables are: a named auxiliary

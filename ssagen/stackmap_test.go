@@ -1,0 +1,243 @@
+// Copyright 2026 The golang.design Initiative Authors.
+// All rights reserved. Use of this source code is governed by
+// a BSD-style license that can be found in the LICENSE file.
+
+package ssagen
+
+import (
+	"strings"
+	"testing"
+
+	"golang.design/x/nanogo/obj"
+	"golang.design/x/nanogo/ssa"
+)
+
+// TestFrameGeometryMatchesTheRuntime checks the assertion that discharges
+// specs/027-liveness-and-stackmaps.md's obligation on the code generator.
+//
+// The runtime does not read the frame layout. It computes the block it scans
+// as [Varp - nbit*PtrSize, Varp), where Varp is the caller's stack pointer
+// less one word on this target, so a frame whose Varp is elsewhere is scanned
+// at the wrong address with a bitmap that is internally consistent. Each case
+// here is a way for the two to disagree.
+func TestFrameGeometryMatchesTheRuntime(t *testing.T) {
+	tests := []struct {
+		name      string
+		frameless bool
+		size      int64
+		fr        ssa.Frame
+		want      string
+	}{
+		{"a frame the layout and the prologue agree on", false, 32,
+			ssa.Frame{Size: 32, Varp: 24, LocalsBase: 8, LocalsBits: 1}, ""},
+		{"a frameless function", true, 0, ssa.Frame{}, ""},
+		{"a frame the stack pointer cannot hold", false, 24,
+			ssa.Frame{Size: 24, Varp: 16, LocalsBase: 8}, "16-byte aligned"},
+		{"a frameless function with a frame", true, 32,
+			ssa.Frame{Size: 32, Varp: 24, LocalsBase: 8}, "nothing in its frame"},
+		{"a frame with no room for the two saved words", false, 0,
+			ssa.Frame{Varp: 0}, "link register"},
+		{"a frame that saves only the link register", false, 16,
+			ssa.Frame{Size: 16, Varp: 16, LocalsBase: 8}, "Varp"},
+		{"locals over the saved link register", false, 32,
+			ssa.Frame{Size: 32, Varp: 24, LocalsBase: 0}, "saved link register"},
+		{"a pointer in a frame the runtime does not scan", false, 16,
+			ssa.Frame{Size: 16, Varp: 8, LocalsBase: 8, LocalsBits: 1}, "does not scan"},
+	}
+	for _, tt := range tests {
+		e := &emitter{opt: Options{Sym: "test.f"}}
+		fr := tt.fr
+		e.fr, e.frame.size = &fr, tt.size
+		err := e.checkFrame(tt.frameless)
+		switch {
+		case tt.want == "" && err != nil:
+			t.Errorf("%s: %v", tt.name, err)
+		case tt.want != "" && err == nil:
+			t.Errorf("%s: accepted", tt.name)
+		case tt.want != "" && !strings.Contains(err.Error(), tt.want):
+			t.Errorf("%s: %v, want a report of %q", tt.name, err, tt.want)
+		}
+	}
+}
+
+// TestTablesAreIndexedByPosition checks the shape of what a text symbol
+// carries for the collector.
+//
+// The object format carries no index with a FUNCDATA or PCDATA entry: the
+// linker reads them in order and the position is the index. An entry that is
+// left out therefore moves every later table up by one, and the collector
+// reads the arguments map where the locals map should be.
+func TestTablesAreIndexedByPosition(t *testing.T) {
+	// A pointer argument, live across a call: the arguments bitmap has a bit
+	// and the locals bitmap has one for the slot the argument is spilled to,
+	// so the two symbols differ and the test sees two of everything.
+	const src = "package main\n\nfunc gcNow() int\nfunc use(p *int) int\n\n" +
+		"func f(p *int, b int) int {\n\tgcNow()\n\treturn use(p)\n}\n"
+	c := compile(t, src, "f")
+	p := obj.NewPackage("main")
+	r := emit(t, c, p)
+
+	if len(r.Funcdata) != 2 {
+		t.Fatalf("%d funcdata symbols, want the arguments map and the locals map", len(r.Funcdata))
+	}
+	if len(r.Pcdata) != 2 {
+		t.Fatalf("%d pcdata streams, want the unsafe points and the stack map index", len(r.Pcdata))
+	}
+	for i, s := range r.Funcdata {
+		// A bitmap symbol keeps a name, and the prefix is what puts it in the
+		// go:func.* class of the content hash. Without it a bitmap can merge
+		// with read-only data that happens to hold the same bytes.
+		if !strings.HasPrefix(s.Name, "gclocals·") {
+			t.Errorf("funcdata %d is named %q", i, s.Name)
+		}
+		if s.Anonymous {
+			t.Errorf("funcdata %d is anonymous, and cmd/link places it by name", i)
+		}
+		if s.Size < 8 || s.Size != uint32(len(s.Data)) {
+			t.Errorf("funcdata %d is %d bytes with %d of data, and a bitmap holds two counts", i, s.Size, len(s.Data))
+		}
+	}
+	// The name is the content, so two maps that differ cannot share it. The
+	// arguments map of this function marks the incoming pointer at every
+	// safepoint and the locals map marks the slot it is spilled to at one, so
+	// they differ.
+	if r.Funcdata[0].Name == r.Funcdata[1].Name {
+		t.Error("the arguments map and the locals map of this function are one symbol")
+	}
+	for i, s := range r.Pcdata {
+		// A pc-value table is merged into runtime.pctab and must carry no
+		// name: cmd/link decides whether a symbol takes part in the data
+		// layout by asking whether it has one.
+		if s.Name != "" || !s.Anonymous {
+			t.Errorf("pcdata %d is named %q", i, s.Name)
+		}
+		if !s.Pcdata {
+			t.Errorf("pcdata %d is not marked as a pc-value table, so it can merge with read-only data", i)
+		}
+	}
+	// The function makes one call, so it has one safepoint and the stream
+	// that selects a bitmap for it is not empty.
+	if len(r.Pcdata[ssa.PCDATA_StackMapIndex].Data) == 0 {
+		t.Error("the function makes a call and no stack map index is in effect at it")
+	}
+	if len(r.Pcdata[ssa.PCDATA_UnsafePoint].Data) == 0 {
+		t.Error("the function has a prologue and no range of it is marked unsafe")
+	}
+}
+
+// TestAddRefusesAnIncompleteResult checks that a text symbol cannot reach an
+// object without the tables the collector reads.
+//
+// specs/027-liveness-and-stackmaps.md: a binary with a partial map runs until
+// a collection happens at the wrong moment, so the refusal is at the point
+// where the symbol would be written and not later.
+func TestAddRefusesAnIncompleteResult(t *testing.T) {
+	c := compile(t, "package main\n\nfunc f(a int) int { return a }\n", "f")
+	build := func() *Result {
+		p := obj.NewPackage("main")
+		return emit(t, c, p)
+	}
+	tests := []struct {
+		name   string
+		break_ func(r *Result)
+		want   string
+	}{
+		{"no FuncInfo", func(r *Result) { r.FuncInfo = nil }, "FuncInfo"},
+		{"no locals map", func(r *Result) { r.Funcdata[ssa.FUNCDATA_LocalsPointerMaps] = nil }, "funcdata 1"},
+		{"no stack map index", func(r *Result) { r.Pcdata[ssa.PCDATA_StackMapIndex] = nil }, "pcdata 1"},
+	}
+	for _, tt := range tests {
+		r := build()
+		tt.break_(r)
+		_, err := r.Add(obj.NewPackage("main"))
+		if err == nil {
+			t.Errorf("%s: added", tt.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: %v, want a report of %q", tt.name, err, tt.want)
+		}
+	}
+}
+
+// TestPcdataSymIsAnEntryEvenWhenEmpty checks the placeholder.
+//
+// An index with no table is still an entry, because the position of an entry
+// is its index. ssa.PCDataSym returns nothing for an empty stream, so the
+// empty symbol is this package's to build.
+func TestPcdataSymIsAnEntryEvenWhenEmpty(t *testing.T) {
+	s := pcdataSym(nil)
+	if s == nil {
+		t.Fatal("an empty stream produced no entry")
+	}
+	if !s.Anonymous || s.Name != "" || !s.Pcdata || s.Size != 0 {
+		t.Errorf("the empty entry is %+v", s)
+	}
+	s = pcdataSym([]byte{2, 4, 0})
+	if s.Name != "" || !s.Anonymous || s.Size != 3 {
+		t.Errorf("a stream of three bytes gave %+v", s)
+	}
+}
+
+// TestGclocalsNameIsGcs checks the name a bitmap symbol carries.
+//
+// It is gc's name for the same bytes, so a nanogo bitmap and a gc bitmap that
+// describe the same frame are one symbol in the linked binary. The digest is
+// cmd/internal/hash.Sum32, which is sha256 with the first byte inverted, and
+// the encoding is base64 of its first sixteen bytes.
+func TestGclocalsNameIsGcs(t *testing.T) {
+	// The arguments map of a function with one pointer word of arguments,
+	// live at one safepoint. gc prints this name for these bytes.
+	data := []byte{2, 0, 0, 0, 1, 0, 0, 0, 1, 0}
+	if got, want := gclocalsName(data), "gclocals·wvjpxkknJ4nY1JtrArJJaw=="; got != want {
+		t.Errorf("the name is %q, and gc writes %q for the same bytes", got, want)
+	}
+	if gclocalsName([]byte{0}) == gclocalsName([]byte{1}) {
+		t.Error("two bitmaps that differ share a name")
+	}
+	comparisons++
+}
+
+// TestALeafWithAGrowableFrameIsRefused records a gap in ssa.BuildStackMaps
+// and the refusal that keeps it out of a binary.
+//
+// A function that makes no call has no safepoint, so BuildStackMaps writes no
+// bitmap at all. The runtime reads one anyway when such a function grows the
+// stack: runtime.morestack copies the frames and adjustframe reads the
+// arguments bitmap of the frame that called it, whatever its program counter
+// says about the locals. It throws "missing stackmap" when there is none, and
+// the shape that reaches it is ordinary: a leaf whose frame is at least
+// StackSmall, which is the frame that carries a growth check.
+//
+// gc never has the problem because its liveness adds a stack map for the
+// entry block of every function. The day ssa.BuildStackMaps does the same,
+// this test fails and the assertion becomes the value the function computes.
+func TestALeafWithAGrowableFrameIsRefused(t *testing.T) {
+	// Enough values live at once to fill the registers many times over, so
+	// the frame is far past StackSmall, and one argument so that the
+	// arguments bitmap is one the runtime reads.
+	const n = 64
+	c := hand(t, "bigleaf", func(f *ssa.Func) {
+		e := f.Entry
+		e.Kind = ssa.BlockRet
+		mem := e.NewValue(0, ssa.OpInitMem, ssa.MemType)
+		a := e.NewValue(0, ssa.OpArg, typeInt)
+		vals := make([]*ssa.Value, n)
+		for i := range vals {
+			vals[i] = e.NewValue(0, ssa.OpAdd, typeInt, a, a)
+		}
+		sum := vals[0]
+		for i := 1; i < n; i++ {
+			sum = e.NewValue(0, ssa.OpAdd, typeInt, sum, vals[i])
+		}
+		e.Control = e.NewValue(0, ssa.OpMakeResult, ssa.MemType, sum, mem)
+	})
+	_, err := Emit(c.f, c.a, obj.NewPackage("main"), Options{Sym: c.f.Sym})
+	if err == nil {
+		t.Fatal("a leaf with a growable frame and no stack map was emitted")
+	}
+	if !strings.Contains(err.Error(), "entry stack map") {
+		t.Fatalf("the refusal is %v", err)
+	}
+	t.Logf("%v", err)
+}

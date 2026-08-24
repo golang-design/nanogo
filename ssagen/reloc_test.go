@@ -5,9 +5,6 @@
 package ssagen
 
 import (
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -16,37 +13,35 @@ import (
 	"golang.design/x/nanogo/rtsym"
 )
 
-// TestMorestackIsInTheRuntime checks the one runtime symbol this package
-// spells by hand.
+// TestMorestackComesFromRtsym checks that the stack-growth tail names the
+// symbol rtsym carries rather than a literal of its own.
 //
 // specs/031-runtime-lowering.md requires every runtime symbol the compiler
-// generates a call to be checked against the runtime's source rather than
-// typed in and trusted, and rtsym is where that check lives. The prologue's
-// symbol is not in rtsym's table, so the check is here: the name has to be a
-// TEXT symbol in the runtime's assembly, and the call has to be ABI0 because
-// that is how the runtime defines it.
-func TestMorestackIsInTheRuntime(t *testing.T) {
-	if rtsym.Lookup(morestack.name) != nil {
-		t.Fatalf("%s is in rtsym now, so this package should take it from there", morestack.name)
+// generates a call to be checked against the runtime's source, and rtsym is
+// where that check lives. The symbol has no Go declaration, so rtsym marks it
+// Assembly and checks that the runtime's assembly defines it; this test checks
+// that the emitter reads that record, because a literal here would not move
+// when the runtime does.
+func TestMorestackComesFromRtsym(t *testing.T) {
+	s := rtsym.Lookup(morestackName)
+	if s == nil {
+		t.Fatalf("rtsym does not carry %s", morestackName)
 	}
-	path := filepath.Join(runtimeGOROOT(t), "src", "runtime", "asm_arm64.s")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if requireCorpus() {
-			t.Fatalf("NANOGO_REQUIRE_CORPUS is set and the runtime source is not there: %v", err)
-		}
-		t.Skipf("no runtime source: %v", err)
+	if !s.Assembly {
+		t.Errorf("%s is not marked Assembly, and only that justifies calling it at ABI0", s.Name)
 	}
-	// The runtime writes the middle dot, and the linker name uses a full stop.
-	want := regexp.MustCompile(`(?m)^TEXT\s+runtime·` +
-		regexp.QuoteMeta(strings.TrimPrefix(morestack.name, "runtime.")) + `\(SB\)`)
-	if !want.MatchString(string(b)) {
-		t.Fatalf("%s does not define %s", path, morestack.name)
+	c, ok := morestackCallee()
+	if !ok {
+		t.Fatal("the emitter found no callee for the stack-growth tail")
 	}
-	if morestack.abi != obj.ABI0 {
-		t.Errorf("the call names ABI %d, and the runtime defines the symbol in assembly, which is ABI0", morestack.abi)
+	if c.name != s.Name {
+		t.Errorf("the tail calls %q and rtsym names %q", c.name, s.Name)
 	}
-	t.Logf("%s is defined in %s", morestack.name, path)
+	// The runtime defines the symbol in assembly, which cmd/internal/obj
+	// looks up in the ABI0 table.
+	if c.abi != obj.ABI0 {
+		t.Errorf("the tail calls %s at ABI %d, want ABI0", c.name, c.abi)
+	}
 	comparisons++
 }
 
@@ -131,7 +126,7 @@ func TestCallRelocations(t *testing.T) {
 	// the type and the target are checked by the disassembler rather than by
 	// this package's own record of them.
 	text := disassemble(t, r, p)
-	for _, want := range []string{"R_CALLARM64:main.g", "R_CALLARM64:" + morestack.name} {
+	for _, want := range []string{"R_CALLARM64:main.g", "R_CALLARM64:" + morestackName} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the disassembly does not hold %s:\n%s", want, text)
 		}

@@ -246,13 +246,13 @@ func hostToolchain(t *testing.T) *obj.Toolchain {
 	return tc
 }
 
-// writeObject writes an object holding the given result, and returns its path.
+// writeObject writes an object and returns its path.
 //
 // The auxiliary symbols carry no name, which obj.Symbol.Anonymous states and
 // the writer enforces. An earlier version of this file patched the written
 // bytes to clear those names, because the writer rejected every empty name and
 // the format's requirement was unexpressible.
-func writeObject(t *testing.T, p *obj.Package, tc *obj.Toolchain, aux []int, hashed []int) string {
+func writeObject(t *testing.T, p *obj.Package, tc *obj.Toolchain) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "nanogo.o")
 	f, err := os.Create(path)
@@ -265,32 +265,19 @@ func writeObject(t *testing.T, p *obj.Package, tc *obj.Toolchain, aux []int, has
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = aux, hashed
 	return path
 }
 
-// addFull puts a result and its auxiliary symbols into an object and returns
-// the indices anonymise needs.
-func addFull(t *testing.T, r *Result, p *obj.Package) (defs, hashed []int) {
+// addFull puts a result and every symbol it carries into an object.
+//
+// It is Result.Add and nothing else. A test that built the auxiliary list of
+// its own would be a second answer to the question of which tables a text
+// symbol needs, and the linker reads the one this package writes.
+func addFull(t *testing.T, r *Result, p *obj.Package) {
 	t.Helper()
-	defs = append(defs, addDef(p, r.FuncInfo))
-	hashed = append(hashed, addHashed(p, r.Pcsp), addHashed(p, r.Pcfile), addHashed(p, r.Pcline))
-	r.Text.Aux = []obj.Aux{
-		{Type: obj.AuxFuncInfo, Sym: obj.SymRef{PkgIdx: obj.PkgIdxSelf, SymIdx: uint32(defs[0])}},
-		{Type: obj.AuxPcsp, Sym: obj.SymRef{PkgIdx: obj.PkgIdxHashed, SymIdx: uint32(hashed[0])}},
-		{Type: obj.AuxPcfile, Sym: obj.SymRef{PkgIdx: obj.PkgIdxHashed, SymIdx: uint32(hashed[1])}},
-		{Type: obj.AuxPcline, Sym: obj.SymRef{PkgIdx: obj.PkgIdxHashed, SymIdx: uint32(hashed[2])}},
+	if _, err := r.Add(p); err != nil {
+		t.Fatalf("Add: %v", err)
 	}
-	p.AddDef(r.Text)
-	return defs, hashed
-}
-
-func addDef(p *obj.Package, s *obj.Symbol) int {
-	return int(p.AddDef(s).SymIdx)
-}
-
-func addHashed(p *obj.Package, s *obj.Symbol) int {
-	return int(p.AddHashedDef(s).SymIdx)
 }
 
 var textRe = regexp.MustCompile(`^\s+[^\s]+:\d+\s+0x[0-9a-f]+\s+[0-9a-f]+\s+(.*)$`)
@@ -304,8 +291,8 @@ var textRe = regexp.MustCompile(`^\s+[^\s]+:\d+\s+0x[0-9a-f]+\s+[0-9a-f]+\s+(.*)
 func disassemble(t *testing.T, r *Result, p *obj.Package) string {
 	t.Helper()
 	tc := hostToolchain(t)
-	defs, hashed := addFull(t, r, p)
-	path := writeObject(t, p, tc, defs, hashed)
+	addFull(t, r, p)
+	path := writeObject(t, p, tc)
 	out, err := exec.Command(goTool(t), "tool", "objdump", path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("go tool objdump rejected the object: %v\n%s", err, out)
@@ -332,11 +319,12 @@ func disassemble(t *testing.T, r *Result, p *obj.Package) string {
 // The milestone: link a compiled function and run it
 
 var (
-	linkCfgOnce sync.Once
-	linkCfgPath string
-	linkCfgWork string
-	linkCfgDir  string
-	linkCfgErr  error
+	linkCfgOnce    sync.Once
+	linkCfgPath    string
+	compileCfgPath string
+	linkCfgWork    string
+	linkCfgDir     string
+	linkCfgErr     error
 )
 
 // linkConfig returns an importcfg that maps every package the runtime needs to
@@ -350,9 +338,15 @@ func linkConfig(t *testing.T) string {
 		if linkCfgErr != nil {
 			return
 		}
+		// The stub imports what a caller compiled by the tests of this
+		// package imports, because the compile step needs an import
+		// configuration of its own and the go command writes one per package
+		// it builds. A stub that imported nothing would produce a
+		// configuration that names nothing.
 		files := map[string]string{
-			"go.mod":  "module nanogo.example/link\n\ngo 1.27\n",
-			"main.go": "package main\n\nfunc main() {}\n",
+			"go.mod": "module nanogo.example/link\n\ngo 1.27\n",
+			"main.go": "package main\n\nimport (\n\t\"runtime\"\n\t\"sync/atomic\"\n)\n\n" +
+				"var n int32\n\nfunc main() {\n\truntime.GC()\n\tatomic.AddInt32(&n, 1)\n}\n",
 		}
 		for name, body := range files {
 			if linkCfgErr = os.WriteFile(filepath.Join(linkCfgDir, name), []byte(body), 0o600); linkCfgErr != nil {
@@ -377,8 +371,19 @@ func linkConfig(t *testing.T) string {
 			return
 		}
 		linkCfgErr = filepath.WalkDir(linkCfgWork, func(path string, d fs.DirEntry, err error) error {
-			if err == nil && !d.IsDir() && d.Name() == "importcfg.link" {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			switch d.Name() {
+			case "importcfg.link":
 				linkCfgPath = path
+			case "importcfg":
+				// The main package's, which is the one that names every
+				// package the stub imports.
+				b, err := os.ReadFile(path)
+				if err == nil && strings.Contains(string(b), "packagefile sync/atomic=") {
+					compileCfgPath = path
+				}
 			}
 			return nil
 		})
@@ -390,6 +395,17 @@ func linkConfig(t *testing.T) string {
 		t.Fatal("the go command produced no importcfg.link")
 	}
 	return linkCfgPath
+}
+
+// compileConfig returns the import configuration a caller compiled by these
+// tests needs. It is built by the same run as linkConfig.
+func compileConfig(t *testing.T) string {
+	t.Helper()
+	linkConfig(t)
+	if compileCfgPath == "" {
+		t.Fatal("the go command produced no importcfg for the main package")
+	}
+	return compileCfgPath
 }
 
 // TestLinkAndRun is the milestone of this package.
@@ -436,7 +452,7 @@ func TestLinkAndRun(t *testing.T) {
 			c := compile(t, "package main\n\n"+tc2.src+"\n", "run")
 			p := newMainPackage()
 			r := emit(t, c, p)
-			defs, hashed := addFull(t, r, p)
+			addFull(t, r, p)
 
 			// main.main calls the compiled function and exits with what it
 			// returned, so the process's exit status is the value the
@@ -444,7 +460,7 @@ func TestLinkAndRun(t *testing.T) {
 			// because nanogo compiles one function here and the driver that
 			// compiles a package is specs/050-driver.md.
 			caller := exitWrapper(t, goCmd, c.f.Sym, tc2.call, tc2.defs)
-			got := strings.TrimSpace(runLinked(t, goCmd, tc, cfg, p, defs, hashed, caller))
+			got := strings.TrimSpace(runLinked(t, goCmd, tc, cfg, p, caller))
 			if want := strconv.Itoa(tc2.want); got != want {
 				t.Fatalf("the program printed %q, and the function returns %s", got, want)
 			}
@@ -464,9 +480,9 @@ func newMainPackage() *obj.Package {
 //
 // go tool link takes one object, so the two halves of the main package travel
 // in an archive: the function nanogo compiled and the caller gc compiled.
-func runLinked(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj.Package, defs, hashed []int, caller string) string {
+func runLinked(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj.Package, caller string) string {
 	t.Helper()
-	objPath := writeObject(t, p, tc, defs, hashed)
+	objPath := writeObject(t, p, tc)
 	dir := t.TempDir()
 	archive := filepath.Join(dir, "main.a")
 	if b, err := exec.Command(goCmd, "tool", "pack", "c", archive, caller, objPath).CombinedOutput(); err != nil {
@@ -484,9 +500,9 @@ func runLinked(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj
 }
 
 // runLinkedRaw is runLinked for a program that is expected to fail.
-func runLinkedRaw(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj.Package, defs, hashed []int, caller string) (string, error) {
+func runLinkedRaw(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj.Package, caller string) (string, error) {
 	t.Helper()
-	objPath := writeObject(t, p, tc, defs, hashed)
+	objPath := writeObject(t, p, tc)
 	dir := t.TempDir()
 	archive := filepath.Join(dir, "main.a")
 	if b, err := exec.Command(goCmd, "tool", "pack", "c", archive, caller, objPath).CombinedOutput(); err != nil {
@@ -500,26 +516,29 @@ func runLinkedRaw(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *
 	return string(b), err
 }
 
-// TestStackGrowthRunsAndStopsAtTheStackMap drives the stack-growth path of
+// TestStackGrowthCopiesNanogoFrames drives the stack-growth path of
 // specs/035-goroutines-and-stack-growth.md with a recursion deep enough to
-// exhaust the goroutine's first stack.
+// exhaust the goroutine's first stack several times over.
 //
-// Three things happen and all three are asserted, because each is a different
-// piece of this package:
+// Four things happen and the result asserts all of them, because each is a
+// different piece of this package:
 //
 //   - the prologue's comparison against the stack guard fires, so
 //     runtime.morestack runs, which means the tail spilled the arguments and
 //     put the link register in R3;
 //   - the runtime's stack copier walks the nanogo frames, which it can only do
-//     with the pc-value table this package wrote: the traceback names the
-//     function once per frame;
-//   - it then stops, because a frame with locals needs a stack map and this
-//     package writes no FUNCDATA. That is specs/027-liveness-and-stackmaps.md's
-//     work and it is the next thing to build.
+//     with the pc-value table this package wrote;
+//   - it reads a stack map for each of them, which is what this package now
+//     writes: without one the runtime throws "missing stackmap" rather than
+//     copying;
+//   - it rewrites every word the locals bitmap marks, so a bit set on a word
+//     that holds an integer turns that integer into a wrong one. The recursion
+//     carries its accumulator through the growth, so the printed value is the
+//     evidence that nothing was rewritten that should not have been.
 //
-// The day the stack maps arrive this test fails, and the assertion becomes the
-// value the recursion computes.
-func TestStackGrowthRunsAndStopsAtTheStackMap(t *testing.T) {
+// This test used to assert the throw. The stack maps are what turned it into
+// an assertion about the value.
+func TestStackGrowthCopiesNanogoFrames(t *testing.T) {
 	goCmd := goTool(t)
 	tc := hostToolchain(t)
 	cfg := linkConfig(t)
@@ -527,20 +546,19 @@ func TestStackGrowthRunsAndStopsAtTheStackMap(t *testing.T) {
 	c := compile(t, "package main\n\n"+src+"\n", "run")
 	p := newMainPackage()
 	r := emit(t, c, p)
-	defs, hashed := addFull(t, r, p)
+	addFull(t, r, p)
 	caller := exitWrapper(t, goCmd, c.f.Sym, "run(200000, 0)", "")
-	out, err := runLinkedRaw(t, goCmd, tc, cfg, p, defs, hashed, caller)
-	if err == nil {
-		t.Fatalf("the program ran to completion, so stack maps have arrived and this test should assert 200000: %q", out)
+	// gccheckmark marks a second time with the world stopped and compares, so
+	// a frame the copier read with the wrong map is a crash here rather than a
+	// wrong answer somewhere else.
+	out, err := runLinkedEnv(t, goCmd, tc, cfg, p, caller, []string{"GODEBUG=gccheckmark=1"})
+	if err != nil {
+		t.Fatalf("the program failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "missing stackmap") {
-		t.Fatalf("the program failed for a reason other than the missing stack map:\n%s", out)
+	if got := strings.TrimSpace(out); got != "200000" {
+		t.Fatalf("the recursion printed %q, and it counts 200000 frames", got)
 	}
-	if n := strings.Count(out, "main.run()"); n < 3 {
-		t.Fatalf("the stack copier walked %d nanogo frames, so the pc-value table did not describe them:\n%s", n, out)
-	}
-	t.Logf("the growth check fired, morestack ran, and %d frames were walked before the missing stack map stopped it",
-		strings.Count(out, "main.run()"))
+	t.Logf("200000 frames were grown, copied and unwound")
 }
 
 // exitWrapper compiles the main package that calls the function under test and
@@ -831,7 +849,15 @@ func TestAddWritesTheAuxiliarySymbols(t *testing.T) {
 	if _, err := r.Add(p); err != nil {
 		t.Fatal(err)
 	}
-	want := []obj.AuxType{obj.AuxFuncInfo, obj.AuxPcsp, obj.AuxPcfile, obj.AuxPcline}
+	// gc's order, and the two FUNCDATA and two PCDATA entries are in the
+	// index order the runtime defines, because the position of an entry is
+	// its index.
+	want := []obj.AuxType{
+		obj.AuxFuncInfo,
+		obj.AuxFuncdata, obj.AuxFuncdata,
+		obj.AuxPcsp, obj.AuxPcfile, obj.AuxPcline,
+		obj.AuxPcdata, obj.AuxPcdata,
+	}
 	if len(r.Text.Aux) != len(want) {
 		t.Fatalf("%d auxiliary entries, want %d", len(r.Text.Aux), len(want))
 	}
@@ -844,7 +870,7 @@ func TestAddWritesTheAuxiliarySymbols(t *testing.T) {
 		}
 	}
 	// The object still has to be one the tools read.
-	path := writeObject(t, p, tc, nil, nil)
+	path := writeObject(t, p, tc)
 	out, err := exec.Command(goTool(t), "tool", "nm", "-size", path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("go tool nm rejected the object: %v\n%s", err, out)
@@ -1084,7 +1110,7 @@ func TestEmitterRejectsBadInput(t *testing.T) {
 	}
 
 	e = &emitter{opt: Options{Sym: "test.f"}}
-	e.slotOff(3)
+	e.slotOffset(3)
 	if e.err() == nil {
 		t.Error("a slot outside the frame was accepted")
 	}
@@ -1495,7 +1521,7 @@ func TestCallFailuresAreNamed(t *testing.T) {
 	e = newEmitter(f, 32)
 	wide := b.NewValue(0, ssa.OpARM64ADD, &ir.Type{Kind: ir.Int64, Size: 3, Align: 1})
 	e.a.Home[wide.ID] = ssa.SlotLoc(0)
-	e.frame.slot = []int64{8}
+	e.slotOff = []int64{8}
 	e.spill(wide)
 	if err := e.err(); err == nil || !strings.Contains(err.Error(), "no store") {
 		t.Errorf("a spill of three bytes gave %v", e.err())

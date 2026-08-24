@@ -51,6 +51,24 @@ import (
 // that the frame size does not include it. Both halves are true and together
 // they are misleading: the space is not in the frame that saves it, it is in
 // the frame of the function that frame calls.
+//
+// # Where Varp is, and why the layout has to know
+//
+// The collector scans the block [Varp - nbit*PtrSize, Varp), and Varp is not
+// this file's choice. The runtime computes it (runtime/traceback.go): the
+// frame pointer is the caller's stack pointer, which is newSP + size, and the
+// word below it is the caller's saved frame pointer, so
+//
+//	Varp = newSP + size - 8
+//	Argp = newSP + size + 8
+//
+// The layout of specs/027-liveness-and-stackmaps.md must therefore put the
+// top of the locals area one word below the top of the frame, and the group
+// of pointer-holding slots directly under it. ssa.FrameConfig says that with
+// SaveFP set and SaveRA clear: the reserved word above the locals is the
+// caller's frame pointer, and the link register is the first word of the
+// outgoing argument area rather than a word above the locals. layout builds
+// that configuration and checkFrame asserts the result.
 
 // The stack-growth thresholds of internal/abi/stack.go.
 //
@@ -100,10 +118,6 @@ type frame struct {
 	// outArgs is the size of the outgoing argument area, at the bottom of the
 	// frame. It is the largest argument area of any call this function makes.
 	outArgs int64
-
-	// slot is the offset of each spill slot from the new stack pointer,
-	// indexed as ssa.Alloc.Slots is.
-	slot []int64
 
 	// leaf reports that the function makes no call. Together with a small
 	// frame it is what lets the stack-growth check be skipped entirely.
@@ -203,13 +217,26 @@ func roundUp(n, align int64) int64 {
 	return (n + align - 1) / align * align
 }
 
-// layout computes the frame.
+// linkSlot is the word at the bottom of the frame that holds the saved link
+// register.
 //
-// Slot offsets are assigned here because ssa.Alloc carries sizes and no
-// offsets: specs/027-liveness-and-stackmaps.md lays the frame out after
-// allocation and owns the pointer-slot grouping that makes the stack map
-// short. This is the placement without that grouping, in slot order, and it
-// belongs to specs/027 the moment ssa exposes it.
+// specs/042-arm64-backend.md puts it there rather than above the locals, so it
+// is reserved as the first word of the outgoing argument area: the callee
+// reads its own arguments at its stack pointer plus this, which is the
+// runtime's MinFrameSize for this target.
+const linkSlot = 8
+
+// layout computes the frame, from ssa.LayoutFrame and from nothing else.
+//
+// specs/027-liveness-and-stackmaps.md owns the geometry, because the stack map
+// it builds describes words by their distance from Varp. A second placement
+// here would be a map that describes the wrong words, which is why this
+// function computes what ssa.FrameConfig cannot know and then reads the
+// answer back.
+//
+// What it computes is the target's part: which word the link register
+// occupies, how large the outgoing argument area is, and where the incoming
+// arguments are.
 func (e *emitter) layout() error {
 	f := &e.frame
 
@@ -232,55 +259,111 @@ func (e *emitter) layout() error {
 		}
 	}
 
-	// The body is the outgoing arguments, then the objects that live in the
-	// frame, then the spill slots. The link register slot is below all of
-	// them.
-	body := f.outArgs
-	// ssa.Func.Frame lists the objects that do not live in a value: the ones
-	// whose address is taken and the ones whose type is not held in one
-	// value. They are placed in declaration order, which is the order the
-	// list has, so the layout is the same on every run
-	// (specs/053-determinism.md).
-	for _, o := range e.f.Frame {
-		if o == nil || o.Type == nil {
-			return fmt.Errorf("a frame object has no type")
-		}
-		align := o.Type.Align
-		if align < 1 {
-			align = 1
-		}
-		body = roundUp(body, align)
-		e.frames[o] = 8 + body
-		body += o.Type.Size
+	items, err := ssa.FrameItems(e.a)
+	if err != nil {
+		return err
 	}
-	f.slot = make([]int64, len(e.a.Slots))
-	for i, s := range e.a.Slots {
-		align := s.Align
-		if align < 1 {
-			align = 1
-		}
-		body = roundUp(body, align)
-		f.slot[i] = 8 + body
-		body += s.Size
-	}
-	body = roundUp(body, 8)
 
-	if body == 0 && f.leaf {
-		// A leaf with nothing in its frame keeps the caller's stack pointer
-		// and never saves the link register. gc marks it NOFRAME.
-		f.size = 0
-	} else {
-		size := body + 8 // the link register slot
-		// The top of the frame holds the caller's saved frame pointer, and
-		// the stack pointer must stay 16-byte aligned.
-		if size%16 == 8 {
-			size += 8
-		} else {
-			size += 16
+	// A leaf with nothing in its frame keeps the caller's stack pointer and
+	// never saves the link register. gc marks it NOFRAME, and the runtime
+	// then reads Varp as the stack pointer itself, so the frame reserves no
+	// word above the locals either.
+	frameless := f.leaf && len(items) == 0
+	cfg := ssa.FrameConfig{
+		Align: 16,
+		// The link register sits at the bottom of the frame rather than
+		// above the locals, so SaveRA is false and the word is reserved
+		// inside the outgoing argument area instead.
+		SaveRA: false,
+		// SaveFP reserves the word at the top of the frame. It holds the
+		// *caller's* saved frame pointer, which the caller wrote below its
+		// own stack pointer before this frame existed, and the runtime
+		// excludes it from the locals: traceback.go computes
+		// varp = fp - PtrSize whenever the frame is not empty. A layout that
+		// did not reserve it would put a local where the caller's frame
+		// pointer is and would place Varp one word above where the collector
+		// looks.
+		SaveFP:   !frameless,
+		ArgsSize: f.args,
+	}
+	if !frameless {
+		cfg.OutArgs = linkSlot + f.outArgs
+	}
+	for i := range f.in {
+		cfg.Args = append(cfg.Args, ssa.FrameArg{
+			Name: fmt.Sprintf("arg%d", i),
+			Off:  f.in[i].off,
+			Type: f.in[i].typ,
+		})
+	}
+	fr, err := ssa.LayoutFrame(e.f, items, cfg)
+	if err != nil {
+		return err
+	}
+	e.items, e.fr = fr.Items, fr
+	f.size = fr.Size
+
+	if err := e.checkFrame(frameless); err != nil {
+		return err
+	}
+
+	// The offsets the generator emits are the layout's, read back by item
+	// rather than recomputed.
+	e.slotOff = make([]int64, len(e.a.Slots))
+	for i := range e.slotOff {
+		e.slotOff[i] = -1
+	}
+	for i := range e.items {
+		it := &e.items[i]
+		switch it.Kind {
+		case ssa.ItemSpill:
+			e.slotOff[it.Index] = it.Off
+		case ssa.ItemObject:
+			e.frames[it.Obj] = it.Off
 		}
-		f.size = size
 	}
 	f.nosplit = f.size == 0 || (f.leaf && f.size < stackSmall)
+	return nil
+}
+
+// checkFrame asserts that the frame the prologue will build is the frame the
+// layout described.
+//
+// specs/027-liveness-and-stackmaps.md states the obligation this discharges:
+// the runtime does not read the layout, it computes the block it scans from
+// Varp and the bitmap, so a frame whose Varp is elsewhere is scanned at the
+// wrong address with a bitmap that is internally consistent. The check is here
+// rather than in a comment because the two sides of it are computed by
+// different packages.
+func (e *emitter) checkFrame(frameless bool) error {
+	fr, size := e.fr, e.frame.size
+	if size%16 != 0 {
+		// The stack pointer must stay 16-byte aligned at every instruction.
+		return fmt.Errorf("the frame is %d bytes, which is not 16-byte aligned", size)
+	}
+	if frameless {
+		if size != 0 {
+			return fmt.Errorf("the function has nothing in its frame and the layout gave it %d bytes", size)
+		}
+		return nil
+	}
+	if size < 2*linkSlot {
+		return fmt.Errorf("the frame is %d bytes and holds the link register and the caller's frame pointer", size)
+	}
+	// varp = fp - PtrSize on this target, and fp is the caller's stack
+	// pointer, which is this frame's own plus its size.
+	if want := size - 8; fr.Varp != want {
+		return fmt.Errorf("the layout puts Varp at %d and the frame the prologue builds puts it at %d", fr.Varp, want)
+	}
+	if fr.LocalsBase < linkSlot {
+		return fmt.Errorf("the locals area starts at %d, over the saved link register at %d", fr.LocalsBase, linkSlot)
+	}
+	// The runtime reads the locals bitmap only when varp - sp is larger than
+	// the target's stack alignment (runtime/stkframe.go, getStackMap), so a
+	// pointer in a frame below that bound is a pointer it never scans.
+	if fr.LocalsBits > 0 && size-8 <= 16 {
+		return fmt.Errorf("%d pointer words live in a frame of %d bytes, which the runtime does not scan", fr.LocalsBits, size)
+	}
 	return nil
 }
 
@@ -454,6 +537,22 @@ func (e *emitter) constInto(dst arm64.Reg, v int64) {
 // epilogue tears the frame down and returns.
 func (e *emitter) epilogue() {
 	f := &e.frame
+	at := int64(e.pc())
+	defer func() {
+		if f.size == 0 {
+			// Nothing was torn down, because there was no frame. A function
+			// that never moves the stack pointer has no range where its frame
+			// is half gone.
+			return
+		}
+		// The teardown is a range no asynchronous preemption may stop in: the
+		// frame is gone from the stack pointer's point of view before the
+		// return is taken, and specs/027-liveness-and-stackmaps.md marks such
+		// a range rather than describing it. A function has one teardown per
+		// return, so this is a range of its own rather than the single
+		// EpilogueStart the pc-value builder also accepts.
+		e.unsafe = append(e.unsafe, ssa.PCRange{Lo: at, Hi: int64(e.pc())})
+	}()
 	if f.size != 0 {
 		e.memIf(arm64.MemUnscaled, arm64.LoadX, arm64.RegFramePtr, arm64.RSP, -8)
 		if f.size <= maxPreIndex {
@@ -495,9 +594,14 @@ func (e *emitter) growstack() {
 		e.argSpill(p, true)
 	}
 	e.word(arm64.MovRegReg(arm64.Size64, arm64.R3, arm64.RegLink))
-	e.call(e.pc(), morestack)
-	w, ok := arm64.Bl(0)
-	e.wordIf(w, ok, "BL runtime.morestack_noctxt")
+	c, ok := morestackCallee()
+	if !ok {
+		e.fail("%s is not in rtsym, so the stack-growth tail has no callee", morestackName)
+		return
+	}
+	e.call(e.pc(), c)
+	w, wok := arm64.Bl(0)
+	e.wordIf(w, wok, "BL %s", c.name)
 	for _, p := range e.frame.in {
 		if !p.inReg {
 			continue
@@ -507,6 +611,10 @@ func (e *emitter) growstack() {
 	// Re-execute the function. The check runs again with the larger stack and
 	// falls through this time.
 	e.branchToPC(0)
+	// The whole tail is unsafe, which specs/042-arm64-backend.md states: the
+	// arguments are in flight between their registers and the argument area,
+	// and the tail re-enters the function from its first instruction.
+	e.unsafe = append(e.unsafe, ssa.PCRange{Lo: int64(e.growPC), Hi: int64(e.pc())})
 }
 
 // argSpill stores an argument register to its slot in the argument area, or
