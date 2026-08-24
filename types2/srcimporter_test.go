@@ -74,14 +74,34 @@ func (imp *srcImporter) ImportFrom(path, dir string, _ ImportMode) (*Package, er
 	return pkg, err
 }
 
+// srcContext is the build context the source importer resolves packages in.
+//
+// CgoEnabled is false, and that is not a convenience. build.Default follows the
+// ambient CGO_ENABLED, so on a machine where cgo is on, `net` resolves to its
+// cgo files and cannot be type-checked from source at all, while on a machine
+// where cgo is off the same import succeeds. A test whose corpus depends on the
+// host's cgo setting passes locally and fails on CI, which is exactly what it
+// did.
+//
+// Disabling cgo is also nanogo's own configuration, by specs/000-decisions.md
+// decision 8, so this context is the one the compiler will actually use rather
+// than a setting chosen to make a test pass.
+func srcContext() build.Context {
+	ctxt := build.Default
+	ctxt.CgoEnabled = false
+	return ctxt
+}
+
 func (imp *srcImporter) load(path, dir string) (*Package, error) {
-	bp, err := build.Import(path, dir, 0)
+	ctxt := srcContext()
+	bp, err := ctxt.Import(path, dir, 0)
 	if err != nil {
 		return nil, err
 	}
 	if len(bp.CgoFiles) > 0 {
-		// A cgo package needs the generated _cgo_gotypes.go, which only the
-		// go command can produce. specs/014-package-loader.md owns that.
+		// Unreachable while srcContext disables cgo, and kept because the
+		// alternative to an explicit refusal is a package that type-checks
+		// with its cgo declarations missing.
 		return nil, fmt.Errorf("cannot import %q from source: it uses cgo", path)
 	}
 	if len(bp.GoFiles) == 0 {
