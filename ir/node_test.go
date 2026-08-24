@@ -40,6 +40,7 @@ func TestGoSpecificSetIsTheLoweringTable(t *testing.T) {
 		ORange, OTypeAssert, OTypeSwitch, OClosure, ODefer, OGo, OSend, ORecv,
 		OMake, OAppend, OCopy, ODelete, OPanic, ORecover, OLen, OCap, ONew,
 		OComplex, OReal, OImag, OClear, OMin, OMax, OSelect,
+		OCompositeLit, OSlice, OClose, OPrint, OPrintln,
 	}
 	for _, op := range mustLower {
 		if !op.IsGoSpecific() {

@@ -63,6 +63,19 @@ const (
 	// Void is the type of an expression with no value, and of a function with
 	// no results. It has size zero and no pointers.
 	Void
+
+	// Tuple is the type of a multi-value expression: a call with several
+	// results, or a two-value map read, type assertion or channel receive.
+	//
+	// It is not a Go type and no variable has one. It exists because such an
+	// expression still needs a type at this boundary, and the alternative is a
+	// nil type that every consumer must special-case.
+	//
+	// Its layout is a struct's and is deliberately NOT the result layout of
+	// specs/030-abi.md. Results are assigned to registers and the stack by the
+	// calling convention, not by struct packing, and reading a tuple's field
+	// offsets as an ABI answer would be wrong. Fields carry the components.
+	Tuple
 )
 
 var kindNames = [...]string{
@@ -92,6 +105,7 @@ var kindNames = [...]string{
 	FuncKind:   "func",
 	Interface:  "interface",
 	Void:       "void",
+	Tuple:      "tuple",
 }
 
 func (k Kind) String() string {
@@ -237,7 +251,7 @@ func layout(t *Type, inProgress map[*Type]bool) error {
 		t.PtrBits = arrayPtrBits(t.Elem, t.Len)
 		return nil
 
-	case Struct:
+	case Struct, Tuple:
 		return layoutStruct(t, inProgress)
 	}
 
@@ -421,6 +435,17 @@ func (t *Type) string(depth int) string {
 		return fmt.Sprintf("map[%s]%s", t.Key.string(depth+1), t.Elem.string(depth+1))
 	case Chan:
 		return "chan " + t.Elem.string(depth+1)
+	case Tuple:
+		var b strings.Builder
+		b.WriteString("(")
+		for i, f := range t.Fields {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(f.Type.string(depth + 1))
+		}
+		b.WriteString(")")
+		return b.String()
 	case Struct:
 		var b strings.Builder
 		b.WriteString("struct{")

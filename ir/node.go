@@ -91,58 +91,74 @@ const (
 	OCase   // one clause of an OSwitch or OSelect; Args are the case
 	//	expressions and no Args means default
 
+	// Also added after the fact, and for a sharper reason: without them the
+	// builder encoded a composite literal as ONew, a slice expression as
+	// OIndex with extra Args, and close/print/println as calls to function
+	// objects it invented. Each of those is a workaround, and a workaround in
+	// the IR is a lie that every later pass has to be told about.
+	OCompositeLit // T{...}; Args are the elements, Type is T
+	OSlice        // X[lo:hi] and X[lo:hi:max]; Args are the three bounds, any nil
+	OClose        // close(X)
+	OPrint        // print(Args...)
+	OPrintln      // println(Args...)
+
 	opCount
 )
 
 var opNames = [...]string{
-	OpInvalid:   "invalid",
-	OConst:      "const",
-	OLocal:      "local",
-	OGlobal:     "global",
-	OField:      "field",
-	OIndex:      "index",
-	ODeref:      "deref",
-	OAddr:       "addr",
-	OUnary:      "unary",
-	OBinary:     "binary",
-	OCompare:    "compare",
-	OConvert:    "convert",
-	OCall:       "call",
-	OIf:         "if",
-	OFor:        "for",
-	OSwitch:     "switch",
-	OSelect:     "select",
-	OBlock:      "block",
-	OGoto:       "goto",
-	OLabel:      "label",
-	OReturn:     "return",
-	OBreak:      "break",
-	OContinue:   "continue",
-	ORange:      "range",
-	OTypeAssert: "typeassert",
-	OTypeSwitch: "typeswitch",
-	OClosure:    "closure",
-	ODefer:      "defer",
-	OGo:         "go",
-	OSend:       "send",
-	ORecv:       "recv",
-	OMake:       "make",
-	OAppend:     "append",
-	OCopy:       "copy",
-	ODelete:     "delete",
-	OPanic:      "panic",
-	ORecover:    "recover",
-	OLen:        "len",
-	OCap:        "cap",
-	ONew:        "new",
-	OComplex:    "complex",
-	OReal:       "real",
-	OImag:       "imag",
-	OClear:      "clear",
-	OMin:        "min",
-	OMax:        "max",
-	OAssign:     "assign",
-	OCase:       "case",
+	OpInvalid:     "invalid",
+	OConst:        "const",
+	OLocal:        "local",
+	OGlobal:       "global",
+	OField:        "field",
+	OIndex:        "index",
+	ODeref:        "deref",
+	OAddr:         "addr",
+	OUnary:        "unary",
+	OBinary:       "binary",
+	OCompare:      "compare",
+	OConvert:      "convert",
+	OCall:         "call",
+	OIf:           "if",
+	OFor:          "for",
+	OSwitch:       "switch",
+	OSelect:       "select",
+	OBlock:        "block",
+	OGoto:         "goto",
+	OLabel:        "label",
+	OReturn:       "return",
+	OBreak:        "break",
+	OContinue:     "continue",
+	ORange:        "range",
+	OTypeAssert:   "typeassert",
+	OTypeSwitch:   "typeswitch",
+	OClosure:      "closure",
+	ODefer:        "defer",
+	OGo:           "go",
+	OSend:         "send",
+	ORecv:         "recv",
+	OMake:         "make",
+	OAppend:       "append",
+	OCopy:         "copy",
+	ODelete:       "delete",
+	OPanic:        "panic",
+	ORecover:      "recover",
+	OLen:          "len",
+	OCap:          "cap",
+	ONew:          "new",
+	OComplex:      "complex",
+	OReal:         "real",
+	OImag:         "imag",
+	OClear:        "clear",
+	OMin:          "min",
+	OMax:          "max",
+	OAssign:       "assign",
+	OCase:         "case",
+	OCompositeLit: "compositelit",
+	OSlice:        "slice",
+	OClose:        "close",
+	OPrint:        "print",
+	OPrintln:      "println",
 }
 
 func (o Op) String() string {
@@ -162,6 +178,8 @@ var goSpecificOps = map[Op]bool{
 	OAppend: true, OCopy: true, ODelete: true, OPanic: true, ORecover: true,
 	OLen: true, OCap: true, ONew: true, OComplex: true, OReal: true,
 	OImag: true, OClear: true, OMin: true, OMax: true, OSelect: true,
+	OCompositeLit: true, OSlice: true,
+	OClose: true, OPrint: true, OPrintln: true,
 }
 
 // IsGoSpecific reports whether o is a construct that must be lowered away.

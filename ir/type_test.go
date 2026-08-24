@@ -407,3 +407,37 @@ func TestStringOnACyclicTypeTerminates(t *testing.T) {
 		t.Errorf("a cyclic pointer printed %q", s)
 	}
 }
+
+// TestTupleLayout covers the kind that exists because a multi-value expression
+// still needs a type at this boundary.
+//
+// The layout is a struct's. It is deliberately not the result layout of
+// specs/030-abi.md: results go to registers and the stack by the calling
+// convention, so reading a tuple's offsets as an ABI answer would be wrong.
+func TestTupleLayout(t *testing.T) {
+	tup := &Type{Kind: Tuple, Fields: []Field{
+		field("", scalar(Int64)),
+		field("", ptrTo(scalar(Int8))),
+		field("", scalar(Bool)),
+	}}
+	mustLayout(t, tup)
+
+	if got, want := tup.Size, int64(24); got != want {
+		t.Errorf("size %d, want %d", got, want)
+	}
+	if got, want := tup.Fields[1].Offset, int64(8); got != want {
+		t.Errorf("the second component is at %d, want %d", got, want)
+	}
+	// The pointer component must appear in the pointer map, or a live result
+	// held in a tuple is invisible to the collector.
+	if !tup.HasPointers() || tup.PtrBytes() != 16 {
+		t.Errorf("PtrBytes %d, HasPointers %v", tup.PtrBytes(), tup.HasPointers())
+	}
+
+	if got, want := tup.String(), "(int64, *int8, bool)"; got != want {
+		t.Errorf("printed %q, want %q", got, want)
+	}
+	if got, want := (&Type{Kind: Tuple}).String(), "()"; got != want {
+		t.Errorf("an empty tuple printed %q, want %q", got, want)
+	}
+}
