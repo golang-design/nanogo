@@ -116,6 +116,11 @@ func TestTableMatchesTheRuntime(t *testing.T) {
 
 	var missing, differs int
 	for _, s := range All() {
+		if s.Assembly {
+			// No Go declaration exists to compare against.
+			// TestAssemblySymbolsExist checks these instead.
+			continue
+		}
 		got, ok := sigs[s.Base()]
 		if !ok {
 			// A symbol implemented only in assembly has no Go declaration in
@@ -218,4 +223,55 @@ func TestGroupStrings(t *testing.T) {
 	if got := GroupInvalid.String(); got != "invalid" {
 		t.Errorf("GroupInvalid prints %q", got)
 	}
+}
+
+// TestAssemblySymbolsExist checks the symbols that have no Go declaration.
+//
+// runtime.morestack_noctxt is written in assembly, so the signature check
+// above has nothing to read. What can still be checked is that the symbol is
+// defined, and that is worth checking: the function prologue calls it on every
+// non-leaf function, so a rename would break every compiled program at link
+// time with an error naming a symbol nobody wrote by hand.
+func TestAssemblySymbolsExist(t *testing.T) {
+	dir := filepath.Join(runtime.GOROOT(), "src", "runtime")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.Getenv("NANOGO_REQUIRE_CORPUS") == "1" {
+			t.Fatalf("NANOGO_REQUIRE_CORPUS=1 and the runtime source could not be read: %v", err)
+		}
+		t.Skip("no runtime source under GOROOT")
+	}
+
+	var asm strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".s") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		asm.Write(b)
+	}
+	if asm.Len() == 0 {
+		t.Skip("no runtime assembly found")
+	}
+	text := asm.String()
+
+	n := 0
+	for _, s := range All() {
+		if !s.Assembly {
+			continue
+		}
+		n++
+		// A TEXT directive names the symbol with the middle dot that Plan 9
+		// assembly uses for the package separator.
+		if !strings.Contains(text, "·"+s.Base()+"(SB)") {
+			t.Errorf("%s is not defined in the runtime's assembly", s.Name)
+		}
+	}
+	if n == 0 {
+		t.Error("no assembly symbol was checked; the table lost its Assembly entries")
+	}
+	t.Logf("checked %d assembly symbols", n)
 }

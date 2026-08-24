@@ -739,3 +739,42 @@ func TestDeterminismAcrossProcesses(t *testing.T) {
 	}
 	t.Logf("compared %d objects of %d bytes written in other processes", n, len(here))
 }
+
+// TestAnonymousSymbol covers the format requirement that an auxiliary payload
+// carries no name.
+//
+// cmd/link decides whether a symbol takes part in the data layout by asking
+// whether it has a name. A named pc-value table is therefore placed into the
+// read-only section, its offset in runtime.pctab is overwritten by that
+// placement, and the linker faults writing the table. The writer used to reject
+// every empty name, which made the requirement unexpressible and forced its
+// first consumer to clear the name lengths in the written bytes afterwards.
+func TestAnonymousSymbol(t *testing.T) {
+	// An unnamed symbol that does not say so is still a mistake.
+	if err := checkSym(&Symbol{Type: SRODATA}); err == nil {
+		t.Error("an unnamed symbol was accepted without Anonymous set")
+	}
+
+	// One that says so is accepted.
+	aux := &Symbol{Type: SRODATA, Anonymous: true, Pcdata: true, Size: 4, Data: []byte{1, 2, 3, 4}}
+	if err := checkSym(aux); err != nil {
+		t.Errorf("an anonymous auxiliary symbol was rejected: %v", err)
+	}
+
+	// And it round-trips through a written object with an empty name, which is
+	// the property the linker reads.
+	p := NewPackage("example.com/x")
+	text := &Symbol{Name: "example.com/x.f", Type: STEXT, Size: 4, Data: []byte{0xc0, 0x03, 0x5f, 0xd6}}
+	pc := &Symbol{Type: SRODATA, Anonymous: true, Pcdata: true, Size: 2, Data: []byte{0x02, 0x00}}
+	ref := p.AddDef(pc)
+	text.Aux = []Aux{{Type: AuxPcsp, Sym: ref}}
+	p.AddDef(text)
+
+	b, err := p.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	if len(b) == 0 {
+		t.Fatal("the object is empty")
+	}
+}

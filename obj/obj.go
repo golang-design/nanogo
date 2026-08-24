@@ -307,6 +307,21 @@ type Symbol struct {
 	// pc-value table from merging with read only data that happens to hold
 	// the same bytes.
 	Pcdata bool
+
+	// Anonymous states that the symbol is an auxiliary payload and must be
+	// written with no name.
+	//
+	// This is the format's requirement, not a preference. cmd/link's loader
+	// decides whether a symbol takes part in the data layout by asking whether
+	// it has a name, so a *named* pc-value table is placed into the read-only
+	// section, its offset in runtime.pctab is overwritten by that placement,
+	// and the linker faults while writing the table.
+	//
+	// The field exists rather than inferring intent from an empty name,
+	// because forgetting to name a real symbol and deliberately not naming an
+	// auxiliary one produce the same empty string, and only one of them is a
+	// bug. The caller says which.
+	Anonymous bool
 }
 
 // An ImportedPkg is one Autolib entry: a package this one imports, with

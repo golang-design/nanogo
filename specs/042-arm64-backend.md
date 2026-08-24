@@ -75,10 +75,43 @@ that tests whether the middle end is genuinely target-neutral.
     RET   (R30)
 growstack:
     ... spill argument registers ...
+    MOVD  R30, R3               // morestack reads the caller's return address here
     CALL  runtime.morestack_noctxt(SB)
     ... restore ...
     JMP   0                     // re-execute the function
 ```
+
+The `MOVD R30, R3` is a correction. `runtime.morestack` reads the caller's
+return address from R3, which `runtime/asm_arm64.s` states in a comment on the
+entry point, and an earlier version of this listing omitted it. The order is
+load-bearing too: R3 is also the fourth argument register, so the arguments are
+saved before it is overwritten.
+
+### The prologue has four forms, not one
+
+The listing above is the form for a mid-sized frame. The guard comparison has
+three forms and the frame push has two, because both depend on how large the
+frame is against an immediate range:
+
+| Frame size | Guard | Push |
+| --- | --- | --- |
+| within 128 bytes | `CMP` against the guard | `MOVD.W` |
+| up to 4096 bytes | `SUB` then `CMP` | `MOVD.W` up to 240 bytes |
+| beyond 4096 bytes | `SUBS`, `BLO`, then `CMP` | `SUB` then `MOVD` |
+
+A test that checks only one frame size checks one of them. The emitter compares
+all four against `go tool asm` at nine frame sizes, and a frame whose size and
+whose size minus 128 both fall outside the 12-bit immediate forms uses the R27
+expansion.
+
+### The reserved words at the top of a frame
+
+The 8 or 16 bytes at the top of a frame hold the **caller's** saved frame
+pointer, not this function's. Without them a call overwrites it. So the locals
+area is the frame size less that reservation, and the incoming argument area
+starts at SP+8 rather than at SP. An earlier version of this spec described the
+saved frame pointer in a way that read as though the reservation were this
+frame's own.
 
 Three details are load-bearing and are stated because they are easy to lose.
 All three were found by writing the encoder, and the first two mean an earlier

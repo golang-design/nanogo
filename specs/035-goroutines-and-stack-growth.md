@@ -37,6 +37,11 @@ Three requirements follow:
 2. **The morestack tail must save and restore the argument registers.** The
    function will be re-executed, so its arguments must be intact.
    [030](030-abi.md)'s argument spill space exists for this.
+   It must also **pass the caller's return address in R3** on `arm64`, which
+   `runtime.morestack` reads and `runtime/asm_arm64.s` documents at its entry
+   point. The order matters: R3 is the fourth argument register, so the
+   arguments are saved before it is overwritten. An earlier version of this
+   spec and of [042](042-arm64-backend.md) omitted the move entirely.
 3. **The prologue and the tail are unsafe points.** The frame is not established.
    `PCDATA $PCDATA_UnsafePoint` marks them, per
    [027](027-liveness-and-stackmaps.md).

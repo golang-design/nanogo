@@ -43,6 +43,15 @@ type Sym struct {
 	// values alive across every bounds check in the program.
 	NoReturn bool
 
+	// Assembly marks a symbol with no Go declaration.
+	//
+	// The prologue calls runtime.morestack_noctxt, which exists only in
+	// runtime/asm_<arch>.s. Its signature cannot be read from Go source, so
+	// the table records what the compiler calls it with and a separate test
+	// checks the symbol is defined in the assembly rather than checking a
+	// signature that no source states.
+	Assembly bool
+
 	// Group is what the symbol is for, so that a reader can find the family
 	// rather than the name.
 	Group Group
@@ -137,6 +146,10 @@ var syms = []Sym{
 
 	// Goroutines and defer.
 	{Name: "runtime.newproc", Sig: "func(*funcval)", Group: GroupGoroutine},
+	// morestack_noctxt has no Go declaration: it is written in assembly, so
+	// the table records the signature it is called with rather than one the
+	// checker can read. TestAssemblySymbolsExist is what keeps it honest.
+	{Name: "runtime.morestack_noctxt", Sig: "func()", Assembly: true, Group: GroupGoroutine},
 	{Name: "runtime.deferproc", Sig: "func(func())", Group: GroupDefer},
 	{Name: "runtime.deferreturn", Sig: "func()", Group: GroupDefer},
 

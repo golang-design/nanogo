@@ -114,9 +114,26 @@ already ordered, and a divergent hash for an itab is exactly the pointer
 identity failure [032](032-type-descriptors-and-itabs.md) describes. The order
 is the emission order, and a test locks it.
 
-**A TEXT symbol without `AuxFuncInfo` crashes the linker.** `cmd/link` panics in
-its DWARF pass with no diagnostic. The aux symbol is mandatory for a TEXT
-symbol, not optional.
+**A TEXT symbol needs four auxiliary symbols, not one.** `AuxFuncInfo`,
+`AuxPcsp`, `AuxPcfile` and `AuxPcline` are all mandatory. Without `AuxFuncInfo`
+the symbol belongs to no compilation unit and `cmd/link` panics in its DWARF
+pass with no diagnostic; without the other three, `generatePctab` calls
+`SymSize` on an unchecked index and faults on symbol 0. An earlier version of
+this spec named only the first.
+
+**An auxiliary symbol must be unnamed.** `cmd/link`'s loader decides whether a
+symbol takes part in the data layout by asking whether it has a name, so a
+*named* pc-value table is placed into the read-only section, its offset in
+`runtime.pctab` is overwritten by that placement, and the linker faults while
+writing the table. The writer expresses this with an explicit flag rather than
+by inferring intent from an empty name, because forgetting to name a real
+symbol and deliberately not naming an auxiliary one produce the same empty
+string and only one of them is a bug.
+
+**`AuxFuncInfo` must be a plain definition in this package's index space**, not
+a content-addressable one. `cmd/link` reads it at the symbol index the
+auxiliary entry names without resolving which index space that is, so a hashed
+definition returns another symbol's bytes.
 
 This is the mechanism [032](032-type-descriptors-and-itabs.md)'s canonical
 naming feeds. Names make two symbols *nominally* the same; hashing makes them

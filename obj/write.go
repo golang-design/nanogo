@@ -623,8 +623,8 @@ func (p *Package) checkRef(r SymRef) error {
 }
 
 func checkSym(s *Symbol) error {
-	if s.Name == "" {
-		return errors.New("obj: symbol with empty name")
+	if s.Name == "" && !s.Anonymous {
+		return errors.New("obj: symbol with empty name; use Anonymous for an auxiliary symbol")
 	}
 	if float64(s.Size) > MaxSymSize {
 		return fmt.Errorf("obj: %s: symbol too large: %d bytes, the limit is %d", s.Name, s.Size, int64(MaxSymSize))
