@@ -9,14 +9,16 @@
   <a href="https://github.com/golang-design/nanogo/actions/workflows/ci.yml"><img src="https://github.com/golang-design/nanogo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg" alt="License: BSD-3-Clause"></a>
   <img src="https://img.shields.io/badge/go-1.27+-00ADD8.svg" alt="Go 1.27+">
-  <img src="https://img.shields.io/badge/status-specs%20only-orange.svg" alt="Status: specs only">
+  <img src="https://img.shields.io/badge/status-early-orange.svg" alt="Status: early">
 </p>
 
 ---
 
 > [!IMPORTANT]
-> **No compiler exists yet.** This repository holds a design spec deck and two
-> spikes. Nothing compiles anything. Do not depend on this.
+> **nanogo cannot compile a program yet.** The front end, the type checker, the
+> object writer and the arm64 encoder are built and gated. The middle of the
+> compiler, from the typed tree down through SSA to code generation, is not.
+> Do not depend on this.
 
 nanogo is a compiler for the Go language as defined by the
 [Go language specification](https://go.dev/ref/spec). It is small on purpose: the
@@ -68,11 +70,39 @@ Some decisions worth knowing before reading further:
   the guarantee arrives with the forked checker.
   [`specs/013`](specs/013-generics.md)
 
+## What is built
+
+Every package is gated against an external oracle rather than against itself.
+That is the point: a compiler's bugs are invisible in its own output.
+
+| Package | Coverage | What proves it |
+| --- | --- | --- |
+| [`syntax`](syntax/) | 99% | 19,674 files agree with `go/scanner` on tokens and positions; 16,293 agree with `go/parser` on accept, reject and first error |
+| [`types2`](types2/) | see below | a fork of the Go type checker, re-pointed at nanogo's tree: 613 subtests, a 375-package errorcheck corpus, and it type-checks nanogo's own source |
+| [`loader`](loader/) | 99% | 6,821 files on two platforms agree with `go/build`; 467 packages agree with `go list` |
+| [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
+| [`obj/arm64`](obj/arm64/) | 99% | 864,092 encodings agree with `go tool asm`, with none disagreeing |
+| [`ir`](ir/) | 99% | type layout agrees with `reflect` and with the compiler |
+| [`driver`](driver/) | 97% | a real `go build -toolexec` completes |
+
+`types2` is excluded from the coverage gate, with the reason recorded in
+[`internal/covercheck/exclusions.txt`](internal/covercheck/exclusions.txt): it
+is a fork, and the gate that replaces coverage is upstream's own test suite,
+ported with the sources.
+
+**Not built:** the IR builder, SSA construction, lowering, register allocation,
+liveness and stack maps. That is the middle of the compiler and it is what
+stands between here and a program that runs.
+
 ## Specs
 
-[`specs/`](specs/) is the design deck: 41 specs, all `draft`, nothing built.
-Start with [`specs/000-decisions.md`](specs/000-decisions.md), which is normative,
-then [`specs/003-sequencing.md`](specs/003-sequencing.md) for the order of work.
+[`specs/`](specs/) is the design deck: 41 specs. Start with
+[`specs/000-decisions.md`](specs/000-decisions.md), which is normative, then
+[`specs/003-sequencing.md`](specs/003-sequencing.md) for the order of work.
+
+The specs are corrected by the code rather than defended against it. Roughly
+thirty defects have been found by implementing them, and each correction says
+what was wrong and how it was found.
 
 ## Spikes
 
