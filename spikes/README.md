@@ -1,15 +1,20 @@
 # spikes
 
 Small experiments that answer a question a spec depends on. Each one is kept
-because a normative decision cites it. They are separate modules, are not part
-of `golang.design/x/nanogo`, and are not built by CI.
+because a normative decision cites it. They are separate modules and are not
+part of `golang.design/x/nanogo`.
+
+CI runs all three on `macos-latest`, because a decision that rests on a
+measurement is only as good as the measurement, and a spike that nobody runs
+stops reproducing without saying so. Two of them are `darwin/arm64` assembly,
+so that is the runner they need.
 
 Run a spike from its own directory with the `go` tool of the day.
 
 | Spike | Question | Answer |
 | --- | --- | --- |
 | [`stackmap`](stackmap) | Can text Plan 9 assembly express per-PC GC stack maps? | Yes. See [`specs/040-object-format.md`](../specs/040-object-format.md). |
-| [`symbolnames`](symbolnames) | Can text Plan 9 assembly define the symbol names the compiler and linker use? | No. Names that contain `:` are rejected. |
+| [`symbolnames`](symbolnames) | Can text Plan 9 assembly define the symbol names the compiler and linker use? | No. Names that contain `:` are rejected. See [`symbolnames/README.md`](symbolnames/README.md). |
 | [`toolexec`](toolexec) | Can a foreign compiler be substituted per package by `go build -toolexec`, and with which flags? | Yes. See [`specs/051-build-integration.md`](../specs/051-build-integration.md); the flag set is larger than `-h` suggests. |
 
 ## stackmap
@@ -36,12 +41,18 @@ assembly declared.
 hold a relocation to another symbol, which is what a type descriptor or an itab
 needs.
 
-`s2_arm64.s` does not assemble:
+`s2_arm64.s.txt` does not assemble:
 
 ```
-./s2_arm64.s:2: expect two operands for DATA
-./s2_arm64.s:3: expect two or three operands for GLOBL
+s2_arm64.s:2: expect two operands for DATA
+s2_arm64.s:3: expect two or three operands for GLOBL
 ```
+
+It carries a `.txt` suffix because its value is the failure. Under a `.s`
+suffix the two files sit in one package and `go build ./...` in that directory
+fails, which would take the working half of the spike down with it. CI copies
+it to a temporary directory as `s2_arm64.s` and asserts that `go tool asm`
+rejects it, so the failure is checked rather than remembered.
 
 The name is `type:main.Obj`. The assembler lexer stops at the colon. The
 compiler and the linker both use that namespace: `type:*`, `go:itab.*`,

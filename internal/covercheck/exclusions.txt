@@ -1,0 +1,17 @@
+# Packages that are reported but not gated.
+#
+# An entry here is a debt with a name on it. It says that a package ships below
+# the coverage gate and that somebody decided this on purpose, so the reason is
+# mandatory and covercheck rejects an entry without one. "hard to test" is not
+# a reason; "the darwin/arm64 encoder path needs a device, and the table it
+# drives is checked by golden files instead" is.
+#
+# Format, one package per line:
+#
+#	golang.design/x/nanogo/internal/thing  # why the gate is off, and what replaces it
+#
+# The number is still printed for an excluded package on every run. An
+# exclusion removes the gate, never the measurement.
+#
+# There are no entries. Adding the first one is a review conversation, not a
+# commit.

@@ -1,4 +1,36 @@
+# Copyright 2026 The golang.design Initiative Authors.
+# All rights reserved. Use of this source code is governed by
+# a BSD-style license that can be found in the LICENSE file.
+
 name: ci
+
+# The gates a compiler needs are not the gates a library needs, so this file is
+# shaped by specs/000-decisions.md rather than by habit.
+#
+# Three of the jobs here guard a claim the deck makes rather than a bug a test
+# would find:
+#
+#   determinism  decision 7 and specs/053-determinism.md. G1 is defined as a
+#                byte-identical fixed point, so non-determinism does not weaken
+#                that gate, it removes it, and it removes it in a way that
+#                looks like a miscompile.
+#   spikes       decisions 3 and 11 are taken against measured evidence, and
+#                the evidence is three spike programs. A decision that rests on
+#                a measurement is only as good as the measurement, so the
+#                measurement runs on every commit.
+#   vanity       the module path is the project's identity in every import,
+#                every doc link, and the pkg.go.dev badge.
+#
+# Windows is absent on purpose. Decision 9 names darwin/arm64 first and
+# linux/amd64 second, and there is no third target in the deck. A windows
+# runner would gate a platform nobody promised, and a red gate on an unpromised
+# platform teaches people to ignore red gates.
+#
+# CGO_ENABLED is not pinned globally, unlike the sibling accel repository.
+# Decision 8 puts cgo out of scope as a compiler input feature, which is a
+# statement about what nanogo compiles, not about how nanogo itself is built.
+# The race detector needs cgo, and nothing in the deck says this build must not
+# have it.
 
 on:
   push:
@@ -6,18 +38,300 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
-  build:
-    name: Build
-    runs-on: ubuntu-latest
+  test:
+    name: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # fail-fast would hide a failure that happens on one runner only, which
+      # is the failure this matrix exists to find.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-go@v5
+    - uses: actions/checkout@v5
+
+    - uses: actions/setup-go@v6
       with:
-        go-version: ^1.27
+        go-version: '1.27.x'
+        check-latest: true
+
+    - name: Build
+      run: go build ./...
 
     - name: Vet
       run: go vet ./...
 
     - name: Test
-      run: go test -race -v ./...
+      run: go test ./...
+
+    # Run twice, without and then with the detector. A data race can change
+    # the answer rather than crash, and a compiler that compiles functions
+    # concurrently (specs/002-architecture.md) is exactly the program where a
+    # race reads as a miscompile. The plain run stays because the detector
+    # changes timing enough to hide a bug the ordinary schedule shows.
+    - name: Test under the race detector
+      run: go test -race ./...
+
+  gofmt:
+    name: gofmt
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.27.x'
+        check-latest: true
+
+    # gofmt -l over the whole tree, spikes included. They are separate modules,
+    # so no build here reaches them, and unformatted source in them would live
+    # forever.
+    - name: Check formatting
+      run: |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "::error::these files are not gofmt'd:"
+          echo "$unformatted"
+          exit 1
+        fi
+        echo "all files formatted"
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.27.x'
+        check-latest: true
+
+    # -coverpkg=./... measures every package from every test binary, so a
+    # package tested only through its caller gets the credit it earned. The
+    # cost is duplicate blocks, one per binary, which the gate merges.
+    - name: Measure
+      run: go test -coverprofile=cover.out -coverpkg=./... ./...
+
+    # Per package, never one repository average. An average lets a well-tested
+    # package carry an untested one and reports a number nobody can act on:
+    # "the repository is at 91%" does not name the package to test next. The
+    # exclusions file is empty, and an entry in it needs a written reason,
+    # because an exclusion is a debt with a name on it.
+    - name: Gate
+      run: go run ./internal/covercheck -profile=cover.out -v
+
+    # Uploaded even when the gate fails, because the profile is how the author
+    # finds the uncovered lines.
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: coverage-profile
+        path: cover.out
+
+  determinism:
+    name: determinism
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.27.x'
+        check-latest: true
+
+    # This is a placeholder, and saying so is the point.
+    #
+    # What it checks today is what the repository produces today, which is
+    # cmd/nanogo and the internal commands, built by gc. That is a weak claim:
+    # it gates the toolchain's determinism and the build's freedom from path
+    # leaks, not nanogo's. The real checks are the table in
+    # specs/053-determinism.md, and every one of them needs a compiler that
+    # does not exist yet: compile every package twice in one process, compile
+    # in two processes with different working directories, compile with -c 1
+    # and with -c 8, and finally the G1 fixed point N2 = N3.
+    #
+    # It is here now for two reasons. The second build runs from a different
+    # absolute path, which is the check specs/053-determinism.md singles out as
+    # the one most often omitted, and it is the check that finds a leaked
+    # working directory. And the day cmd/nanogo starts emitting object files,
+    # this job compares them without an edit, because it compares every binary
+    # the module produces.
+    - name: Build twice from two different directories
+      run: |
+        set -eu
+        second="$RUNNER_TEMP/second"
+        out1="$RUNNER_TEMP/out1"
+        out2="$RUNNER_TEMP/out2"
+        mkdir -p "$second" "$out1" "$out2"
+        # Copied outside the workspace, or cp would recurse into its own copy.
+        cp -a . "$second"
+
+        go build -trimpath -o "$out1/" ./...
+        cd "$second" && go build -trimpath -o "$out2/" ./...
+
+    - name: Compare the bytes
+      run: |
+        set -eu
+        out1="$RUNNER_TEMP/out1"
+        out2="$RUNNER_TEMP/out2"
+        if ! diff -r "$out1" "$out2"; then
+          echo "::error::the two builds differ; specs/053-determinism.md says the same inputs produce the same bytes"
+          exit 1
+        fi
+        # An empty comparison passes and proves nothing, so the count is
+        # printed and an empty pair is a failure.
+        n=$(find "$out1" -type f | wc -l | tr -d ' ')
+        if [ "$n" -eq 0 ]; then
+          echo "::error::no binaries were produced, so nothing was compared"
+          exit 1
+        fi
+        echo "$n binaries are byte-identical across two build directories"
+
+  spikes:
+    name: spikes
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.27.x'
+        check-latest: true
+
+    # A job that promises darwin/arm64 and finds something else is a failure,
+    # not a skip. Two of these spikes are _arm64.s files: on an amd64 runner
+    # the assembly is excluded by the file name, the Go declarations lose their
+    # bodies, and the build fails with a message about missing functions that
+    # says nothing about the runner.
+    - name: Assert the runner is darwin/arm64
+      run: |
+        set -eu
+        test "$(uname -s)" = "Darwin"
+        test "$(uname -m)" = "arm64"
+
+    # specs/000-decisions.md decision 3 cites this spike for the claim that
+    # text assembly can express per-PC GC stack maps, which is the hardest
+    # metadata a compiler emits. The claim is a runtime observation, not a
+    # compile-time one: the object survives the collection at stack map index 0
+    # and is collected at index 1. Only running it can say that is still true.
+    - name: stackmap
+      working-directory: spikes/stackmap
+      run: |
+        set -eu
+        go build ./...
+
+        live=$(go run . live)
+        echo "$live"
+        echo "$live" | grep -qE 'finalizers-during-call=0( |$)' || {
+          echo "::error::stackmap live: the pointer slot declared live was collected anyway"
+          exit 1
+        }
+
+        dead=$(go run . dead)
+        echo "$dead"
+        echo "$dead" | grep -qE 'finalizers-during-call=1( |$)' || {
+          echo "::error::stackmap dead: NO_LOCAL_POINTERS did not make the object collectable"
+          exit 1
+        }
+
+        # The decisive case: one function, one frame, two bitmaps in a
+        # hand-written FUNCDATA, selected per call site by PCDATA.
+        multi=$(go run . multi)
+        echo "$multi"
+        echo "$multi" | grep -q 'RESULT: per-PC stack maps in text asm ARE honoured' || {
+          echo "::error::stackmap multi: the runtime no longer reads the per-PC map the text assembly declared"
+          exit 1
+        }
+
+    # The other half of decision 3, and the half that decided it. The working
+    # file must assemble and link, and the counter-example must not assemble.
+    # An expected failure is a gate only when the failure is asserted: this
+    # step fails if s2_arm64.s.txt ever starts to assemble, because that would
+    # mean the ceiling the decision was taken against had moved and the
+    # decision should be re-argued rather than inherited.
+    - name: symbolnames
+      working-directory: spikes/symbolnames
+      run: |
+        set -eu
+        go build -o symbolnames .
+        out=$(./symbolnames)
+        echo "$out"
+        echo "$out" | grep -q 'target=42' || {
+          echo "::error::symbolnames: the hand-written DATA word no longer reads back"
+          exit 1
+        }
+
+        # Kept as .txt so that this directory still builds. Copied back to .s
+        # here, because the assembler chooses its parser by file name.
+        work=$(mktemp -d)
+        cp s2_arm64.s.txt "$work/s2_arm64.s"
+        if go tool asm -I "$(go env GOROOT)/src/runtime" -o "$work/s2.o" "$work/s2_arm64.s" 2>"$work/err"; then
+          echo "::error::s2_arm64.s.txt assembled; decision 3 rests on the assembler rejecting a name with a colon in it, so re-argue the decision"
+          exit 1
+        fi
+        cat "$work/err"
+        # Assert the reason, not only the failure. Any typo also fails to
+        # assemble, and a typo would prove nothing.
+        grep -q 'expect two operands for DATA' "$work/err" || {
+          echo "::error::s2_arm64.s.txt failed to assemble for a different reason than the colon in the symbol name"
+          exit 1
+        }
+        echo "the assembler still rejects type:main.Obj"
+
+    # decision 11 depends on this mechanism: go build -toolexec hands every
+    # tool invocation to nanogo, which compiles the packages it can and execs
+    # gc for the rest. -a is not optional. A cached build invokes no tool at
+    # all, the log stays empty, and the step would pass having proved nothing.
+    - name: toolexec
+      working-directory: spikes/toolexec
+      run: |
+        set -eu
+        log="$RUNNER_TEMP/toolexec.log"
+        passthrough="$RUNNER_TEMP/passthrough"
+        rm -f "$log"
+
+        go build -o "$passthrough" .
+        PT_LOG="$log" go build -a -toolexec="$passthrough" -o "$RUNNER_TEMP/spike" .
+        test -x "$RUNNER_TEMP/spike"
+
+        # The build completing is half the answer. The other half is that the
+        # substitution actually happened, so the log must hold the compile
+        # invocations and the -V=full handshake that the go command uses to
+        # derive the tool's build ID.
+        # The log holds the full path to the tool, which is what the go
+        # command passes as argv[1], so the name is matched with its
+        # directory separator in front of it.
+        compiles=$(grep -cE '/compile( |$)' "$log" || true)
+        echo "$compiles compile invocations"
+        [ "$compiles" -gt 0 ] || {
+          echo "::error::the passthrough logged no compile invocation, so nothing was substituted"
+          exit 1
+        }
+        grep -q -- '-V=full' "$log" || {
+          echo "::error::the go command did not ask for -V=full; the build ID protocol in specs/050-driver.md changed"
+          exit 1
+        }
+
+  vanity:
+    name: vanity import path
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    # golang.design/x/nanogo is a vanity path served by a redirect, and it is
+    # what every import, every doc link, and the pkg.go.dev badge names. A
+    # module path edited by accident still builds locally and breaks every
+    # consumer, so it is cheaper to check the one line than to notice later.
+    - name: Check the module path
+      run: |
+        set -eu
+        # Matched anywhere in the file rather than on line one, because this
+        # repository puts a three-line copyright header on every file it can
+        # and go.mod may grow one.
+        if ! grep -q '^module golang.design/x/nanogo$' go.mod; then
+          echo "::error::go.mod does not declare module golang.design/x/nanogo; it says:"
+          grep '^module' go.mod || echo "  (no module line at all)"
+          exit 1
+        fi
+        grep '^module' go.mod
