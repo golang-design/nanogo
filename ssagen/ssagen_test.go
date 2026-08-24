@@ -2091,3 +2091,27 @@ func TestStackArgumentsAreReadWhereTheyAreDefined(t *testing.T) {
 	}
 	t.Logf("frame %d, %d arguments in registers and %d in the area", r.Frame, fixed, n-fixed)
 }
+
+// TestRegRefusesAFloatRegister guards a check that was dead.
+//
+// reg() promises to refuse anything that is not an integer register of this
+// target. It used to test `arm64.Reg(r) != x` with x already assigned
+// arm64.Reg(r), which is always false, so a float register reached an integer
+// encoder as its raw number and encoded as some unrelated integer register.
+func TestRegRefusesAFloatRegister(t *testing.T) {
+	var e emitter
+	e.reg(ssa.Reg(arm64.F0))
+	if e.err() == nil {
+		t.Error("a float register passed the integer register check")
+	}
+
+	// An integer register still passes, or the guard is too broad and every
+	// function stops compiling.
+	var ok emitter
+	if got := ok.reg(ssa.Reg(arm64.R5)); got != arm64.R5 {
+		t.Errorf("reg(R5) = %v, want R5", got)
+	}
+	if err := ok.err(); err != nil {
+		t.Errorf("an integer register was refused: %v", err)
+	}
+}

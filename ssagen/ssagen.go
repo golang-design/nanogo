@@ -398,7 +398,11 @@ func (e *emitter) reg(r ssa.Reg) arm64.Reg {
 		return arm64.ZR
 	}
 	x := arm64.Reg(r)
-	if !x.Valid() || arm64.Reg(r) != x {
+	// IsFloat is the test, and an earlier version of this line was
+	// `arm64.Reg(r) != x` with x already equal to arm64.Reg(r). That disjunct
+	// is always false, so the refusal this function promises never happened
+	// and a float register reached an integer encoder as its raw number.
+	if !x.Valid() || x.IsFloat() {
 		e.fail("register %d is not an integer register of this target", r)
 		return arm64.ZR
 	}

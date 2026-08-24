@@ -203,12 +203,30 @@ func parseFiles(cfg *Config) ([]*syntax.File, *syntax.FileSet, error) {
 	return files, fset, nil
 }
 
-// pragmaHandler records nothing.
+// pragmaHandler records nothing, and that is a correctness gap rather than a
+// missing feature.
 //
-// specs/016-directives-and-pragmas.md owns the directives and no pass below
-// reads them yet. The handler exists because the parser needs one to attach a
-// //go: comment to the declaration that follows it, and a nil handler makes
-// the parser treat the comment as ordinary text.
+// specs/016-directives-and-pragmas.md divides the directives into two groups,
+// and the first is titled "required for correctness": getting one of them
+// wrong produces a program that is wrong, not slow. Dropping every one of them
+// silently means a source file that says
+//
+//	//go:nosplit
+//	func f() { ... }
+//
+// compiles to a function with a stack-growth check in it. The check calls
+// runtime.morestack, and the whole reason a function is marked nosplit is that
+// it runs where that call is not allowed.
+//
+// nanogo does not compile the runtime today, and the runtime is the only
+// consumer of that group, so nothing reachable is miscompiled by this yet. The
+// gap is recorded here and gated by TestNosplitIsStillDropped rather than
+// left as an absence, because the day nanogo reaches a package that uses the
+// directive, the failure has no diagnostic at all.
+//
+// The handler exists because the parser needs one to attach a //go: comment to
+// the declaration that follows it, and a nil handler makes the parser treat
+// the comment as ordinary text.
 func pragmaHandler(_ syntax.Pos, _ bool, _ string, _ syntax.Pragma) syntax.Pragma {
 	return nil
 }

@@ -553,3 +553,32 @@ func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
 		t.Errorf("the output file was not created: %v", statErr)
 	}
 }
+
+// TestNosplitIsStillDropped records a known correctness gap so that closing it
+// is deliberate rather than accidental.
+//
+// specs/016-directives-and-pragmas.md classes //go:nosplit as required for
+// correctness: a function marked with it must get no stack-growth check,
+// because it runs where the call that check makes is not allowed. nanogo drops
+// every //go: directive at the parser, so a marked function today compiles
+// with the check in it.
+//
+// Nothing reachable is miscompiled, because the runtime is the only consumer
+// of that group and nanogo does not compile the runtime. This test fails the
+// moment the handler starts recording, which is the point: it turns closing
+// the gap into a change somebody has to look at.
+func TestNosplitIsStillDropped(t *testing.T) {
+	for _, directive := range []string{
+		"go:nosplit",
+		"go:nowritebarrier",
+		"go:systemstack",
+		"go:noescape",
+	} {
+		if p := pragmaHandler(0, false, directive, nil); p != nil {
+			t.Errorf("%s now reaches the compiler.\n"+
+				"Remove this test, and make ssa and ssagen honour it: "+
+				"specs/016-directives-and-pragmas.md says which of them are "+
+				"required for correctness rather than for speed.", directive)
+		}
+	}
+}
