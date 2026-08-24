@@ -545,6 +545,18 @@ func lowerCompare(v *ssa.Value, e *ssa.Edit) bool {
 	if isFloat(x.Type) {
 		return false
 	}
+	// An operand that does not fit one register has no compare instruction,
+	// and refusing it is not optional. ARM64Size answers Size64 for anything
+	// wider than four bytes, so without this a 16-byte string comparison
+	// became a 64-bit compare of its first word: code that runs, computes the
+	// wrong answer, and reports nothing.
+	//
+	// String and interface equality are not per-part comparisons either, so
+	// the decomposition pass leaves them whole on purpose. They become runtime
+	// calls, per specs/020-ir.md's lowering table.
+	if _, ok := ssa.ClassOfType(x.Type); !ok {
+		return false
+	}
 	cond := condOf(v.Op, signed(x.Type))
 	flags, ok := compareFlags(v, e, x, y, ssa.ARM64Size(x.Type))
 	if !ok {

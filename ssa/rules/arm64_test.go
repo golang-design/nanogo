@@ -1819,3 +1819,69 @@ func TestARM64ImmediateSweep(t *testing.T) {
 		}
 	}
 }
+
+// TestCompareRefusesWideOperands is a regression test for a silent miscompile.
+//
+// ARM64Size answers Size64 for any type wider than four bytes, so a comparison
+// rule that only refused floats emitted a 64-bit CMP for a 16-byte string. The
+// result runs, compares the two string headers' first words, and reports
+// nothing. Two strings with the same data pointer and different lengths would
+// have compared equal.
+//
+// String and interface equality are not per-part comparisons: a string
+// compares its bytes and an interface calls the dynamic type's equality
+// function. specs/020-ir.md's lowering table makes both runtime calls, so this
+// rule must refuse them rather than guess.
+func TestCompareRefusesWideOperands(t *testing.T) {
+	for _, ty := range []*ir.Type{
+		{Kind: ir.String, Size: 16, Align: 8, Name: "string"},
+		{Kind: ir.Interface, Size: 16, Align: 8, Name: "any"},
+	} {
+		p := newBuilder()
+		cmp := p.val(ssa.OpEq, tBool, p.arg(ty), p.arg(ty))
+		f := p.ret(cmp)
+
+		// The refusal is a crash naming the operation, which is what
+		// specs/025-lowering-and-rules.md requires of a missing rule: a silent
+		// fallback produces a function that is missing an operation, and that
+		// is the hardest bug in the compiler to find. Asserting the crash is
+		// asserting the contract.
+		msg := lowerPanic(t, f)
+		if msg == "" {
+			t.Errorf("%s: lowering a wide comparison did not fail; it was guessed at, and %v is what it became",
+				ty.Name, cmp.Op)
+			continue
+		}
+		if !strings.Contains(msg, "Eq") {
+			t.Errorf("%s: the refusal does not name the operation: %s", ty.Name, msg)
+		}
+	}
+}
+
+// lowerPanic runs the pass and returns the panic message, or "" if it did not
+// panic.
+func lowerPanic(t *testing.T, f *ssa.Func) (msg string) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			msg = fmt.Sprint(r)
+		}
+	}()
+	ssa.Lower(f, ARM64)
+	return ""
+}
+
+// TestCompareAcceptsRegisterWidthOperands is the other half. A guard that is
+// too broad refuses every comparison in the program, which no corpus test
+// would notice because such a function simply fails to lower.
+func TestCompareAcceptsRegisterWidthOperands(t *testing.T) {
+	for _, ty := range []*ir.Type{tI64, tI32} {
+		p := newBuilder()
+		cmp := p.val(ssa.OpEq, tBool, p.arg(ty), p.arg(ty))
+		f := lower(t, p.ret(cmp))
+		_ = f
+		if cmp.Op == ssa.OpEq {
+			t.Errorf("%s: a comparison that fits one register was refused", ty)
+		}
+	}
+}
