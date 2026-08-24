@@ -108,7 +108,9 @@ The Plan 9 assembler rejects a symbol name containing a colon:
 ./s2_arm64.s:2: expect two operands for DATA      // DATA type:main.Obj(SB)/8, $7
 ```
 
-recorded in [`spikes/symbolnames`](../spikes/symbolnames). Every prefix in the
+recorded in [`spikes/symbolnames`](../spikes/symbolnames) (the offending file is kept there as
+`s2_arm64.s.txt`, because a file that must not assemble cannot sit in a package
+that is built). Every prefix in the
 table above uses one. A text-assembly emitter would have to rename them, the
 linker would stop collecting them, `runtime.itablinks` would be empty, itabs
 would not be registered, and a dynamic conversion would build a second itab for a

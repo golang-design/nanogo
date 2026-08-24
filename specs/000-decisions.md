@@ -99,6 +99,10 @@ must define. It cannot. The assembler rejects any name that contains a colon:
 ./s2_arm64.s:2: expect two operands for DATA      // DATA type:main.Obj(SB)/8, $7
 ```
 
+The offending file is kept in the spike as `s2_arm64.s.txt`, because a file that
+must not assemble cannot sit in a package that is built. CI copies it back to a
+`.s` name and fails if the assembler ever accepts it.
+
 The compiler and the linker share a namespace built on that character:
 `type:*` for type descriptors, `go:itab.*` for itabs, `go:string.*` for string
 data. The linker scans those prefixes to build `runtime.typelinks` and
