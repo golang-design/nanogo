@@ -225,11 +225,56 @@ var scalarLayout = map[Kind]struct{ size, align int64 }{
 //
 // It is idempotent. A type whose layout is already computed is returned
 // unchanged, which is what makes it safe to call on a shared type graph.
+//
+// # Two walks, because a pointer is not containment
+//
+// A type contained in another by value has to be laid out before the one that
+// contains it, and cannot contain that one in turn: the language forbids it
+// and layout's cycle check reports it. A type behind a pointer is the
+// opposite. It is not contained, it does not affect the containing type's size
+// or alignment, and it may well be the containing type: type T struct{ next
+// *T } is an ordinary declaration. So the pointee cannot take part in the
+// containment recursion and is laid out afterwards, from a queue.
+//
+// This is the invariant the two walks establish, and every reader of a
+// composite type depends on it:
+//
+//	if t.Align != 0 then every type reachable from t has Align != 0
+//
+// It did not hold before. Layout of a slice, a pointer, a map or a channel
+// came out of the scalar table and stopped there, so the element type of
+// []*int had size zero unless something else happened to convert *int on its
+// own. Three consumers read that zero: this package's lowering multiplies an
+// index by the element size to make a slice expression's data pointer,
+// specs/031-runtime-lowering.md chooses memclrNoHeapPointers or
+// memclrHasPointers by whether the element holds a pointer, and
+// specs/021-ssa-construction.md's indexAddr puts the element size in the
+// stride of every OpPtrIndex. A zero there is an index that does not move, a
+// clear that leaves pointers where the collector reads them, and neither is
+// visible to the verifier. The doc comment above has always said "and for
+// every type reachable from it"; the code did not.
 func Layout(t *Type) error {
-	return layout(t, make(map[*Type]bool))
+	var pending []*Type
+	if err := layout(t, make(map[*Type]bool), &pending); err != nil {
+		return err
+	}
+	// The queue is appended to while it is drained, because laying out a
+	// pointee finds the next pointer. A type already laid out is skipped
+	// rather than revisited, which is what the invariant above buys: its own
+	// pointees were queued when it was laid out.
+	for i := 0; i < len(pending); i++ {
+		cur := pending[i]
+		if cur == nil || cur.Align != 0 {
+			continue
+		}
+		if err := layout(cur, make(map[*Type]bool), &pending); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func layout(t *Type, inProgress map[*Type]bool) error {
+func layout(t *Type, inProgress map[*Type]bool, pending *[]*Type) error {
 	if t == nil {
 		return fmt.Errorf("ir: layout of a nil type")
 	}
@@ -250,6 +295,10 @@ func layout(t *Type, inProgress map[*Type]bool) error {
 	if s, ok := scalarLayout[t.Kind]; ok {
 		t.Size, t.Align = s.size, s.align
 		t.PtrBits = scalarPtrBits(t.Kind)
+		// A pointer, a slice, a map and a channel are one word here and name
+		// a type that is not one. That type is queued rather than recursed
+		// into, for the reason Layout gives.
+		*pending = append(*pending, t.Elem, t.Key)
 		return nil
 	}
 
@@ -261,7 +310,7 @@ func layout(t *Type, inProgress map[*Type]bool) error {
 		if t.Len < 0 {
 			return fmt.Errorf("ir: array with length %d", t.Len)
 		}
-		if err := layout(t.Elem, inProgress); err != nil {
+		if err := layout(t.Elem, inProgress, pending); err != nil {
 			return err
 		}
 		t.Align = t.Elem.Align
@@ -270,20 +319,20 @@ func layout(t *Type, inProgress map[*Type]bool) error {
 		return nil
 
 	case Struct, Tuple:
-		return layoutStruct(t, inProgress)
+		return layoutStruct(t, inProgress, pending)
 	}
 
 	return fmt.Errorf("ir: cannot lay out kind %s", t.Kind)
 }
 
-func layoutStruct(t *Type, inProgress map[*Type]bool) error {
+func layoutStruct(t *Type, inProgress map[*Type]bool, pending *[]*Type) error {
 	var off, align int64 = 0, 1
 	for i := range t.Fields {
 		f := &t.Fields[i]
 		if f.Type == nil {
 			return fmt.Errorf("ir: struct field %s has no type", f.Name)
 		}
-		if err := layout(f.Type, inProgress); err != nil {
+		if err := layout(f.Type, inProgress, pending); err != nil {
 			return err
 		}
 		off = roundUp(off, f.Type.Align)

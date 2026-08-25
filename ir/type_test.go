@@ -441,3 +441,120 @@ func TestTupleLayout(t *testing.T) {
 		t.Errorf("an empty tuple printed %q, want %q", got, want)
 	}
 }
+
+// TestLayoutReachesThroughAPointer is Layout's own contract: "for t and for
+// every type reachable from it".
+//
+// It did not hold. A pointer, a slice, a map and a channel came out of the
+// scalar table and their element type was left with size zero, which three
+// consumers read as a real answer. The case that found it was clear of a
+// []*int: HasPointers on an unlaid element is false, so the clear chose
+// memclrNoHeapPointers over a region that holds nothing else.
+func TestLayoutReachesThroughAPointer(t *testing.T) {
+	elem := &Type{Kind: Ptr, Elem: &Type{Kind: Int8, Name: "int8"}}
+	slice := &Type{Kind: Slice, Elem: elem}
+	if err := Layout(slice); err != nil {
+		t.Fatalf("Layout: %v", err)
+	}
+	if elem.Size != PtrSize || elem.Align != PtrSize {
+		t.Errorf("the element of a slice is %d/%d", elem.Size, elem.Align)
+	}
+	if !elem.HasPointers() {
+		t.Error("the element of a slice of pointers holds no pointer")
+	}
+	if elem.Elem.Size != 1 {
+		t.Errorf("the type two pointers down is %d bytes", elem.Elem.Size)
+	}
+
+	// A map reaches its key as well as its value.
+	key := &Type{Kind: Int32, Name: "int32"}
+	val := &Type{Kind: Struct, Fields: []Field{{Name: "a", Type: &Type{Kind: Float64}}}}
+	m := &Type{Kind: Map, Key: key, Elem: val}
+	if err := Layout(m); err != nil {
+		t.Fatalf("Layout: %v", err)
+	}
+	if key.Align == 0 || val.Align == 0 {
+		t.Errorf("a map left its key at %d and its value at %d", key.Align, val.Align)
+	}
+}
+
+// TestLayoutCrossesACycleThroughAPointer checks the reason the pointee is laid
+// out from a queue rather than by recursion.
+//
+// A type behind a pointer is not contained in the one that names it, so it may
+// be that type. The containment check must not fire on any of these, and none
+// of them may loop forever.
+func TestLayoutCrossesACycleThroughAPointer(t *testing.T) {
+	// type T struct{ next *T }
+	self := &Type{Kind: Struct, Name: "T"}
+	self.Fields = []Field{{Name: "next", Type: &Type{Kind: Ptr, Elem: self}}}
+
+	// type L []L, which the converter's cache spells as a slice of itself.
+	list := &Type{Kind: Slice, Name: "L"}
+	list.Elem = list
+
+	// type A struct{ p *B }; type B struct{ p *A }
+	a := &Type{Kind: Struct, Name: "A"}
+	b := &Type{Kind: Struct, Name: "B"}
+	a.Fields = []Field{{Name: "p", Type: &Type{Kind: Ptr, Elem: b}}}
+	b.Fields = []Field{{Name: "p", Type: &Type{Kind: Ptr, Elem: a}}}
+
+	for _, tc := range []struct {
+		what string
+		t    *Type
+	}{
+		{"a struct with a pointer to itself", self},
+		{"a slice of itself", list},
+		{"two structs pointing at each other", a},
+	} {
+		if err := Layout(tc.t); err != nil {
+			t.Errorf("%s: %v", tc.what, err)
+		}
+	}
+	if b.Align == 0 {
+		t.Error("the second of two mutually pointing structs was not laid out")
+	}
+
+	// Containment is still an error. The check is what this queue must not
+	// weaken.
+	bad := &Type{Kind: Struct, Name: "bad"}
+	bad.Fields = []Field{{Name: "self", Type: bad}}
+	if err := Layout(bad); err == nil {
+		t.Error("a struct that contains itself was laid out")
+	}
+}
+
+// TestLayoutIsClosed states the invariant the two walks establish, over a type
+// graph deep enough that one walk would not reach the bottom of it.
+func TestLayoutIsClosed(t *testing.T) {
+	deep := &Type{Kind: Chan, Elem: &Type{Kind: Map,
+		Key: &Type{Kind: Ptr, Elem: &Type{Kind: Array, Len: 2,
+			Elem: &Type{Kind: Slice, Elem: &Type{Kind: Ptr, Elem: &Type{Kind: Uint16}}}}},
+		Elem: &Type{Kind: Struct, Fields: []Field{
+			{Name: "s", Type: &Type{Kind: Slice, Elem: &Type{Kind: Bool}}},
+		}},
+	}}
+	if err := Layout(deep); err != nil {
+		t.Fatalf("Layout: %v", err)
+	}
+	seen := map[*Type]bool{}
+	var walk func(*Type)
+	walk = func(x *Type) {
+		if x == nil || seen[x] {
+			return
+		}
+		seen[x] = true
+		if x.Align == 0 {
+			t.Errorf("%s is reachable and not laid out", x.Kind)
+		}
+		walk(x.Elem)
+		walk(x.Key)
+		for _, f := range x.Fields {
+			walk(f.Type)
+		}
+	}
+	walk(deep)
+	if len(seen) < 8 {
+		t.Errorf("the walk reached %d types; the graph has more", len(seen))
+	}
+}
