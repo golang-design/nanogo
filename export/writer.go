@@ -80,25 +80,38 @@ func Write(pkg *types2.Package) (data []byte, fingerprint [8]byte, err error) {
 		return nil, fingerprint, fmt.Errorf("export: the two root elements got indices %v and %v", public.Idx, private.Idx)
 	}
 
-	// The public root: the package, then every exported package-scope
-	// declaration. Scope.Names is sorted, so the order is fixed by the names
-	// and not by the checker's map (specs/053-determinism.md).
+	// Walk the exported package-scope declarations, which writes them and
+	// everything they reach. Scope.Names is sorted, so the order of the walk
+	// is fixed by the names and not by the checker's map
+	// (specs/053-determinism.md), and the index of every object below is
+	// fixed by the order it was first reached.
 	//
-	// Exported only. gc's linked export data lists exactly the exported
-	// names; an unexported declaration reaches a reader by reference from an
-	// exported one, and only if one refers to it.
+	// Exported only. An unexported declaration is written when an exported
+	// one refers to it and not otherwise.
 	scope := pkg.Scope()
-	var names []string
 	for _, name := range scope.Names() {
 		if obj := scope.Lookup(name); obj != nil && obj.Exported() {
-			names = append(names, name)
+			pw.objIdx(obj)
 		}
 	}
 
+	// The public root: the package, then every object in the file.
+	//
+	// Every object, not only this package's: gc's linker lists what it
+	// copied, which is the transitive closure, and gc's reader needs the
+	// whole list. An importer writes a stub for each declaration of another
+	// package it mentions, and resolves that stub by looking the name up in
+	// the table this list builds. A root that named only this package's
+	// declarations would leave gc unable to resolve, say, io.Reader in the
+	// signature of a bufio function it imported, and the failure is an
+	// internal compiler error a long way from here.
 	public.pkg(pkg)
-	public.Len(len(names))
-	for _, name := range names {
-		public.obj(scope.Lookup(name), nil)
+	n := pw.NumElems(pkgbits.SectionObj)
+	public.Len(n)
+	for i := range n {
+		public.Sync(pkgbits.SyncObject)
+		public.Reloc(pkgbits.SectionObj, pkgbits.Index(i))
+		public.Len(0) // no explicit type arguments
 	}
 	public.Sync(pkgbits.SyncEOF)
 	public.Flush()

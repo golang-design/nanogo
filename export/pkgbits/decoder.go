@@ -442,6 +442,46 @@ func (r *Decoder) bigFloat() *big.Float {
 	return v
 }
 
+// PeekPkgPath returns the package path for the specified package index.
+//
+// nanogo restored this and [PkgDecoder.PeekObj] with the writer half: both
+// answer what an element is without decoding it, which is what a writer that
+// copies or checks elements needs.
+func (pr *PkgDecoder) PeekPkgPath(idx RelElemIdx) string {
+	var path string
+	{
+		r := pr.TempDecoder(SectionPkg, idx, SyncPkgDef)
+		path = r.String()
+		pr.RetireDecoder(&r)
+	}
+	if path == "" {
+		path = pr.pkgPath
+	}
+	return path
+}
+
+// PeekObj returns the package path, object name and CodeObj of the object at
+// the given index, without decoding the object itself.
+func (pr *PkgDecoder) PeekObj(idx RelElemIdx) (string, string, CodeObj) {
+	var ridx RelElemIdx
+	var name string
+	var rcode int
+	{
+		r := pr.TempDecoder(SectionName, idx, SyncObject1)
+		r.Sync(SyncSym)
+		r.Sync(SyncPkg)
+		ridx = r.Reloc(SectionPkg)
+		name = r.String()
+		rcode = r.Code(SyncCodeObj)
+		pr.RetireDecoder(&r)
+	}
+
+	path := pr.PeekPkgPath(ridx)
+	assert(name != "")
+
+	return path, name, CodeObj(rcode)
+}
+
 // Version reports the version of the bitstream.
 func (w *Decoder) Version() Version { return w.common.version }
 
