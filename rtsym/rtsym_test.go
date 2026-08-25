@@ -222,7 +222,7 @@ func TestEverySymbolIsWellFormed(t *testing.T) {
 }
 
 func TestGroupStrings(t *testing.T) {
-	for g := GroupAlloc; g <= GroupDefer; g++ {
+	for g := GroupAlloc; g <= GroupPrint; g++ {
 		if got := g.String(); got == "" || got == "group(?)" {
 			t.Errorf("group %d prints %q", g, got)
 		}

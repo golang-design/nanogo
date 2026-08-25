@@ -72,6 +72,7 @@ const (
 	GroupBarrier
 	GroupGoroutine
 	GroupDefer
+	GroupPrint
 )
 
 var groupNames = [...]string{
@@ -86,6 +87,7 @@ var groupNames = [...]string{
 	GroupBarrier:   "write barrier",
 	GroupGoroutine: "goroutine",
 	GroupDefer:     "defer",
+	GroupPrint:     "print",
 }
 
 func (g Group) String() string {
@@ -187,6 +189,36 @@ var syms = []Sym{
 	{Name: "runtime.morestack_noctxt", Sig: "func()", Assembly: true, Group: GroupGoroutine},
 	{Name: "runtime.deferproc", Sig: "func(func())", Group: GroupDefer},
 	{Name: "runtime.deferreturn", Sig: "func()", Group: GroupDefer},
+
+	// print and println. specs/020-ir.md's rows for the two builtins are a
+	// bracketed sequence: the lock, one call per operand, the newline that
+	// only println writes, and the unlock. The lock is not decoration. The
+	// runtime prints to file descriptor 2 without buffering, so two goroutines
+	// printing at once interleave inside a line, and printlock is what the
+	// language's one guarantee about print rests on.
+	{Name: "runtime.printlock", Sig: "func()", Group: GroupPrint},
+	{Name: "runtime.printunlock", Sig: "func()", Group: GroupPrint},
+	// printsp and printnl are the separator and the newline. gc writes them as
+	// the string constants " " and "\n" and then recognises those two
+	// constants again, which is a detour this pass does not take: the two
+	// symbols are what the detour arrives at.
+	{Name: "runtime.printsp", Sig: "func()", Group: GroupPrint},
+	{Name: "runtime.printnl", Sig: "func()", Group: GroupPrint},
+	{Name: "runtime.printbool", Sig: "func(bool)", Group: GroupPrint},
+	// One symbol per width class and not per type. Every signed kind widens to
+	// int64 and every unsigned kind to uint64, which is what gc does, so a
+	// program that prints an int8 and one that prints an int64 call one
+	// function.
+	{Name: "runtime.printint", Sig: "func(int64)", Group: GroupPrint},
+	{Name: "runtime.printuint", Sig: "func(uint64)", Group: GroupPrint},
+	{Name: "runtime.printfloat32", Sig: "func(float32)", Group: GroupPrint},
+	{Name: "runtime.printfloat64", Sig: "func(float64)", Group: GroupPrint},
+	{Name: "runtime.printstring", Sig: "func(string)", Group: GroupPrint},
+	// A pointer, a map, a channel and a func value are all one word, and the
+	// runtime prints the word. A uintptr is not one of them: it is a number,
+	// and gc prints it with printuint, so nothing here hands the collector a
+	// number as if it were a pointer.
+	{Name: "runtime.printpointer", Sig: "func(unsafe.Pointer)", Group: GroupPrint},
 
 	// Interface and string comparison. specs/031's table names these as the
 	// calls an equality or an ordering lowers to.
