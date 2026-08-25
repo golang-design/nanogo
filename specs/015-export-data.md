@@ -110,16 +110,21 @@ needs no change to `syntax`, only the file names and line numbers the compiled
 files already have, and the `-trimpath` rewriting that makes them the same on
 two machines ([053](053-determinism.md)).
 
-Three further things the writer does not carry, each of which an importer can
+Two further things the writer does not carry, each of which an importer can
 observe. A `//go:` directive of any kind, because nanogo's parser records none
 ([016](016-directives-and-pragmas.md)); that includes `//go:linkname`, so an
 importer of a package nanogo compiled would call the declared name and not the
-linkname target. A package initialisation task, because nanogo emits none; a
-package with initialisation that nanogo compiled is not initialised, which is a
-gap in code generation and not in the format. And escape analysis results,
-which are written as empty notes; an empty note parses as "leaks to the heap",
-which is the conservative answer a caller must assume
-([023](023-escape-analysis.md)).
+linkname target. And escape analysis results, which are written as empty notes;
+an empty note parses as "leaks to the heap", which is the conservative answer a
+caller must assume ([023](023-escape-analysis.md)).
+
+The one bit of the private root nanogo does carry is whether the object holds
+an initialisation record. `driver/inittask.go` decides it, and an importer
+orders its own record after this package's when it is set. It is a bit that
+fails silently in one direction and loudly in the other: a package that has a
+record and says it has none never runs its initialisation and nothing reports
+it, and a package that says it has one and has none is a link failure naming a
+symbol nothing defines.
 
 No function body of any kind is read, because the reader is the types-only one.
 That blocks [024](024-inlining-and-devirtualization.md) entirely, and it blocks

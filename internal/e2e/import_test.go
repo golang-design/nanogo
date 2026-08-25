@@ -311,3 +311,73 @@ func TestNanogoCompilesAStandardLibraryPackage(t *testing.T) {
 		t.Fatalf("the program did not run against a standard library package nanogo compiled: %v\n%s", err, b)
 	}
 }
+
+// initLibrary is a package whose initialisation is observable.
+//
+// It has no package-level variable, because nanogo has no data symbol writer
+// and refuses one. What is left is an init function with an effect, and the
+// only effect a package with no state can have is to end the process. So the
+// library's initialisation divides by zero, and the assertion is inverted:
+// the program must fail.
+const initLibrary = `package initlib
+
+func boom(a, b int) int { return a / b }
+
+func init() {
+	zero := 0
+	_ = boom(1, zero)
+}
+`
+
+// initImporter blank-imports it and does nothing else.
+const initImporter = `package main
+
+import _ "nanogo.example/initrun/initlib"
+
+func main() {}
+`
+
+// TestGcOrdersInitAfterAPackageNanogoCompiled is the private root's one bit,
+// end to end.
+//
+// nanogo writes an initialisation record for the library and says so in the
+// export data. gc compiles the importing package, reads that bit, and orders
+// its own record after the library's, so cmd/link's walk reaches the
+// library's init and the runtime runs it. A bit written wrongly is silent:
+// the program would link and run and the library's initialisation would never
+// happen, which is why the library's init is the thing that ends the process.
+func TestGcOrdersInitAfterAPackageNanogoCompiled(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":             "module nanogo.example/initrun\n\ngo 1.27\n",
+		"initlib/initlib.go": initLibrary,
+		"main.go":            initImporter,
+	}, []string{"nanogo.example/initrun/initlib"})
+
+	out, err := h.build(t, "-o", "initrun", ".")
+	if err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	lines := h.decisions(t)
+	if !compiled(lines, "nanogo.example/initrun/initlib") {
+		t.Fatalf("nanogo delegated the library:\n%s", strings.Join(lines, "\n"))
+	}
+
+	b, err := exec.Command(filepath.Join(h.mod, "initrun")).CombinedOutput()
+	if err == nil {
+		t.Fatalf("the program exited zero, so the library's initialisation never ran:\n%s", b)
+	}
+	// The library's init function has to be named in what the process
+	// printed. That is the whole claim: the runtime reached a function in a
+	// package nanogo compiled, which it can only do through the ordering edge
+	// gc wrote from this bit.
+	//
+	// The message is a traceback failure and not "integer divide by zero",
+	// because the runtime cannot walk out of a frame nanogo generated for a
+	// synthesised init: it reports an unexpected return pc for
+	// initlib.init.0. That is a gap in the frame nanogo writes for the init
+	// function and not in the export data, and it is evidence for this test
+	// either way, because a name in the traceback is a function that ran.
+	if !strings.Contains(string(b), "initlib.init") {
+		t.Errorf("the program failed for some other reason than the library's init:\n%s", b)
+	}
+}
