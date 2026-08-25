@@ -25,8 +25,8 @@ const VersionFile = "VERSION"
 // of itself nanogo compiled, and [VerifyTree] fails when the statement and the
 // archives disagree.
 type Version struct {
-	// Nanogo is the release, as "nanogo0.1.0".
-	Nanogo string
+	// Release is the nanogo release, as "nanogo0.1.0".
+	Release string
 	// Go is the pinned Go release, as "go1.27.0".
 	Go string
 	// Target is the GOOS_GOARCH the archives are for.
@@ -40,7 +40,7 @@ type Version struct {
 
 // String is the file's content.
 func (v Version) String() string {
-	return v.Nanogo + "\n" +
+	return v.Release + "\n" +
 		"go " + v.Go + "\n" +
 		"target " + v.Target + "\n" +
 		"packages " + strconv.Itoa(v.Packages) + "\n" +
@@ -58,9 +58,9 @@ func ParseVersion(b []byte) (Version, error) {
 	if len(lines) != 6 {
 		return Version{}, fmt.Errorf("%s has %d lines and a nanogo %s has 6", VersionFile, len(lines), VersionFile)
 	}
-	v := Version{Nanogo: lines[0]}
-	if !strings.HasPrefix(v.Nanogo, "nanogo") {
-		return Version{}, fmt.Errorf("%s line 1 is %q, which is not a nanogo release", VersionFile, v.Nanogo)
+	v := Version{Release: lines[0]}
+	if !strings.HasPrefix(v.Release, "nanogo") {
+		return Version{}, fmt.Errorf("%s line 1 is %q, which is not a nanogo release", VersionFile, v.Release)
 	}
 	strs := []struct {
 		key string
