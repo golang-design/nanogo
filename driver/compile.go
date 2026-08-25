@@ -92,6 +92,9 @@ func Compile(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	if err := checkExportedTypes(cfg, pkg, fset); err != nil {
+		return err
+	}
 	p, err := ir.Build(pkg, files, info)
 	if err != nil {
 		return &UnsupportedError{Package: cfg.Package, What: "this package", Detail: err.Error()}
