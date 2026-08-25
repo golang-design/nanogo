@@ -22,8 +22,11 @@ simultaneously, and a crash has no suspect.
 
 Two build paths are built and gated, and they are for different people.
 
-`nanogo build` is the user's, and it needs no `go` command in the loop. It is
-the section further down.
+`nanogo build` is the user's. It takes no allowlist and no environment
+variable, and it takes no standard library archive from the `go` command when a
+distribution is installed. It still runs the `go` command twice, to resolve the
+packages the user named and to link, and the section further down says so
+rather than leaving a reader to find out.
 
 The substitution is the compiler developer's. `driver.Run` implements the
 flowchart below, `cmd/nanogo/main_test.go` drives a real
@@ -197,17 +200,45 @@ by nanogo and fails when $Q$ is added, the bug is in what $Q$ uses.
 someone else's build, it needs an allowlist, and everything above is about
 making that substitution safe.
 
-A user types `nanogo build .`, and there is no allowlist, no environment
-variable and no `go` command in the loop. nanogo resolves the package graph
-itself ([014](014-package-loader.md)), takes the standard library from the tree
-the binary is installed in ([054](054-distribution.md)), compiles what it can,
+A user types `nanogo build .`, and there is no allowlist and no environment
+variable. nanogo resolves the package graph itself
+([014](014-package-loader.md)), takes the standard library from the tree the
+binary is installed in ([054](054-distribution.md)), compiles what it can,
 delegates the rest, and links.
+
+The `go` command is still in the loop twice, and calling that out is the point
+of this paragraph rather than a caveat at the end of it:
+
+| What | Why it is still the `go` command's | What removes it |
+| --- | --- | --- |
+| `go list` over the patterns the user named | module resolution, vendoring and the build constraint rules decide which files a package has, and [014](014-package-loader.md)'s G2 loader is unbuilt | [014](014-package-loader.md) |
+| `go tool link` | nanogo has no linker | [045](045-linker.md) |
+
+What it is **not** in the loop for is the standard library. Every archive under
+the distribution's `pkg/GOOS_GOARCH` is named in the `-importcfg` from that
+tree's `MANIFEST`, and asking the `go` command for an export file, which is
+what would build one of those packages with `gc`, never happens. A standard
+library package the tree does not hold is a refusal naming the package and the
+tree, never a substitution from the ambient toolchain.
+
+Two things are checked before a build against a distribution starts, because
+both fail late and unreadably otherwise:
+
+1. **The tree agrees with its own manifest.** `dist.TallyTree` requires a
+   record per archive, an archive per record, and a matching SHA-256. A tree
+   that cannot say what compiled it cannot be built against.
+2. **The installed `go` command is the release the tree was built with.**
+   `driver.writeOutput` copies the `go object ...` header line verbatim from
+   the installed toolchain ([054](054-distribution.md)), so a different release
+   produces a `main` object whose header disagrees with every archive in the
+   tree. The refusal names both releases and the tree; the link failure names
+   two releases and neither.
 
 | | `-toolexec` | `nanogo build` |
 | --- | --- | --- |
 | Who decides which packages nanogo compiles | the allowlist file, per invocation | nanogo, per package, by whether it compiles |
 | Who resolves the graph | the `go` command | `driver/build.go` |
-| Where the standard library comes from | the ambient toolchain | `NANOGOROOT`, or the tree beside the binary |
+| Where the standard library comes from | the ambient toolchain | the tree beside the binary, or `NANOGOROOT`, or the ambient toolchain when there is no distribution |
 | Who computes `-p` | the `go` command | nanogo |
 | Cache | the `go` command's | none |
 

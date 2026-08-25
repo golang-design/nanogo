@@ -30,9 +30,34 @@ already have. The target is one: `darwin/arm64`.
 go install golang.design/x/nanogo/cmd/nanogo@latest
 ```
 
-> [!NOTE]
-> `nanogo build` is not in a tagged release yet. Until it is, build the command
-> from a clone of this repository: `go build -o nanogo ./cmd/nanogo`.
+That gives you the command and nothing beside it, so it takes the standard
+library from the Go toolchain on your machine.
+
+A release tarball carries its own. Unpack it and run the binary inside it:
+
+```console
+$ tar xzf nanogo<version>.darwin-arm64.tar.gz
+$ ./nanogo/bin/nanogo build .
+nanogo: 1 of 28 packages compiled by nanogo; 27 by gc go1.27.0 (everything not named on the command line)
+nanogo: the standard library and the runtime come from /path/to/nanogo (the tree the nanogo binary is installed in)
+nanogo: the executable was written by go tool link; nanogo has no linker (specs/045-linker.md)
+```
+
+Every archive that build read came out of `nanogo/pkg/darwin_arm64`, named
+from that tree's `MANIFEST` and checked against the SHA-256 in it. The tree
+holds the 27 packages the smallest Go program needs, so a program that imports
+anything outside that set is refused by name rather than served a copy from your
+toolchain. `nanogo-dist tally` lists what the tree holds.
+
+The `go` command must still be installed, and the build says why on every run:
+`go list` resolves the packages you name, and `go tool link` writes the
+executable. Its release has to be the one the tarball was built with, because
+nanogo copies the object header from it.
+
+> [!WARNING]
+> `nanogo0.1.0` is the exception. Its `nanogo build` refuses every program,
+> because it could not read its own `pkg/darwin_arm64` tree. Use a clone of this
+> repository until the next release: `go build -o nanogo ./cmd/nanogo`.
 
 ## Compile a program
 
@@ -184,8 +209,9 @@ Use integers until that is finished.
 ## What nanogo does not do
 
 **It does not compile the standard library.** Every package your program
-imports comes from the Go toolchain on your machine. nanogo reads the export
-data that toolchain wrote.
+imports was compiled by `gc`, out of a release tarball's `pkg` tree or out of
+the Go toolchain on your machine. nanogo reads the export data `gc` wrote. The
+count nanogo prints on every build is how much of the program that is.
 
 **It does not link.** `go tool link` writes the executable. nanogo has no
 linker yet. See [`specs/045-linker.md`](specs/045-linker.md).
@@ -209,9 +235,13 @@ os.(*File).write(...)
 This is the one failure nanogo does not announce. Do not put a nanogo-compiled
 package into a program you care about.
 
-**It writes no export data.** The archive holds the object and nothing a
-compiler can import, so no other package may import a package nanogo compiled.
-nanogo takes packages from the top of the import graph downwards.
+**It compiles one package at a time in a build.** The archive nanogo writes
+does carry export data, and `gc` reads back all 275 of the 375 standard library
+packages whose surface round-trips through it
+([`specs/015-export-data.md`](specs/015-export-data.md)), so a package nanogo
+compiled can be imported. What `nanogo build` does not do yet is order two of
+its own targets, so it refuses a build in which one package you named imports
+another. Name one, or build the other with the `go` command.
 
 **It has one target.** nanogo emits arm64 machine code and refuses to run on a
 host that is not arm64. It does not yet refuse a `GOARCH` that is not arm64. It

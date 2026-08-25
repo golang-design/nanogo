@@ -314,7 +314,7 @@ different day, and the rule would read as a comment nobody had reason to keep.
 
 ## Testing
 
-`internal/release` builds the real tarball and then proves four things in the
+`internal/release` builds the real tarball and then proves five things in the
 order a user meets them:
 
 1. It opens with the `tar` a user has, not only with `archive/tar`.
@@ -326,9 +326,24 @@ order a user meets them:
 4. A program compiles through the unpacked `bin/nanogo` and links against
    archives that come only from the tree, named one by one in an `-importcfg`,
    then runs and prints what it was meant to.
+5. `bin/nanogo build` compiles and links the same kind of program from a module
+   outside this repository, with `GOROOT` and `NANOGOROOT` unset, and the
+   executable runs and prints the right answer.
 
 The program uses `println` and not `fmt`, because `fmt` is not in the bootstrap
 closure and a distribution that held it would not be this one.
+
+Four and five are not the same claim and the difference is what a release job
+missed once. Four drives the compiler the way the `go` command drives it, as a
+`-toolexec` tool with an `-importcfg` the *test* wrote. Five drives the command
+a person who downloads a compiler runs, which has to write that `-importcfg`
+itself from the tree. `v0.1.0` passed four and shipped a `nanogo build` that
+refused every program, because nothing ran five.
+
+Five reads the `-work` scratch directory and requires every `packagefile` line
+to name an archive under the tree's `pkg/GOOS_GOARCH`. A build that took one
+package from the `go` command's cache would print the same summary and pass
+every other assertion.
 
 **The delegation is asserted, not inferred.** nanogo compiles no package of this
 closure, so its log must record a delegation. A program that ran is not evidence
