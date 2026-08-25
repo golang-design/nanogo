@@ -244,9 +244,14 @@ func TestCompileRefusals(t *testing.T) {
 			want: []string{"a type its code needs a descriptor for", "main.point", "method set"},
 		},
 		{
-			name: "a package-level variable is refused",
+			// By name and by position. A package whose variables have no
+			// data symbol is a package whose initialisation record would
+			// list work that cannot be done, and a record that is short of
+			// what the source asked for produces a program that runs and is
+			// wrong.
+			name: "a package-level variable is refused by name and position",
 			src:  "package main\n\nvar n = 1\n\nfunc f() int { return n }\n",
-			want: []string{"package-level variables"},
+			want: []string{"package-level variable n", "a.go:3:5", "data symbol"},
 		},
 		{
 			name: "-complete makes a bodyless declaration an error",
@@ -572,17 +577,39 @@ func TestPragmaHandlerRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestCompileRefusesAnInitFunction is separate from the table because an init
-// reaches ir.Package.Inits and not ir.Package.Globals, and the two refusals
-// have different reasons.
-func TestCompileRefusesAnInitFunction(t *testing.T) {
-	_, err := compileSource(t, "package main\n\nfunc init() {}\n\nfunc f() int { return 1 }\n", nil)
-	if err == nil {
-		t.Fatal("Compile accepted a package with an init function")
+// TestCompileEmitsAnInitTaskForADeclaredInit reads the archive with the tool
+// that reads objects.
+//
+// ir.Build puts a declared init in p.Funcs under its own symbol and
+// synthesises one function in p.Inits that calls it. Both are compiled, and
+// the record lists the synthesised one alone: it is the entry point for
+// everything this package initialises, in the order the source fixed.
+func TestCompileEmitsAnInitTaskForADeclaredInit(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	out, err := compileSource(t, "package main\n\nfunc init() {}\n\nfunc f() int { return 1 }\n",
+		func(c *Config) { c.Pack = true })
+	if err != nil {
+		t.Fatalf("Compile refused a package with an init function: %v", err)
 	}
-	if !strings.Contains(err.Error(), "init function") {
-		t.Errorf("the message does not name the construct:\n%v", err)
+	syms := symbolsOf(t, out)
+	for _, want := range []string{"main..inittask", "main.init", "main.init.0"} {
+		if !strings.Contains(syms, want) {
+			t.Errorf("the object holds no %s:\n%s", want, syms)
+		}
 	}
+}
+
+// symbolsOf is go tool nm over an archive nanogo wrote. The reader is the
+// toolchain's, so a symbol it does not report is a symbol cmd/link would not
+// see either.
+func symbolsOf(t *testing.T, archive string) string {
+	t.Helper()
+	out, err := exec.Command("go", "tool", "nm", archive).CombinedOutput()
+	if err != nil {
+		t.Fatalf("go tool nm %s: %v\n%s", archive, err, out)
+	}
+	return string(out)
 }
 
 // TestCompileReportsAnEmitFailure covers the last stage of the pipeline.

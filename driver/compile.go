@@ -96,7 +96,7 @@ func Compile(cfg *Config) error {
 	if err != nil {
 		return &UnsupportedError{Package: cfg.Package, What: "this package", Detail: err.Error()}
 	}
-	if err := checkIR(cfg, p); err != nil {
+	if err := checkIR(cfg, p, fset); err != nil {
 		return err
 	}
 
@@ -288,22 +288,23 @@ func checkFiles(cfg *Config, imp *importer, files []*syntax.File, fset *syntax.F
 // checkIR refuses the package-level constructs the backend has no writer for.
 //
 // They are separate from the per-function refusals below because they are
-// properties of the package: a global needs a data symbol and an initialiser
-// needs an init task, and neither exists. Compiling the functions first and
-// discovering this at link time would report the gap as an undefined symbol.
-func checkIR(cfg *Config, p *ir.Package) error {
+// properties of the package: a package-level variable needs a data symbol and
+// there is no writer for one. Compiling the functions first and discovering
+// this at link time would report the gap as an undefined symbol.
+//
+// The refusal names the variable and its position rather than the package.
+// The alternative is worse than a poor message: a package whose variables
+// nanogo cannot write is a package whose initialisation record would list an
+// init function that assigns to symbols that do not exist. A record that is
+// silently short of the work the source asked for produces a program that
+// runs and is wrong, which is the failure the record exists to prevent.
+func checkIR(cfg *Config, p *ir.Package, fset *syntax.FileSet) error {
 	if len(p.Globals) > 0 {
+		g := p.Globals[0]
 		return &UnsupportedError{
 			Package: cfg.Package,
-			What:    "a package with package-level variables",
+			What:    "package-level variable " + g.Name + " at " + position(fset, g.Pos, g.Name),
 			Detail:  "a global needs a data symbol, which specs/020-ir.md's object model does not carry yet",
-		}
-	}
-	if len(p.Inits) > 0 {
-		return &UnsupportedError{
-			Package: cfg.Package,
-			What:    "a package with an init function",
-			Detail:  "an init needs the package init task of specs/040-object-format.md, which is unbuilt",
 		}
 	}
 	return nil
@@ -362,7 +363,14 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// first-use order rather than a set, because the object's symbol table is
 	// written in the order symbols were added (specs/053-determinism.md).
 	var needed []*ir.Type
-	for _, fn := range p.Funcs {
+	// The functions the initialisation record runs, in the order they must
+	// run. ir.Build puts one synthesised function in p.Inits: it assigns the
+	// package-level variables in the order specs/012-type-checking.md
+	// computed, and then calls each declared init in source order. The
+	// declared inits are in p.Funcs and are compiled with everything else, so
+	// only the synthesised one belongs in the record.
+	var initFns []obj.SymRef
+	for _, fn := range append(append([]*ir.Func{}, p.Funcs...), p.Inits...) {
 		if fn.Bodyless {
 			// A bodyless declaration is satisfied by assembly, and
 			// checkAssembly has already refused a package that has any.
@@ -381,8 +389,12 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 		if err != nil {
 			return nil, err
 		}
-		if _, err := r.Add(out); err != nil {
+		ref, err := r.Add(out)
+		if err != nil {
 			return nil, &UnsupportedError{Package: cfg.Package, What: "function " + fn.Name, Detail: err.Error()}
+		}
+		if isPackageInit(p, fn) {
+			initFns = append(initFns, ref)
 		}
 		needed = append(needed, types...)
 	}
@@ -400,7 +412,25 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	if err := addDescriptors(cfg, out, needed); err != nil {
 		return nil, err
 	}
+	// The record goes in last. It names the init function by the reference
+	// r.Add returned, and it adds one non-package reference per import, so
+	// every definition this object holds is already in place.
+	addInitTask(out, imports, initFns)
 	return out, nil
+}
+
+// isPackageInit reports whether fn is the function ir.Build synthesised to run
+// this package's initialisation.
+//
+// Identity, not the name: a declared "init" is an ordinary function in
+// p.Funcs, and the synthesised one carries the same Name.
+func isPackageInit(p *ir.Package, fn *ir.Func) bool {
+	for _, in := range p.Inits {
+		if in == fn {
+			return true
+		}
+	}
+	return false
 }
 
 // addDescriptors writes the type descriptors of the types the code names.
