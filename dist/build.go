@@ -91,17 +91,22 @@ func Build(o Options) (Version, error) {
 	}
 
 	v := Version{Release: o.Release, Go: o.GoVersion, Target: o.Target}
+	var m Manifest
 	for _, p := range o.Packages {
 		r, err := installArchive(o.Out, o.Target, p)
 		if err != nil {
 			return Version{}, err
 		}
+		m = append(m, r)
 		v.Packages++
 		if r.Producer.IsNanogo() {
 			v.ByNanogo++
 		} else {
 			v.ByGc++
 		}
+	}
+	if err := WriteManifest(o.Out, o.Target, m); err != nil {
+		return Version{}, err
 	}
 	if err := os.WriteFile(filepath.Join(o.Out, VersionFile), []byte(v.String()), fileMode); err != nil {
 		return Version{}, err
@@ -112,42 +117,45 @@ func Build(o Options) (Version, error) {
 	return v, nil
 }
 
-// installArchive copies one archive into pkg and makes it name its producer.
+// installArchive copies one archive into pkg and returns its manifest record.
 //
-// An archive that already carries a record keeps it. That is the case a nanogo
-// build produces, and it is why the producer is written by the producer rather
-// than asserted here: this function knows only that the go command handed it a
-// file, and the day nanogo compiles a standard library package the file will
-// come from somewhere else.
+// The producer is declared by the caller and never guessed here. A package
+// nanogo compiled arrives with [Package.Producer] set, and this function knows
+// only that it was handed a file.
 //
-// An archive with no record is gc's, and the release it names is read out of
-// its own object header rather than taken from [Options.GoVersion]. The two
-// are compared afterwards by [VerifyTree], which is the whole point of reading
-// it rather than assuming it.
+// An undeclared producer is gc's, and the release it names is read out of the
+// archive's own object header rather than taken from [Options.GoVersion]. The
+// two are compared afterwards by [VerifyTree], which is the whole point of
+// reading it rather than assuming it.
+//
+// The record carries the SHA-256 of the bytes that were written, computed from
+// the destination rather than from the source, so that a copy that went wrong
+// is caught by the verify at the end of [Build].
 func installArchive(root, target string, p Package) (Record, error) {
 	b, err := os.ReadFile(p.Archive)
 	if err != nil {
 		return Record{}, err
 	}
-	r, err := ReadRecord(b)
-	if err != nil {
-		version, verr := ToolchainVersion(b)
-		if verr != nil {
-			return Record{}, fmt.Errorf("%s: %v", p.Path, verr)
+	producer := p.Producer
+	if producer.Tool == "" {
+		version, err := ToolchainVersion(b)
+		if err != nil {
+			return Record{}, fmt.Errorf("%s: %v", p.Path, err)
 		}
-		r = Record{Path: p.Path, Producer: Producer{Tool: GcTool, Version: version}}
-		if b, err = AddRecord(b, r); err != nil {
-			return Record{}, err
-		}
-	}
-	if r.Path != p.Path {
-		return Record{}, fmt.Errorf("%s carries a record for %s", p.Path, r.Path)
+		producer = Producer{Tool: GcTool, Version: version}
 	}
 	dst := filepath.Join(root, "pkg", target, filepath.FromSlash(p.Path)+archiveExt)
 	if err := os.MkdirAll(filepath.Dir(dst), dirMode); err != nil {
 		return Record{}, err
 	}
-	return r, os.WriteFile(dst, b, fileMode)
+	if err := os.WriteFile(dst, b, fileMode); err != nil {
+		return Record{}, err
+	}
+	sum, err := sumFile(dst)
+	if err != nil {
+		return Record{}, err
+	}
+	return Record{Path: p.Path, Producer: producer, Sum: sum}, nil
 }
 
 // TreeName is the directory a tarball unpacks to, whatever the tree was built

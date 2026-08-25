@@ -61,7 +61,7 @@ func version(t *testing.T, root string, v Version) {
 
 func TestVerifyTreeAcceptsATreeThatMatchesItsClaim(t *testing.T) {
 	gc := Producer{GcTool, "go1.27.0"}
-	root := writeTree(t, "darwin_arm64", Record{"internal/abi", gc}, Record{"runtime", gc})
+	root := writeTree(t, "darwin_arm64", Record{Path: "internal/abi", Producer: gc}, Record{Path: "runtime", Producer: gc})
 	version(t, root, Version{Release: "nanogo0.1.0", Go: "go1.27.0", Target: "darwin_arm64", Packages: 2, ByGc: 2})
 	if err := VerifyTree(root); err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestVerifyTreeFailsWhenTheClaimAndTheArchivesDisagree(t *testing.T) {
 	}{
 		{
 			name:    "a package count that is too high",
-			records: []Record{{"runtime", gc}},
+			records: []Record{{Path: "runtime", Producer: gc}},
 			version: base,
 			want:    "says 2 packages and pkg/darwin_arm64 holds 1",
 		},
@@ -92,7 +92,7 @@ func TestVerifyTreeFailsWhenTheClaimAndTheArchivesDisagree(t *testing.T) {
 			// The claim this whole spec exists to stop: a tree of gc archives
 			// reported as nanogo's work.
 			name:    "nanogo credited for gc's archives",
-			records: []Record{{"internal/abi", gc}, {"runtime", gc}},
+			records: []Record{{Path: "internal/abi", Producer: gc}, {Path: "runtime", Producer: gc}},
 			version: Version{Release: "nanogo0.1.0", Go: "go1.27.0", Target: "darwin_arm64", Packages: 2, ByNanogo: 2},
 			want:    "says nanogo compiled 2 packages and the archives say 0",
 		},
@@ -101,7 +101,7 @@ func TestVerifyTreeFailsWhenTheClaimAndTheArchivesDisagree(t *testing.T) {
 			// setup-go's 1.27.x with check-latest makes this the likely
 			// failure, not a hypothetical one.
 			name:    "a gc release that is not the pinned one",
-			records: []Record{{"internal/abi", Producer{GcTool, "go1.27.3"}}, {"runtime", gc}},
+			records: []Record{{Path: "internal/abi", Producer: Producer{GcTool, "go1.27.3"}}, {Path: "runtime", Producer: gc}},
 			version: base,
 			want:    "compiled by gc go1.27.3 and VERSION pins go1.27.0",
 		},
@@ -136,8 +136,8 @@ func TestVerifyTreeFailsWithoutAVersionOrAPkgTree(t *testing.T) {
 // right for the wrong reason has to fail too.
 func TestVerifyTreeDerivesTheGcCount(t *testing.T) {
 	root := writeTree(t, "darwin_arm64",
-		Record{"internal/abi", Producer{NanogoTool, "3fbcea1"}},
-		Record{"runtime", Producer{GcTool, "go1.27.0"}})
+		Record{Path: "internal/abi", Producer: Producer{NanogoTool, "3fbcea1"}},
+		Record{Path: "runtime", Producer: Producer{GcTool, "go1.27.0"}})
 	version(t, root, Version{Release: "nanogo0.1.0", Go: "go1.27.0", Target: "darwin_arm64", Packages: 2, ByNanogo: 1, ByGc: 1})
 	if err := VerifyTree(root); err != nil {
 		t.Fatal(err)

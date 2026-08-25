@@ -10,6 +10,28 @@ import (
 	"testing"
 )
 
+// appendMember writes one member onto the end of an archive. It builds the
+// fixtures the readers here are aimed at; nothing outside a test writes an
+// archive, because a distribution copies the ones gc wrote.
+func appendMember(a []byte, name string, body []byte) ([]byte, error) {
+	if len(name) > nameWidth {
+		return nil, fmt.Errorf("member name %q is longer than %d bytes", name, nameWidth)
+	}
+	if len(a)%2 != 0 {
+		a = append(a, 0)
+	}
+	h := fmt.Sprintf("%-16s%-12d%-6d%-6d%-8o%-10d%s", name, 0, 0, 0, 0o644, len(body), headerTrailer)
+	if len(h) != headerSize {
+		return nil, fmt.Errorf("member header for %q is %d bytes, not %d", name, len(h), headerSize)
+	}
+	a = append(a, h...)
+	a = append(a, body...)
+	if len(body)%2 != 0 {
+		a = append(a, 0)
+	}
+	return a, nil
+}
+
 // fakeArchive builds an archive with a __.PKGDEF holding the given object
 // header line, plus an empty object member. It is the shape gc writes, which
 // is what every reader here is aimed at.
@@ -34,7 +56,7 @@ func TestMembersReadsWhatAppendMemberWrote(t *testing.T) {
 	a := fakeArchive(t, gcHeader)
 	// An odd length body, so that the padding rule is exercised: a reader that
 	// trusts the header and not the padding lands inside the next header.
-	a, err := appendMember(a, recordMember, []byte("odd"))
+	a, err := appendMember(a, "odd.o", []byte("odd"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +68,7 @@ func TestMembersReadsWhatAppendMemberWrote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{pkgdefMember, "_go_.o", recordMember, "tail.o"}
+	want := []string{pkgdefMember, "_go_.o", "odd.o", "tail.o"}
 	if len(ms) != len(want) {
 		t.Fatalf("read %d members, wrote %d: %v", len(ms), len(want), ms)
 	}

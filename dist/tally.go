@@ -19,7 +19,7 @@ const archiveExt = ".a"
 // archive names.
 type Tally struct {
 	// Records are the archives found, sorted by import path.
-	Records []Record
+	Records Manifest
 }
 
 // Total is the number of archives.
@@ -72,9 +72,15 @@ func (t Tally) Others() []struct {
 // It names the denominator, so that a number cannot be read as a fraction of
 // something else, and it names every producer that is not nanogo, so that a
 // tree of gc-compiled archives cannot be read as nanogo's work.
+//
+// "in this distribution" and not "in the bootstrap closure". The two are the
+// same set today, and this function counts what is in pkg and has no way to
+// know whether that is still the closure. A sentence describing a set it did
+// not measure is the same fault as a tally nobody checks, one sentence
+// smaller. specs/054-distribution.md carries the closure count.
 func (t Tally) Line() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "nanogo: %d of %d packages in the bootstrap closure compiled by nanogo",
+	fmt.Fprintf(&b, "nanogo: %d of %d packages in this distribution compiled by nanogo",
 		t.Nanogo(), t.Total())
 	for _, g := range t.Others() {
 		fmt.Fprintf(&b, "; %d by %s", g.Count, g.Producer)
@@ -82,48 +88,68 @@ func (t Tally) Line() string {
 	return b.String()
 }
 
-// TallyTree reads every archive under root/pkg/target and reports what they
-// say about themselves.
+// TallyTree reads a tree's manifest and checks it against the archives.
 //
-// Every archive must carry a record. One that does not fails the whole tally,
-// because a distribution that can account for all but one of its packages
-// cannot answer the question the tally is asked.
+// Three things are required and each closes a way the tree could lie:
+//
+//  1. Every archive under pkg/target has a manifest record. An archive that
+//     appeared from somewhere else is not counted as anything, it fails the
+//     whole tally, because a distribution that can account for all but one of
+//     its packages cannot answer the question the tally is asked.
+//  2. Every record names an archive that is there.
+//  3. Every archive's SHA-256 matches its record. This is what makes the
+//     record a statement about the bytes rather than about what somebody
+//     expected the tree to hold. An archive swapped for another is caught
+//     here, which is the accidental version of the fault, and the one that
+//     actually happens.
 func TallyTree(root, target string) (Tally, error) {
+	m, err := ReadManifest(root, target)
+	if err != nil {
+		return Tally{}, err
+	}
 	dir := filepath.Join(root, "pkg", target)
-	var t Tally
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	byPath := make(map[string]Record, len(m))
+	for _, r := range m {
+		byPath[r.Path] = r
+	}
+	found := make(map[string]bool, len(m))
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() || filepath.Ext(path) != archiveExt {
 			return nil
 		}
-		r, err := ReadRecordFile(path)
-		if err != nil {
-			return err
-		}
-		// The record names the package and the path in the tree names it
-		// again. Two copies of a fact drift, so the copy is checked.
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
 		}
-		if want := filepath.ToSlash(strings.TrimSuffix(rel, archiveExt)); want != r.Path {
-			return fmt.Errorf("%s: the archive sits at %s and its record says %s", path, want, r.Path)
+		p := filepath.ToSlash(strings.TrimSuffix(rel, archiveExt))
+		r, ok := byPath[p]
+		if !ok {
+			return fmt.Errorf("%s is in the tree and not in %s, so nothing says which compiler produced it", path, ManifestFile)
 		}
-		t.Records = append(t.Records, r)
+		sum, err := sumFile(path)
+		if err != nil {
+			return err
+		}
+		if sum != r.Sum {
+			return fmt.Errorf("%s does not match its %s record: the file is %s and the record is %s", path, ManifestFile, sum, r.Sum)
+		}
+		found[p] = true
 		return nil
 	})
 	if err != nil {
 		return Tally{}, err
 	}
-	if len(t.Records) == 0 {
-		return Tally{}, fmt.Errorf("%s holds no archives, so the tree can link nothing", dir)
+	// The manifest is sorted, so this reports the first missing archive by
+	// import path rather than by whatever order a map gave.
+	for _, r := range m {
+		if !found[r.Path] {
+			return Tally{}, fmt.Errorf("%s lists %s and pkg/%s does not hold it", ManifestFile, r.Path, target)
+		}
 	}
-	// WalkDir is lexical, which is the sorted order already. Sorting again is
-	// the cheap way to keep that true if the walk is ever replaced.
-	sort.Slice(t.Records, func(i, j int) bool { return t.Records[i].Path < t.Records[j].Path })
-	return t, nil
+	return Tally{Records: m}, nil
 }
 
 // TallyLine is [Tally.Line] for the tree at root.

@@ -62,11 +62,12 @@ func TestClosureIsTheSmallestProgramsDependencies(t *testing.T) {
 		if _, err := ToolchainVersion(b); err != nil {
 			t.Fatalf("%s: %v", p.Path, err)
 		}
-		// None of them carries a producer record yet. gc does not write one,
-		// so Build stamps them, and the day nanogo compiles one of these this
-		// assertion is what says so.
-		if _, err := ReadRecord(b); err == nil {
-			t.Fatalf("%s already carries a producer record, which gc does not write", p.Path)
+		// The closure declares no producer. Every one of these is gc's, and
+		// Build reads the release out of the header above rather than being
+		// told it. The day nanogo compiles one of these, its Package carries
+		// a Producer and this assertion is what has to change with it.
+		if p.Producer.Tool != "" {
+			t.Fatalf("%s arrived from go list declaring producer %s", p.Path, p.Producer)
 		}
 	}
 	if !seen {

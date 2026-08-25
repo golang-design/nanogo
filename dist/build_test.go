@@ -23,7 +23,7 @@ func TestParseClosureDropsWhatADistributionDoesNotHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Package{{"internal/goarch", "/cache/goarch.a"}, {"runtime", "/cache/runtime.a"}}
+	want := []Package{{Path: "internal/goarch", Archive: "/cache/goarch.a"}, {Path: "runtime", Archive: "/cache/runtime.a"}}
 	if len(pkgs) != len(want) {
 		t.Fatalf("parseClosure gave %v, want %v", pkgs, want)
 	}
@@ -100,8 +100,8 @@ func archive(t *testing.T, header string) string {
 
 func TestBuildStampsEveryArchiveAndVerifiesTheResult(t *testing.T) {
 	o := options(t,
-		Package{"internal/abi", archive(t, gcHeader)},
-		Package{"runtime", archive(t, gcHeader)})
+		Package{Path: "internal/abi", Archive: archive(t, gcHeader)},
+		Package{Path: "runtime", Archive: archive(t, gcHeader)})
 	v, err := Build(o)
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +115,7 @@ func TestBuildStampsEveryArchiveAndVerifiesTheResult(t *testing.T) {
 		"bin/nanogo",
 		"src/LICENSE", "src/PATENTS", "src/internal/abi/abi.go",
 		"pkg/darwin_arm64/internal/abi.a", "pkg/darwin_arm64/runtime.a",
+		"pkg/darwin_arm64/" + ManifestFile,
 	} {
 		if _, err := os.Stat(filepath.Join(o.Out, filepath.FromSlash(name))); err != nil {
 			t.Errorf("the tree has no %s: %v", name, err)
@@ -124,7 +125,7 @@ func TestBuildStampsEveryArchiveAndVerifiesTheResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "nanogo: 0 of 2 packages in the bootstrap closure compiled by nanogo; 2 by gc go1.27.0"
+	want := "nanogo: 0 of 2 packages in this distribution compiled by nanogo; 2 by gc go1.27.0"
 	if line != want {
 		t.Fatalf("TallyLine =\n\t%s\nwant\n\t%s", line, want)
 	}
@@ -134,15 +135,8 @@ func TestBuildStampsEveryArchiveAndVerifiesTheResult(t *testing.T) {
 // case a nanogo-compiled package produces, and it is why Build never asserts a
 // producer of its own.
 func TestBuildKeepsARecordTheProducerWrote(t *testing.T) {
-	stamped := filepath.Join(t.TempDir(), "abi.a")
-	b, err := AddRecord(fakeArchive(t, gcHeader), Record{"internal/abi", Producer{NanogoTool, "3fbcea1"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(stamped, b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	v, err := Build(options(t, Package{"internal/abi", stamped}, Package{"runtime", archive(t, gcHeader)}))
+	stamped := archive(t, gcHeader)
+	v, err := Build(options(t, Package{Path: "internal/abi", Archive: stamped, Producer: Producer{NanogoTool, "3fbcea1"}}, Package{Path: "runtime", Archive: archive(t, gcHeader)}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +148,7 @@ func TestBuildKeepsARecordTheProducerWrote(t *testing.T) {
 // The release job's real failure mode: setup-go resolves 1.27.x to a patch
 // release the pin does not name, and the archives say so.
 func TestBuildFailsWhenTheToolchainIsNotThePinnedOne(t *testing.T) {
-	o := options(t, Package{"runtime", archive(t, "go object darwin arm64 go1.27.3 X:regabiwrapper")})
+	o := options(t, Package{Path: "runtime", Archive: archive(t, "go object darwin arm64 go1.27.3 X:regabiwrapper")})
 	_, err := Build(o)
 	if err == nil || !strings.Contains(err.Error(), "compiled by gc go1.27.3 and VERSION pins go1.27.0") {
 		t.Fatalf("Build = %v, want an error about the unpinned toolchain", err)
@@ -169,21 +163,21 @@ func TestBuildRefusesWhatItCannotStandBehind(t *testing.T) {
 		}
 	})
 	t.Run("no Go version", func(t *testing.T) {
-		o := options(t, Package{"runtime", archive(t, gcHeader)})
+		o := options(t, Package{Path: "runtime", Archive: archive(t, gcHeader)})
 		o.GoVersion = ""
 		if _, err := Build(o); err == nil {
 			t.Error("a distribution that pins no Go release was accepted")
 		}
 	})
 	t.Run("a bad target", func(t *testing.T) {
-		o := options(t, Package{"runtime", archive(t, gcHeader)})
+		o := options(t, Package{Path: "runtime", Archive: archive(t, gcHeader)})
 		o.Target = "darwin"
 		if _, err := Build(o); err == nil {
 			t.Error("a target that is not GOOS_GOARCH was accepted")
 		}
 	})
 	t.Run("an existing output directory", func(t *testing.T) {
-		o := options(t, Package{"runtime", archive(t, gcHeader)})
+		o := options(t, Package{Path: "runtime", Archive: archive(t, gcHeader)})
 		if err := os.MkdirAll(o.Out, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -192,28 +186,28 @@ func TestBuildRefusesWhatItCannotStandBehind(t *testing.T) {
 		}
 	})
 	t.Run("a missing binary", func(t *testing.T) {
-		o := options(t, Package{"runtime", archive(t, gcHeader)})
+		o := options(t, Package{Path: "runtime", Archive: archive(t, gcHeader)})
 		o.Binary = filepath.Join(t.TempDir(), "absent")
 		if _, err := Build(o); err == nil {
 			t.Error("a missing binary was accepted")
 		}
 	})
 	t.Run("a missing licence", func(t *testing.T) {
-		o := options(t, Package{"runtime", archive(t, gcHeader)})
+		o := options(t, Package{Path: "runtime", Archive: archive(t, gcHeader)})
 		o.License = filepath.Join(t.TempDir(), "absent")
 		if _, err := Build(o); err == nil {
 			t.Error("a distribution with no licence was accepted")
 		}
 	})
 	t.Run("a missing GOROOT", func(t *testing.T) {
-		o := options(t, Package{"runtime", archive(t, gcHeader)})
+		o := options(t, Package{Path: "runtime", Archive: archive(t, gcHeader)})
 		o.GOROOT = t.TempDir()
 		if _, err := Build(o); err == nil {
 			t.Error("a GOROOT with no sources was accepted")
 		}
 	})
 	t.Run("a missing archive", func(t *testing.T) {
-		o := options(t, Package{"runtime", filepath.Join(t.TempDir(), "absent.a")})
+		o := options(t, Package{Path: "runtime", Archive: filepath.Join(t.TempDir(), "absent.a")})
 		if _, err := Build(o); err == nil {
 			t.Error("a missing archive was accepted")
 		}
@@ -223,23 +217,15 @@ func TestBuildRefusesWhatItCannotStandBehind(t *testing.T) {
 		if err := os.WriteFile(name, []byte("not an archive"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		o := options(t, Package{"runtime", name})
+		o := options(t, Package{Path: "runtime", Archive: name})
 		if _, err := Build(o); err == nil {
 			t.Error("a file that is not an archive was accepted")
 		}
 	})
-	t.Run("an archive whose record names another package", func(t *testing.T) {
-		name := filepath.Join(t.TempDir(), "runtime.a")
-		b, err := AddRecord(fakeArchive(t, gcHeader), Record{"math/bits", Producer{NanogoTool, "x"}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(name, b, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		o := options(t, Package{"runtime", name})
+	t.Run("a producer naming an unknown tool", func(t *testing.T) {
+		o := options(t, Package{Path: "runtime", Archive: archive(t, gcHeader), Producer: Producer{"clang", "17"}})
 		if _, err := Build(o); err == nil {
-			t.Error("an archive carrying another package's record was accepted")
+			t.Error("an archive attributed to a tool the manifest cannot name was accepted")
 		}
 	})
 }
@@ -247,7 +233,7 @@ func TestBuildRefusesWhatItCannotStandBehind(t *testing.T) {
 // Build installs extra commands so that an unpacked tarball can answer
 // questions about itself without a second download.
 func TestBuildInstallsExtraCommands(t *testing.T) {
-	o := options(t, Package{"runtime", archive(t, gcHeader)})
+	o := options(t, Package{Path: "runtime", Archive: archive(t, gcHeader)})
 	extra := filepath.Join(t.TempDir(), "tool")
 	if err := os.WriteFile(extra, []byte("tool"), 0o755); err != nil {
 		t.Fatal(err)
@@ -264,7 +250,7 @@ func TestBuildInstallsExtraCommands(t *testing.T) {
 		t.Errorf("bin/nanogo-dist is %v and a command has to be executable", fi.Mode())
 	}
 
-	o2 := options(t, Package{"runtime", archive(t, gcHeader)})
+	o2 := options(t, Package{Path: "runtime", Archive: archive(t, gcHeader)})
 	o2.Commands = map[string]string{"gone": filepath.Join(t.TempDir(), "absent")}
 	if _, err := Build(o2); err == nil {
 		t.Error("a command that is not there was accepted")

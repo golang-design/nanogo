@@ -20,6 +20,11 @@ type Package struct {
 	// Archive is the .a file on disk, as the go command's build cache holds
 	// it.
 	Archive string
+	// Producer is the compiler that wrote it. The zero value means the
+	// archive is gc's and its release is read out of its own object header,
+	// which is what [Closure] produces. A caller that compiled the archive
+	// itself sets this, because a producer is declared by the producer.
+	Producer Producer
 }
 
 // closureProgram is the program whose dependencies define the bootstrap

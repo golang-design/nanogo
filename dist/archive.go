@@ -19,7 +19,6 @@ const (
 	headerSize    = 60
 	nameWidth     = 16
 	pkgdefMember  = "__.PKGDEF"
-	recordMember  = "__.NANOGO"
 	objectPrefix  = "go object "
 	headerTrailer = "`\n"
 )
@@ -34,8 +33,7 @@ type member struct {
 //
 // The order matters to one reader and is therefore preserved rather than
 // sorted: the compiler's importer requires __.PKGDEF first and reports
-// "not a package file" when anything precedes it. That is why [AddRecord]
-// appends.
+// "not a package file" when anything precedes it.
 func members(a []byte) ([]member, error) {
 	if !strings.HasPrefix(string(a), archiveMagic) {
 		return nil, errors.New("not a Unix archive: it does not start with !<arch>")
@@ -68,29 +66,6 @@ func members(a []byte) ([]member, error) {
 		}
 	}
 	return out, nil
-}
-
-// appendMember writes one member onto the end of an archive.
-//
-// The modification time, the owner and the group are zero so that two runs
-// over the same input produce the same bytes (specs/053-determinism.md).
-func appendMember(a []byte, name string, body []byte) ([]byte, error) {
-	if len(name) > nameWidth {
-		return nil, fmt.Errorf("member name %q is longer than %d bytes", name, nameWidth)
-	}
-	if len(a)%2 != 0 {
-		a = append(a, 0)
-	}
-	h := fmt.Sprintf("%-16s%-12d%-6d%-6d%-8o%-10d%s", name, 0, 0, 0, 0o644, len(body), headerTrailer)
-	if len(h) != headerSize {
-		return nil, fmt.Errorf("member header for %q is %d bytes, not %d", name, len(h), headerSize)
-	}
-	a = append(a, h...)
-	a = append(a, body...)
-	if len(body)%2 != 0 {
-		a = append(a, 0)
-	}
-	return a, nil
 }
 
 // ToolchainVersion is the Go release named in an archive's object header.

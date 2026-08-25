@@ -21,9 +21,16 @@
 // part nanogo and part gc (specs/051-build-integration.md). So the bytes of an
 // archive do not say who wrote them, and a distribution of gc-compiled
 // archives under a nanogo name would look exactly like a distribution nanogo
-// compiled. Every archive therefore carries a record naming its producer,
-// written by the producer, and an archive without one is an error rather than
-// an assumption.
+// compiled.
+//
+// pkg/GOOS_GOARCH/MANIFEST therefore names the producer of every archive
+// beside it, with the SHA-256 that binds each record to the bytes it
+// describes. An archive with no record fails the whole tally rather than being
+// assumed to be gc's, and an archive whose hash has moved fails it too. The
+// archives themselves are untouched: an earlier design carried the record
+// inside each one and broke go tool nm and go tool objdump, which refuse any
+// archive member that is not an object. specs/054-distribution.md has that
+// account.
 //
 // dist imports nothing from driver. driver consumes a tree and dist produces
 // one, and an import in either direction would stop the other from calling
