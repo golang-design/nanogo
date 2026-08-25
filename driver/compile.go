@@ -302,13 +302,15 @@ func checkFiles(cfg *Config, imp *importer, files []*syntax.File, fset *syntax.F
 // silently short of the work the source asked for produces a program that
 // runs and is wrong, which is the failure the record exists to prevent.
 func checkIR(cfg *Config, p *ir.Package, fset *syntax.FileSet) error {
-	if len(p.Globals) > 0 {
-		g := p.Globals[0]
+	var ge *ssagen.GlobalError
+	if err := ssagen.CheckGlobals(p); errors.As(err, &ge) {
 		return &UnsupportedError{
 			Package: cfg.Package,
-			What:    "package-level variable " + g.Name + " at " + position(fset, g.Pos, g.Name),
-			Detail:  "a global needs a data symbol, which specs/020-ir.md's object model does not carry yet",
+			What:    "package-level variable " + ge.Obj.Name + " at " + position(fset, ge.Obj.Pos, ge.Obj.Name),
+			Detail:  ge.Reason,
 		}
+	} else if err != nil {
+		return err
 	}
 	return nil
 }
@@ -366,6 +368,24 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// first-use order rather than a set, because the object's symbol table is
 	// written in the order symbols were added (specs/053-determinism.md).
 	var needed []*ir.Type
+	// The data symbols of the package-level variables. They go in before any
+	// function is compiled, so that a variable nanogo cannot write is refused
+	// by name and position rather than reported by the linker as an undefined
+	// symbol, and so that the descriptors their pointer maps need join the set
+	// above before it is emitted.
+	globalTypes, err := ssagen.AddGlobals(out, p)
+	if err != nil {
+		var ge *ssagen.GlobalError
+		if errors.As(err, &ge) {
+			return nil, false, &UnsupportedError{
+				Package: cfg.Package,
+				What:    "package-level variable " + ge.Obj.Name + " at " + position(fset, ge.Obj.Pos, ge.Obj.Name),
+				Detail:  ge.Reason,
+			}
+		}
+		return nil, false, err
+	}
+	needed = append(needed, globalTypes...)
 	// The functions the initialisation record runs, in the order they must
 	// run. ir.Build puts one synthesised function in p.Inits: it assigns the
 	// package-level variables in the order specs/012-type-checking.md

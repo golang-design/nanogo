@@ -249,9 +249,14 @@ func TestCompileRefusals(t *testing.T) {
 			// list work that cannot be done, and a record that is short of
 			// what the source asked for produces a program that runs and is
 			// wrong.
+			//
+			// The variable is a map because the collector scans one and reads
+			// its pointer map through a type descriptor rtype cannot build. A
+			// variable of a type with no pointers in it, and one of a type
+			// whose descriptor rtype can build, both get their symbol now.
 			name: "a package-level variable is refused by name and position",
-			src:  "package main\n\nvar n = 1\n\nfunc f() int { return n }\n",
-			want: []string{"package-level variable main.n", "a.go:3:5", "data symbol"},
+			src:  "package main\n\nvar m map[string]int\n\nfunc f() int { return len(m) }\n",
+			want: []string{"package-level variable main.m", "a.go:3:5", "type descriptor"},
 		},
 		{
 			name: "-complete makes a bodyless declaration an error",
@@ -614,15 +619,19 @@ func symbolsOf(t *testing.T, archive string) string {
 
 // TestCompileReportsAnEmitFailure covers the last stage of the pipeline.
 //
-// A string constant needs a data symbol, and specs/032 has no writer, so the
-// emitter has no address to relocate against. The message has to name the
-// function, because the allowlist entry that produced it names only a package.
+// A floating-point constant has no encoder on this target
+// (specs/042-arm64-backend.md's group 6 is unbuilt), so the emitter has no
+// instruction to write. The message has to name the function, because the
+// allowlist entry that produced it names only a package.
+//
+// It used to be a string constant, which needed a data symbol nothing wrote.
+// That gap is closed, so the case moved to a construct that is still open.
 func TestCompileReportsAnEmitFailure(t *testing.T) {
 	arm64Only(t)
 	needGoCommand(t)
-	_, err := compileSource(t, "package main\n\nfunc f() string { return \"x\" }\n", nil)
+	_, err := compileSource(t, "package main\n\nfunc f() float64 { return 1.5 }\n", nil)
 	if err == nil {
-		t.Fatal("Compile emitted a function that returns a string constant")
+		t.Fatal("Compile emitted a function that returns a floating-point constant")
 	}
 	for _, want := range []string{"function f", "a.go:3:6", "ssagen.Emit"} {
 		if !strings.Contains(err.Error(), want) {
