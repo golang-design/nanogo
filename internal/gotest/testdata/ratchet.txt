@@ -1,0 +1,122 @@
+# What Go's own test corpus proved about nanogo, on the day this was written.
+#
+# Written by internal/gotest. Refresh it with
+#
+#	NANOGO_REQUIRE_CORPUS=1 NANOGO_REQUIRE_LINK=1 NANOGO_REFRESH_RATCHET=1 \
+#		go test ./internal/gotest/
+#
+# and read the diff before committing. A line that disappeared is a file that
+# used to pass and no longer does, which is a regression and not a refresh.
+#
+# Three kinds of line:
+#
+#	files N            how many files the corpus holds
+#	census KIND N      how many files carry that recipe kind
+#	pass HOW FILE      a file nanogo did what the recipe asked with,
+#	                   and how: matched, compiled or rejected
+#
+# A pass means nanogo ran the program and it behaved as gc's build did, or
+# nanogo compiled what the recipe said to compile, or nanogo rejected what the
+# recipe said to reject, at the annotated line. A refusal is never recorded:
+# recording one would freeze a gap in place and call it progress.
+#
+# Sorted, so a refresh produces a diff and not a reshuffle
+# (specs/053-determinism.md).
+
+files 356
+
+census (none) 1
+census build 4
+census buildrundir 3
+census compile 12
+census compiledir 2
+census errorcheck 152
+census errorcheckandrundir 3
+census errorcheckdir 1
+census errorcheckoutput 3
+census run 151
+census rundir 4
+census runindir 1
+census runoutput 14
+census skip 5
+
+pass rejected alias.go
+pass rejected alias2.go
+pass rejected append1.go
+pass rejected assign.go
+pass rejected assign1.go
+pass rejected blank1.go
+pass rejected bombad.go
+pass rejected cannotassign.go
+pass matched char_lit.go
+pass rejected cmp6.go
+pass rejected cmplx.go
+pass rejected complit1.go
+pass rejected const1.go
+pass rejected const2.go
+pass rejected const5.go
+pass rejected const6.go
+pass rejected convert1.go
+pass rejected convert2.go
+pass rejected convert3.go
+pass rejected convlit.go
+pass rejected convlit1.go
+pass rejected copy1.go
+pass rejected ddd1.go
+pass rejected declbad.go
+pass rejected embedfunc.go
+pass compiled empty.go
+pass matched env.go
+pass compiled eof.go
+pass compiled eof1.go
+pass rejected float_lit3.go
+pass rejected func1.go
+pass rejected func3.go
+pass rejected func4.go
+pass matched func6.go
+pass rejected funcdup.go
+pass rejected funcdup2.go
+pass matched gc.go
+pass matched gc1.go
+pass rejected goto.go
+pass matched helloworld.go
+pass rejected import5.go
+pass rejected import6.go
+pass rejected indirect1.go
+pass rejected init.go
+pass rejected initexp.go
+pass rejected initializerr.go
+pass rejected initloop.go
+pass matched int_lit.go
+pass rejected label1.go
+pass rejected mainsig.go
+pass rejected makechan.go
+pass rejected makemap.go
+pass rejected makenew.go
+pass rejected map1.go
+pass rejected method6.go
+pass rejected named1.go
+pass matched printbig.go
+pass rejected range2.go
+pass rejected recover5.go
+pass rejected rename1.go
+pass rejected return.go
+pass rejected runtime.go
+pass rejected shift1.go
+pass matched sigchld.go
+pass rejected slice3err.go
+pass rejected switch2.go
+pass rejected switch3.go
+pass rejected switch4.go
+pass rejected switch5.go
+pass rejected switch6.go
+pass rejected switch7.go
+pass rejected typecheck.go
+pass rejected typecheckloop.go
+pass rejected typeswitch2.go
+pass rejected typeswitch2b.go
+pass rejected typeswitch3.go
+pass rejected undef.go
+pass rejected used.go
+pass rejected varerr.go
+pass rejected weak.go
