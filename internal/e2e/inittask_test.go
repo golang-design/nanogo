@@ -248,16 +248,14 @@ func main() { os.Exit(rec.Value()) }
 	}
 }
 
-// TestBuildRefusesAPackageLevelVariableByNameAndPosition is the boundary of
-// the work above.
+// TestBuildRunsAPackageLevelVariableThroughTheRecord is the boundary of the
+// work above.
 //
-// A package-level variable needs a data symbol and specs/020-ir.md's object
-// model carries none, so the variable is refused. It is refused rather than
-// left out of the record: a record that listed an init which assigns to
-// symbols that do not exist would produce a program that runs and is wrong,
-// which is what the record exists to prevent. The message names the variable
-// and where it is declared, because those are what say what to do next.
-func TestBuildRefusesAPackageLevelVariableByNameAndPosition(t *testing.T) {
+// The record's whole job is to run the initialisation before main does, and a
+// package-level variable is what the initialisation writes. The exit status is
+// the assertion: a variable left zero exits 0 and a record that did not run
+// exits 0, so 9 is the only status that says both halves worked.
+func TestBuildRunsAPackageLevelVariableThroughTheRecord(t *testing.T) {
 	h := setup(t, map[string]string{
 		"go.mod": "module nanogo.example/global\n\ngo 1.27\n",
 		"main.go": `package main
@@ -270,11 +268,50 @@ func main() { os.Exit(n) }
 `,
 	}, nil)
 
+	if out, err := h.nanogoBuild(t, "-o", "global", "."); err != nil {
+		t.Fatalf("nanogo build .: %v\n%s", err, out)
+	}
+	if code := exitCode(t, filepath.Join(h.mod, "global")); code != 9 {
+		t.Errorf("the program exited %d, want 9: the package-level variable did not hold its value", code)
+	}
+}
+
+// TestBuildRefusesAPackageLevelVariableByNameAndPosition is the half of that
+// boundary that is still refused.
+//
+// A variable whose type holds a pointer needs its type descriptor, because
+// cmd/link reads the pointer map of a data symbol through it. rtype cannot
+// build the descriptor of an interface with methods, so the variable is
+// refused rather than emitted where the collector would misread it. It is
+// refused before any function is compiled: a record that listed an init which
+// assigns to a symbol that does not exist would produce a program that runs
+// and is wrong. The message names the variable and where it is declared,
+// because those are what say what to do next.
+func TestBuildRefusesAPackageLevelVariableByNameAndPosition(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod": "module nanogo.example/global\n\ngo 1.27\n",
+		"main.go": `package main
+
+import (
+	"errors"
+	"os"
+)
+
+var errBad = errors.New("bad")
+
+func main() {
+	if errBad != nil {
+		os.Exit(1)
+	}
+}
+`,
+	}, nil)
+
 	out, err := h.nanogoBuild(t, "-o", "global", ".")
 	if err == nil {
-		t.Fatalf("nanogo build accepted a package-level variable:\n%s", out)
+		t.Fatalf("nanogo build accepted a variable it cannot describe to the collector:\n%s", out)
 	}
-	for _, want := range []string{"package-level variable main.n", "main.go:5:5", "data symbol"} {
+	for _, want := range []string{"package-level variable main.errBad", "main.go:8:5", "type descriptor"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the refusal does not name %q:\n%s", want, out)
 		}
