@@ -2288,3 +2288,57 @@ func TestDecomposeIfaceNilNeedsNoCall(t *testing.T) {
 		t.Errorf("the comparison became %s", eq.LongString())
 	}
 }
+
+// TestStringSymNameIsGcs compares the name of a string constant's data symbol
+// against the names gc writes for the same constants.
+//
+// The expectations are not derived from this compiler. They were read off a
+// gc-built object with
+//
+//	go tool compile -p main -o x.o main.go && go tool nm x.o
+//
+// which is the only oracle for a name the linker deduplicates by. A name that
+// differs from gc's by one character is a second symbol holding bytes the
+// binary already carries, and nothing reports it.
+//
+// The rule is cmd/compile/internal/staticdata.StringSym: a constant of at most
+// 100 bytes is named by its quoted contents, and a longer one by its length
+// and the first sixteen bytes of the toolchain's 32-byte hash, base64 encoded.
+func TestStringSymNameIsGcs(t *testing.T) {
+	// 106 bytes, the constant that produced the long name below.
+	long := "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345"
+	if len(long) != 106 {
+		t.Fatalf("the long constant is %d bytes, and the name records the length", len(long))
+	}
+	for _, c := range []struct {
+		text string
+		want string
+	}{
+		{"hi", `go:string."hi"`},
+		{"hi\n", `go:string."hi\n"`},
+		{"hello", `go:string."hello"`},
+		{"", `go:string.""`},
+		{long, "go:string..gostring.106.cauplPwZt46y0gKg9FL5SQ=="},
+	} {
+		if got := ssa.StringSymName(c.text); got != c.want {
+			t.Errorf("the symbol of %q is named %q, want %q", c.text, got, c.want)
+		}
+	}
+	// The boundary is the length, not the content: 100 bytes are spelled out
+	// and 101 are hashed.
+	if got := ssa.StringSymName(strings.Repeat("a", 100)); !strings.HasPrefix(got, `go:string."`) {
+		t.Errorf("a constant of 100 bytes is named %q, want the quoted form", got)
+	}
+	if got := ssa.StringSymName(strings.Repeat("a", 101)); !strings.HasPrefix(got, "go:string..gostring.101.") {
+		t.Errorf("a constant of 101 bytes is named %q, want the hashed form", got)
+	}
+}
+
+// TestStringSymNameReachesTheValue is the same rule seen through the pass, so
+// that a value built by Decompose carries the name the rule computes rather
+// than one this test asserts twice.
+func TestStringSymNameReachesTheValue(t *testing.T) {
+	if got, want := decStringSymName(t, "hi"), `go:string."hi"`; got != want {
+		t.Errorf("the decomposed constant names %q, want %q", got, want)
+	}
+}

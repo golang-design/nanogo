@@ -6,7 +6,10 @@ package ssa
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"strconv"
 
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/rtsym"
@@ -917,20 +920,61 @@ func (d *decomposer) zeroPart(b *Block, pos syntax.Pos, t *ir.Type) *Value {
 // constants were met in, which specs/053-determinism.md rules out, and two
 // equal constants name one symbol.
 func newStringSym(s string) *StringSym {
-	sum := sha256.Sum256([]byte(s))
 	t := &ir.Type{Kind: ir.Array, Elem: &ir.Type{Kind: ir.Uint8}, Len: int64(len(s))}
 	if err := ir.Layout(t); err != nil {
 		panic("ssa: decompose: " + err.Error())
 	}
 	return &StringSym{
 		Obj: &ir.Object{
-			Name:  fmt.Sprintf("go:string.%x", sum[:8]),
+			Name:  StringSymName(s),
 			Type:  t,
 			Class: ir.ClassGlobal,
 		},
 		Text: s,
 	}
 }
+
+// StringSymName is the linker name gc gives the data of a string constant.
+//
+// The name is gc's spelling and not a spelling of nanogo's own, because the
+// linker merges two definitions of one string by name and by content hash
+// together: a name that differs by one character is a second symbol holding
+// bytes the binary already carries. cmd/compile/internal/staticdata's
+// StringSym is the source of both branches below.
+//
+// A short constant is named by its own contents, quoted with strconv.Quote, so
+// the name is legible in a symbol table and depends on nothing but the string.
+// Above stringSymMaxLen the name would be as large as the data, so gc hashes
+// instead and writes the length beside the hash, which is what makes a length
+// extension of one constant a different symbol from the constant itself.
+//
+// The hash is the compiler toolchain's 32-byte hash, which is SHA-256 over a
+// leading 0x01 byte and then the content. obj.hashPrefix does the same for the
+// same reason: it makes the value differ from a plain SHA-256 of the bytes.
+func StringSymName(s string) string {
+	if len(s) > stringSymMaxLen {
+		h := sha256.New()
+		h.Write(stringSymHashPrefix)
+		io.WriteString(h, s)
+		// Sixteen bytes of the hash, base64 encoded, is gc's shortHashString.
+		short := base64.StdEncoding.EncodeToString(h.Sum(nil)[:16])
+		return fmt.Sprintf("%s.gostring.%d.%s", stringSymPrefix, len(s), short)
+	}
+	return stringSymPrefix + strconv.Quote(s)
+}
+
+// The parts of gc's string symbol naming, named as gc names them so that the
+// two can be compared line by line.
+const (
+	stringSymPrefix = "go:string."
+
+	// stringSymMaxLen is the longest constant gc names by its contents.
+	stringSymMaxLen = 100
+)
+
+// stringSymHashPrefix is what cmd/internal/hash.New32 writes before the
+// content.
+var stringSymHashPrefix = []byte{1}
 
 // link fills the arguments of the phi and copy parts.
 //
