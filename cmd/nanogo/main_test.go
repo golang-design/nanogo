@@ -185,11 +185,16 @@ func TestToolexecPassthrough(t *testing.T) {
 
 // TestToolexecAllowlisted proves the selection wiring runs in the real binary.
 //
-// The package on the allowlist returns a string constant, which nanogo has no
-// data symbol for, so the build stops. What is checked is that it stops in
-// nanogo, naming the package and the construct: an allowlist entry is a claim
-// that nanogo owns the package, so a construct nanogo cannot compile is an
-// error and never a silent hand back to gc.
+// The package on the allowlist holds a construct nanogo cannot compile, so the
+// build stops. What is checked is that it stops in nanogo, naming the package
+// and the construct: an allowlist entry is a claim that nanogo owns the
+// package, so a construct nanogo cannot compile is an error and never a silent
+// hand back to gc.
+//
+// The construct is a floating-point constant, which specs/042-arm64-backend.md
+// group 6 has no encoder for. It used to be the string constant Message
+// returns, which needed a data symbol nothing wrote; that gap is closed, so
+// the test names a construct that is still open.
 func TestToolexecAllowlisted(t *testing.T) {
 	goBin := needGo(t)
 	dir := t.TempDir()
@@ -197,6 +202,10 @@ func TestToolexecAllowlisted(t *testing.T) {
 
 	mod := filepath.Join(dir, "mod")
 	writeModule(t, mod)
+	if err := os.WriteFile(filepath.Join(mod, "greet", "refuse.go"),
+		[]byte("package greet\n\nfunc ratio() float64 { return 1.5 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	list := filepath.Join(dir, "allowlist")
 	if err := os.WriteFile(list, []byte("# one package\nnanogotest/greet\n"), 0o644); err != nil {
