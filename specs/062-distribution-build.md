@@ -18,16 +18,24 @@ the distribution's own tests.
 **Nothing here is built.** No package of the distribution is compiled by nanogo,
 and the requirements in the table below belong to specs that are unbuilt in
 turn: [044](044-plan9-assembler.md), [034](034-write-barriers.md),
-[035](035-goroutines-and-stack-growth.md), [023](023-escape-analysis.md).
+[023](023-escape-analysis.md), and the capture half of
+[033](033-closures-defer-panic.md).
+
+`dist/` is not this gate. It builds and audits a *nanogo* distribution, the
+`bin/`, `src/`, `pkg/` and `VERSION` tree that `nanogo build` takes its
+standard library from, which [051](051-build-integration.md) records under
+whole-world mode. G3 is nanogo compiling Go's distribution, and that is
+untouched.
 
 The distribution is nevertheless the corpus the front end is already measured
 against, which is why this gate is closer to reachable than it reads. The IR
 builder walks 536 packages of 663, producing 39,947 functions and 4,188,075
 nodes, with 126 packages skipped (31 for `cgo`, 94 with no Go files, 1 with a
 type error) and 72 built partially. [004](004-conformance.md) has the rest of
-the corpus counts. What none of that says is that a package compiles: SSA
-construction accepts two functions in five, and [060](060-selfhost.md) has
-that number and the refusals behind it.
+the corpus counts. What none of that says is that a package compiles: three
+functions in five get past SSA construction with [020](020-ir.md)'s lowering
+pass run first, [003](003-sequencing.md) counts them, and
+[060](060-selfhost.md) has what still refuses the rest.
 
 ## The scope, bounded honestly
 

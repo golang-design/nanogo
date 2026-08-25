@@ -22,6 +22,7 @@ flowchart TD
   parse["parser<br/>011"]
   check["type checker (types2 fork)<br/>012 013"]
   irgen["IR builder<br/>020"]
+  irlow["IR lowering<br/>020<br/>half its table built"]
   opt1["IR passes<br/>inline 024, escape 023<br/>not built"]
   ssa["SSA builder<br/>021"]
   opt2["SSA passes<br/>022<br/>not built"]
@@ -34,11 +35,11 @@ flowchart TD
   bin["executable"]
 
   src --> load --> scan --> parse --> check --> irgen
-  irgen --> opt1 --> ssa --> opt2 --> lower --> regalloc --> live --> emit --> obj --> link --> bin
+  irgen --> opt1 --> irlow --> ssa --> opt2 --> lower --> regalloc --> live --> emit --> obj --> link --> bin
 
   rt["runtime symbols<br/>031 032 034"] -.-> irgen
   rt -.-> lower
-  exp["export data<br/>015<br/>not built"] -.-> check
+  exp["export data<br/>015<br/>both directions"] -.-> check
   check -.-> exp
 ```
 
@@ -57,8 +58,10 @@ target-neutral and ends target-specific. Nothing above it knows about registers;
 nothing below it knows about Go statements.
 
 The boundary between them is where Go semantics are lowered into operations and
-runtime calls. After the SSA builder there is no such thing as a map index. There
-is a call to `runtime.mapaccess1` ([031](031-runtime-lowering.md)).
+runtime calls. `ir.Lower` is the pass that crosses it, and it runs over the
+tree before construction sees it, so construction can refuse a Go-specific node
+rather than handle one. After it there is no such thing as a map index. There is
+a call to `runtime.mapaccess1` ([031](031-runtime-lowering.md)).
 
 ## Why two and not one
 
@@ -70,8 +73,8 @@ one representation is the design that makes compilers unreadable, and
 [000](000-decisions.md) decision 10 is a budget that will not survive it.
 
 The cost is one lowering step that must be complete: every Go construct has to
-be gone by the end of SSA construction. [020](020-ir.md) carries the list, and
-the list being exhaustive is what makes the SSA layer simple.
+be gone before SSA construction. [020](020-ir.md) carries the list with a state
+per row, and the list being exhaustive is what makes the SSA layer simple.
 
 ## Package layout
 
@@ -86,14 +89,17 @@ golang.design/x/nanogo
 │   ├── errors/            vendored error codes                 012
 │   └── gen/               the generator that ports the fork    012
 ├── loader/                build tags, import graph, go list    014
-├── ir/                    typed tree IR, type layout           020
+├── export/                reader for gc's export data          015
+│   └── pkgbits/           the bit stream it decodes            015
+├── ir/                    typed tree IR, type layout, lowering 020
 ├── ssa/                   SSA values, blocks, passes, ABI      021 025 026 027 030
 │   └── rules/             lowering rules per target            025 042
-├── rtsym/                 runtime symbol names and signatures  031 032
+├── rtsym/                 runtime symbol names and signatures  031
+├── rtype/                 type descriptor encoder              032
 ├── obj/                   goobj container writer               040
 │   └── arm64/             encoder                              041 042
 ├── ssagen/                SSA to machine code, prologues       027 035 041
-└── internal/              covercheck, hygiene: the gates
+└── internal/              covercheck, hygiene, e2e: the gates
 ```
 
 Planned and not written. Each is named here so that a reader who looks for the
@@ -135,11 +141,11 @@ had to name `*ir.Type`, `*ir.Object` or an `ir.Op`, which the builder, the
 address-taken decision and the verifier all do. What matters is that there is no
 cycle, so that the two representations stay distinct and decision 5 holds.
 
-**Nothing below `ir` imports `types2`.** This is the load-bearing rule. Types
-reach the backend as layout facts, size, alignment and pointer map, not as
-`types2.Type` values, and `*ir.Type` is the object that carries them.
-[020](020-ir.md) defines it. If `types2` were reachable from the backend, the
-boundary would exist only by convention.
+**Nothing below `ir` imports `types2`.** This is the rule that keeps the
+layering intact. Types reach the backend as layout facts, size, alignment and
+pointer map, not as `types2.Type` values, and `*ir.Type` is the object that
+carries them. [020](020-ir.md) defines it. If `types2` were reachable from the
+backend, the boundary would exist only by convention.
 
 ## Data that crosses the whole pipeline
 

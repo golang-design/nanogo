@@ -133,7 +133,7 @@ this spec named only the first.
 is not uniform and an earlier version of this spec stated only half of it.
 
 A stack map bitmap is named `gclocals·<base64>`, which is `gc`'s scheme, and the
-name is load-bearing: the content-hash class is derived from the name, and only
+name matters: the content-hash class is derived from the name, and only
 that prefix selects the class that keeps a bitmap from merging with unrelated
 read-only data. A `{n=1, nbit=0}` bitmap is eight mostly-zero bytes, so a merge
 is not hypothetical. When it happens, the linker's pclntab pass sets the
@@ -232,11 +232,14 @@ nanogo does not compute one.
 
 The `AuxFuncdata` count has the same shape. The format allows one entry per
 `FUNCDATA` index and nanogo writes exactly two, `FUNCDATA_ArgsPointerMaps` and
-`FUNCDATA_LocalsPointerMaps`. `FUNCDATA_StackObjects` is declared in
-`ssa/stackmap.go` and is not written: a stack object record holds an offset to
-the local's type descriptor, and [032](032-type-descriptors-and-itabs.md) has
-no writer for one. The omission is conservative rather than wrong. Such a local
-stays in the locals bitmap for the whole of its marked lifetime, so the
+`FUNCDATA_LocalsPointerMaps`. `FUNCDATA_StackObjects` is computed and not written.
+`ssa.StackMaps.ObjectsSym` builds the table, and 162 functions of the
+distribution corpus have one, but `ssagen` passes it no way to name a local's
+type descriptor, so no object carries the symbol. That seam is narrower than it
+was: [032](032-type-descriptors-and-itabs.md) writes a descriptor now, and what
+is missing is the lookup from an `ir.Type` to the `goobj.SymRef` of the
+descriptor's pointer mask. The omission is conservative rather than wrong. Such
+a local stays in the locals bitmap for the whole of its marked lifetime, so the
 collector scans it and never misses it.
 
 ## The fingerprint, which is plumbing with no value in it
@@ -253,18 +256,27 @@ block is empty and the fingerprint is eight zero bytes. This was found by
 grepping for every writer of the field and finding only the writer that copies
 it into the object.
 
-The consequence is worth stating plainly, because the spec claimed the
-opposite. This spec said the fingerprint is "the mechanism that makes hosted
-mode ([000](000-decisions.md) decision 11) safe: a nanogo-compiled package and
-a `gc`-compiled importer either agree or fail loudly." They do not fail loudly.
-Zero equals zero, so the linker's check passes on any pair, and a nanogo object
-compiled against stale export data links silently. The safety net decision 11
-leans on is declared and absent.
+The spec claimed the opposite. It said the fingerprint is "the mechanism that
+makes hosted mode ([000](000-decisions.md) decision 11) safe: a nanogo-compiled
+package and a `gc`-compiled importer either agree or fail loudly." They do not
+fail loudly. Zero equals zero, so the linker's check passes on any pair, and a
+nanogo object compiled against stale export data links silently. The safety net
+decision 11 leans on is declared and absent.
 
-It is absent for a reason above this spec rather than in it: the fingerprint is
-a hash of export data, [015](015-export-data.md) owns export data, and
-[015](015-export-data.md) is unwritten. There is nothing to hash yet. The field
-is the right shape and it waits on its input.
+It was absent for a reason above this spec: the fingerprint is a hash of the
+export data a package *writes*, and [015](015-export-data.md)'s writer was
+unbuilt, so there was nothing to hash. The writer exists now, so the input is
+there and the field is the work that is left.
+
+**Nothing else may be added to the archive to carry a fact about it.**
+[054](054-distribution.md) tried exactly that, appending a member naming which
+compiler produced an archive. The importer and the linker both accepted it, and
+`go tool nm` and `go tool objdump` both stopped working on every archive,
+because `cmd/internal/objfile` treats a member it does not know as a hard
+error. The producer record now sits beside the archives, in
+`pkg/GOOS_GOARCH/MANIFEST`, with a SHA-256 per archive. A field about an
+archive belongs next to it, not inside it, unless the format already has a
+field for it. The fingerprint above is the field the format already has.
 
 ## Version pinning
 

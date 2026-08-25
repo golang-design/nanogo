@@ -175,7 +175,8 @@ than a copy:
    `errorcheck_test.go` scans `/* ERROR */` annotations out of the source text,
    because upstream reads them with `syntax.CommentMap` and nanogo's tree
    carries no comments. `srcimporter_test.go` type-checks an imported package
-   from source, because [015](015-export-data.md) is not built.
+   from source, because it is the harness that replaces upstream's importer
+   test, which names upstream's importer and not nanogo's.
 3. **A drift test over the whole port.** Every rewrite must state its reason,
    every upstream test file must be either ported or listed as skipped with a
    reason, and regeneration must be idempotent.

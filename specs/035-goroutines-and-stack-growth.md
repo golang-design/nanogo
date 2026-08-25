@@ -24,9 +24,11 @@ checked instruction by instruction against `go tool asm`. A test recurses
 the frames really are copied and the maps of
 [027](027-liveness-and-stackmaps.md) really are read by the copier.
 
-The goroutine half is not built. `go f(a, b)` is refused by SSA construction and
-`runtime.newproc` is never called, although the symbol is in `rtsym` and is
-checked against the runtime.
+The goroutine half is half built. `go f()` with no arguments lowers to
+`runtime.newproc` on a one-word func value, and `internal/e2e` runs a goroutine
+that reaches its own panic. `go f(a, b)` is refused: an argument becomes a
+capture, and a capture is read through the context register, which no SSA
+operation reads ([033](033-closures-defer-panic.md)).
 
 The `//go:nosplit` half is not built either, and it is the part of this spec
 most likely to be misread. See "The nosplit budget" below.
@@ -181,10 +183,13 @@ arguments are evaluated in the current goroutine, at the `go` statement, and
 copied into the new goroutine's initial frame. Getting the evaluation point wrong
 is a visible semantic bug, not a performance one.
 
-None of this is built. The IR builder produces an `OGo` node and SSA
-construction refuses it, along with the closure the node needs
-([033](033-closures-defer-panic.md)). `runtime.newproc` is in `rtsym` and is
-checked against the runtime, and nothing calls it.
+The argument half is not built. `go f()` with an empty argument list lowers
+to `runtime.newproc`, which is the same one-word func value `defer` passes to
+`runtime.deferproc`. An argument list is refused, because the arguments have to
+be captured and the captured form is read through the context register that
+[033](033-closures-defer-panic.md) owns. So the evaluation point above is not
+yet a decision the code has taken: with no arguments there is nothing to
+evaluate.
 
 ## Testing
 

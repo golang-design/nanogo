@@ -23,13 +23,16 @@ streams are built and are written into object files. `ssa/liveness.go`,
 `ssa/frame.go` and `ssa/stackmap.go` hold them, and `ssagen/stackmap.go`
 attaches them to a function.
 
-**The stack objects table is not written.** `ssa.StackMaps.ObjectsSym` builds
-one, but nothing calls it: a record names its type's descriptor, and
-[032](032-type-descriptors-and-itabs.md) has no writer for a descriptor. The
-table is precision rather than coverage, so its absence is safe: an
-address-taken local is in the locals bitmap for the whole of its marked
-lifetime, which is the conservative answer. Read the "Stack objects" section
-below as a design that waits on [032](032-type-descriptors-and-itabs.md).
+**The stack objects table is computed and not written.**
+`ssa.StackMaps.ObjectsSym` builds one, and 162 functions of the distribution
+corpus have a stack object, but `ssagen` does not call it. A record names the
+`runtime.gcbits` symbol of its type's descriptor, and what is missing is the
+lookup from an `ir.Type` to that symbol's `goobj.SymRef`.
+[032](032-type-descriptors-and-itabs.md) writes the descriptor itself now, so
+the gap is the lookup and no longer the writer. The table is precision rather
+than coverage, so its absence is safe: an address-taken local is in the locals
+bitmap for the whole of its marked lifetime, which is the conservative
+answer.
 
 ## The contract
 

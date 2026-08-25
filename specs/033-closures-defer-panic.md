@@ -27,7 +27,8 @@ The captureless half of each feature is built, and every capture is refused.
 | `defer` with arguments | **refused**; an argument becomes a capture |
 | `go f()` on the same terms | built; `runtime.newproc` takes the same one word |
 | `panic` | built; `runtime.gopanic`, and a deferred call runs off the chain while panicking |
-| `recover` | **not built**; no call to `runtime.gorecover` is generated |
+| `recover()` whose value nobody reads | built; `runtime.gorecover`, which is the shape of the idiom |
+| `recover()` whose value is read | **refused**; the result is an interface and nothing below the IR decomposes one |
 | open-coded `defer` and `FUNCDATA_OpenCodedDeferInfo` | **not built**; nanogo writes three funcdata indices and that is not one of them |
 | a heap `_defer` record built by the compiler | **not built**; `runtime.deferproc` builds it |
 
@@ -89,8 +90,17 @@ everything by reference, as the note at the top of this spec records.
 ### Where the closure object lives
 
 On the stack when the closure does not outlive the frame, on the heap when it
-does. A closure that is only called immediately, which is the common case in
-`defer` and in `range`-over-function, stays in the frame and costs nothing.
+does.
+
+**Nothing puts one in the frame today**, and the reason is two unbuilt things
+rather than an oversight. Deciding that a closure does not outlive its frame is
+[023](023-escape-analysis.md)'s judgement, and there is no escape analysis. And
+a captureless `funcval` is one word of read-only data, which wants a data
+symbol, and the only channel to a data symbol runs through
+[032](032-type-descriptors-and-itabs.md)'s descriptors. So every func value
+`ir/lower.go` builds is a heap allocation and a store, where `gc` has neither.
+That is the cost, it is correct, and the fix is a channel for data symbols
+rather than anything in this spec.
 
 ## Defer
 
@@ -122,8 +132,11 @@ record in the frame, linked onto the goroutine's defer chain by
 
 ### Heap-allocated `_defer`
 
-`defer` in a loop, where the number of records is not known: `runtime.deferproc`,
-allocating.
+`runtime.deferproc`, allocating. This spec presented it as the case for a
+`defer` in a loop, where the number of records is not known. That reads as a
+restriction and it is not one: `deferproc` is correct for every `defer`, and
+the other two implementations are optimizations of it. nanogo emits it for
+every case, which is why `defer` works before either optimization exists.
 
 ### `deferreturn`
 
@@ -137,12 +150,19 @@ the normal return path, only on the panic path.
 deferred call in a frame it constructs, and either finds a `recover` or reaches
 the bottom and terminates the program.
 
-`recover` is `runtime.gorecover`, and it is **only effective when called directly
-from a deferred function**. The compiler's obligation is to pass the caller's
-frame pointer so the runtime can check that relationship. This is also why
+`recover` is `runtime.gorecover`, and it is **only effective when called
+directly from a deferred function**.
+
+This spec said the compiler's obligation is to pass the caller's frame pointer
+so the runtime can check that relationship. It is not. `runtime.gorecover`
+takes no argument. It walks the stack itself and counts the frames between its
+own caller and `runtime.gopanic`, recovering only when there is exactly one.
+The compiler's obligation is the opposite of passing something: it must not put
+anything between the deferred function and the call, because one extra frame
+turns a `recover` into a no-op. That is also why
 [024](024-inlining-and-devirtualization.md) refuses to inline a function
-containing `recover`: inlining changes which frame it is in, and would change its
-meaning from "recovers" to "does not".
+containing `recover`: inlining changes which frame it is in, and would change
+its meaning from "recovers" to "does not".
 
 ### The interaction that must be right
 

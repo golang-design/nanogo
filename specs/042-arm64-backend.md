@@ -115,7 +115,7 @@ growstack:
 The `MOVD R30, R3` is a correction. `runtime.morestack` reads the caller's
 return address from R3, which `runtime/asm_arm64.s` states in a comment on the
 entry point, and an earlier version of this listing omitted it. The order is
-load-bearing too: R3 is also the fourth argument register, so the arguments are
+significant too: R3 is also the fourth argument register, so the arguments are
 saved before it is overwritten.
 
 The callee is not spelled in the emitter. `runtime.morestack_noctxt` comes from
@@ -157,7 +157,7 @@ starts at SP+8 rather than at SP. An earlier version of this spec described the
 saved frame pointer in a way that read as though the reservation were this
 frame's own.
 
-Four details are load-bearing and are stated because they are easy to lose.
+Four details are required and are stated because they are easy to lose.
 They were found by writing the encoder, and the first two mean an earlier
 version of this listing did not assemble. The count was wrong too: the text
 said three and the list below has four.
@@ -194,10 +194,12 @@ order they are worth writing:
 4. Branches and the condition-code forms.
 5. Calls. The spec said four shapes, static, closure, interface and deferred,
    and there are three. `ssa/op.go` has `OpStaticCall`, `OpClosureCall` and
-   `OpInterCall` and no deferred call: a `defer` does not become a call
-   operation, it becomes the runtime calls of
-   [033](033-closures-defer-panic.md), which is unbuilt. This was found by
-   reading the call operations against the rule table.
+   `OpInterCall` and no deferred call, and that is correct: a `defer` never
+   becomes a call operation. It becomes a static call to
+   `runtime.deferproc` and one to `runtime.deferreturn`, which
+   [033](033-closures-defer-panic.md) owns. This was found by reading the call
+   operations against the rule table, and the lowering pass that came later
+   confirmed the shape.
 6. Floating point. Written. The two things in it that are not a transcription
    of the integer rules are the constant, whose immediate reaches 256 values
    and nothing else, and the condition codes, which are not the integer ones:

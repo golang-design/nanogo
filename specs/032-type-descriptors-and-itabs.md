@@ -28,13 +28,26 @@ text-assembly seam in [000](000-decisions.md) decision 3.
 | The canonical name, both spellings | `ir/rtype.go` | built; the expected spellings were read out of a `gc` object with `go tool nm`, and the hash below re-checks the link string against a running `gc` binary |
 | The descriptor bytes | `rtype/` | built for the types below, checked field by field against `reflect` |
 | The reference from generated code | `ir/lower.go` | built for `new`, `&T{...}`, a slice literal and `make([]T, n)`, and the pass runs in a real compile |
-| The descriptor as a data symbol in the object | `driver/compile.go` | built, see the seam below |
+| The descriptor as a data symbol in the object | `driver/compile.go` | built; a named `dupok` definition, and the data it points at is hashed |
 | Itabs | nowhere | **not built**, and blocked on the IR rather than on this spec |
 
-The `gclocals·` and `go:string.` rows of the namespace table are produced as
-before, in `ssagen/stackmap.go` and `ssa/decompose.go`.
+The `gclocals·` and `go:string.` rows of the namespace table are produced
+elsewhere, in `ssagen/stackmap.go` and `ssa/decompose.go`.
 
-### The two spellings, which the first draft of this spec did not separate
+What reaches a running program today: a variadic call, a slice literal, `make`
+of a slice, and `new` of a type whose descriptor can be filled in. Those
+compile, link against the real runtime and run, and `internal/e2e` runs a
+collection over what one of them allocated. A defined type is refused, and the
+refusal arrives from `rtype` after the function it came from has compiled,
+because lowering can name `main.point` without trouble and only the encoder
+knows that its method set is not in the IR. That is the same gap that stops
+itabs, met from the driver.
+
+Four wiring changes closed the seam between the lowering pass and the object
+file. Two of them were not what this spec predicted, and **What was wrong** at
+the end of this file records all four.
+
+### The two spellings
 
 `gc` writes a type twice and the two strings differ.
 
@@ -98,66 +111,6 @@ of this spec: they are blocked on a different thing, the type boundary itself,
 and so is every defined type's descriptor. Extending [020](020-ir.md) to carry
 a method set is the work that unblocks both.
 
-### The seam, and what closing it corrected
-
-The seam was that nothing wrote a descriptor into an object file and nothing
-ran the lowering pass in a real build. It is closed. This section is kept
-because two of the three changes it named were not right, and a reader who
-follows the same reasoning again would make the same two mistakes.
-
-1. **`driver/compile.go` now calls `ir.Lower`.** It is the first stage of
-   `compileFunc`'s pass list, ahead of `ssa.Build`, and it is named `ir.Lower`
-   rather than "lowering" because `ssa.Lower` is in the same list and the two
-   are different decks. The corpus number is no longer a measurement of what
-   the pass would buy: 24,095 of 39,947 distribution functions get past
-   construction with the pass, and 17,905 without it.
-2. `emitPackage` collects `ir.LowerAndCollect`'s per function lists, unions
-   them in first-use order, calls `rtype.Descriptor` on each, and resolves each
-   `rtype.Reloc` target by name. **The descriptor itself is `AddDef`, not
-   `AddHashedDef`, and this spec was wrong to say otherwise.** `cmd/link` reads
-   no name for a symbol in the hashed index space, so a hashed descriptor is
-   nameless to the linker: no reference from another object resolves to it and
-   nothing collects it into `runtime.typelinks`. `gc` agrees. It sets
-   `AttrContentAddressable` on `type:.importpath.`, `type:.namedata.`,
-   `runtime.gcbits.` and itabs, and never on the descriptor. So the descriptor
-   is a named `dupok` definition and the data it points at is hashed, which is
-   what `rtype` documents when it returns the descriptor first.
-3. `ssagen/reloc.go`'s `symbolName` prefixed `pkg.Path + "."` onto any global
-   whose name held no dot. `type:p.T` survived that and `type:int`,
-   `type:[]int` and `type:interface {}` did not. It leaves a `type:` name
-   alone.
-4. **A fourth change this spec did not name.** A symbol's identity is its name
-   *and* its ABI, and `cmd/link` resolves a by-name reference with both:
-   `abiToVer` maps `ABIInternal` to one version and everything else to
-   another, and `regabiwrappers` is always on for arm64, so the two versions
-   are not the same. `gc` gives a data symbol no ABI, so a descriptor is ABI0,
-   and `ssagen` referenced every global at `ABIInternal`. With changes 1 to 3
-   and not this one the link reports
-
-   ```
-   main.main: relocation target type:int not defined for ABIInternal (but is defined for ABI0)
-   ```
-
-   which was measured, not predicted. The reference now follows the object's
-   class: `ClassGlobal` is ABI0 and a text symbol is `ABIInternal`. The
-   equality routine a descriptor's `Equal` closure points at is the one target
-   that is not data, and `rtsym` is what says so.
-
-The ordering the seam had was still the right one. A program that reached one
-of these rows was refused at compile time before change 1, and after change 1
-without change 2 it compiles and reports the descriptor as undefined at link
-time, which is loud rather than silent. That is why the lowering rows were
-built ahead of the writer: a row blocked on a writer in another package should
-not be counted as a row blocked on the lowering table.
-
-**What reaches a running program.** A variadic call, a slice literal, `make` of
-a slice and `new` of a type whose descriptor can be filled in are compiled,
-linked against the real runtime and run. A defined type is refused, and the
-refusal now arrives from `rtype` after the function it came from compiled,
-because lowering can name `main.point` without trouble and only the encoder
-knows that its method set is not in the IR. That is the same gap that stops
-itabs, met from the driver.
-
 ## The type descriptor
 
 ```go
@@ -188,17 +141,15 @@ Four fields are worth calling out because each has a way of being subtly wrong:
 - **`GCData`** is the pointer bitmask. It is the same information as the IR
   type's `PtrBits` from [020](020-ir.md) and must be computed from it, not
   recomputed, so that the two cannot disagree.
-- **`Hash`** must match **`gc`'s**, not the runtime's. This spec said "what the
-  runtime computes"; the runtime computes no type hash. `gc` computes it at
+- **`Hash`** must match **`gc`'s**, not the runtime's. `gc` computes it at
   compile time and the runtime only compares it, so the requirement is that two
   compilers agree. `gc` hashes the *link string* with `cmd/internal/hash.Sum32`,
   which is sha256 with the first byte inverted, and takes the first four bytes
   little-endian. Reproducing it is also a check on the link string: a hash that
   matches proves the two compilers spell the type the same way.
 - **`Equal`** is a generated function for a struct or an array whose parts do
-  **not** compare as one region of memory. This spec said it is never a runtime
-  helper, and that is too strong. Every other comparable type reaches a
-  function the runtime already has, and a region of memory whose size is not
+  **not** compare as one region of memory. Every other comparable type reaches
+  a function the runtime already has, and a region of memory whose size is not
   one of the fixed widths reaches `runtime.memequal_varlen`, which takes the
   size out of the closure and needs no generated function either. The field
   holds a **func value**, so it points at a one-word closure symbol and never
@@ -289,10 +240,8 @@ conversion to an interface, use as a map key or element, use as a channel
 element, reflection, and a type assertion's target.
 
 The set is collected by the lowering pass and returned per function, by
-`ir.LowerAndCollect`. This spec said SSA construction, and construction is the
-wrong pass: every reference is introduced by lowering, and construction refuses
-every node that would introduce one. Deduplication is the linker's, so a
-descriptor emitted by two packages is not an error.
+`ir.LowerAndCollect`. Deduplication is the linker's, so a descriptor emitted by
+two packages is not an error.
 
 For types defined in another package, the descriptor is emitted by the defining
 package and referenced. For composite types built from them, such as
@@ -323,3 +272,80 @@ generated equality functions, neither of which exists.
 - Generated equality functions used as map keys, for structs and arrays of every
   comparable field type, including nested and padded ones. Padding bytes must not
   be compared.
+
+## What was wrong
+
+### The seam between lowering and the object file
+
+Nothing wrote a descriptor into an object file and nothing ran the lowering
+pass in a real build. This spec named three changes that would close that seam.
+Two of them were wrong and a fourth was missing, so the record is kept: a
+reader who follows the same reasoning again makes the same two mistakes.
+
+1. **`driver/compile.go` now calls `ir.Lower`.** It is the first stage of
+   `compileFunc`'s pass list, ahead of `ssa.Build`, and it is named `ir.Lower`
+   rather than "lowering" because `ssa.Lower` is in the same list and the two
+   are different decks. The corpus now measures what the pass buys rather than
+   what it would buy: 24,508 of 39,947 distribution functions get past
+   construction with the pass, and 17,905 without it.
+2. `emitPackage` collects `ir.LowerAndCollect`'s per function lists, unions
+   them in first-use order, calls `rtype.Descriptor` on each, and resolves each
+   `rtype.Reloc` target by name. **The descriptor itself is `AddDef`, not
+   `AddHashedDef`, and this spec was wrong to say otherwise.** `cmd/link` reads
+   no name for a symbol in the hashed index space, so a hashed descriptor is
+   nameless to the linker: no reference from another object resolves to it and
+   nothing collects it into `runtime.typelinks`. `gc` agrees. It sets
+   `AttrContentAddressable` on `type:.importpath.`, `type:.namedata.`,
+   `runtime.gcbits.` and itabs, and never on the descriptor. So the descriptor
+   is a named `dupok` definition and the data it points at is hashed, which is
+   what `rtype` documents when it returns the descriptor first.
+3. `ssagen/reloc.go`'s `symbolName` prefixed `pkg.Path + "."` onto any global
+   whose name held no dot. `type:p.T` survived that and `type:int`,
+   `type:[]int` and `type:interface {}` did not. It leaves a `type:` name
+   alone.
+4. **A fourth change this spec did not name.** A symbol's identity is its name
+   *and* its ABI, and `cmd/link` resolves a by-name reference with both:
+   `abiToVer` maps `ABIInternal` to one version and everything else to
+   another, and `regabiwrappers` is always on for arm64, so the two versions
+   are not the same. `gc` gives a data symbol no ABI, so a descriptor is ABI0,
+   and `ssagen` referenced every global at `ABIInternal`. With changes 1 to 3
+   and not this one the link reports
+
+   ```
+   main.main: relocation target type:int not defined for ABIInternal (but is defined for ABI0)
+   ```
+
+   which was measured, not predicted. The reference now follows the object's
+   class: `ClassGlobal` is ABI0 and a text symbol is `ABIInternal`. The
+   equality routine a descriptor's `Equal` closure points at is the one target
+   that is not data, and `rtsym` is what says so.
+
+The ordering the seam had was still the right one. A program that reached one
+of these rows was refused at compile time before change 1, and after change 1
+without change 2 it compiles and reports the descriptor as undefined at link
+time, which is loud rather than silent. That is why the lowering rows were
+built ahead of the writer: a row blocked on a writer in another package should
+not be counted as a row blocked on the lowering table.
+
+### Three claims the encoder disproved
+
+**The hash is `gc`'s, not the runtime's.** This spec said `Hash` must match
+"what the runtime computes". The runtime computes no type hash. The field above
+carries the correction and the method.
+
+**`Equal` is sometimes a runtime helper.** This spec said it is never one. Every
+comparable type whose parts compare as one region of memory reaches a function
+the runtime already has, and a region whose size is not a fixed width reaches
+`runtime.memequal_varlen`.
+
+**The reference set is collected by lowering, not by SSA construction.** This
+spec named construction, and construction is the wrong pass: every reference is
+introduced by lowering, and construction refuses every node that would
+introduce one.
+
+### One spelling was two
+
+The first draft of this spec did not separate the link string from the name
+string. `gc` writes a type twice and the two differ, and a descriptor built
+from one where the other belongs makes `reflect` report a name one character
+short. The two spellings are set out above.

@@ -240,7 +240,7 @@ The measured results, with `NANOGO_REQUIRE_CORPUS=1` set:
 | Per-file constraints against `go/build.MatchFile` | 6,821 files per platform, 0 mismatches, on `linux/amd64` and on `darwin/arm64` |
 | `crypto` under `-tags purego` | 599 files, 0 mismatches |
 | Package-level partition | 765 directories and 6,560 files on `linux/amd64`, 762 and 6,564 on `darwin/arm64` |
-| `go list` agreement | 520 packages, 6,923 files, 0 mismatches: 379 standard library packages and 141 of nanogo's own |
+| `go list` agreement | 524 packages, 6,966 files, 0 mismatches: 379 standard library packages and 145 of nanogo's own |
 
 ### One deliberate difference from `go/build`
 

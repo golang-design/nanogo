@@ -15,36 +15,45 @@ The G1 gate of [001](001-bootstrap-gates.md), as a procedure that can be run.
 ## This procedure cannot be run yet
 
 Stage 1 does not start. The blocker is not a percentage of the language, it is
-four categorical refusals in `driver.Compile`, and nanogo's own packages trip
-all four:
+three categorical refusals in `driver.Compile`, and nanogo's own packages trip
+all three:
 
 | Refused | Why | Owner |
 | --- | --- | --- |
-| a package that imports another package | there is no reader for `gc`'s export data | [015](015-export-data.md) |
 | a package with a package-level variable | a global needs a data symbol | [020](020-ir.md), [040](040-object-format.md) |
 | a package with an `init` function | an init needs a package init task | [040](040-object-format.md) |
 | a package with assembly | an assembly definition is ABI0 and needs a wrapper | [030](030-abi.md) |
 
-Every package of nanogo has imports. So the count of nanogo packages that nanogo
-compiles today is zero, and no arithmetic over the language subset changes that.
+A fourth refusal is gone. `export/` reads `gc`'s export data and writes it, so
+a package that imports is no longer refused and a package nanogo compiled can
+be imported. That removes the one blocker every nanogo package tripped, and it
+removes no other: every nanogo package also has a package-level variable or an
+`init`. The count of nanogo packages that nanogo compiles today is still zero,
+and no arithmetic over the language subset changes that.
+
+One export-data limit is still in the way of this gate specifically. The writer
+refuses a generic declaration, and nanogo's own source uses generics, so stage
+1 needs [013](013-generics.md) as well as the language rows below.
 
 The second-order measure is the language, and it says the same thing more
 slowly. The IR builder produces 39,947 functions for 536 packages of the
 distribution. SSA construction accepts 17,905 of them, two in five. 17,809 of
 those lower completely to arm64 machine operations and 17,758 carry a stack
 map, so the back half of the pipeline is in better shape than the front of it.
-The largest single refusal is now the composite literal, at 5,893 functions,
-and every large refusal after it is a row of [020](020-ir.md)'s lowering table
-that no pass performs. `ssagen`'s link-and-run tests still say in a comment
-that their sources contain no assignment statement because `ssa.Build` refuses
-one, which stopped being true and is the next thing to widen: the programs the
-end-to-end gate runs are written in the language the compiler accepts, so they
-grow only when it does.
+The largest single refusal is the composite literal, at 4,841 functions, and
+every large refusal after it is a row of [020](020-ir.md)'s lowering table.
+About half those rows are performed now, and with the lowering pass run first,
+which is what the driver does, three functions in five get past construction.
+[020](020-ir.md)'s **State** column names the rows this gate still waits on and
+its corpus counts them.
 
-A compiler that cannot build a composite literal is a long way from compiling
-itself. The
-sections below are the procedure for the day it is not, and they are unchanged
-because the procedure is not what was wrong.
+The end-to-end gate grows only as the language does, because its programs are
+written in the language the compiler accepts. `internal/e2e`'s first program is
+a counted loop, which was impossible while construction refused an assignment
+statement.
+
+The sections below are the procedure for the day the language is wide enough,
+and they are unchanged because the procedure is not what was wrong.
 
 ## The build
 
@@ -76,7 +85,7 @@ and it is worth listing because it sizes M5 in [003](003-sequencing.md):
 | generics ([013](013-generics.md)) | `sort`, `strconv`, `fmt`, `os`, `io` from the standard library | `cgo` |
 | type switches and assertions | `//go:` directives, only as input | assembly of its own |
 
-The standard library entries are the load-bearing ones. nanogo's dependency set
+The standard library entries are the decisive ones. nanogo's dependency set
 reaches a large part of `fmt`, `go/types`' fork, and the `internal` packages
 underneath them, so "the subset nanogo uses" is not small: it is most of the
 language exercised by ordinary application code, and none of the language

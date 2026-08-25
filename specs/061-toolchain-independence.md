@@ -15,13 +15,21 @@ The G2 gate of [001](001-bootstrap-gates.md): nanogo builds nanogo on a machine
 with no `go` binary.
 
 **Nothing here is built, and G2 is not the next thing to build.** It follows
-G1, and [060](060-selfhost.md) records that G1's stage 1 does not start. Of the
-four dependencies in the table below, none is retired: [045](045-linker.md) is
+G1, and [060](060-selfhost.md) records that G1's stage 1 does not start. None
+of the four dependencies in the table below is retired: [045](045-linker.md) is
 unbuilt, [014](014-package-loader.md) has its G1 half and shells out to
-`go list`, and there is no orchestrator. One claim below is confirmed and worth
-keeping: nanogo's own source still contains no assembly, which
-`internal/hygiene` checks from the other side by walking the tree for file names
-that carry an accidental platform constraint.
+`go list`, and the standard library a build reads still comes from a `gc`
+toolchain ([054](054-distribution.md)).
+
+One dependency moved. There is an orchestrator now: `nanogo build` resolves the
+graph itself and drives one compile per package
+([051](051-build-integration.md)), which is the whole-world driver this gate
+needs. It still calls `go tool link`, so the retirement is not what moved, only
+the orchestration.
+
+One claim below is confirmed and worth keeping: nanogo's own source still
+contains no assembly, which `internal/hygiene` checks from the other side by
+walking the tree for file names that carry an accidental platform constraint.
 
 ## The test
 

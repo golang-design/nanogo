@@ -166,7 +166,16 @@ completely to arm64 machine operations, so the older claim that *what
 construction accepts, the back end finishes* is now 99.5% true rather than
 100% true. The 96 exceptions are named below.
 
-The refusals, by reason, over 536 packages:
+That figure measures construction alone, on a tree straight out of `ir.Build`,
+and it is not what the compiler reaches. The driver runs [020](020-ir.md)'s
+lowering pass first, which removes most of the Go-specific nodes in the table
+below, and 24,508 functions then get past construction. Both numbers are
+measured over the same corpus and each answers a different question: this one
+says what construction itself accepts, and the other says how far a real
+compile gets.
+
+The refusals below are the first figure's, by reason, over 536 packages. A row
+that [020](020-ir.md) lowers does not reach construction in a real compile:
 
 | Functions refused | Reason |
 | --- | --- |
@@ -192,9 +201,10 @@ The refusals, by reason, over 536 packages:
 | the rest | addresses of a call result and of a constant |
 
 Every row of that table except the two multi-value assignment rows and the
-`field <n> of <interface>` row is [020](020-ir.md)'s lowering obligation,
-unpaid. No pass performs it, so every construct in it arrives here intact and
-is refused.
+`field <n> of <interface>` row is a row of [020](020-ir.md)'s lowering table.
+About half of those rows are now performed by `ir/lower.go`, and the rest
+arrive here intact and are refused. [020](020-ir.md)'s **State** column says
+which is which, and its own corpus counts the rows that are still unpaid.
 
 The two multi-value rows left are a two-value type assertion and a two-value
 map read, and both are the corresponding single-value form's refusal: neither
@@ -346,7 +356,7 @@ the pass that caused it rather than in the register allocator.
 - `goto` and label programs from Go's `test/` corpus, which are the cases that
   break sealing. Not written.
 
-## Deviations
+## What was wrong
 
 The spec said construction lowers [020](020-ir.md)'s table and that no
 Go-specific operation remains by the end. Construction refuses one instead:
@@ -368,12 +378,14 @@ are a loop condition's temporaries and the right operand of `&&` and `||`, so
 each of those held the entry block's zero.
 
 Neither miscompile was visible to a gate, and the reason is worth writing down.
-`ssagen`'s `TestLinkAndRun` is the end-to-end test, and its own comment says
-its programs contain no assignment statement, because construction refused one.
-A program with no assignment has no counted loop, so nothing in the repository
-ever ran one. The gap in the language and the gap in the gate were the same
-gap: the constructs a compiler refuses are also the constructs its end-to-end
-tests cannot use.
+`ssagen`'s `TestLinkAndRun` was the end-to-end test, and its own comment
+recorded that its programs contained no assignment statement, because
+construction refused one. A program with no assignment has no counted loop, so
+nothing in the repository ever ran one. The gap in the language and the gap in
+the gate were the same gap: the constructs a compiler refuses are also the
+constructs its end-to-end tests cannot use. `internal/e2e`'s first program is a
+counted loop, which is the rule that came out of it: widening what is accepted
+is followed by widening what is run.
 
 **The claim that what construction accepts the back end finishes is now 99.5%
 rather than 100%.** `reached == lowered == 8,238` held because the accepted set
@@ -403,8 +415,13 @@ nor the `*maptype` descriptor both take.
 [031](031-runtime-lowering.md) owns the symbol table, so the row cannot be
 performed anywhere until both exist.
 
-The deck read that number the other way round for a while. The reading to
+**The lowering table's performer arrived and this spec's headline number stayed
+the same.** That is correct and it reads as though something was missed, so it
+is written down. This spec measures construction on an unlowered tree, which is
+what says how much of the language construction itself handles. What the
+compiler reaches is the other measurement, 24,508 of 39,947 with the pass run
+first, and [020](020-ir.md) owns it.
+
+The deck read the fraction the other way round for a while. The reading to
 avoid is "every function of the distribution compiles", which is true only of
-the functions construction accepts and false of the distribution. Two in five
-is the honest fraction, and [020](020-ir.md)'s unpaid lowering table is almost
-all of the other three.
+the functions construction accepts and false of the distribution.

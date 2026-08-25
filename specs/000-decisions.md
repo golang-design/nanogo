@@ -235,10 +235,18 @@ abandoning gates G2 and G3. A budget invented before the work was understood is
 not a reason to give up the goal the work is for, so the budget moved and the
 gates did not.
 
-The new figure is a projection rather than a wish: 41,733 lines measured, plus
-about 4,600 for the export writer, about 6,000 for the linker, about 3,000 for
-the assembler, and the language features the closure of `func main() {}` still
-needs. It is expected to be approached, not to be comfortable.
+The new figure is a projection rather than a wish: the measured tree, plus
+about 6,000 for the linker, about 3,000 for the assembler, about 3,600 for
+escape analysis and inlining, and the language features the closure of
+`func main() {}` still needs. It is expected to be approached, not to be
+comfortable.
+
+The projection has already been corrected once, in the direction that matters.
+It reserved about 4,600 lines for the export data writer. The writer landed
+days later and cost about 800, because the container's read half was already
+there and the write half is its mirror. An estimate made against `gc`'s line
+count for a component overstates a component nanogo builds by reusing what it
+has.
 
 **This may not happen a second time.** A budget raised whenever it binds is not
 a budget, and the honest description of that is no constraint at all. The next
@@ -257,7 +265,7 @@ find . -name '*.go' -not -name '*_test.go' \
     -not -path './types2/*' -not -path './spikes/*' | xargs wc -l
 ```
 
-The compiler is **41,733** lines of compiler source today, against the 60,000
+The compiler is **42,338** lines of compiler source today, against the 60,000
 the decision now budgets. What the accounting got wrong is below, under "What
 the estimates got wrong".
 
@@ -266,23 +274,23 @@ two rows cannot claim the same file.
 
 | Component | Spec | Files | Reference | Estimate | Measured |
 | --- | --- | --- | --- | --- | --- |
-| Positions, scanner, parser | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) | `syntax/` | 7,522 (`syntax`) | 7,500 | 6,385 |
+| Positions, scanner, parser | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) | `syntax/` | 7,522 (`syntax`) | 7,500 | 6,386 |
 | Type checker | [012](012-type-checking.md) | `types2/` | 23,222 (`types2`) | **excluded**, forked | 25,162, plus 1,311 for its generator |
 | Package loader, G1 form | [014](014-package-loader.md) | `loader/` | | 300 | 1,025 |
-| Export data | [015](015-export-data.md) | `export/`, `export/pkgbits/` | 1,568 + 8,097 + 772 | 7,000 | 2,347, the reader only |
-| Typed IR, and its lowering pass | [020](020-ir.md) | `ir/` | 10,216 (`ir`) | 6,000 with escape and inlining | 5,873 |
+| Export data | [015](015-export-data.md) | `export/`, `export/pkgbits/` | 1,568 + 8,097 + 772 | 7,000 | 3,178 |
+| Typed IR, and its lowering pass | [020](020-ir.md) | `ir/` | 10,216 (`ir`) | 6,000 with escape and inlining | 6,033 |
 | Escape analysis, inlining | [023](023-escape-analysis.md), [024](024-inlining-and-devirtualization.md) | | 3,601 (`escape`) | same row | **0, not written** |
 | SSA construction and its passes | [021](021-ssa-construction.md), [022](022-optimization-passes.md) | `ssa/` less the eight files below | 11,609 hand-written | 8,000 | 5,929 |
 | Lowering rules, one target | [025](025-lowering-and-rules.md) | `ssa/rules/`, `ssa/lower.go`, `ssa/macharm64.go` | 18,704 (`_gen`, all targets) | 3,000 | 3,142 |
 | Register allocation, liveness | [026](026-register-allocation.md), [027](027-liveness-and-stackmaps.md) | `ssa/regalloc.go`, `ssa/liveness.go`, `ssa/stackmap.go` | | 3,000 | 2,988 |
-| ABI, runtime symbols, descriptors | [030](030-abi.md) to [032](032-type-descriptors-and-itabs.md) | `ssa/abi.go`, `rtsym/`, `rtype/` | 2,938 (`reflectdata`) | 2,500 | 2,405 |
-| SSA to machine code | no spec owns it | `ssagen/` | | **no row existed** | 2,664 |
-| Object writer | [040](040-object-format.md) | `obj/` | 1,559 (`goobj`) | 1,500 | 1,364 |
+| ABI, runtime symbols, descriptors | [030](030-abi.md) to [032](032-type-descriptors-and-itabs.md) | `ssa/abi.go`, `rtsym/`, `rtype/` | 2,938 (`reflectdata`) | 2,500 | 2,437 |
+| SSA to machine code | no spec owns it | `ssagen/` | | **no row existed** | 2,682 |
+| Object writer | [040](040-object-format.md) | `obj/` | 1,559 (`goobj`) | 1,500 | 1,382 |
 | `arm64` encoder | [041](041-instruction-encoding.md) | `obj/arm64/` | 36,224 (`obj/arm64`, whole ISA) | 2,000 | 2,183 |
-| Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | `driver/`, `cmd/nanogo/` | | 1,000 | 2,804 |
-| Distribution build | [051](051-build-integration.md), [062](062-distribution-build.md) | `dist/`, `cmd/nanogo-dist/` | | **no row existed** | 1,384 |
-| The gates and the package doc | no spec owns them | `internal/covercheck/`, `doc.go` | | **no row existed** | 468 |
-| | | | | **≈41,800** | **40,961** |
+| Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | `driver/`, `cmd/nanogo/` | | 1,000 | 3,079 |
+| Distribution build | [054](054-distribution.md), [062](062-distribution-build.md) | `dist/`, `cmd/nanogo-dist/` | | **no row existed** | 1,424 |
+| The gates and the package doc | no spec owns them | `internal/covercheck/`, `doc.go` | | **no row existed** | 470 |
+| | | | | **≈41,800** | **42,338** |
 
 The measured column is not a smaller version of the estimate column, and the
 difference between them is the interesting part.
@@ -290,10 +298,10 @@ difference between them is the interesting part.
 #### What the estimates got wrong
 
 **The original verdict is kept because it was the honest answer at the time.**
-This decision said: *v1 does not fit, by about five per cent*, against an
-estimated 41,800. That was recorded rather than adjusted, and it stands as
-written. The measurement says something different, and it does not say the
-budget is safe.
+Against the 40,000 this decision first set, it said: *v1 does not fit, by about
+five per cent*, on an estimate of 41,800. It was right about the fit and wrong
+about the margin, which turned out to be the whole reason the number moved. It
+is kept as written rather than adjusted to the budget that replaced it.
 
 #### The overrun that raised the budget
 
@@ -303,14 +311,14 @@ guessed. The rows below are what the gate exposed, and they are kept because
 each one is a way an estimate goes wrong, not because the number they sum to
 still binds.
 
-**Three rows are zero and one is half done.** Escape analysis, inlining and
-generics instantiation are not written, and export data has its reader and not
-its writer: 2,347 lines of the 7,000 estimated. What is left of the four rows
-is about 14,700 lines, so the overrun is not the whole of the problem. It is
-the part of it that is already on disk.
+**Two rows are zero and one is most of the way there.** Escape analysis,
+inlining and generics instantiation are not written. Export data has both
+directions and no function bodies: 3,178 lines of the 7,000 estimated. This
+decision's own projection puts what is left ahead at about 13,600 lines, and
+the overrun above is only the part of it that is already on disk.
 
 **One component had no row at all.** The pass that turns SSA into machine code
-and writes it through the object writer, `ssagen`, is 2,664 lines and was
+and writes it through the object writer, `ssagen`, is 2,682 lines and was
 budgeted nowhere. The pipeline of [002](002-architecture.md) has the stage; the
 accounting skipped it, because the estimate was made by listing specs and no
 spec owns that stage. This was found by summing the tree against the table
@@ -380,11 +388,12 @@ before there is a compiler. M3 in [003](003-sequencing.md) tested it and it
 holds in both directions that are built. `internal/e2e` compiles a leaf package
 with nanogo under a real `go build -toolexec=nanogo`, links it with the real
 linker against `gc`-compiled packages and the real runtime, and runs it; and
-`export/` reads `gc`'s export data, so a nanogo-compiled package can import a
-`gc`-compiled one. The direction that is not built is the reverse: nanogo
-writes no export data, so nothing can import what nanogo compiled. That is
-[015](015-export-data.md)'s writer half, and the fallback in this decision is
-not taken.
+`export/` reads `gc`'s export data and writes it, so a nanogo-compiled package
+can import a `gc`-compiled one and a `gc`-compiled package can import a
+nanogo-compiled one. What is not built is a generic declaration, which the
+writer refuses by name ([013](013-generics.md)), and function bodies, which
+[024](024-inlining-and-devirtualization.md) needs. The fallback in this
+decision is not taken.
 
 Without this, the first milestone that runs real code requires the runtime, the
 whole standard library, and the linker at once, and a crash has five hundred

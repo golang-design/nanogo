@@ -154,7 +154,7 @@ Risks are listed with the milestone that retires them, not with a probability.
 | GC metadata is wrong in a way that only shows under load | M4 | Allocation stress with `GOGC=1` and `GODEBUG=gccheckmark=1`, not a unit test. |
 | The forked type checker cannot be re-pointed at nanogo's syntax tree cheaply | M2 | [012](012-type-checking.md) names the interface it is re-pointed through. If the fork resists, the fallback is to keep `go/ast` under the checker and translate, at a cost stated in that spec. |
 | Generics instantiation is a rewrite rather than a port | M5 | Deferred deliberately: nanogo's own source uses generics, so M6 cannot be reached without it, and M5 is where it is confronted with the corpus available. |
-| The v1 line budget is exceeded | M4 | **Fired.** The tree is over 40,000 lines and `internal/hygiene` fails on it, with four components still unwritten. [000](000-decisions.md) decision 10 carries the accounting, the estimate still ahead, and the two recovery points, [022](022-optimization-passes.md) and [015](015-export-data.md). Decision 10 says what to give up rather than what to raise, so the number stays and the scope moves. |
+| The v1 line budget is exceeded | M4 | **Fired once, and the budget moved.** The tree passed the original 40,000 lines, `internal/hygiene` failed on it, and [000](000-decisions.md) decision 10 raised the number to 60,000 with the reasoning written down. That decision also says it may not happen twice: the next overrun is answered by naming what to give up. The two recovery points are [022](022-optimization-passes.md) and [024](024-inlining-and-devirtualization.md). |
 | `//go:linkname` and `//go:nosplit` semantics are subtler than documented | M9 | The runtime is the only consumer that cares, and M9 is where it is compiled. |
 
 ## Where the work stands
@@ -169,7 +169,7 @@ its gate is not met.**
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
 | M2 types | done, less a generic declaration in export data | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads and writes gc's export data |
 | M3 first binary | **in progress** | a leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs; the clause "with its tests passing" is unmet, because `go test -toolexec` is not run |
-| M4 runtime interface | **in progress** | liveness, stack maps, the ABI, the stack growth check and type descriptors are built, a nanogo-allocated object survives a collection, and `panic`, `defer`, `go` and a closure work as long as nothing is captured; itabs, write barriers, `recover` and every capture are not built |
+| M4 runtime interface | **in progress** | liveness, stack maps, the ABI, the stack growth check and type descriptors are built, a nanogo-allocated object survives a collection, and `panic`, `recover`, `defer`, `go` and a closure work as long as nothing is captured; itabs, write barriers and every capture are not built |
 | M5 to M10 | not started | |
 | the distribution | built, and reporting a zero | a tarball unpacks into a tree `driver.FindRoot` resolves, and its 27 archives account for themselves: 0 by nanogo, 27 by `gc` |
 
@@ -218,7 +218,7 @@ measures both orders:
 | Measurement | Functions |
 | --- | --- |
 | reach SSA construction with no lowering pass | 17,905 |
-| get past construction once the lowering pass has run, which is what the driver does | 24,095 |
+| get past construction once the lowering pass has run, which is what the driver does | 24,508 |
 | lower completely to arm64 machine operations | 17,809 |
 | carry a stack map | 17,758 |
 
@@ -285,7 +285,7 @@ package:
 | `rtsym` | 100% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |
 | `rtype` | 96% | [032](032-type-descriptors-and-itabs.md) |
 | `export` | 96% | [015](015-export-data.md) |
-| `export/pkgbits` | 94% | [015](015-export-data.md) |
+| `export/pkgbits` | 92% | [015](015-export-data.md) |
 | `driver` | 98% | [050](050-driver.md), [051](051-build-integration.md) |
 | `internal/covercheck` | 97% | the gate itself |
 | `cmd/nanogo` | excluded | one statement; the reason is in the exclusions file |

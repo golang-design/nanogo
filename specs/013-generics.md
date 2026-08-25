@@ -39,6 +39,15 @@ uninstantiated body arrived. The property this spec claims at the end therefore
 holds today, that nothing below [020](020-ir.md) sees a type parameter, but it
 holds because the bodies are dropped and not because they were instantiated.
 
+**Export data refuses a generic declaration too, and for this spec's reason.**
+`export/writer.go` names a declaration with type parameters and refuses to
+encode it: an importing package stencils a generic, stenciling needs the
+function body, and nanogo writes declarations only. So the missing stenciler
+and the missing body reader are one gap seen from two sides, and a package that
+declares a generic does not round-trip. That is what is left of
+[003](003-sequencing.md)'s M2 gate, and [015](015-export-data.md) records it
+from its side.
+
 This note is at the top rather than at the end because a reader who takes the
 design below for a description of the code will be wrong about the whole file.
 
@@ -109,7 +118,7 @@ rule for what goes in them, and a story for methods reached through them. In
 `gc` this is a substantial part of the generics implementation.
 
 Under [000](000-decisions.md) decision 10 that subsystem has to justify itself
-against a 40,000-line budget, and what it buys is binary size.
+against a line budget, and what it buys is binary size.
 
 ### 3. It is correct by construction
 

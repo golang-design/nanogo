@@ -29,10 +29,11 @@ flowchart TD
 
 Each level catches a class the level above cannot.
 
-**One level is built, one exists in a narrow form, and two do not exist.** L1 is
-built and large for the front end. L3 runs as a differential against `gc` at the
-instruction and the ABI boundary, not as whole programs built twice and run. L2
-has no harness at all, and L4 cannot be run until [060](060-selfhost.md) reports
+**One level is built, one exists in a narrow form, and two do not exist.** L1
+is built and large for the front end. L3 runs as a differential against `gc` at
+the instruction and the ABI boundary, and it now runs whole programs, but it
+does not build the same program twice and compare the two outputs. L2 has no
+harness at all, and L4 cannot be run until [060](060-selfhost.md) reports
 otherwise. The table below is the state of each level, and each section says
 what stands and what does not.
 
@@ -40,7 +41,7 @@ what stands and what does not.
 | --- | --- | --- |
 | L1 agreement | built for the front end, partial for the checker | scanner, parser, build constraints and `go list`, over the distribution |
 | L2 corpus | **not built** | nothing reads `~/dev/go.dev/go/test` |
-| L3 differential execution | partial | instruction encodings, runtime symbols, prologues, and 18 mixed-toolchain link-and-run cases |
+| L3 differential execution | partial | instruction encodings, runtime symbols, prologues, 18 mixed-toolchain link-and-run cases, and whole programs built through a real `go build -toolexec=nanogo` and run |
 | L4 fixed point | **not built** | no stage is runnable, per [060](060-selfhost.md) |
 
 ### L1: agreement on accept and reject
@@ -57,7 +58,7 @@ the front end is now measured against it:
 | Scanner token streams | 19,674 files of 19,691, 17 skipped, 0 failures | `go/scanner` |
 | Parse accept and reject | 16,293 files, 14 documented exceptions | `go/parser` |
 | Build-constraint selection | 6,821 files per platform, 0 mismatches | `go/build` |
-| Package and file lists | 520 packages, 0 mismatches | `go list` |
+| Package and file lists | 524 packages, 0 mismatches | `go list` |
 | IR construction | 536 packages of 663, 39,947 functions | none; it is a build, not a comparison |
 
 The type checker is the half that does not meet this level's bar. It agrees with

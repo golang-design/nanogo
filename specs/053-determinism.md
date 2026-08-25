@@ -28,8 +28,8 @@ insertion-ordered symbol list in `obj`, package lists sorted by import path in
 `loader`. Each of those carries a comment naming this spec, which is what keeps
 the rule from being reverted by someone who reads only the function.
 
-The checks are per component rather than per compile, because there is no whole
-compile to run twice yet:
+Most checks are per component, because a component is what a fast test can run
+twice. Two are not: a whole compile, and a whole distribution tree.
 
 | Check | Where |
 | --- | --- |
@@ -38,6 +38,8 @@ compile to run twice yet:
 | One function's machine code, 8 times, 32 bytes identical | `ssagen/ssagen_test.go` |
 | SSA construction, decomposition, liveness, allocation, frame layout and stack maps, each twice | `ssa/*_test.go` |
 | `go list` results, sorted by import path | `loader/golist_test.go` |
+| A whole package compile, twice | `driver/compile_test.go` |
+| The distribution tarball, from two build directories | `dist/`, per [054](054-distribution.md) |
 
 The two-process check is the one this spec singles out below, and it is built:
 the children run in different working directories with different `HOME`, `LANG`,

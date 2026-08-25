@@ -20,25 +20,37 @@ simultaneously, and a crash has no suspect.
 
 ## What is built
 
-The substitution is built and gated. `driver.Run` implements the flowchart
-below, `cmd/nanogo/main_test.go` drives a real `go build -toolexec=nanogo` over
-a two-package module and runs the result, and a second test puts a package on
-the allowlist and asserts the build stops with that package named.
+Two build paths are built and gated, and they are for different people.
+
+`nanogo build` is the user's, and it needs no `go` command in the loop. It is
+the section further down.
+
+The substitution is the compiler developer's. `driver.Run` implements the
+flowchart below, `cmd/nanogo/main_test.go` drives a real
+`go build -toolexec=nanogo` over a two-package module and runs the result, and
+a second test puts a package on the allowlist and asserts the build stops with
+that package named.
 
 The payload is no longer empty. `driver.Compile` runs the pipeline of
 [002](002-architecture.md) and writes the archive `-pack` asks for, and
 `internal/e2e` runs a real `go build -toolexec=nanogo ./...` over a module whose
 `main` package is on the allowlist. nanogo compiles it, `gc` compiles the
 standard library beneath it, the real linker joins them, and the program runs.
-A second program in the same shape divides by zero, and the traceback the
-runtime prints names both nanogo-compiled functions with the file and the line
-each one is on.
+[003](003-sequencing.md) lists the programs that go that route and what each
+one proves. One of them divides by zero, and the traceback the runtime prints
+names both nanogo-compiled functions with the file and the line each one is on.
+Another makes a variadic call under `runtime.GC()`, so the object it allocated
+is scanned with the pointer mask nanogo emitted.
 
 What that build compiles is small, and the size is set above the driver.
-`driver.Compile` refuses a package that imports another one, because
-[015](015-export-data.md) has no reader, and it refuses a composite literal,
-because nobody performs [020](020-ir.md)'s lowering table. No allowlist file is
-committed, so a checkout still compiles nothing until a build names one.
+`driver.Compile` compiles what SSA construction accepts once
+[020](020-ir.md)'s lowering pass has run, which is three functions in five of
+the Go distribution ([003](003-sequencing.md) counts them), and refuses the
+rest by name. A package that imports is no
+longer refused: `export/` reads `gc`'s export data, and `internal/e2e` compiles
+a package that imports one of its own and a package that imports `math/bits`
+and `strconv`. No allowlist file is committed, so a checkout still compiles
+nothing until a build names one.
 
 ## `-toolexec`
 
@@ -148,33 +160,24 @@ list with `main` on it claims every main package in every module. That was read
 out of `driver/allowlist.go` against the rule above, and the first reading of it
 was that the check belongs in `Has`.
 
-Building the compiler said the opposite. `main` is the only package a whole
-`go build` can hand to nanogo, and the reason is
-[015](015-export-data.md), not this rule:
+Building the compiler said the opposite. When that was written `main` was the
+only package a whole `go build` could hand to nanogo, and the reason was
+[015](015-export-data.md) rather than this rule. Both directions of that spec
+were unbuilt, and a main package is the one package in a build that neither
+imports nor is imported, so it was the only one both directions left alone.
+Enforcing the rule in `Has` would have turned that into zero compiled packages.
 
-| Direction | What is needed | State |
-| --- | --- | --- |
-| nanogo compiles a package with an import | an export data **reader** | unbuilt |
-| `gc` compiles a package that imports nanogo's | an export data **writer** | unbuilt |
+**That reason is gone.** [015](015-export-data.md) reads and writes export
+data, so a package with imports compiles and a package nanogo compiled can be
+imported. The rule is now what it always should have been: a constraint on the
+**repository's** allowlist file, where `main` would claim every main package in
+the Go corpus, and not a mechanism in the driver. Putting the check in `Has` is
+worth reconsidering, because a non-main package is a usable first entry now.
 
-A main package is the one package in a build that neither imports nor is
-imported, so it is the only one both columns leave alone. `internal/e2e` builds
-a module with `main` on the allowlist, and the program nanogo compiles runs.
-Enforcing the rule in `Has` would turn that back into zero compiled packages.
-
-So the rule is a constraint on the **repository's** allowlist file, where `main`
-would claim every main package in the Go corpus, and not a mechanism in the
-driver. The driver's protection is different and already in place: a package it
-owns and cannot compile is an error that names the package, never a silent hand
-back to `gc`, so a `main` entry that claimed a main package nanogo cannot
-compile stops the build loudly. Reconsider putting the check in `Has` when
-[015](015-export-data.md) has a writer, because a non-main package becomes a
-better first entry the day it does.
-
-Note which half of [015](015-export-data.md) each step proves. A leaf package
-reads no export data, but `gc` compiles its test binary and therefore reads what
-nanogo wrote, so the first entry proves the **writer**. The reader is first
-exercised one step up, at the first package with an import.
+The driver's protection is separate and already in place: a package it owns and
+cannot compile is an error that names the package, never a silent hand back to
+`gc`, so a `main` entry that claimed a main package nanogo cannot compile stops
+the build loudly.
 
 ## Why this is better than a self-contained test suite
 
@@ -186,20 +189,54 @@ nanogo could write, and it costs nothing to obtain.
 It also localises blame precisely. If the binary works with package $P$ compiled
 by nanogo and fails when $Q$ is added, the bug is in what $Q$ uses.
 
+## `nanogo build`, which is the user's path
+
+`-toolexec` is the compiler developer's path. It substitutes nanogo inside
+someone else's build, it needs an allowlist, and everything above is about
+making that substitution safe.
+
+A user types `nanogo build .`, and there is no allowlist, no environment
+variable and no `go` command in the loop. nanogo resolves the package graph
+itself ([014](014-package-loader.md)), takes the standard library from the tree
+the binary is installed in ([054](054-distribution.md)), compiles what it can,
+delegates the rest, and links.
+
+| | `-toolexec` | `nanogo build` |
+| --- | --- | --- |
+| Who decides which packages nanogo compiles | the allowlist file, per invocation | nanogo, per package, by whether it compiles |
+| Who resolves the graph | the `go` command | `driver/build.go` |
+| Where the standard library comes from | the ambient toolchain | `NANOGOROOT`, or the tree beside the binary |
+| Who computes `-p` | the `go` command | nanogo |
+| Cache | the `go` command's | none |
+
+The last two rows change what the `-p main` rule above binds. nanogo computes
+the package path itself here, so a main package is not the ambiguous `-p main`
+the `go` command sends, and the rule that `main` is never matched by an
+allowlist entry has nothing to constrain on this path.
+
+Every build reports how many packages nanogo compiled and how many the
+toolchain did. That count is the defence against the failure
+[054](054-distribution.md) names: delegation is the fallback, so a build that
+succeeds proves nothing on its own about who compiled what.
+
 ## Whole-world mode
 
-The second mode of [000](000-decisions.md) decision 11, for G2 and G3: nanogo
-compiles every package including the runtime, and `go build` is not involved.
+The third mode, and the one neither of the two above is: nanogo compiles every
+package including the runtime, for G2 and G3
+([000](000-decisions.md) decision 11).
 
 It uses the same object format, the same export data, and the same ABI. The
-difference is only who drives, and the driver is nanogo's own build orchestrator
-over the package graph from [014](014-package-loader.md), compiling in
-topological order with one process per package.
+difference is only who drives.
 
-Unbuilt. `driver.Run` compiles one package per invocation and nothing
-orchestrates. The graph half exists: [014](014-package-loader.md)'s G1 loader
-returns packages sorted by import path and agrees with `go list` over 520
-packages.
+**The orchestrator is built and the mode is not.** `nanogo build` is that
+orchestrator, and every package it cannot compile it hands to `gc`. Whole-world
+mode is the same command with nothing left to hand over, which needs the
+runtime's rules ([034](034-write-barriers.md),
+[035](035-goroutines-and-stack-growth.md)), the assembler
+([044](044-plan9-assembler.md)) and the linker ([045](045-linker.md)). The
+counter `nanogo build` prints is the distance: today it reports zero packages
+of the bootstrap closure compiled by nanogo, and [054](054-distribution.md)
+records the same figure for a released tree.
 
 ## Caching
 
@@ -224,9 +261,12 @@ cache possible later; nothing depends on it existing.
 
 ## Testing
 
-What runs today, all of it about the mechanism and none of it about a compiled
-package:
+What runs today:
 
+- `internal/e2e` installs the binary and drives real builds through it, each
+  one a module nobody wrote for a harness, and runs the program that comes out.
+  That is the mechanism and the payload together, which is the pairing the four
+  unwired passes of [032](032-type-descriptors-and-itabs.md) got past.
 - `cmd/nanogo/main_test.go` builds the real binary and runs
   `go build -toolexec=nanogo ./...` over a module, then runs the program. The
   passthrough path is therefore gated end to end.

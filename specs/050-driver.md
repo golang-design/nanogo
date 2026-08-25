@@ -10,23 +10,60 @@ depends_on:
 
 # Driver
 
-`cmd/nanogo` is the executable. Its command line is `go tool compile`'s, because
-[051](051-build-integration.md) substitutes it for `go tool compile` through
-`-toolexec` and the `go` command constructs the arguments.
+`cmd/nanogo` is the executable, and it has two command lines.
 
-This is not a nicety. If the flags differ, the substitution does not work, and
-the bring-up strategy of [000](000-decisions.md) decision 11 is gone.
+The one this spec is mostly about is `go tool compile`'s, because
+[051](051-build-integration.md) substitutes nanogo for `go tool compile`
+through `-toolexec` and the `go` command constructs the arguments. This is not
+a nicety. If the flags differ, the substitution does not work, and the bring-up
+strategy of [000](000-decisions.md) decision 11 is gone.
+
+The other is for a person.
+
+## The two command lines
+
+`run` tells them apart by the first argument. `-toolexec` splits its value into
+words and appends an absolute tool path, so a real substitution's first
+argument is a path and no tool is named `build`, `help` or `version`. A word
+that is one of those three is a person typing, and cannot be the `go` command.
+
+| Command line | Who sends it | What it does |
+| --- | --- | --- |
+| `nanogo <tool> [args]` | the `go` command, through `-toolexec` | compiles one package, or execs the real tool. The rest of this spec. |
+| `nanogo build [-o out] [-v] [-work] [packages]` | a person | resolves the package graph itself, compiles what it can with the same `Compile`, and links. [051](051-build-integration.md) owns it under whole-world mode. |
+| `nanogo help` | a person | what nanogo compiles today and what it refuses |
+| `nanogo version` | a person | the pinned release and this build's identity |
+
+`nanogo help` is not decoration. A driver whose limits are discoverable only by
+hitting them wastes a reader's afternoon, and nanogo's limits are the subject:
+the help text names the constructs it compiles and the constructs it refuses.
+
+`-fallback` is nanogo's only driver flag, and it is accepted before the tool
+path and inside the compile flag set, because the `go` command puts it in both
+places.
 
 ## What is built
 
 The command line is built. `driver` parses every flag in the tables below,
 answers `-V=full`, reads `-importcfg`, and dispatches per invocation: a tool
 other than `compile`, a package off the allowlist, or a command line it cannot
-parse goes to `gc` ([051](051-build-integration.md)). `cmd/nanogo` is 30 lines
+parse goes to `gc` ([051](051-build-integration.md)). `cmd/nanogo` is 34 lines
 over `driver.Run`.
 
-What is not built is most of what the flags ask for. `driver.Compile` runs the
-pipeline and refuses, by name, everything the compiler cannot do yet:
+`driver.Compile` runs the pipeline, in the order below, and refuses by name
+everything the compiler cannot do yet.
+
+| Stage | Owner |
+| --- | --- |
+| parse, type check, build the typed tree | [011](011-parser-and-ast.md), [012](012-type-checking.md), [020](020-ir.md) |
+| `ir.Lower`, which also collects the descriptors the tree names | [020](020-ir.md), [032](032-type-descriptors-and-itabs.md) |
+| `ssa.Build`, lowering, decomposition, register allocation | [021](021-ssa-construction.md), [025](025-lowering-and-rules.md), [026](026-register-allocation.md) |
+| `ssagen`, then the text symbols and the descriptors into the object | [041](041-instruction-encoding.md), [040](040-object-format.md) |
+
+`ir.Lower` runs first because `ssa.Build` refuses every Go-specific node. An
+earlier pass list started at `ssa.Build`, so the lowering pass never ran in a
+real compile, and [032](032-type-descriptors-and-itabs.md) records what that
+cost.
 
 | Refused | Because |
 | --- | --- |
@@ -34,12 +71,21 @@ pipeline and refuses, by name, everything the compiler cannot do yet:
 | `-+` | the runtime rules of [034](034-write-barriers.md) and [035](035-goroutines-and-stack-growth.md) are unbuilt |
 | `-embedcfg` | see [`go:embed`](#goembed) below |
 | a package with an assembly definition in `-symabis` | the ABI wrapper of [030](030-abi.md) is unbuilt |
-| a package that imports another package | [015](015-export-data.md) has no reader |
 | a package with a package-level variable, or an `init` | neither has a data symbol or an init task yet |
-| a package with no function bodies | nanogo writes text symbols and nothing else |
+| a package with no function bodies | nanogo writes text symbols and the descriptors its code names, and nothing else |
+| a type its code needs a descriptor for and `rtype` cannot fill in | [032](032-type-descriptors-and-itabs.md)'s method set gap |
+| a function no pass in the list accepts | the pass names itself and the error names the function and its position |
 
 Each refusal names the spec that owns the gap, because the allowlist is the
 progress metric and a failure has to say which entry produced it.
+
+**A package that imports another package is no longer refused.** `export/`
+reads `gc`'s export data and writes it ([015](015-export-data.md)), so the
+importer resolves a `gc`-compiled dependency and the archive nanogo produces
+carries a `__.PKGDEF` that a `gc`-compiled importer can read.
+`internal/e2e` compiles a package that imports one of its own and a package
+that imports `math/bits` and `strconv`. What is still refused is a generic
+declaration, which the writer names rather than encodes.
 
 ## Flags that must be honoured
 
@@ -211,8 +257,9 @@ a string or byte slice or `embed.FS` structure. It is listed here so it is not
 forgotten, since a standard library package uses it and G3 needs it.
 
 None of it is written. `checkSupported` refuses `-embedcfg` outright, which is
-the honest state: nanogo has no data symbol emitter, so a package that embeds a
-file has nowhere to put it.
+the honest state. nanogo emits one kind of data symbol, the type descriptors of
+[032](032-type-descriptors-and-itabs.md), and nothing binds a data symbol to a
+package-level variable, which is what an embedded file needs.
 
 ## Exit status and output
 
@@ -232,6 +279,11 @@ What runs today:
   parses the line itself and a malformed one is fatal to the build.
 - The same file drives a build with a package on the allowlist and asserts the
   failure names the package.
+- `internal/e2e` installs the binary the way a user installs it and drives six
+  builds through it, from the command line to a process that returns the answer
+  it computed. Nothing in it calls into nanogo's packages, because the claim is
+  about the command line and a test that reached inside would not be testing
+  that claim.
 - `spikes/toolexec` runs in CI on every commit, which is what keeps the flag
   table measured rather than transcribed.
 

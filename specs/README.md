@@ -23,8 +23,9 @@ reader knows before opening a spec whether it describes code or a plan:
 | `in progress` | part of it is built, and the spec says which part |
 | `draft` | nothing in it is built |
 
-42 specs: 7 `complete`, 21 `in progress`, 14 `draft`. A third of the deck is
-still a plan, and now says so.
+42 specs, and the index below is the only place their statuses are counted, so
+that no second copy can drift from it. A third of the deck is still `draft`,
+which is to say still a plan, and now says so.
 
 Where the code disproved a spec, the spec keeps the record: what it claimed,
 what the code does, and how the difference was found. None of it is deleted
@@ -37,11 +38,11 @@ read as one list. A single correction stays where it matters, marked as one.
 records departures from a plan rather than from a design; the component specs
 call theirs **What was wrong**.
 
-Two audits in August 2026 went through all 41 against the tree. The first found
-stale claims in most of them. The second, after the driver was wired end to
-end, found the reverse fault: specs describing as unbuilt work that had landed.
-[003](003-sequencing.md)'s Deviations section carries the corrections that
-cross spec boundaries.
+Two audits in August 2026 went through the whole deck against the tree. The
+first found stale claims in most of it. The second, after the driver was wired
+end to end, found the reverse fault: specs describing as unbuilt work that had
+landed. [003](003-sequencing.md)'s Deviations section carries the corrections
+that cross spec boundaries.
 
 The numbers in [003](003-sequencing.md) are gated by `internal/hygiene`, which
 reads them out of the prose and fails when they disagree with what the tests
@@ -87,7 +88,7 @@ believed.
 | [012](012-type-checking.md) | Type checking | `complete` | forking `types2` |
 | [013](013-generics.md) | Generics | `draft` | full stenciling; the stenciler is not written |
 | [014](014-package-loader.md) | Package loader | `in progress` | `go list` at G1, direct resolution at G2 |
-| [015](015-export-data.md) | Export data | `in progress` | `gc`-compatible; the reader is built and imports work, the writer is not |
+| [015](015-export-data.md) | Export data | `in progress` | `gc`-compatible; both directions work, a generic declaration is refused |
 | [016](016-directives-and-pragmas.md) | Directives and pragmas | `draft` | the complete `//go:` table; nothing reads one yet |
 
 ### Middle end
@@ -154,10 +155,10 @@ believed.
 
 | | |
 | --- | --- |
-| Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the export data reader, the typed IR and part of its lowering table, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, type descriptors, the object writer, the arm64 encoder, and the driver |
-| Proved | A leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs. A nanogo-compiled frame keeps an allocation alive across `runtime.GC()`, so a real collector reads the stack map and the pointer mask nanogo wrote |
-| The largest gap | The lowering pass gets 24,095 of the distribution's 39,947 functions past SSA construction. The rows of [020](020-ir.md)'s table that no pass performs block the rest, and a closure alone blocks 1,805. [020](020-ir.md) owns the table, [021](021-ssa-construction.md) owns the pass |
-| Not started | The export data writer, escape analysis, inlining, generics instantiation, itabs, closures, `defer`, `panic`, write barriers, goroutines, the linker, the assembler, DWARF, and the amd64 backend |
+| Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the export data reader and writer, the typed IR and part of its lowering table, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, type descriptors, the object writer, the arm64 encoder, the driver, and `nanogo build` |
+| Proved | A leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs. A nanogo-compiled frame keeps an allocation alive across `runtime.GC()`, so a real collector reads the stack map and the pointer mask nanogo wrote. A deferred call runs while the goroutine is panicking, in the frame order `gc` produces |
+| The largest gap | Three functions in five of the Go distribution get past SSA construction, and the unbuilt rows of [020](020-ir.md)'s lowering table block the other two. No SSA operation reads the context register, so every capture is refused. [020](020-ir.md) owns the table with a state per row, [021](021-ssa-construction.md) owns the pass, and [003](003-sequencing.md) carries the counts |
+| Not started | Escape analysis, inlining, generics instantiation, itabs, `recover`, write barriers, the linker, the assembler, DWARF, and the amd64 backend |
 | Decided against | Assembly text as a build path, a from-scratch type checker, GC-shape stenciling with dictionaries |
 
 ## The spikes
