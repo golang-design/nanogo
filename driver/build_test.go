@@ -638,7 +638,7 @@ func TestBuildTakesTheStandardLibraryFromTheDistribution(t *testing.T) {
 // the package. Substituting the installed toolchain's copy would produce a
 // program whose standard library did not come from the tree the build named.
 func TestBuildRefusesAStandardPackageTheDistributionDoesNotHold(t *testing.T) {
-	root := writeDistribution(t, "runtime")
+	root := writeDistribution(t, "runtime", "internal/abi")
 	f := newFakeBuild(t, &buildOptions{Patterns: []string{"."}})
 	f.b.findRoot = func(string) (Root, error) {
 		return Root{Path: root, Origin: RootEnv, Nanogo: true}, nil
@@ -647,7 +647,7 @@ func TestBuildRefusesAStandardPackageTheDistributionDoesNotHold(t *testing.T) {
 	if err == nil {
 		t.Fatal("a dependency the distribution does not hold was accepted")
 	}
-	for _, want := range []string{root, "math/bits", "1 packages"} {
+	for _, want := range []string{root, "math/bits", "has 2 packages"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %v does not mention %q", err, want)
 		}

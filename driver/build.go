@@ -529,10 +529,10 @@ func (b *builder) dependencies(targets []*loader.Package, graph map[string]*load
 		fromGo = append(fromGo, p)
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("the distribution at %s holds %d packages and none of them is %s: "+
-			"a standard library package the tree does not carry cannot be supplied from the installed "+
-			"toolchain without the build ceasing to be a build against this tree",
-			b.tree.Root, b.tree.Packages, strings.Join(missing, ", "))
+		return nil, fmt.Errorf("the distribution at %s does not hold %s: its pkg/%s has %d packages, "+
+			"and a standard library package the tree does not carry cannot be taken from the installed "+
+			"toolchain, which would make this something other than a build against this tree",
+			b.tree.Root, strings.Join(missing, ", "), TargetDir(), b.tree.Packages)
 	}
 
 	if len(fromGo) > 0 {
