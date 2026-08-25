@@ -274,28 +274,33 @@ func TestNanogoImportsWhatNanogoWrote(t *testing.T) {
 
 // TestNanogoCompilesAStandardLibraryPackage is the keystone claim.
 //
-// internal/goarch is in the closure of every Go program: it is constants and
-// type aliases, it compiles to no symbol at all, and the runtime imports it.
-// With it on the allowlist, nanogo compiles it and gc compiles the other
-// twenty-eight packages of the build against the export data nanogo wrote,
-// runtime included. The program then runs.
+// internal/goarch and internal/goos are in the closure of every Go program:
+// each is constants and type aliases, each compiles to no symbol at all, and
+// the runtime imports both. With them on the allowlist, nanogo compiles them
+// and gc compiles the other twenty-seven packages of the build against the
+// export data nanogo wrote, runtime included. The program then runs.
 //
-// This is what specs/015-export-data.md's missing writer was blocking. Until
-// it existed, nanogo could compile only a package that nothing imports, which
-// in this closure is main and nothing else.
+// This is what specs/015-export-data.md's missing writer was blocking, and
+// these two packages are where it was most visible: the driver refused them
+// with a message about having no function bodies, which said the export data
+// was missing rather than that code generation could not reach them. Until
+// the writer existed, nanogo could compile only a package that nothing
+// imports, which in this closure is main and nothing else.
 func TestNanogoCompilesAStandardLibraryPackage(t *testing.T) {
 	h := setup(t, map[string]string{
 		"go.mod":  "module nanogo.example/goarch\n\ngo 1.27\n",
 		"main.go": stdlibProgram,
-	}, []string{"internal/goarch"})
+	}, []string{"internal/goarch", "internal/goos"})
 
 	out, err := h.build(t, "-o", "prog", ".")
 	if err != nil {
 		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
 	}
 	lines := h.decisions(t)
-	if !compiled(lines, "internal/goarch") {
-		t.Fatalf("nanogo delegated internal/goarch:\n%s", strings.Join(lines, "\n"))
+	for _, pkg := range []string{"internal/goarch", "internal/goos"} {
+		if !compiled(lines, pkg) {
+			t.Fatalf("nanogo delegated %s:\n%s", pkg, strings.Join(lines, "\n"))
+		}
 	}
 	if compiled(lines, "runtime") {
 		t.Fatalf("nanogo compiled the runtime, so the test says nothing about importing:\n%s",
