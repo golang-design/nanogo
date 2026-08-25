@@ -475,8 +475,39 @@ func (e *emitter) run() {
 		}
 		e.terminator(b, next)
 	}
+	e.padExit()
 	e.growstack()
 	e.patch()
+}
+
+// padExit appends one instruction after a last block that ends in a call which
+// does not return.
+//
+// The return address of a call to runtime.panicdivide is never executed, and
+// it is still read: the traceback resolves the frame of the function that
+// panicked from it, and every pc-value table is a map from a program counter
+// to a range. When the call is the last instruction of the body, its return
+// address is the first instruction of the stack-growth tail, and the tail
+// declares a stack pointer delta of zero because it runs before the frame is
+// pushed. The unwinder therefore reads the frame of a function that has one as
+// though it had none, computes the caller's stack pointer a frame size too
+// low, and reports
+//
+//	runtime: g 1: unexpected return pc for <fn> called from <garbage>
+//
+// instead of the panic. Every frame above it is wrong as well, so a panic
+// anywhere under such a function has no usable traceback.
+//
+// One word of padding puts the return address back inside the block it belongs
+// to. gc does the same thing for the same reason, in
+// cmd/compile/internal/ssagen/ssa.go: "We need the return address of a panic
+// call to still be inside the function in question."
+func (e *emitter) padExit() {
+	n := len(e.f.Blocks)
+	if n == 0 || e.f.Blocks[n-1].Kind != ssa.BlockExit {
+		return
+	}
+	e.word(arm64.Nop())
 }
 
 // mark records where a value's instructions landed.
