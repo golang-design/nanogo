@@ -1199,12 +1199,40 @@ func TestBuildMultiValueAssign(t *testing.T) {
 	}
 }
 
+// TestBuildMultiValueAssignWideResult asserts that a result wider than a
+// register builds.
+//
+// Construction refused this form while ssa/decompose.go numbered a part of
+// result i as word i+j, because the string below owns two words and the
+// integer after it would have been read from the second of them. The
+// numbering is now a sum over the widths of the earlier results, so the form
+// builds and reads what it names.
+func TestBuildMultiValueAssignWideResult(t *testing.T) {
+	s := obj("s", tString, ir.ClassLocal)
+	n := obj("n", tInt, ir.ClassLocal)
+	callee := obj("callee", tFunc, ir.ClassFunc)
+	fn := fun("f", []*ir.Object{s, n},
+		multiAsn(call(callee, tuple(tString, tInt)), local(s), local(n)),
+		ret(local(s), local(n)))
+	f := build(t, fn)
+
+	var got []string
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpSelectN {
+				got = append(got, fmt.Sprintf("%d:%v", v.AuxInt, v.Type))
+			}
+		}
+	}
+	// The index is still the result here. It becomes the word of the result
+	// area in ssa/decompose.go, which is the pass that knows the widths.
+	if want := "0:string 1:int"; strings.Join(got, " ") != want {
+		t.Errorf("results are %q, want %q\n%s", strings.Join(got, " "), want, f)
+	}
+}
+
 // TestBuildMultiValueAssignOneDestination asserts the form with one
 // destination builds.
-//
-// It cannot collide with anything, because one read of a call names one word
-// however wide the result is, so the bound that refuses a wide result does not
-// apply to it.
 func TestBuildMultiValueAssignOneDestination(t *testing.T) {
 	s := obj("s", tString, ir.ClassLocal)
 	callee := obj("callee", tFunc, ir.ClassFunc)
@@ -1617,13 +1645,6 @@ func TestBuildRejects(t *testing.T) {
 			callee := obj("callee", tFunc, ir.ClassFunc)
 			return fun("f", []*ir.Object{x, y},
 				multiAsn(call(callee, tInt), local(x), local(y)))
-		}},
-		{"a multi-value assignment with a result wider than a register", InvNone, func() *ir.Func {
-			s := obj("s", tString, ir.ClassLocal)
-			ok := obj("ok", tBool, ir.ClassLocal)
-			callee := obj("callee", tFunc, ir.ClassFunc)
-			return fun("f", []*ir.Object{s, ok},
-				multiAsn(call(callee, tuple(tString, tBool)), local(s), local(ok)))
 		}},
 		{"the address of an expression that has none", InvNone, func() *ir.Func {
 			callee := obj("callee", tFunc, ir.ClassFunc)

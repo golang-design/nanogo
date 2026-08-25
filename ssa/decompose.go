@@ -137,6 +137,23 @@ type decomposer struct {
 	split []bool
 	parts [][]*Value
 
+	// results lists the values that read the results of each call, indexed by
+	// the call's identifier and ordered by the result each one reads. calls
+	// holds the identifiers of the calls that have such a list, in block
+	// order, so that the numbering walk has no map on its path.
+	results [][]*Value
+	calls   []ID
+
+	// selOK marks a call result this pass may split. It is set only for a
+	// call whose result list is complete, because the word a result starts at
+	// is the sum of the widths of the results before it.
+	selOK []bool
+
+	// word holds the machine word of the result area each call result starts
+	// at, indexed by the reader's identifier and -1 for a value that reads no
+	// result. It is what the index of a SelectN means once this pass has run.
+	word []int64
+
 	// remove marks a value that leaves the function: a split original, or a
 	// load whose only reader became a block move.
 	remove []bool
@@ -155,7 +172,9 @@ func (d *decomposer) run() {
 	d.index()
 	d.aggregateCopies()
 	d.index()
+	d.collectResults()
 	d.plan()
+	d.number()
 	d.create()
 	d.link()
 	d.rewrite()
@@ -433,6 +452,103 @@ func (d *decomposer) dropped(v *Value) bool {
 }
 
 // ---------------------------------------------------------------------------
+// Call results
+
+// collectResults groups the values that read a call's results.
+//
+// A result is read by a SelectN whose index names it, and the index means two
+// different things on the two sides of this pass: the result before it, and
+// the machine word of the result area after it. Renumbering one result needs
+// the width of every result before it, so it needs every one of them to be
+// there.
+//
+// specs/021-ssa-construction.md reads every result of a call, including a
+// result assigned to the blank identifier, so a complete list is what a built
+// function holds. A list that is not complete, or that reads one result twice,
+// is left alone: the width of a result nothing reads is not knowable here, and
+// a guess would place a later result on a word that holds something else.
+func (d *decomposer) collectResults() {
+	n := d.f.NumValues()
+	d.results = make([][]*Value, n)
+	d.selOK = make([]bool, n)
+
+	for _, b := range d.f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpSelectN || len(v.Args) == 0 || v.Args[0] == nil {
+				continue
+			}
+			c := v.Args[0]
+			if int(c.ID) >= n {
+				continue
+			}
+			if len(d.results[c.ID]) == 0 {
+				d.calls = append(d.calls, c.ID)
+			}
+			d.results[c.ID] = append(d.results[c.ID], v)
+		}
+	}
+
+	for _, id := range d.calls {
+		vs := d.results[id]
+		ordered := make([]*Value, len(vs))
+		complete := true
+		for _, v := range vs {
+			i := v.AuxInt
+			if i < 0 || int(i) >= len(ordered) || ordered[i] != nil {
+				complete = false
+				break
+			}
+			ordered[i] = v
+		}
+		if !complete {
+			d.results[id] = nil
+			continue
+		}
+		d.results[id] = ordered
+		for _, v := range ordered {
+			d.selOK[v.ID] = true
+		}
+	}
+}
+
+// number gives every call result the machine word of the result area it starts
+// at.
+//
+// The word result i starts at is the sum of the widths of results 0 to i-1.
+// The width of a result is the number of values this pass leaves in its place,
+// which the plan decides: a result it splits is one value per part, and a
+// result it leaves whole is one value and one word here whatever its type is.
+// A result of no width contributes no value and no word.
+//
+// Every word is computed before any is applied, because the walk sums over the
+// values it is about to renumber.
+func (d *decomposer) number() {
+	d.word = make([]int64, d.f.NumValues())
+	for i := range d.word {
+		d.word[i] = -1
+	}
+	for _, id := range d.calls {
+		w := int64(0)
+		for _, v := range d.results[id] {
+			d.word[v.ID] = w
+			if d.isSplit(v) {
+				w += int64(len(d.leavesOf(v.Type)))
+				continue
+			}
+			w++
+		}
+	}
+}
+
+// wordOf returns the word of the result area a call result starts at.
+func (d *decomposer) wordOf(v *Value) (int64, bool) {
+	if v == nil || int(v.ID) >= len(d.word) || d.word[v.ID] < 0 {
+		return 0, false
+	}
+	return d.word[v.ID], true
+}
+
+// ---------------------------------------------------------------------------
 // The plan
 
 // plan decides which values are replaced by their parts.
@@ -480,10 +596,10 @@ func (d *decomposer) candidate(v *Value) bool {
 		return true
 	case OpSelectN:
 		// The index counts the machine words of the result area after this
-		// pass, so a part of result i is word i+j. That renumbering is only
-		// correct for the first result, and specs/021 builds no other: a call
-		// with several results is one SelectN of a tuple.
-		return v.AuxInt == 0
+		// pass, and number computes the word each result starts at from the
+		// widths of the results before it. That needs the call's whole result
+		// list, which collectResults is what establishes.
+		return int(v.ID) < len(d.selOK) && d.selOK[v.ID]
 	case OpConstString:
 		_, ok := v.Aux.(string)
 		return ok || v.Aux == nil
@@ -742,10 +858,22 @@ func (d *decomposer) makeParts(b *Block, v *Value) (before, parts []*Value) {
 		}
 
 	case OpSelectN:
+		// The index is the machine word of the result area from here on, and
+		// part j of this result is word j of the words it occupies. Where it
+		// starts is the sum of the widths of the results before it, which
+		// number computed while every result was still one value.
 		call := v.Args[0]
+		base, ok := d.wordOf(v)
+		if !ok {
+			// The plan only splits a result whose call has a complete result
+			// list, and number gave every one of those a word. Numbering the
+			// parts from zero instead would put this result over the first
+			// one, silently, which is the failure this pass was fixed for.
+			panic("ssa: decompose: a call result with no word of the result area")
+		}
 		for i, lf := range ls {
 			p := d.mk(b, v.Pos, OpSelectN, lf.typ, call)
-			p.AuxInt = v.AuxInt + int64(i)
+			p.AuxInt = base + int64(i)
 			parts = append(parts, p)
 		}
 
@@ -864,6 +992,13 @@ func (d *decomposer) rewrite() {
 				}
 			case OpStaticCall, OpClosureCall, OpInterCall, OpMakeResult:
 				d.spliceArgs(v)
+			case OpSelectN:
+				// A result this pass splits is renumbered by makeParts. One
+				// it leaves whole is one word and is renumbered here, because
+				// a result before it may have become several words.
+				if w, ok := d.wordOf(v); ok {
+					v.AuxInt = w
+				}
 			}
 			out = append(out, v)
 		}
@@ -1488,6 +1623,58 @@ func CheckDecomposed(f *Func) []Violation {
 				Block:     b.ID,
 				Value:     v.ID,
 				Detail:    fmt.Sprintf("%v has type %v, which is wider than a register", v.Op, v.Type),
+			})
+		}
+	}
+	return append(out, checkResultWords(f)...)
+}
+
+// checkResultWords reports a call whose results do not name the words of its
+// result area from zero, once each.
+//
+// The index of a SelectN is the machine word of the result area once this pass
+// has run, and specs/030-abi.md places the results by that index. Two results
+// on one word take one register between them and one of them silently gets the
+// other's, which is what the numbering before this pass produced for a result
+// wider than a register. A word no result names is a result the code generator
+// cannot place, and it says so. The numbering is a sum over the widths of the
+// earlier results, so this is the assertion that those widths were right.
+func checkResultWords(f *Func) []Violation {
+	n := f.NumValues()
+	sel := make([][]*Value, n)
+	var calls []ID
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpSelectN || len(v.Args) == 0 || v.Args[0] == nil {
+				continue
+			}
+			c := v.Args[0]
+			if int(c.ID) >= n {
+				continue
+			}
+			if len(sel[c.ID]) == 0 {
+				calls = append(calls, c.ID)
+			}
+			sel[c.ID] = append(sel[c.ID], v)
+		}
+	}
+
+	var out []Violation
+	for _, id := range calls {
+		vs := sel[id]
+		taken := make([]bool, len(vs))
+		for _, v := range vs {
+			i := v.AuxInt
+			if i >= 0 && int(i) < len(taken) && !taken[i] {
+				taken[i] = true
+				continue
+			}
+			out = append(out, Violation{
+				Invariant: InvOpForm,
+				Block:     v.Block.ID,
+				Value:     v.ID,
+				Detail: fmt.Sprintf("reads word %d of the %d words v%d returns, which another result reads or which is not there",
+					i, len(vs), id),
 			})
 		}
 	}

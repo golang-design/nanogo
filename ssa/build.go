@@ -1059,25 +1059,6 @@ func (b *builder) multiAssign(n *ir.Node) {
 		b.errorf(InvNone, "%d destinations and %d results", len(n.Args), len(types))
 		return
 	}
-	// A result wider than a register is refused rather than built, and the
-	// reason is a pass below this one. SelectN's index means the result before
-	// decomposition and the machine word of the result area after it, and
-	// ssa/decompose.go renumbers a part of result i as word i+j, which is only
-	// right when every result before i is one word. A wide result at index
-	// zero expands into the words the later indices already claim, and a wide
-	// one above zero is not split at all, so either way two reads would name
-	// one word. The fix belongs in that renumbering, not here.
-	//
-	// One destination cannot collide with anything, so the bound is only on
-	// the form that produces more than one read of the call.
-	if len(types) > 1 {
-		for _, t := range types {
-			if Multiword(t) {
-				b.unsupported(n, "a multi-value assignment with a result wider than a register")
-				return
-			}
-		}
-	}
 	c := b.callValue(src)
 	if b.err != nil || c == nil {
 		return
@@ -1092,7 +1073,10 @@ func (b *builder) multiAssign(n *ir.Node) {
 	// One SelectN per result, including a result assigned to the blank
 	// identifier: the code generator places the results of a call together and
 	// names each one by the SelectN that reads it, so a gap in the sequence is
-	// a result it cannot place.
+	// a result it cannot place. ssa/decompose.go needs the same list for the
+	// same reason, because it renumbers a result by the widths of the results
+	// before it, and a result wider than a register is what makes those widths
+	// differ.
 	reads := make([]*Value, len(n.Args))
 	for i := range n.Args {
 		r := b.value(OpSelectN, types[i], n.Pos, c)

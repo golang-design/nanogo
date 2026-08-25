@@ -672,6 +672,173 @@ func TestDecomposeCallResultTuple(t *testing.T) {
 	}
 }
 
+// decCall returns a call and one reader per result type, in result order.
+func (p *decFn) decCall(types ...*ir.Type) (*ssa.Value, []*ssa.Value) {
+	call := p.v(ssa.OpStaticCall, ssa.MemType, p.mem)
+	call.Aux = &ir.Object{Name: "callee", Class: ir.ClassFunc}
+	p.mem = call
+	res := make([]*ssa.Value, len(types))
+	for i, t := range types {
+		r := p.v(ssa.OpSelectN, t, call)
+		r.AuxInt = int64(i)
+		res[i] = r
+	}
+	return call, res
+}
+
+// decResultWords returns the index and the type of every call result, in the
+// order the block holds them.
+func decResultWords(f *ssa.Func) string {
+	var got []string
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == ssa.OpSelectN {
+				got = append(got, fmt.Sprintf("%d:%v", v.AuxInt, v.Type))
+			}
+		}
+	}
+	return strings.Join(got, " ")
+}
+
+// TestDecomposeCallResultWords is the shape the numbering was wrong for: a
+// call that returns a string and an integer, with the integer read.
+//
+// The string owns words 0 and 1 of the result area, so the integer is word 2.
+// The numbering this pass had gave a part of result i the word i+j, which put
+// the integer on word 1 and read the length of the string in its place. That
+// is why specs/021-ssa-construction.md refused the form rather than building
+// it, and the count of results this test asserts is the count the code
+// generator places by index.
+func TestDecomposeCallResultWords(t *testing.T) {
+	p := newDecFn()
+	_, res := p.decCall(decStr, decInt)
+	f := p.ret(res[0], res[1])
+	ssa.Decompose(f)
+	decVerified(t, f)
+
+	if got, want := decResultWords(f), "0:*uint8 1:int 2:int"; got != want {
+		t.Errorf("results are %q, want %q\n%s", got, want, f)
+	}
+	// The integer names word 2 and nothing else does. Asserting the word
+	// rather than the dump is what makes this a test of the numbering.
+	var n *ssa.Value
+	for _, v := range p.b.Values {
+		if v.Op == ssa.OpSelectN && v.Type == decInt && v.AuxInt != 1 {
+			n = v
+		}
+	}
+	if n == nil || n.AuxInt != 2 {
+		t.Errorf("the second result does not read word 2\n%s", f)
+	}
+	if vs := ssa.CheckDecomposed(f); len(vs) != 0 {
+		t.Errorf("%v\n%s", vs, f)
+	}
+}
+
+// TestDecomposeCallResultWordsWide covers the widths this pass does not
+// produce itself.
+//
+// A result over MaxDecomposeParts stays one value and is one word here, and a
+// result of no width is no value and no word. Both are widths in the sum that
+// places the results after them, so a numbering that assumed one word per
+// result or one word per part would put the slice somewhere else.
+func TestDecomposeCallResultWordsWide(t *testing.T) {
+	p := newDecFn()
+	_, res := p.decCall(decBig, decEmpty, decSlice, decInt)
+	f := p.ret(res[2], res[3])
+	ssa.Decompose(f)
+	decVerified(t, f)
+
+	if got, want := decResultWords(f), "0:big 1:*int 2:int 3:int 4:int"; got != want {
+		t.Errorf("results are %q, want %q\n%s", got, want, f)
+	}
+}
+
+// TestDecomposeCallResultsIncomplete leaves a call alone whose results are not
+// all read.
+//
+// The word a result starts at is the sum of the widths of the results before
+// it, and a result nothing reads has no width here. Splitting on a guess would
+// put a later result on a word that holds something else, so nothing is split
+// and the indices stay as they were.
+func TestDecomposeCallResultsIncomplete(t *testing.T) {
+	tests := []struct {
+		name  string
+		index []int64
+	}{
+		{"a result that nothing reads", []int64{1, 2}},
+		{"one result read twice", []int64{0, 0}},
+		{"an index below zero", []int64{-1, 0}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newDecFn()
+			_, res := p.decCall(decStr, decInt)
+			for i, v := range res {
+				v.AuxInt = tc.index[i]
+			}
+			f := p.ret(res[0], res[1])
+			ssa.Decompose(f)
+			decVerified(t, f)
+			for i, v := range res {
+				if v.AuxInt != tc.index[i] {
+					t.Errorf("result %d moved to word %d\n%s", i, v.AuxInt, f)
+				}
+			}
+			if n := len(p.b.Values); decCountOp(f, ssa.OpSelectN) != 2 {
+				t.Errorf("the call results were split anyway, %d values\n%s", n, f)
+			}
+		})
+	}
+}
+
+// TestDecomposeCallResultWordsIdempotent runs the pass twice.
+//
+// After one run every result is one word, so the second run computes the words
+// it already holds. A numbering that summed over the parts a second time would
+// spread the results apart.
+func TestDecomposeCallResultWordsIdempotent(t *testing.T) {
+	p := newDecFn()
+	_, res := p.decCall(decStr, decInt)
+	f := p.ret(res[0], res[1])
+	ssa.Decompose(f)
+	once := decResultWords(f)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if got := decResultWords(f); got != once {
+		t.Errorf("a second pass renumbered the results to %q, want %q\n%s", got, once, f)
+	}
+}
+
+// TestCheckDecomposedResultWords is the check that would have caught the
+// numbering error where it was made.
+func TestCheckDecomposedResultWords(t *testing.T) {
+	p := newDecFn()
+	_, res := p.decCall(decInt, decInt)
+	res[1].AuxInt = 0 // both results on word 0
+	f := p.ret(res[0], res[1])
+	vs := ssa.CheckDecomposed(f)
+	if len(vs) != 1 {
+		t.Fatalf("CheckDecomposed reported %v, want one violation\n%s", vs, f)
+	}
+	if !strings.Contains(vs[0].Detail, "word 0") {
+		t.Errorf("the violation is %q, and it does not name the word", vs[0].Detail)
+	}
+}
+
+// decCountOp counts the values with one operation.
+func decCountOp(f *ssa.Func, op ssa.Op) int {
+	n := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == op {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // TestDecomposeReturn returns a composite value. MakeResult carries the parts
 // the same way a call carries its arguments.
 func TestDecomposeReturn(t *testing.T) {
@@ -1067,10 +1234,12 @@ type decomposeCounts struct {
 	// says whether the bound or a missing decForm is the reason.
 	wide map[string]int
 
-	// selectNAbove0 counts composite call results read at an index other than
-	// zero. The pass numbers a part of result i as word i+j, which is only
-	// correct for the first result, so it splits nothing else. This turns that
-	// premise into a measurement instead of a reading of specs/021.
+	// selectNAbove0 counts composite call results read at an index above zero,
+	// before this pass runs. It is the shape the part numbering was wrong for:
+	// a result wider than a register that another result follows. The count
+	// was zero while construction refused the form, which is how the numbering
+	// error sat unseen, so the test asserts that the shape is measured rather
+	// than that it is absent.
 	selectNAbove0 int
 
 	verifyNG int
@@ -1176,9 +1345,17 @@ func TestDecomposeCorpus(t *testing.T) {
 	decLogCounts(t, "still wider than a register: type", c.wide)
 	t.Logf("the ABI assignment refused %d functions", c.abiNG)
 	t.Logf("composite call results read at an index above zero: %d", c.selectNAbove0)
-	if c.selectNAbove0 != 0 {
-		t.Errorf("%d composite results are read at an index above zero; the part numbering of SelectN is wrong for them",
-			c.selectNAbove0)
+	if c.selectNAbove0 == 0 {
+		// Zero means the corpus no longer reaches the shape the numbering is
+		// about, not that the numbering is right: construction refusing a
+		// multi-value assignment with a wide result is what made it zero
+		// before, and this pass would then be measured on nothing.
+		msg := "no composite call result is read at an index above zero, so the corpus measures nothing about the part numbering"
+		if required {
+			t.Error(msg)
+		} else {
+			t.Log(msg)
+		}
 	}
 
 	if c.verifyNG > 0 {
