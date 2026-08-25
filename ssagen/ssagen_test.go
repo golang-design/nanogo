@@ -2306,3 +2306,46 @@ func mustRefuseFloat(t *testing.T, e *emitter) {
 		t.Errorf("%d instructions reached the text after a refusal", len(e.text))
 	}
 }
+
+// TestIncomingRefusesAFloatParameter covers the third door into the
+// floating-point gap.
+//
+// valuePlaces refuses a floating-point value at a call site and at a return,
+// and reg refuses one the allocation put in a register. Neither covers a
+// parameter: the stack-growth tail spills every incoming register to the
+// argument area, it reads the placement rather than a value of the function,
+// and argSpill has no failure path. So a floating-point parameter reached
+// obj/arm64's integer store and it panicked:
+//
+//	panic: arm64: F0 used where the encoding means an integer register
+//
+// Go's own test corpus reaches it on test/torture.go, whose determinant takes
+// a [4][4]float64 whose first word arrives in F0.
+func TestIncomingRefusesAFloatParameter(t *testing.T) {
+	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
+	obj := &ir.Object{Name: "x"}
+
+	f := ssa.NewFunc("f")
+	f.Entry.Kind = ssa.BlockRet
+	f.ABI = &ssa.ABI{
+		In: []ssa.ABIValue{{
+			Obj: obj, Type: f64, InReg: true,
+			Parts: []ssa.ABIPart{{Type: f64, Reg: ssa.Reg(arm64.F0)}},
+		}},
+	}
+	e := &emitter{f: f, opt: Options{Sym: "test.f"}}
+	err := e.incoming()
+	if err == nil {
+		t.Fatal("a floating-point parameter was accepted")
+	}
+	if !strings.Contains(err.Error(), "floating-point") || !strings.Contains(err.Error(), "x") {
+		t.Errorf("the refusal names neither the construct nor the parameter: %v", err)
+	}
+
+	// An integer parameter still passes, or no function compiles.
+	f.ABI.In[0].Type = typeInt
+	f.ABI.In[0].Parts[0] = ssa.ABIPart{Type: typeInt, Reg: ssa.Reg(arm64.R0)}
+	if err := e.incoming(); err != nil {
+		t.Errorf("an integer parameter was refused: %v", err)
+	}
+}

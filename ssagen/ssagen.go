@@ -869,6 +869,27 @@ func (e *emitter) incoming() error {
 		return errors.New("the function has no ABI assignment")
 	}
 	e.frame.in, e.frame.args = wordPlaces(abi.In), abi.ArgsSize
+	// A parameter that arrives in a floating-point register is refused here
+	// and not further down. The stack-growth tail spills every incoming
+	// register to the argument area, and it does that from the placement
+	// rather than from a value, so it is reached before any value of the
+	// function is emitted and it has no failure path of its own: argSpill
+	// carried the floating-point register into the integer store and
+	// obj/arm64 panicked on it. valuePlaces makes the same refusal for a call
+	// site and for a return, and this is the third door into the same gap.
+	for i := range abi.In {
+		av := &abi.In[i]
+		for j := range av.Parts {
+			if av.Parts[j].Reg == ssa.NoReg || !arm64.Reg(av.Parts[j].Reg).IsFloat() {
+				continue
+			}
+			name := "a parameter"
+			if av.Obj != nil {
+				name = "parameter " + av.Obj.Name
+			}
+			return fmt.Errorf("%s is %v, and this target has no floating-point code generator", name, av.Type)
+		}
+	}
 	for _, v := range e.f.Entry.Values {
 		if v.Op != ssa.OpArg {
 			continue
