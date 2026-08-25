@@ -1,6 +1,6 @@
 ---
 title: "Export data: gc-compatible package summaries"
-status: draft
+status: in progress
 layer: front end
 gate: G1
 depends_on:
@@ -18,31 +18,46 @@ from [000](000-decisions.md) decision 11 and is what makes the incremental
 bring-up of [051](051-build-integration.md) possible: a package compiled by
 nanogo can be imported by a package compiled by `gc`, and the reverse.
 
-## No reader and no writer exist
+## The reader is built and the writer is not
 
-There is no `export` package. No reader, no writer, no container. Nothing in the
-repository encodes or decodes export data. Everything below the next heading is
-a plan, and a reader who takes it for a description of the code will be wrong
-about all of it.
+`export/` reads gc's export data and produces the `*types2.Package` values
+nanogo's checker imports. `driver/importer.go` turns an import path into a file
+through `-importcfg` and hands it to that reader, so a package that imports
+compiles. `export/README.md` records what was ported and every divergence.
 
-Two places in the code name the gap rather than route around it. `checkFiles` in
-`driver/compile.go` fails a package that has an import, with the missing
-importer as the reason, so the failure names this spec instead of arriving later
-as a confusing message about an undefined name. `types2` carries a hand-written
-`srcimporter_test.go`, which type-checks an imported package from source,
-because that is the only importer there is; upstream's `importer_test.go` is
-skipped for the same reason, and the skip carries it as its reason.
+There is no writer. The archive nanogo produces carries the object and no
+`__.PKGDEF` (`driver/archive.go`), so a package nanogo compiled cannot be
+imported. The consequence is the reverse of the one this spec used to record:
+nanogo takes packages from the top of the import graph downwards, and the
+allowlist grows towards the leaves rather than away from them.
 
-The consequence is larger than this spec. It is why
-[012](012-type-checking.md)'s standard library agreement runs over 14 named
-packages rather than a walk, why [013](013-generics.md) cannot begin, and why
-`driver` compiles only a package with no imports.
+The `types2` fork carries a hand-written `srcimporter_test.go`, which
+type-checks an imported package from source. Upstream's `importer_test.go` is
+still skipped, because it names upstream's importer and not this one.
 
-**The importcfg section below is the exception and it is built.**
-`driver/importcfg.go` parses all four directives, keeps them in separate tables
-as specified, and rejects an unknown directive. It sits in `driver` and not in
-an export package, because the driver is what reads the command line and the
-parser was built with [050](050-driver.md)'s flag handling.
+**The importcfg section below is also built.** `driver/importcfg.go` parses all
+four directives, keeps them in separate tables as specified, and rejects an
+unknown directive. It sits in `driver` and not in an export package, because
+the driver is what reads the command line and the parser was built with
+[050](050-driver.md)'s flag handling.
+
+### What the reader does not carry
+
+Positions and bodies, and each one costs something named elsewhere in the deck.
+
+An imported declaration decodes to `syntax.NoPos`. nanogo's position is an
+offset into the `FileSet` the compiled files were parsed with
+([010](010-scanner-and-positions.md)), and a file in another package has no
+place in it. A diagnostic about an imported declaration therefore says the
+position is unknown, which is a gap in [052](052-diagnostics.md). Closing it
+needs a `FileSet` that can hold a foreign file's line table, which is a change
+to `syntax` and not to the reader.
+
+No function body of any kind is read, because the reader is the types-only one.
+That blocks [024](024-inlining-and-devirtualization.md) entirely, and it blocks
+the part of [013](013-generics.md) where a package instantiates a generic
+another package declares. The row below that calls generic bodies required data
+is still true, and it is still unmet.
 
 ## What is in it
 
@@ -78,20 +93,27 @@ The costs are real and are accepted:
    | --- | --- | --- |
    | `internal/pkgbits` | 1,568 | the container: sections, indices, cross-references |
    | `cmd/compile/internal/noder` writer, reader, linker | 8,097 | encoding and decoding declarations and bodies |
-   | `go/internal/gcimporter` | 1,259 | the types-only reader |
+   | `go/internal/gcimporter` | 1,259 | the types-only reader, against `go/types` |
+   | `cmd/compile/internal/importer` | 772 | **the same reader, against `types2`** |
 
-   nanogo needs the container, a writer, and both readers: the types-only one for
-   ordinary imports and the full one for the bodies below. Call it 6,000 to
-   8,000 lines against [000](000-decisions.md) decision 10's budget. It is the
-   third-largest component in the compiler after the forked checker and the
-   backend, and sizing it by assertion would have been a mistake.
-3. **Both directions are required, and the writer comes first.** This is the
-   opposite of what it looks like. A leaf package has no imports, so compiling it
-   with nanogo exercises no reader at all, but its test binary is compiled by
-   `gc`, which then reads what nanogo *wrote*. So [051](051-build-integration.md)'s
-   first allowlist entry proves the **writer**. The reader is first exercised
-   when nanogo compiles a package that imports something, which is one step *up*
-   the graph, not down.
+   The last row is the one this spec had wrong. It named only
+   `go/internal/gcimporter` and sized the port by it, which measured the wrong
+   thing twice: that reader produces `go/types` packages and would have to be
+   translated, and it is 1,259 lines. Its `types2` twin needs no translation,
+   because nanogo's checker is a fork of `types2`, and it is 772. The reader
+   here measures 1,948 lines including the container's read half and the
+   archive, against an estimate of 7,000 for the whole component.
+
+   What is left of the estimate is the writer and the body reader, and both are
+   real. nanogo still needs the container's write half, a declaration writer,
+   and `noder`'s reader for the bodies below.
+3. **Both directions are required, and which one comes first depends on where
+   the allowlist starts.** A leaf package has no imports, so compiling it with
+   nanogo exercises no reader, but anything that imports it reads what nanogo
+   *wrote*. A `main` package is the opposite: it imports and nothing imports it,
+   so it exercises the reader and no writer. nanogo started at `main`
+   ([051](051-build-integration.md)), so the reader came first, and the writer
+   is what the allowlist needs before it can hold a package anything imports.
 
 ## Structure
 
@@ -142,7 +164,27 @@ path**, enforced by review and by the drift test below.
 
 ## Testing
 
-None of this is built, because nothing it tests is built.
+What the reader has:
+
+- Agreement on a fixture: one package carrying every type tag, every constant
+  encoding, a generic type with a method, a method with type parameters of its
+  own, an alias with type parameters and a self-referential type, compiled by
+  `gc` and compared declaration by declaration (`export/export_test.go`).
+- The standard library: every package of it, 375 of them and 13,518
+  declarations, read from the archives the installed toolchain wrote, with
+  every declaration forced. An unattended run reads 21 of them; the sweep runs
+  under `NANOGO_REQUIRE_CORPUS=1`. Nothing fails.
+- Sharing: a package reached through two different archives is one package, so
+  the checker does not see two `io.Writer` types.
+- Refusal: thirteen malformed archives, each producing a message that names
+  what is wrong with it, and each naming the package and the file through
+  `driver.ImportError`.
+- End to end: `go build -toolexec=nanogo` over a module where `gc` compiles the
+  library and nanogo compiles the package that imports it, and over a package
+  that imports `math/bits` and `strconv`. Both programs run
+  (`internal/e2e/import_test.go`).
+
+What the writer will need, unchanged from before:
 
 - Round trip: write nanogo's export data for every standard library package,
   read it back, and compare the reconstructed package surface against the

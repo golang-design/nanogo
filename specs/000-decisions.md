@@ -239,14 +239,14 @@ find . -name '*.go' -not -name '*_test.go' \
     -not -path './types2/*' -not -path './spikes/*' | xargs wc -l
 ```
 
-The compiler is **34,396** lines of compiler source today.
+The compiler is **36,237** lines of compiler source today.
 
 | Component | Spec | Reference | Estimate | Measured |
 | --- | --- | --- | --- | --- |
 | Positions, scanner, parser | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) | 7,522 (`syntax`) | 7,500 | 6,385 |
 | Type checker | [012](012-type-checking.md) | 23,222 (`types2`) | **excluded**, forked | 25,162, plus 1,311 for its generator |
 | Package loader, G1 form | [014](014-package-loader.md) | | 300 | 1,025 |
-| Export data | [015](015-export-data.md) | 1,568 + 8,097 + 1,259 | 7,000 | **0, not written** |
+| Export data | [015](015-export-data.md) | 1,568 + 8,097 + 772 | 7,000 | 1,948, the reader only |
 | Typed IR | [020](020-ir.md) | 10,216 (`ir`) | 6,000 with escape and inlining | 3,659 |
 | Escape analysis, inlining | [023](023-escape-analysis.md), [024](024-inlining-and-devirtualization.md) | 3,601 (`escape`) | same row | **0, not written** |
 | SSA and its passes | [021](021-ssa-construction.md), [022](022-optimization-passes.md) | 11,609 hand-written | 8,000 | 11,824 |
@@ -257,7 +257,7 @@ The compiler is **34,396** lines of compiler source today.
 | Object writer | [040](040-object-format.md) | 1,559 (`goobj`) | 1,500 | 1,364 |
 | `arm64` encoder | [041](041-instruction-encoding.md) | 36,224 (`obj/arm64`, whole ISA) | 2,000 | 2,040 |
 | Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | | 1,000 | 1,698 |
-| | | | **≈41,800** | **34,396** |
+| | | | **≈41,800** | **36,237** |
 
 The measured column is not a smaller version of the estimate column, and the
 difference between them is the interesting part.
@@ -270,11 +270,12 @@ estimated 41,800. That was recorded rather than adjusted, and it stands as
 written. The measurement says something different, and it does not say the
 budget is safe.
 
-**Four rows are zero because the work is not done.** Export data, escape
-analysis, inlining and generics instantiation are not written. Their estimates
-total 16,600 lines. A tree that is 34,396 lines with 16,600 lines of estimate
-still ahead of it is not under a 40,000 line budget, it is untested against one.
-The two recovery points below are still the two recovery points.
+**Three rows are zero and one is half done.** Escape analysis, inlining and
+generics instantiation are not written, and export data has its reader and not
+its writer: 1,948 lines of the 7,000 estimated. What is left of the four rows
+is about 14,700 lines. A tree that is 36,237 lines with 14,700 lines of
+estimate still ahead of it is not under a 40,000 line budget, it is untested
+against one. The two recovery points below are still the two recovery points.
 
 **One component had no row at all.** The pass that turns SSA into machine code
 and writes it through the object writer, `ssagen`, is 2,634 lines and was

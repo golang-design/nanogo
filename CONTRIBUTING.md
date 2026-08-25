@@ -173,6 +173,7 @@ is [decision 9](specs/000-decisions.md): the host is the first target.
 | `syntax/` | Positions, scanner, parser, syntax tree | 010, 011 |
 | `types2/` | The forked type checker, and the generator that ports it | 012, 013 |
 | `loader/` | Build constraints, the import graph, `go list` | 014 |
+| `export/`, `export/pkgbits/` | The reader for `gc`'s export data | 015 |
 | `ir/` | The typed tree, and the type layout the backend reads | 020 |
 | `ssa/` | SSA construction, lowering, decomposition, ABI, registers, liveness | 021, 025, 026, 027, 030 |
 | `ssa/rules/` | The lowering rules of each target | 025, 042 |

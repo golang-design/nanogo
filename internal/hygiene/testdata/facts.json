@@ -1,6 +1,8 @@
 {
   "arm64.encodings": 963460,
-  "cover.driver": 97.8,
+  "cover.driver": 97.9,
+  "cover.export": 96.9,
+  "cover.export/pkgbits": 92.4,
   "cover.ir": 94,
   "cover.loader": 98.8,
   "cover.obj": 98.1,

@@ -154,20 +154,19 @@ Risks are listed with the milestone that retires them, not with a probability.
 | GC metadata is wrong in a way that only shows under load | M4 | Allocation stress with `GOGC=1` and `GODEBUG=gccheckmark=1`, not a unit test. |
 | The forked type checker cannot be re-pointed at nanogo's syntax tree cheaply | M2 | [012](012-type-checking.md) names the interface it is re-pointed through. If the fork resists, the fallback is to keep `go/ast` under the checker and translate, at a cost stated in that spec. |
 | Generics instantiation is a rewrite rather than a port | M5 | Deferred deliberately: nanogo's own source uses generics, so M6 cannot be reached without it, and M5 is where it is confronted with the corpus available. |
-| The v1 line budget is exceeded | M4 | The tree measures 31,257 lines against a budget of 40,000, with export data, escape analysis, inlining and generics instantiation still unwritten and estimated at 16,600. [000](000-decisions.md) decision 10 carries the accounting and the two recovery points, [022](022-optimization-passes.md) and [015](015-export-data.md). `internal/hygiene` gates the figure. |
+| The v1 line budget is exceeded | M4 | The tree measures 36,237 lines against a budget of 40,000, with the export data writer, escape analysis, inlining and generics instantiation still unwritten and estimated at 14,700. [000](000-decisions.md) decision 10 carries the accounting and the two recovery points, [022](022-optimization-passes.md) and [015](015-export-data.md). `internal/hygiene` gates the figure. |
 | `//go:linkname` and `//go:nosplit` semantics are subtler than documented | M9 | The runtime is the only consumer that cares, and M9 is where it is compiled. |
 
 ## Where the work stands
 
-**M0 and M1 are complete. M2 is complete except for the export data half it
-was given and never built. M3 and M4 are partly built and neither gate is
-met.**
+**M0 and M1 are complete. M2 is complete except for the export data writer. M3
+and M4 are partly built and neither gate is met.**
 
 | Milestone | State | Gate |
 | --- | --- | --- |
 | M0 skeleton | done | a `go build -a -toolexec=nanogo` completes by delegating |
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
-| M2 types | done, less its export data half | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source |
+| M2 types | done, less the export data writer | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads gc's export data |
 | M3 first binary | **in progress** | the pipeline is built end to end and a compiled function links against the real runtime and runs; a leaf package under `-toolexec` does not compile |
 | M4 runtime interface | **in progress** | liveness, stack maps, the ABI and the stack growth check are built; type descriptors, itabs, closures, `defer`, `panic`, write barriers and goroutines are not |
 | M5 to M10 | not started | |
@@ -227,6 +226,8 @@ package:
 | `obj` | 98% | [040](040-object-format.md) |
 | `obj/arm64` | 99% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
 | `rtsym` | 100% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |
+| `export` | 96% | [015](015-export-data.md) |
+| `export/pkgbits` | 92% | [015](015-export-data.md) |
 | `driver` | 97% | [050](050-driver.md), [051](051-build-integration.md) |
 | `internal/covercheck` | 97% | the gate itself |
 | `cmd/nanogo` | excluded | one statement; the reason is in the exclusions file |
@@ -236,15 +237,19 @@ package:
 Each entry records a departure from the plan above with the reason, so that the
 plan stays honest instead of staying accurate.
 
-**M2 was recorded as done and one third of its gate was never built.** M2's
-scope names [015](015-export-data.md) and its gate says "round-trips export data
-for every standard library package". There is no export data reader and no
-writer, and there is no `export` package. The two other parts of the gate, type
-checking the distribution and matching `errorcheck`, are met and gated. The
-consequence is not cosmetic: without an export data reader nanogo cannot compile
-a package that imports anything, which is why M3's gate cannot be met either.
-`driver/importer.go` refuses the import with a message that names this spec, so
-the compiler is honest about it even where this file was not.
+**M2 was recorded as done and one third of its gate was never built. Half of
+that third is built now.** M2's scope names [015](015-export-data.md) and its
+gate says "round-trips export data for every standard library package". The
+reader half is built: `export/` reads gc's export data, and a package that
+imports compiles and runs under `-toolexec`. The writer is not, so nothing
+round-trips and the gate is still unmet. The two other parts of the gate, type
+checking the distribution and matching `errorcheck`, are met and gated.
+
+The consequence has moved rather than gone. nanogo can compile a package that
+imports, so M3's gate is no longer blocked by this spec; what it is blocked by
+is the language nanogo accepts. What the missing writer blocks is the other
+direction: a package nanogo compiled cannot be imported, so the allowlist can
+only hold packages nothing else in the build imports.
 
 **M3 was recorded as done and its gate was never met.** An earlier version of
 this section marked M3 done in the table and said in the same paragraph that

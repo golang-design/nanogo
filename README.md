@@ -112,9 +112,9 @@ Some decisions worth knowing before reading further:
   own. [`specs/012`](specs/012-type-checking.md)
 - **The compiler emits object files, not assembly text.** Two spikes decided
   this, and both are in [`spikes/`](spikes/). [`specs/040`](specs/040-object-format.md)
-- **It is meant to fit 40,000 lines for v1.** The compiler is 31,257 lines
-  today, and export data, escape analysis, inlining and generics instantiation
-  are not written. [`specs/000`](specs/000-decisions.md) carries the accounting
+- **It is meant to fit 40,000 lines for v1.** The compiler is 36,237 lines
+  today, and escape analysis, inlining and generics instantiation are not
+  written, nor is the export data writer. [`specs/000`](specs/000-decisions.md) carries the accounting
   and the two places to recover the budget if it runs out.
 - **It is object-compatible with `gc`**, so `go build -toolexec=nanogo` can
   compile one package with nanogo while `gc` compiles the rest. That is how the
@@ -141,6 +141,8 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 39,947 functions and 4,188,075 nodes |
 | [`ssa`](ssa/) | 96% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant |
 | [`ssa/rules`](ssa/rules/) | 97% | the arm64 rule set, checked by lowering the corpus and by a verifier after every rule |
+| [`export`](export/) | 96% | reads gc's export data for all 375 packages of the standard library, 13,518 declarations, and for a fixture carrying every encoding the format has, checked declaration by declaration |
+| [`export/pkgbits`](export/pkgbits/) | 92% | the container, ported from `internal/pkgbits` and exercised by every archive the reader above reads |
 | [`ssagen`](ssagen/) | 92% | emits machine code that **links and runs**, and stack maps a real collector honours |
 | [`rtsym`](rtsym/) | 100% | 45 runtime signatures checked against the runtime's own source |
 | [`driver`](driver/) | 97% | a real `go build -toolexec` completes |

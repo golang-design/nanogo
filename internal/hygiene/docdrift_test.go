@@ -177,6 +177,8 @@ var gatedPackages = []struct{ name, importPath string }{
 	{"syntax", "golang.design/x/nanogo/syntax"},
 	{"loader", "golang.design/x/nanogo/loader"},
 	{"ir", "golang.design/x/nanogo/ir"},
+	{"export", "golang.design/x/nanogo/export"},
+	{"export/pkgbits", "golang.design/x/nanogo/export/pkgbits"},
 	{"ssa", "golang.design/x/nanogo/ssa"},
 	{"ssa/rules", "golang.design/x/nanogo/ssa/rules"},
 	{"ssagen", "golang.design/x/nanogo/ssagen"},
