@@ -5,6 +5,7 @@
 package e2e
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -328,5 +329,54 @@ func TestBuildHelpStatesItsLimits(t *testing.T) {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("nanogo help does not state %q", want)
 		}
+	}
+}
+
+// TestBuildCompilesARangeLoopWithACallInIt is the regression for the move the
+// register allocator asks for when a rematerialisable value is live across a
+// call.
+//
+// The slice's base address is rematerialisable, and the call in the loop body
+// is what makes it live across a call, so the allocator gives it a slot as
+// well. ssagen had no arm of its move table for a value that is recomputed
+// into memory and reported "no move from - to s1". nanogo refused this loop,
+// which is the shape of nearly every loop that does work.
+//
+// The exit status carries the answer because println is not lowered and fmt
+// is out of reach: its closure is 58 packages against 29 for an empty main.
+func TestBuildCompilesARangeLoopWithACallInIt(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod": "module nanogo.example/loop\n\ngo 1.27\n",
+		"main.go": `package main
+
+import "os"
+
+func add(a, b int) int { return a + b }
+
+func sum(xs []int) int {
+	n := 0
+	for _, x := range xs {
+		n = add(n, x)
+	}
+	return n
+}
+
+func main() { os.Exit(sum([]int{1, 2, 3, 4, 5, 6})) }
+`,
+	}, nil)
+
+	if out, err := h.nanogoBuild(t, "-o", "loop", "."); err != nil {
+		t.Fatalf("nanogo build .: %v\n%s", err, out)
+	}
+	err := exec.Command(filepath.Join(h.mod, "loop")).Run()
+	code := 0
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("the program nanogo built did not run: %v", err)
+	}
+	if code != 21 {
+		t.Errorf("the program exited %d, want 21: the loop summed wrongly", code)
 	}
 }
