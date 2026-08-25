@@ -267,12 +267,13 @@ func checkFiles(cfg *Config, imp *importer, files []*syntax.File, fset *syntax.F
 			// types2 reports one Error per mistake, with the continuation
 			// lines already folded into its message, so the position of the
 			// Error is the position the whole message is filed under.
-			var e types2.Error
-			if errors.As(err, &e) {
-				diags.add(e.Pos, err)
-				return
-			}
-			diags.add(syntax.NoPos, err)
+			//
+			// The assertion is unchecked because the checker passes an Error
+			// and nothing else. A fallback branch here would be code no test
+			// can reach, and the zero Error already behaves as one: its Pos
+			// is NoPos, which sorts to the end of the report.
+			e, _ := err.(types2.Error)
+			diags.add(e.Pos, err)
 		},
 	}
 	// The name the checker is given is the import path, which is what
