@@ -11,6 +11,12 @@ import (
 	"strings"
 )
 
+// NoKind is the census key for a file whose recipe could not be read.
+//
+// The parentheses keep it out of the space of real recipe words, and it holds
+// no space of its own because the ratchet's census lines are three fields.
+const NoKind = "(none)"
+
 // ByClass counts the verdicts of each class.
 func (r *Report) ByClass() map[Class]int {
 	n := make(map[Class]int, len(Classes))
@@ -21,13 +27,13 @@ func (r *Report) ByClass() map[Class]int {
 }
 
 // ByKind counts the verdicts of each recipe kind. A file with no readable
-// recipe is counted under "(no recipe)", so the kinds add up too.
+// recipe is counted under [NoKind], so the kinds add up too.
 func (r *Report) ByKind() map[string]int {
 	n := make(map[string]int)
 	for _, v := range r.Verdicts {
 		k := v.Kind
 		if k == "" {
-			k = "(no recipe)"
+			k = NoKind
 		}
 		n[k]++
 	}
@@ -145,7 +151,15 @@ func (r *Report) String() string {
 	}
 	b.WriteString("\t" + pad("TOTAL", 24) + strconv.Itoa(sum) + "\n")
 
-	for _, c := range []Class{ClassRefused, ClassCrashed, ClassFalseError, ClassTimedOut, ClassOracleFailed, ClassKindNotImplemented, ClassRecipeNotImplemented, ClassRecipeSaysSkip, ClassWrongPosition, ClassNoRecipe} {
+	// Every class but the passes gets its files named. A count with no
+	// file names behind it cannot be acted on, and a class left out of
+	// this list is a set of files nobody can find.
+	for _, c := range []Class{
+		ClassMismatched, ClassRefused, ClassCrashed, ClassFalseError,
+		ClassTimedOut, ClassMissed, ClassWrongPosition, ClassOracleFailed,
+		ClassKindNotImplemented, ClassRecipeNotImplemented,
+		ClassRecipeSaysSkip, ClassPlatformExcluded, ClassNoRecipe,
+	} {
 		groups := r.GroupByReason(c)
 		if len(groups) == 0 {
 			continue
