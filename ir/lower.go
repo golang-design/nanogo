@@ -40,13 +40,15 @@ import (
 //     The header is reached the way the machine reaches it: the address of the
 //     value, reinterpreted as a pointer to a struct with the header's fields,
 //     and a field selection off that. header states the layout once.
-//   - There is no allocation. Every symbol rtsym holds for the heap
-//     (newobject, newarray, makeslice, makechan, growslice) takes a *_type,
-//     and specs/032-type-descriptors-and-itabs.md, which produces one, is not
-//     built. A construct that needs the heap is therefore refused rather than
-//     given a frame slot: a frame slot whose address outlives the frame is
-//     memory corruption, and it is the one failure mode that a later pass
-//     cannot detect.
+//   - Allocation goes through a type descriptor. Every symbol rtsym holds for
+//     the heap takes a *_type, so specs/032-type-descriptors-and-itabs.md
+//     decides which of these rows can be built at all: a construct whose type
+//     has no canonical name is still refused, and the refusal names the field
+//     specs/020-ir.md's type boundary drops rather than saying only that a
+//     name was wanted. A frame slot is never the answer for a value that may
+//     outlive the frame, because a frame slot whose address outlives the frame
+//     is memory corruption, and it is the one failure mode a later pass cannot
+//     detect.
 //
 // # What it refuses
 //
@@ -87,13 +89,35 @@ func (e *LowerError) Cause() string { return e.Op.String() + ": " + e.What }
 // construction gets as far as the refused node and no further, which is what
 // makes the count of causes a measurement rather than a guess.
 func Lower(fn *Func) error {
+	_, err := LowerAndCollect(fn)
+	return err
+}
+
+// LowerAndCollect is Lower, and it also returns the types whose descriptors
+// the lowered tree names.
+//
+// Every allocation the pass introduces passes a *_type to the runtime, and
+// specs/032-type-descriptors-and-itabs.md makes the set of descriptors a
+// package must emit exactly the set its code names. Nothing between this pass
+// and the object writer carries a list of data symbols, so the list is
+// returned rather than stored: a caller that gains a writer for them unions
+// the per-function lists and emits each one once.
+//
+// The order is the order the names were first met, not a map's, which
+// specs/053-determinism.md requires of anything that reaches output.
+func LowerAndCollect(fn *Func) ([]*Type, error) {
 	if fn == nil {
-		return fmt.Errorf("ir: Lower needs a function")
+		return nil, fmt.Errorf("ir: Lower needs a function")
 	}
-	l := &lowerer{fn: fn, ptrs: make(map[*Type]*Type), hdrs: make(map[*Type]*Type)}
+	l := &lowerer{
+		fn:    fn,
+		ptrs:  make(map[*Type]*Type),
+		hdrs:  make(map[*Type]*Type),
+		descs: make(map[string]*Object),
+	}
 	fn.Body = l.stmts(fn.Body)
 	if len(l.errs) > 0 {
-		return l.errs[0]
+		return l.needed, l.errs[0]
 	}
 	// The invariant this pass exists to satisfy, asserted rather than assumed.
 	// specs/020-ir.md names HasGoSpecific as the check and records that nothing
@@ -102,10 +126,10 @@ func Lower(fn *Func) error {
 	// code generator.
 	for _, s := range fn.Body {
 		if op, ok := HasGoSpecific(s); ok {
-			return &LowerError{Func: fn.Name, Op: op, What: "survived a lowering that reported no refusal"}
+			return l.needed, &LowerError{Func: fn.Name, Op: op, What: "survived a lowering that reported no refusal"}
 		}
 	}
-	return nil
+	return l.needed, nil
 }
 
 // lowerer holds the state of one function's lowering.
@@ -126,6 +150,14 @@ type lowerer struct {
 	// keeps two addresses of one type comparable by pointer.
 	ptrs map[*Type]*Type
 	hdrs map[*Type]*Type
+
+	// descs is one object per type descriptor symbol this function names, so
+	// that two references to one descriptor become one relocation target. It
+	// is a lookup table and is never ranged over; needed is the ordered record
+	// of the same set, in the order the names were first met, which is what a
+	// caller emitting the descriptors reads.
+	descs  map[string]*Object
+	needed []*Type
 }
 
 func (l *lowerer) refuse(n *Node, what string) {
@@ -389,6 +421,142 @@ func runtimeCall(pos syntax.Pos, name string, args ...Expr) Stmt {
 	}
 }
 
+// Allocation.
+//
+// specs/032-type-descriptors-and-itabs.md is what unblocks this section. Every
+// symbol rtsym holds for the heap takes a *_type, so until a descriptor could
+// be named, a construct that needs the heap had to be refused: a frame slot
+// whose address outlives the frame is memory corruption, and it is the one
+// failure mode a later pass cannot detect.
+//
+// # Why every allocation here goes to the heap
+//
+// specs/023-escape-analysis.md is not built and Object.Escapes is set by
+// nothing, so this pass cannot tell an allocation that outlives the frame from
+// one that does not. The heap is the answer that is always correct and
+// sometimes slower; the frame is the answer that is sometimes correct and
+// otherwise corrupts memory. specs/023 is the pass that turns the slow half
+// back into the fast one, and it is an optimisation over a correct program
+// rather than a repair of an incorrect one.
+//
+// # What a caller must still do
+//
+// The reference this section builds names a symbol, and nothing in this deck
+// writes that symbol into an object. Nothing calls this pass in a real build
+// either: driver/compile.go's pass list starts at ssa.Build, so a program that
+// reaches one of these rows is refused at compile time exactly as it was
+// before, and the corpus test is the only caller. specs/032 lists the three
+// wiring changes that close the seam and the order they have to land in. The
+// one that matters here is that calling this pass without a writer for the
+// descriptors turns a compile-time refusal into an undefined symbol at link
+// time, which is loud rather than silent.
+//
+// The rows are built ahead of the writer for that reason: the count of causes
+// is what says which row to build next, and a row blocked on a writer in
+// another package should not read as a row blocked on this pass.
+
+// rtypeType is the type of a type descriptor, as this pass sees it: six words,
+// which is the size of internal/abi.Type on a 64-bit target.
+//
+// The contents are rtype's business. What is needed here is a type of the
+// right size and alignment to take the address of, because below the IR a type
+// is a size, an alignment and a pointer map and nothing else.
+//
+// It carries no name on purpose. A name would make TypeSymbol produce
+// type:runtime._type, which is a descriptor gc never emits and the linker
+// would never resolve, and a collector walking the types this pass reports
+// would ask for one.
+var rtypeType = func() *Type {
+	t := &Type{Kind: Array, Elem: lowerUintptr, Len: 6}
+	if err := Layout(t); err != nil {
+		panic("ir: runtime._type does not lay out: " + err.Error())
+	}
+	return t
+}()
+
+// descriptor returns the address of the type descriptor of t.
+//
+// The name comes from TypeSymbol and is never built here.
+// specs/032-type-descriptors-and-itabs.md requires one naming function used by
+// everything, because the linker deduplicates these symbols by name and two
+// spellings of one type are two descriptors for a type that must have one.
+//
+// The second result is the reason there is no name, for a caller to report.
+func (l *lowerer) descriptor(t *Type, pos syntax.Pos) (Expr, string) {
+	name, err := TypeSymbol(t)
+	if err != nil {
+		return nil, err.Error()
+	}
+	o, ok := l.descs[name]
+	if !ok {
+		o = &Object{Name: name, Type: rtypeType, Class: ClassGlobal}
+		l.descs[name] = o
+		l.needed = append(l.needed, t)
+	}
+	return &Node{
+		Op: OAddr, Pos: pos, Type: l.ptrTo(rtypeType),
+		X: &Node{Op: OGlobal, Pos: pos, Type: rtypeType, Obj: o},
+	}, ""
+}
+
+// allocate returns a pointer to a fresh zeroed value of t.
+//
+// runtime.newobject zeroes what it returns, which is what lets a literal that
+// names only some of its parts skip the clear that the frame form needs.
+func (l *lowerer) allocate(n Expr, t *Type, pos syntax.Pos) Expr {
+	desc, why := l.descriptor(t, pos)
+	if desc == nil {
+		l.refuse(n, why)
+		return nil
+	}
+	call := &Node{
+		Op: OCall, Pos: pos, Type: lowerUnsafePtr,
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.newobject")},
+		Args: []Expr{desc},
+	}
+	return &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(t), X: call}
+}
+
+// allocateArray returns a pointer to a fresh zeroed array of n elements.
+//
+// runtime.newarray takes the *element* type and the count, so one descriptor
+// serves every length. The alternative, newobject over the array type, would
+// need a descriptor per length, and a variadic call site produces a new length
+// for every arity in the program.
+func (l *lowerer) allocateArray(n Expr, elem *Type, count int64, pos syntax.Pos) Expr {
+	desc, why := l.descriptor(elem, pos)
+	if desc == nil {
+		l.refuse(n, why)
+		return nil
+	}
+	// The pointer's type is a pointer to an array rather than to the element,
+	// so an element store is an index off it, which is a form ssa.Build takes
+	// the address of. A pointer to the element would need pointer arithmetic
+	// that this pass has no node for.
+	arr := &Type{Kind: Array, Elem: elem, Len: count}
+	if err := Layout(arr); err != nil {
+		l.refuse(n, "an array of "+fmt.Sprint(count)+" does not lay out")
+		return nil
+	}
+	call := &Node{
+		Op: OCall, Pos: pos, Type: lowerUnsafePtr,
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.newarray")},
+		Args: []Expr{desc, intConst(pos, lowerInt, count)},
+	}
+	return &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(arr), X: call}
+}
+
+// sliceHeader writes a slice header into a fresh temporary and returns it.
+//
+// ptr is the data pointer, already of the element's pointer type.
+func (l *lowerer) sliceHeader(t *Type, ptr, length, capacity Expr, pos syntax.Pos) Expr {
+	o := l.tempObj(t, pos)
+	l.emit(Assign(pos, l.headerField(ref(o, pos), hdrPtr, l.ptrTo(t.Elem)), ptr))
+	l.emit(Assign(pos, l.headerField(ref(o, pos), hdrLen, lowerInt), length))
+	l.emit(Assign(pos, l.headerField(ref(o, pos), hdrCap, lowerInt), capacity))
+	return ref(o, pos)
+}
+
 // memclr zeroes the storage a pointer names.
 //
 // The symbol is chosen by whether the region can hold a pointer, which
@@ -572,14 +740,7 @@ func (l *lowerer) expr(n Expr) Expr {
 
 	case OAddr:
 		if n.X != nil && n.X.Op == OCompositeLit {
-			// &T{...} is an allocation, and there is none to make. Lowering
-			// the literal into a frame slot and taking its address would
-			// produce a pointer that outlives the frame whenever the value
-			// escapes, and nothing here knows whether it does:
-			// specs/023-escape-analysis.md is not built and Object.Escapes is
-			// set by nothing.
-			l.refuse(n.X, "the address of a composite literal needs an allocation")
-			return n
+			return l.addrLit(n, n.X)
 		}
 		n.X = l.expr(n.X)
 		return n
@@ -622,6 +783,10 @@ func (l *lowerer) expr(n Expr) Expr {
 		return l.clearExpr(n)
 	case OMin, OMax:
 		return l.minMax(n)
+	case ONew:
+		return l.newExpr(n)
+	case OMake:
+		return l.makeExpr(n)
 	case OUnsafeAdd:
 		// Pointer arithmetic. The offset was written with an integer type of
 		// its own, which the specification leaves free, so it is widened to a
@@ -697,10 +862,14 @@ func (l *lowerer) constLen(n, x Expr, length int64) Expr {
 
 // Composite literals.
 //
-// specs/020-ir.md: a frame or heap allocation plus element stores. The heap is
-// not available, so what is built is the frame form, and it is built only where
-// the value is copied out of the frame rather than pointed at. compositeLit is
-// reached from an expression position; the address form is refused in expr.
+// specs/020-ir.md: a frame or heap allocation plus element stores. Which one is
+// decided by whether the value can outlive the frame, and not by
+// specs/023-escape-analysis.md, which is not built:
+//
+//   - A struct or an array in an expression position is copied out of the
+//     frame by its reader, so the frame form is correct and is what is built.
+//   - A slice literal keeps a pointer to its elements, and the address form of
+//     any literal hands out a pointer, so both go to the heap.
 //
 // maxZeroStores bounds the element stores that fill in what a literal left out.
 // Beyond it the temporary is cleared with one call instead, which is both
@@ -719,13 +888,7 @@ func (l *lowerer) compositeLit(n Expr) Expr {
 	case Array:
 		return l.arrayLit(n)
 	case Slice:
-		// The elements go in an array and the header points at it. In the
-		// frame that header outlives nothing it may point at, so the array
-		// belongs in the heap and runtime.newarray takes a *_type
-		// (specs/032-type-descriptors-and-itabs.md). This is also every
-		// variadic call, whose arguments the builder packs into a slice
-		// literal.
-		l.refuse(n, "a slice literal needs a heap allocation")
+		return l.sliceLit(n)
 	case Map:
 		l.refuse(n, "a map literal needs runtime.makemap, which rtsym does not have")
 	default:
@@ -774,27 +937,9 @@ func (l *lowerer) arrayLit(n Expr) Expr {
 	t := n.Type
 	o := l.tempObj(t, n.Pos)
 
-	// The indices, in the order the elements are written, so that the stores
-	// happen in source order.
-	at := make([]int64, len(n.Args))
-	next := int64(0)
-	written := make(map[int64]bool, len(n.Args))
-	for i, e := range n.Args {
-		if e != nil && e.Op == OAssign {
-			key, ok := constIndex(e.X)
-			if !ok {
-				l.refuse(n, "an element index that is not a constant")
-				return n
-			}
-			next = key
-		}
-		if next < 0 || next >= t.Len {
-			l.refuse(n, "an element index outside the array")
-			return n
-		}
-		at[i] = next
-		written[next] = true
-		next++
+	at, written, ok := l.litIndices(n, t.Len)
+	if !ok {
+		return n
 	}
 
 	// A literal that names every element overwrites the whole array, so
@@ -827,6 +972,186 @@ func (l *lowerer) arrayLit(n Expr) Expr {
 		l.emit(Assign(n.Pos, l.elem(o, t, at[i], n.Pos), l.expr(val)))
 	}
 	return ref(o, n.Pos)
+}
+
+// litIndices returns the index each element of an array or slice literal is
+// written to, in the order the elements appear.
+//
+// bound is the length the indices must fall inside, or a negative number when
+// the literal decides the length, which is the slice case.
+func (l *lowerer) litIndices(n Expr, bound int64) (at []int64, written map[int64]bool, ok bool) {
+	at = make([]int64, len(n.Args))
+	written = make(map[int64]bool, len(n.Args))
+	next := int64(0)
+	for i, e := range n.Args {
+		if e != nil && e.Op == OAssign {
+			key, ok := constIndex(e.X)
+			if !ok {
+				l.refuse(n, "an element index that is not a constant")
+				return nil, nil, false
+			}
+			next = key
+		}
+		if next < 0 || (bound >= 0 && next >= bound) {
+			l.refuse(n, "an element index outside the array")
+			return nil, nil, false
+		}
+		at[i] = next
+		written[next] = true
+		next++
+	}
+	return at, written, true
+}
+
+// litValue returns the value an element of an array or slice literal writes.
+//
+// An element with an index carries the index in X and the value in Y, which is
+// how the builder spells a keyed element.
+func litValue(e Expr) Expr {
+	if e != nil && e.Op == OAssign {
+		return e.Y
+	}
+	return e
+}
+
+// sliceLit builds a slice literal.
+//
+// specs/020-ir.md's row is an allocation plus element stores plus a header.
+// The elements go in the heap and not in the frame, because the header outlives
+// the literal wherever the slice is returned or stored, and a header pointing
+// into a dead frame is the corruption the allocation section describes.
+//
+// This is also every variadic call. The builder packs a variadic call's
+// arguments into a slice literal, so a row that refuses one refuses the other,
+// and this is the largest single refusal the pass records.
+//
+// The array runtime.newarray returns is zeroed, so an element the literal
+// leaves out needs no store and no clear. That is the difference from
+// arrayLit, whose temporary is reused on the next iteration of whatever loop
+// holds it.
+func (l *lowerer) sliceLit(n Expr) Expr {
+	t, pos := n.Type, n.Pos
+	if t.Elem == nil {
+		l.refuse(n, "a slice literal with no element type")
+		return n
+	}
+	at, _, ok := l.litIndices(n, -1)
+	if !ok {
+		return n
+	}
+	// The length is one past the largest index written, which is not the
+	// number of elements: []int{5: 1} has one element and length six.
+	length := int64(0)
+	for _, i := range at {
+		if i+1 > length {
+			length = i + 1
+		}
+	}
+
+	base := l.allocateArray(n, t.Elem, length, pos)
+	if base == nil {
+		return n
+	}
+	// Spilled because the pointer is read once per element and once for the
+	// header, and a node is a tree that later passes rewrite in place.
+	p := l.spill(base)
+	for i, e := range n.Args {
+		dst := &Node{Op: OIndex, Pos: pos, Type: t.Elem, X: ref(p, pos), Y: intConst(pos, lowerInt, at[i])}
+		l.emit(Assign(pos, dst, l.expr(litValue(e))))
+	}
+
+	data := &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(t.Elem), X: ref(p, pos)}
+	return l.sliceHeader(t, data,
+		intConst(pos, lowerInt, length), intConst(pos, lowerInt, length), pos)
+}
+
+// addrLit builds the address of a composite literal.
+//
+// The value is built in the frame and copied into the allocation, rather than
+// stored into the allocation field by field. The copy costs a frame slot the
+// size of the literal and it keeps one lowering of each literal form: a second
+// path that wrote through a pointer would be a second set of rules for
+// structs, arrays and slices, and the two would drift.
+func (l *lowerer) addrLit(n, lit Expr) Expr {
+	t, pos := lit.Type, lit.Pos
+	if t == nil {
+		l.refuse(lit, "a literal with no type")
+		return n
+	}
+	base := l.allocate(lit, t, pos)
+	if base == nil {
+		return n
+	}
+	p := l.spill(base)
+	val := l.expr(lit)
+	if val == nil || val.Op == OCompositeLit {
+		// The literal itself was refused, and its cause is already recorded.
+		return n
+	}
+	l.emit(Assign(pos, &Node{Op: ODeref, Pos: pos, Type: t, X: ref(p, pos)}, val))
+	return ref(p, pos)
+}
+
+// makeExpr builds the make builtin.
+//
+// specs/020-ir.md gives it three rows and one is built. A map needs
+// runtime.makemap and the descriptor of a map type, whose tail names the
+// runtime's own group type; a channel needs runtime.makechan and the
+// descriptor of a channel type, whose direction specs/020's type boundary does
+// not carry. Both are refused with the field that is missing.
+func (l *lowerer) makeExpr(n Expr) Expr {
+	t, pos := n.Type, n.Pos
+	if t == nil {
+		l.refuse(n, "a make with no type")
+		return n
+	}
+	if t.Kind != Slice {
+		l.refuse(n, "a make of "+t.Kind.String()+" needs a descriptor of that kind, which specs/032 does not build")
+		return n
+	}
+	if t.Elem == nil || len(n.Args) < 1 || len(n.Args) > 2 {
+		l.refuse(n, fmt.Sprintf("a make of a slice with %d bounds", len(n.Args)))
+		return n
+	}
+	desc, why := l.descriptor(t.Elem, pos)
+	if desc == nil {
+		l.refuse(n, why)
+		return n
+	}
+	// The bounds are read twice, once by the call and once by the header, so
+	// each is evaluated into storage first. The order is the source's: length
+	// then capacity.
+	length := l.hold(l.widen(n.Args[0]))
+	capacity := length
+	if len(n.Args) == 2 {
+		capacity = l.hold(l.widen(n.Args[1]))
+	}
+	// runtime.makeslice performs the checks the specification requires, so no
+	// guard is emitted here. A negative length, a negative capacity and a
+	// length above the capacity each panic inside the call.
+	call := &Node{
+		Op: OCall, Pos: pos, Type: lowerUnsafePtr,
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.makeslice")},
+		Args: []Expr{desc, length(), capacity()},
+	}
+	data := &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(t.Elem), X: call}
+	return l.sliceHeader(t, data, length(), capacity(), pos)
+}
+
+// newExpr builds the new builtin.
+//
+// The node's type is the result type, which is the pointer, so the type to
+// allocate is its element.
+func (l *lowerer) newExpr(n Expr) Expr {
+	if n.Type == nil || n.Type.Kind != Ptr || n.Type.Elem == nil {
+		l.refuse(n, "a new whose result is not a pointer")
+		return n
+	}
+	out := l.allocate(n, n.Type.Elem, n.Pos)
+	if out == nil {
+		return n
+	}
+	return out
 }
 
 // elem returns the element of an array temporary at a constant index.
@@ -1030,9 +1355,10 @@ func (l *lowerer) widen(n Expr) Expr {
 
 // Slice expressions.
 //
-// specs/020-ir.md: bounds checks plus pointer arithmetic. No allocation, which
-// is why this row is built and the composite literal rows that need one are
-// not: the result points into storage the operand already named.
+// specs/020-ir.md: bounds checks plus pointer arithmetic. No allocation: the
+// result points into storage the operand already named, which is why this row
+// was built before a descriptor could be named and the composite literal rows
+// had to wait for one.
 //
 // The shape is the reference implementation's, and one part of it is not an
 // optimisation:

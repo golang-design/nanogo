@@ -344,6 +344,252 @@ func f() int { q := Q{A: 1}; return q.A }`)
 	})
 }
 
+// lowerDescriptors returns the type descriptor symbols a lowered body names.
+func lowerDescriptors(fn *Func) []string {
+	var out []string
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OGlobal && n.Obj != nil && strings.HasPrefix(n.Obj.Name, TypeSymbolPrefix) {
+				out = append(out, n.Obj.Name)
+			}
+			return true
+		})
+	}
+	return out
+}
+
+func lowerNames(fn *Func, name string) bool {
+	for _, d := range lowerDescriptors(fn) {
+		if d == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLowerAllocationRows is specs/020's heap rows, which
+// specs/032-type-descriptors-and-itabs.md unblocked.
+//
+// Each row is checked twice: the runtime symbol it calls, and the descriptor
+// symbol it passes. The second is the half that specs/032 makes load bearing,
+// because the linker deduplicates a descriptor by name and a name that differs
+// from gc's is a second descriptor for a type that already has one.
+func TestLowerAllocationRows(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		call string
+		desc string
+	}{
+		{"new", `func f() *int { return new(int) }`, "runtime.newobject", "type:int"},
+		{"new of a defined type", `func f() *T { return new(T) }`, "runtime.newobject", "type:p.T"},
+		{"the address of a literal", `func f() *T { return &T{1, 2} }`, "runtime.newobject", "type:p.T"},
+		{"the address of an array literal", `func f() *[2]int { return &[2]int{1, 2} }`, "runtime.newobject", "type:[2]int"},
+		{"a slice literal", `func f() []int { return []int{1, 2} }`, "runtime.newarray", "type:int"},
+		{"a slice literal of pointers", `func f() []*T { return []*T{nil} }`, "runtime.newarray", "type:*p.T"},
+		{"an empty slice literal", `func f() []int { return []int{} }`, "runtime.newarray", "type:int"},
+		{"a keyed slice literal", `func f() []int { return []int{5: 1} }`, "runtime.newarray", "type:int"},
+		{"make", `func f() []int { return make([]int, 4) }`, "runtime.makeslice", "type:int"},
+		{"make with a capacity", `func f(n int) []int { return make([]int, n, 2*n) }`, "runtime.makeslice", "type:int"},
+		{"make of a slice of empty interfaces", `func f(n int) []any { return make([]any, n) }`, "runtime.makeslice", "type:interface {}"},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if !lowerCalled(fn, tc.call) {
+				t.Errorf("%s was not called; the calls are %v:\n%s",
+					tc.call, lowerCalls(fn), buildDump(fn))
+			}
+			if !lowerNames(fn, tc.desc) {
+				t.Errorf("%s was not named; the descriptors are %v:\n%s",
+					tc.desc, lowerDescriptors(fn), buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerSliceLiteralLength checks the length a keyed slice literal produces.
+//
+// It is one past the largest index written and not the number of elements:
+// []int{5: 1} holds one element and has length six. An earlier draft used the
+// element count, which produced a slice whose only element was out of bounds.
+func TestLowerSliceLiteralLength(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want int64
+	}{
+		{`func f() []int { return []int{} }`, 0},
+		{`func f() []int { return []int{1, 2, 3} }`, 3},
+		{`func f() []int { return []int{5: 1} }`, 6},
+		{`func f() []int { return []int{2: 1, 9} }`, 4},
+	} {
+		fn := lowerOK(t, tc.body)
+		got := int64(-1)
+		for _, s := range fn.Body {
+			Walk(s, func(n *Node) bool {
+				if n.Op != OCall || n.X == nil || n.X.Obj == nil ||
+					n.X.Obj.Name != "runtime.newarray" || len(n.Args) != 2 {
+					return true
+				}
+				if c, ok := n.Args[1].Val.(ConstValue); ok {
+					got, _ = c.Int64()
+				}
+				return true
+			})
+		}
+		if got != tc.want {
+			t.Errorf("%s: newarray of %d, want %d", tc.body, got, tc.want)
+		}
+	}
+}
+
+// TestLowerSliceLiteralStoresThroughTheAllocation checks that the elements are
+// written into the heap and not into the frame.
+//
+// The frame form is the corruption specs/023-escape-analysis.md would have to
+// rule out and cannot, because it is not built: a header returned from this
+// function would point at a slot the caller has already reused.
+func TestLowerSliceLiteralStoresThroughTheAllocation(t *testing.T) {
+	fn := lowerOK(t, `func f() []int { return []int{1, 2} }`)
+	// The allocation is assigned to a temporary of pointer-to-array type, and
+	// every element store indexes off that same temporary.
+	var alloc *Object
+	for _, s := range fn.Body {
+		if s.Op == OAssign && s.X != nil && s.X.Op == OLocal && s.Y != nil &&
+			s.X.Type != nil && s.X.Type.Kind == Ptr && s.X.Type.Elem != nil &&
+			s.X.Type.Elem.Kind == Array {
+			alloc = s.X.Obj
+		}
+	}
+	if alloc == nil {
+		t.Fatalf("no pointer to the allocated array:\n%s", buildDump(fn))
+	}
+	stores := 0
+	for _, s := range fn.Body {
+		if s.Op != OAssign || s.X == nil || s.X.Op != OIndex || s.X.X == nil {
+			continue
+		}
+		if s.X.X.Op == OLocal && s.X.X.Obj == alloc {
+			stores++
+		}
+	}
+	if stores != 2 {
+		t.Errorf("%d elements stored through the allocation, want 2:\n%s", stores, buildDump(fn))
+	}
+}
+
+// TestLowerEmptySliceLiteralIsNotNil is the semantics of []T{}.
+//
+// The language distinguishes []int{} from a nil slice: the first is non-nil
+// and the second is not. runtime.newarray(t, 0) reaches mallocgc with size
+// zero, which returns the address of runtime.zerobase rather than nil, so the
+// call is what gives the empty literal a non-nil pointer. Building the header
+// with a nil pointer instead would be one comparison different from Go and
+// nothing downstream would report it.
+func TestLowerEmptySliceLiteralIsNotNil(t *testing.T) {
+	fn := lowerOK(t, `func f() []int { return []int{} }`)
+	if !lowerCalled(fn, "runtime.newarray") {
+		t.Errorf("the empty literal did not allocate; the calls are %v:\n%s",
+			lowerCalls(fn), buildDump(fn))
+	}
+}
+
+// TestLowerNamesNoDescriptorOfItsOwnTypes checks that the types this pass
+// invents stay out of the collected set.
+//
+// The pass builds types the checker never produced: the slice and string
+// headers, the pointer to a descriptor, the descriptor itself. None of them is
+// a Go type and none has a descriptor gc would emit, so a name for one would
+// be a symbol the linker never resolves.
+func TestLowerNamesNoDescriptorOfItsOwnTypes(t *testing.T) {
+	_, types, err := lowerCollect(t, `func f(s []int) []int { p := new(int); use(*p); return []int{s[0]} }`)
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	for _, ty := range types {
+		name, err := TypeSymbol(ty)
+		if err != nil {
+			t.Errorf("the collected type %s has no name: %v", ty, err)
+			continue
+		}
+		for _, bad := range []string{"type:runtime._type", "type:slice", "type:string."} {
+			if name == bad {
+				t.Errorf("the pass asked for %s, which gc never emits", name)
+			}
+		}
+	}
+}
+
+// TestLowerCollectsTheDescriptors checks the list a caller emits from.
+//
+// Nothing between this pass and the object writer carries a list of data
+// symbols, so LowerAndCollect returns one. Its order is the order the names
+// were first met, which specs/053-determinism.md requires of anything that
+// reaches output, and it holds one entry per name rather than one per use.
+func TestLowerCollectsTheDescriptors(t *testing.T) {
+	body := `func f() []*T { p := new(int); q := new(int); use(*p + *q); return []*T{nil} }`
+	_, types, err := lowerCollect(t, body)
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	var got []string
+	for _, ty := range types {
+		name, err := TypeSymbol(ty)
+		if err != nil {
+			t.Fatalf("the collected type %s has no name: %v", ty, err)
+		}
+		got = append(got, name)
+	}
+	// int is named twice by the two calls to new and appears once, and the
+	// order is the order of first use.
+	want := []string{"type:int", "type:*p.T"}
+	if len(got) != len(want) {
+		t.Fatalf("collected %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("collected %v, want %v", got, want)
+			break
+		}
+	}
+
+	// Two runs over the same input collect the same list.
+	_, again, err := lowerCollect(t, body)
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	if len(again) != len(types) {
+		t.Errorf("a second run collected %d types and the first collected %d", len(again), len(types))
+	}
+}
+
+// TestLowerCollectsOnARefusal checks that the list survives a refusal.
+//
+// A function that is refused is still lowered everywhere else, so a descriptor
+// its lowered part names still has to be emitted. Returning an empty list on a
+// refusal would drop it.
+func TestLowerCollectsOnARefusal(t *testing.T) {
+	_, types, err := lowerCollect(t, `func f(s []int) []int { p := new(int); use(*p); return append(s, 1) }`)
+	if err == nil {
+		t.Fatal("append was lowered")
+	}
+	if len(types) != 1 {
+		t.Fatalf("collected %d types, want the one new named", len(types))
+	}
+}
+
+// lowerCollect lowers and returns the collected descriptor types.
+func lowerCollect(t *testing.T, body string) (*Func, []*Type, error) {
+	t.Helper()
+	pkg, files, info := buildTypecheck(t, lowerPrelude+"\n"+body)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	fn := buildFuncOf(t, out, "f")
+	types, lerr := LowerAndCollect(fn)
+	return fn, types, lerr
+}
+
 // TestLowerRangeRows is specs/020's range rows: an index loop with the bound
 // hoisted, and a counted loop for an integer.
 func TestLowerRangeRows(t *testing.T) {
@@ -631,12 +877,18 @@ func TestLowerRefusals(t *testing.T) {
 		op   Op
 		want string
 	}{
-		{"a slice literal", `func f() []int { return []int{1, 2} }`, OCompositeLit, "heap allocation"},
 		{"a map literal", `func f() map[int]int { return map[int]int{1: 2} }`, OCompositeLit, "makemap"},
-		{"the address of a literal", `func f() *T { return &T{1, 2} }`, OCompositeLit, "allocation"},
-		{"new", `func f() *int { return new(int) }`, ONew, "no row"},
-		{"make", `func f() []int { return make([]int, 4) }`, OMake, "no row"},
 		{"append", `func f(s []int) []int { return append(s, 1) }`, OAppend, "no row"},
+		// The allocation rows are built, and each still refuses a type whose
+		// descriptor cannot be named. The reason names the field
+		// specs/020-ir.md's type boundary drops, so that a count by cause says
+		// which field is holding the row back rather than only that a name was
+		// wanted.
+		{"make of a map", `func f() map[int]int { return make(map[int]int) }`, OMake, "descriptor"},
+		{"make of a channel", `func f() chan int { return make(chan int) }`, OMake, "descriptor"},
+		{"new of a literal struct", `func f() *struct{ A int } { return new(struct{ A int }) }`, ONew, "field tags"},
+		{"new of a function type", `func f() *func() { return new(func()) }`, ONew, "signature"},
+		{"a slice literal of channels", `func f() []chan int { return []chan int{nil} }`, OCompositeLit, "direction"},
 		{"len of a map", `func f(m map[int]int) int { return len(m) }`, OLen, "the length of map"},
 		{"len of a channel", `func f(c chan int) int { return len(c) }`, OLen, "the length of chan"},
 		{"range over a map", `func f(m map[int]int) { for k := range m { use(k) } }`, ORange, "mapiterinit"},
@@ -682,18 +934,22 @@ func TestLowerRefusals(t *testing.T) {
 // TestLowerReportsTheFirstRefusal checks that a function with two refusals is
 // counted once, under the first one.
 func TestLowerReportsTheFirstRefusal(t *testing.T) {
-	_, err := lowerFunc(t, `func f() int { p := new(int); s := make([]int, 1); return *p + s[0] }`, "f")
+	// Two refusals, in source order. append is the earlier one, so it is the
+	// one the count is grouped under; the map literal after it is not counted
+	// again. Both rows are chosen because neither is built, and the test moves
+	// to another pair when one of them is.
+	_, err := lowerFunc(t, `func f(s []int) int { c := append(s, 1); m := map[int]int{1: 2}; return c[0] + m[1] }`, "f")
 	le, ok := err.(*LowerError)
 	if !ok {
 		t.Fatalf("the error is a %T: %v", err, err)
 	}
-	if le.Op != ONew {
-		t.Errorf("the refusal names %s, want %s", le.Op, ONew)
+	if le.Op != OAppend {
+		t.Errorf("the refusal names %s, want %s", le.Op, OAppend)
 	}
 	if !strings.Contains(le.Error(), "lowering f") {
 		t.Errorf("the message does not name the function: %s", le.Error())
 	}
-	if le.Cause() != "new: "+le.What {
+	if le.Cause() != "append: "+le.What {
 		t.Errorf("the cause is %q", le.Cause())
 	}
 }
