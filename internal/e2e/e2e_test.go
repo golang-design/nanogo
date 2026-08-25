@@ -588,3 +588,376 @@ func TestToolexecCollectsAHeapAllocation(t *testing.T) {
 		t.Fatalf("the collector rejected what nanogo allocated: %v\n%s", err, b)
 	}
 }
+
+// The program that makes a func value and calls it.
+//
+// specs/033-closures-defer-panic.md's closure row, in the part of it a callee
+// that never reads the context register can reach: the literal captures
+// nothing, so the value is one word holding the entry point, and calling it is
+// an indirect call through that word.
+//
+// The literal is behind a function that returns it, so the value crosses a
+// frame boundary and cannot be a frame slot the caller reuses. apply keeps the
+// call indirect: it takes the value as a parameter, so nothing between here
+// and code generation can turn the call into a static one.
+//
+// There is no loop around the indirect call, and the reason is a gap in
+// ssagen: a phi that the allocation resolves by copying a rematerialisable
+// value into a stack slot has no move, and a counted loop with a call in its
+// body produces exactly that. The gap is not this row's.
+//
+// The exit status is the assertion, as in helloProgram. A wrong answer divides
+// by zero and the process dies.
+const closureProgram = `package main
+
+func adder() func(int) int {
+	return func(x int) int { return x + 40 }
+}
+
+func apply(f func(int) int, x int) int { return f(x) }
+
+func main() {
+	f := adder()
+	d := apply(f, 2) - 42
+	if d != 0 {
+		d = d / (d - d)
+	}
+}
+`
+
+// The program that defers.
+//
+// specs/033's slow path: runtime.deferproc takes the func value, and the
+// function leaves through one exit that calls runtime.deferreturn. Both shapes
+// the row lowers are here. early defers through a function symbol, so the
+// funcval is built at the statement; through defers a parameter of function
+// type, so the value is the one the statement saw and no funcval is built at
+// all.
+//
+// nanogo compiles no package-level variable yet, so a deferred call has no
+// storage outside its own frame to record that it ran. The evidence is
+// therefore the panic: the call deferred in through divides by zero, and a
+// program that exits zero is a program whose deferred call did not run.
+//
+// early is the other half. It returns before the end of its body, which is
+// what the single exit is for, and main checks the value it returned: a
+// rewrite that lost the result would divide by zero before through is reached.
+// Its deferred function has an empty body, which is a complete Go function and
+// not a declaration satisfied by assembly. ir.Func.Bodyless is what tells the
+// two apart, and until it did the driver refused this program.
+//
+// ratio has two branches for the reason panicProgram's does: ssagen emits no
+// padding after a call that does not return, so a function whose only trapping
+// call is in its last block unwinds into the stack-growth tail.
+const deferProgram = `package main
+
+func ratio(a, b, c int) int {
+	if a > b {
+		return a / c
+	}
+	return b / c
+}
+
+func nothing() {}
+
+func early(n int) int {
+	defer nothing()
+	if n > 0 {
+		return n + 1
+	}
+	return 0
+}
+
+func through(f func()) { defer f() }
+
+func main() {
+	d := early(5) - 6
+	if d != 0 {
+		d = d / (d - d)
+	}
+	e := early(0)
+	if e != 0 {
+		e = e / (e - e)
+	}
+	through(func() { ratio(1, 2, 0) })
+}
+`
+
+// The program that starts a goroutine.
+//
+// runtime.newproc takes the same one word runtime.deferproc does, which is why
+// this program is short: everything but the symbol is the defer row.
+//
+// The goroutine is observed the way the deferred call is, through the panic it
+// raises, because nanogo compiles no package-level variable for it to write
+// and no channel for it to send on. The panic ends the process, so the sleep
+// is what the program does while it is alive and not what it waits for: a
+// goroutine that never starts makes the program exit zero after the sleep,
+// which the test reads as the failure it is.
+//
+// The wait is a sleep and not a loop over runtime.Gosched, because a counted
+// loop with a call in its body meets the ssagen gap closureProgram names.
+const goProgram = `package main
+
+import "time"
+
+func ratio(a, b, c int) int {
+	if a > b {
+		return a / c
+	}
+	return b / c
+}
+
+func main() {
+	go func() { ratio(1, 2, 0) }()
+	time.Sleep(5 * time.Second)
+}
+`
+
+// The program that panics through a defer.
+//
+// This is the interaction specs/033 says is where the bugs are. The deferred
+// call is not on the normal return path here: first panics before it reaches
+// its exit, so runtime.gopanic is what runs the deferred function, off the
+// _defer record runtime.deferproc linked onto the goroutine.
+//
+// The deferred function panics too, so the runtime prints both panics, and two
+// of them in the output is the evidence that the second one ran. One would
+// mean the defer was not on the chain and the panic walked past it.
+const deferPanicProgram = `package main
+
+func ratio(a, b, c int) int {
+	if a > b {
+		return a / c
+	}
+	return b / c
+}
+
+func second() { ratio(1, 2, 0) }
+
+func first() {
+	defer second()
+	ratio(3, 4, 0)
+}
+
+func main() { first() }
+`
+
+// TestToolexecCallsAClosure runs the func value nanogo built.
+func TestToolexecCallsAClosure(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/closure\n\ngo 1.27\n",
+		"main.go": closureProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "closure", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	if b, err := exec.Command(filepath.Join(h.mod, "closure")).CombinedOutput(); err != nil {
+		t.Fatalf("the program nanogo compiled did not run: %v\n%s", err, b)
+	}
+}
+
+// TestToolexecRunsADefer runs a deferred call on the normal return path.
+func TestToolexecRunsADefer(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/deferred\n\ngo 1.27\n",
+		"main.go": deferProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "deferred", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	b, err := exec.Command(filepath.Join(h.mod, "deferred")).CombinedOutput()
+	if err == nil {
+		t.Fatalf("the program exited zero, so the deferred call did not run:\n%s", b)
+	}
+	got := string(b)
+	t.Logf("the program printed:\n%s", got)
+	for _, want := range []string{
+		"panic: runtime error: integer divide by zero",
+		"main.ratio(",
+		"main.through(",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the output does not contain %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestToolexecStartsAGoroutine runs the goroutine runtime.newproc created.
+func TestToolexecStartsAGoroutine(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/goroutine\n\ngo 1.27\n",
+		"main.go": goProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "goroutine", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	b, err := exec.Command(filepath.Join(h.mod, "goroutine")).CombinedOutput()
+	if err == nil {
+		t.Fatalf("the program exited zero, so the goroutine did not run:\n%s", b)
+	}
+	got := string(b)
+	t.Logf("the program printed:\n%s", got)
+	if !strings.Contains(got, "panic: runtime error: integer divide by zero") {
+		t.Errorf("the output is not the goroutine's panic:\n%s", got)
+	}
+}
+
+// TestToolexecRunsADeferWhilePanicking is the panic path.
+func TestToolexecRunsADeferWhilePanicking(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/deferpanic\n\ngo 1.27\n",
+		"main.go": deferPanicProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "deferpanic", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	b, err := exec.Command(filepath.Join(h.mod, "deferpanic")).CombinedOutput()
+	if err == nil {
+		t.Fatalf("the program exited zero, and it panics:\n%s", b)
+	}
+	got := string(b)
+	t.Logf("the program printed:\n%s", got)
+	if !strings.Contains(got, "panic: runtime error: integer divide by zero") {
+		t.Errorf("the output is not the panic:\n%s", got)
+	}
+	// The order of the frames is the assertion. runtime.gopanic is in the
+	// traceback because first panicked inside it, and main.second is *above*
+	// it, so the deferred function ran off the chain runtime.deferproc built
+	// rather than on any return path. gc prints the same order for the same
+	// program.
+	second, gopanic, first := strings.Index(got, "main.second("),
+		strings.Index(got, "panic({"), strings.Index(got, "main.first(")
+	if second < 0 || gopanic < 0 || first < 0 || !(second < gopanic && gopanic < first) {
+		t.Errorf("the deferred call is not above the panic in the traceback:\n%s", got)
+	}
+}
+
+// The program that recovers.
+//
+// This is the whole of specs/033's interaction, end to end. guarded panics
+// before it reaches its exit, runtime.gopanic runs the deferred literal off
+// the chain, the literal calls runtime.gorecover, and runtime.recovery
+// restores the stack pointer and jumps to the offset cmd/link took from the
+// relocation on the call to runtime.deferreturn. Execution resumes in the
+// epilogue nanogo built.
+//
+// The value guarded returns is the assertion, and it is what makes the test
+// about the epilogue rather than about the recover. recovery restores no
+// register, so a result that lived in one would be whatever the runtime left
+// there. It reads zero here because the result is in the frame and the entry
+// zeroed it, and the assignment that would have given it a value never ran.
+const recoverProgram = `package main
+
+func ratio(a, b, c int) int {
+	if a > b {
+		return a / c
+	}
+	return b / c
+}
+
+func guarded(c int) int {
+	defer func() { recover() }()
+	return ratio(1, 2, c)
+}
+
+func main() {
+	d := guarded(0)
+	if d != 0 {
+		d = d / (d - d)
+	}
+	e := guarded(2) - 1
+	if e != 0 {
+		e = e / (e - e)
+	}
+}
+`
+
+// TestToolexecRecovers resumes a frame nanogo compiled after a panic.
+func TestToolexecRecovers(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/recovered\n\ngo 1.27\n",
+		"main.go": recoverProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "recovered", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	if b, err := exec.Command(filepath.Join(h.mod, "recovered")).CombinedOutput(); err != nil {
+		t.Fatalf("the program did not survive the panic it recovers: %v\n%s", err, b)
+	}
+}
+
+// The program that prints.
+//
+// print and println are the only output a nanogo-compiled program can produce.
+// specs/020-ir.md's two rows are one bracketed sequence each: runtime.printlock,
+// one call per operand, the newline println writes, and runtime.printunlock.
+//
+// Nothing here prints a string, and that is the row's limit rather than a
+// choice: a string constant decomposes into the address of a data symbol and
+// nothing writes that symbol into the object.
+const printProgram = `package main
+
+func sum(a, b int) int { return a + b }
+
+func main() {
+	println(sum(20, 22))
+	print(1, 2, 3)
+	println()
+	println(true, sum(1, 1) == 2)
+}
+`
+
+// TestToolexecPrintsWithTheBuiltins reads what the program wrote.
+//
+// TestToolexecProgramPrints above reads a traceback, which the runtime writes.
+// This one reads what the compiled code itself wrote.
+func TestToolexecPrintsWithTheBuiltins(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/printer\n\ngo 1.27\n",
+		"main.go": printProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "printer", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	b, err := exec.Command(filepath.Join(h.mod, "printer")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("the program nanogo compiled did not run: %v\n%s", err, b)
+	}
+	// print writes its operands with no separator and no newline, and println
+	// writes a space between them and a newline after them. The runtime writes
+	// both to file descriptor 2.
+	if got, want := string(b), "42\n123\ntrue true\n"; got != want {
+		t.Errorf("the program printed %q, want %q", got, want)
+	}
+}
