@@ -136,9 +136,27 @@ jobs:
     # gofmt -l over the whole tree, spikes included. They are separate modules,
     # so no build here reaches them, and unformatted source in them would live
     # forever.
+    #
+    # One directory is excluded, and it is excluded because nanogo did not
+    # write it. internal/gotest/testdata/go/test is the Go Authors' own test
+    # corpus, vendored verbatim under Go's licence. Some of those files are
+    # deliberately malformed -- bombad.go carries byte order marks in the middle
+    # of a function, char_lit1.go carries invalid escapes -- so gofmt cannot
+    # parse them and prints errors rather than a file list. Reformatting one
+    # would destroy the thing the corpus tests. The count is printed so that a
+    # moved or emptied corpus is visible here rather than silently widening the
+    # check.
     - name: Check formatting
       run: |
-        unformatted=$(gofmt -l .)
+        set -eu
+        vendored='./internal/gotest/testdata'
+        n=$(find "$vendored" -name '*.go' | wc -l | tr -d ' ')
+        if [ "$n" -eq 0 ]; then
+          echo "::error::$vendored holds no .go files; the exclusion below now excludes nothing"
+          exit 1
+        fi
+        echo "excluding $n vendored Go Authors' files under $vendored"
+        unformatted=$(find . -name '*.go' -not -path "$vendored/*" -print0 | xargs -0 gofmt -l)
         if [ -n "$unformatted" ]; then
           echo "::error::these files are not gofmt'd:"
           echo "$unformatted"
