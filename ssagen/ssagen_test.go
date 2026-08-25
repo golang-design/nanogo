@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1521,8 +1522,8 @@ func TestEmitterRejectsBadInput(t *testing.T) {
 	// A register the target does not describe is refused rather than
 	// converted into whatever number it happens to be.
 	e := &emitter{opt: Options{Sym: "test.f"}}
-	if got := e.reg(ssa.Reg(ssa.MaxRegs - 1)); got != arm64.ZR {
-		t.Errorf("a register outside the target converted to %v", got)
+	if got, ok := e.reg(ssa.Reg(ssa.MaxRegs - 1)); ok || got != arm64.ZR {
+		t.Errorf("a register outside the target converted to %v, ok=%v", got, ok)
 	}
 	if e.err() == nil {
 		t.Error("a register outside the target was accepted")
@@ -2134,8 +2135,8 @@ func TestRegRefusesAFloatRegister(t *testing.T) {
 	// An integer register still passes, or the guard is too broad and every
 	// function stops compiling.
 	var ok emitter
-	if got := ok.reg(ssa.Reg(arm64.R5)); got != arm64.R5 {
-		t.Errorf("reg(R5) = %v, want R5", got)
+	if got, good := ok.reg(ssa.Reg(arm64.R5)); !good || got != arm64.R5 {
+		t.Errorf("reg(R5) = %v, %v, want R5, true", got, good)
 	}
 	if err := ok.err(); err != nil {
 		t.Errorf("an integer register was refused: %v", err)
@@ -2200,5 +2201,108 @@ func TestRematerialisationIntoASlotStoresIt(t *testing.T) {
 	// the allocator handed out, because no value of the function is in it.
 	if got := e.text[len(e.text)-1]; got == 0 {
 		t.Errorf("the store is not encoded")
+	}
+}
+
+// TestFloatRegisterRefusalDoesNotReachTheEncoder covers the three paths that
+// carried a refused register into obj/arm64 and crashed there.
+//
+// reg() refused a floating-point register, recorded the refusal and then
+// returned arm64.ZR. ZR is a real register, so every caller went on with it
+// and reached an encoder that wanted the floating-point file. regF panics on
+// an integer register by design, so the compiler died with
+//
+//	panic: arm64: ZR used where the encoding means a floating-point register
+//
+// instead of reporting. Go's own test corpus crashed nanogo on align.go,
+// float_lit.go, literal.go and rune.go this way, one panic per path: the
+// rematerialisation of a floating-point constant, the destination of a
+// floating-point load, and the operand of a floating-point compare.
+//
+// A compiler may decline to compile a program. It may not crash on one.
+func TestFloatRegisterRefusalDoesNotReachTheEncoder(t *testing.T) {
+	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
+
+	newEmitter := func(f *ssa.Func, n int) *emitter {
+		a := &ssa.Alloc{
+			Target:  ssa.NewArm64Target(),
+			Home:    make([]ssa.Loc, n),
+			Fixed:   make([]ssa.Reg, n),
+			Result:  make([]ssa.Reg, n),
+			Args:    make([][]ssa.Reg, n),
+			Remat:   make([]bool, n),
+			Spilled: make([]bool, n),
+		}
+		for i := range a.Fixed {
+			a.Fixed[i] = ssa.NoReg
+			a.Result[i] = ssa.NoReg
+		}
+		e := &emitter{
+			f: f, a: a,
+			opt:    Options{Sym: "test.f", File: "t.go"},
+			pkg:    obj.NewPackage("test"),
+			frames: map[*ir.Object]int64{},
+			done:   map[ssa.ID]bool{},
+		}
+		e.syms = newSymbols(e.pkg)
+		e.slotOff = []int64{8}
+		return e
+	}
+
+	// float_lit.go: a floating-point constant is rematerialised into the
+	// register the allocation named, and the constant's encoder is FMOV with
+	// an immediate.
+	t.Run("remat", func(t *testing.T) {
+		f := ssa.NewFunc("f")
+		e := newEmitter(f, 8)
+		c := f.Entry.NewValue(0, ssa.OpARM64FMOVconst, f64)
+		c.AuxInt = int64(math.Float64bits(1.5))
+		e.move(ssa.RegLoc(ssa.Reg(arm64.F1)), ssa.Loc{}, c)
+		mustRefuseFloat(t, e)
+	})
+
+	// align.go: the destination of a floating-point load.
+	t.Run("result", func(t *testing.T) {
+		f := ssa.NewFunc("f")
+		e := newEmitter(f, 8)
+		ptr := f.Entry.NewValue(0, ssa.OpARM64MOVDconst, typeInt)
+		mem := f.Entry.NewValue(0, ssa.OpInitMem, typeInt)
+		ld := f.Entry.NewValue(0, ssa.OpARM64FMOVDload, f64, ptr, mem)
+		e.a.Result[ptr.ID] = ssa.Reg(arm64.R0)
+		e.a.Home[ptr.ID] = ssa.RegLoc(ssa.Reg(arm64.R0))
+		e.a.Args[ld.ID] = []ssa.Reg{ssa.Reg(arm64.R0), ssa.NoReg}
+		e.a.Result[ld.ID] = ssa.Reg(arm64.F0)
+		e.value(ld)
+		mustRefuseFloat(t, e)
+	})
+
+	// literal.go: an operand of a floating-point compare.
+	t.Run("operand", func(t *testing.T) {
+		f := ssa.NewFunc("f")
+		e := newEmitter(f, 8)
+		x := f.Entry.NewValue(0, ssa.OpArg, f64)
+		y := f.Entry.NewValue(0, ssa.OpArg, f64)
+		cmp := f.Entry.NewValue(0, ssa.OpARM64FCMPD, typeInt, x, y)
+		e.a.Args[cmp.ID] = []ssa.Reg{ssa.Reg(arm64.F1), ssa.Reg(arm64.F2)}
+		if _, ok := e.operands(cmp); ok {
+			t.Error("operands accepted a floating-point register")
+		}
+		mustRefuseFloat(t, e)
+	})
+}
+
+// mustRefuseFloat asserts that the emitter reported a floating-point register
+// it cannot generate code for, and emitted nothing.
+func mustRefuseFloat(t *testing.T, e *emitter) {
+	t.Helper()
+	err := e.err()
+	if err == nil {
+		t.Fatal("a floating-point register was accepted")
+	}
+	if !strings.Contains(err.Error(), "floating-point") {
+		t.Errorf("the refusal does not name the construct: %v", err)
+	}
+	if len(e.text) != 0 {
+		t.Errorf("%d instructions reached the text after a refusal", len(e.text))
 	}
 }

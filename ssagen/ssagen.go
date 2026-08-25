@@ -393,20 +393,42 @@ func (e *emitter) markLine(pos syntax.Pos) {
 // what makes this a conversion rather than a table. A floating-point register
 // is above that range and has no encoder, so it is an error and not a wrong
 // instruction.
-func (e *emitter) reg(r ssa.Reg) arm64.Reg {
+//
+// It reports whether the conversion happened, and every caller has to ask.
+// The earlier signature returned arm64.ZR for a register it had just refused,
+// and ZR is a real register: the caller carried it into an encoder, and an
+// encoder that wanted the floating-point file panicked on it rather than
+// reporting. A diagnostic the emitter records and then walks past is not a
+// diagnostic.
+//
+// A value the allocation gave no register at all is not that case. A store
+// and a nil check produce nothing, and their memory argument occupies no
+// register either, so ssa.NoReg is the encoding's own zero register and not a
+// failure. value refuses separately when a value that has a width lands
+// there.
+func (e *emitter) reg(r ssa.Reg) (arm64.Reg, bool) {
 	if r == ssa.NoReg {
-		return arm64.ZR
+		return arm64.ZR, true
 	}
 	x := arm64.Reg(r)
 	// IsFloat is the test, and an earlier version of this line was
 	// `arm64.Reg(r) != x` with x already equal to arm64.Reg(r). That disjunct
 	// is always false, so the refusal this function promises never happened
 	// and a float register reached an integer encoder as its raw number.
-	if !x.Valid() || x.IsFloat() {
-		e.fail("register %d is not an integer register of this target", r)
-		return arm64.ZR
+	if x.IsFloat() {
+		// The allocator has a floating-point free list and hands out F0 to
+		// F29, but nothing below it does: move copies with an integer MOV,
+		// spill stores with an integer store, and the parallel move breaks a
+		// cycle with an integer scratch register. So the refusal is the code
+		// generator's and not the encoder's, and it says so.
+		e.fail("the allocation puts a value in %v, and this target has no floating-point code generator", x)
+		return arm64.ZR, false
 	}
-	return x
+	if !x.Valid() {
+		e.fail("register %d is not a register of this target", r)
+		return arm64.ZR, false
+	}
+	return x, true
 }
 
 // run emits the whole function.
@@ -580,7 +602,10 @@ func (e *emitter) value(v *ssa.Value) {
 		if !ok {
 			return
 		}
-		dst := e.reg(e.a.Result[v.ID])
+		dst, dok := e.reg(e.a.Result[v.ID])
+		if !dok {
+			return
+		}
 		w, wok := arm64.AddRegImm(arm64.Size64, dst, arm64.RSP, off)
 		e.wordIf(w, wok, "ADD $%d, RSP, %v", off, dst)
 		e.spill(v)
@@ -617,8 +642,14 @@ func (e *emitter) value(v *ssa.Value) {
 		e.fail("v%d: %v produces a value and the allocation gives it no register", v.ID, v.Op)
 		return
 	}
-	regs := e.operands(v)
-	dst := e.reg(e.a.Result[v.ID])
+	regs, rok := e.operands(v)
+	if !rok {
+		return
+	}
+	dst, dok := e.reg(e.a.Result[v.ID])
+	if !dok {
+		return
+	}
 	at := e.pc()
 	n, ok := ssa.ARM64Encode(v, dst, regs, e.out[:])
 	if !ok || n == 0 {
@@ -641,7 +672,7 @@ func (e *emitter) value(v *ssa.Value) {
 // A value whose home is a register is already there. A spilled one is loaded
 // from its slot, and a rematerialised one is recomputed: specs/026 says both
 // go into a scratch register, and the allocation names which.
-func (e *emitter) operands(v *ssa.Value) []arm64.Reg {
+func (e *emitter) operands(v *ssa.Value) ([]arm64.Reg, bool) {
 	regs := e.a.Args[v.ID]
 	out := make([]arm64.Reg, len(v.Args))
 	for i, arg := range v.Args {
@@ -649,7 +680,10 @@ func (e *emitter) operands(v *ssa.Value) []arm64.Reg {
 			out[i] = arm64.ZR
 			continue
 		}
-		want := e.reg(regs[i])
+		want, ok := e.reg(regs[i])
+		if !ok {
+			return nil, false
+		}
 		out[i] = want
 		src := e.home(arg)
 		if src.Kind == ssa.LocReg && arm64.Reg(src.Reg) == want {
@@ -657,7 +691,7 @@ func (e *emitter) operands(v *ssa.Value) []arm64.Reg {
 		}
 		e.move(ssa.RegLoc(ssa.Reg(want)), src, arg)
 	}
-	return out
+	return out, true
 }
 
 // home returns where a value lives, or no location when it is rematerialised
@@ -679,7 +713,11 @@ func (e *emitter) spill(v *ssa.Value) {
 	if h.Kind != ssa.LocSlot {
 		return
 	}
-	e.store(e.reg(e.a.Result[v.ID]), h.Slot, v.Type)
+	src, ok := e.reg(e.a.Result[v.ID])
+	if !ok {
+		return
+	}
+	e.store(src, h.Slot, v.Type)
 }
 
 // move copies a value from one location to another.
@@ -688,13 +726,30 @@ func (e *emitter) move(dst, src ssa.Loc, v *ssa.Value) {
 	case dst == src:
 		return
 	case dst.Kind == ssa.LocReg && src.Kind == ssa.LocReg:
-		e.word(arm64.MovRegReg(arm64.Size64, e.reg(dst.Reg), e.reg(src.Reg)))
+		d, dok := e.reg(dst.Reg)
+		s, sok := e.reg(src.Reg)
+		if !dok || !sok {
+			return
+		}
+		e.word(arm64.MovRegReg(arm64.Size64, d, s))
 	case dst.Kind == ssa.LocReg && src.Kind == ssa.LocSlot:
-		e.load(e.reg(dst.Reg), src.Slot, v.Type)
+		d, ok := e.reg(dst.Reg)
+		if !ok {
+			return
+		}
+		e.load(d, src.Slot, v.Type)
 	case dst.Kind == ssa.LocSlot && src.Kind == ssa.LocReg:
-		e.store(e.reg(src.Reg), dst.Slot, v.Type)
+		s, ok := e.reg(src.Reg)
+		if !ok {
+			return
+		}
+		e.store(s, dst.Slot, v.Type)
 	case dst.Kind == ssa.LocReg && src.Kind == ssa.LocNone:
-		e.remat(e.reg(dst.Reg), v)
+		d, ok := e.reg(dst.Reg)
+		if !ok {
+			return
+		}
+		e.remat(d, v)
 	case dst.Kind == ssa.LocSlot && src.Kind == ssa.LocNone:
 		// A rematerialised value whose home is a slot. specs/026 keeps a
 		// constant, a frame address and a symbol address out of the frame by
@@ -970,7 +1025,11 @@ func (e *emitter) loadArg(v *ssa.Value) {
 	}
 	reg := moveScratch
 	if dst.Kind == ssa.LocReg {
-		reg = e.reg(dst.Reg)
+		r, ok := e.reg(dst.Reg)
+		if !ok {
+			return
+		}
+		reg = r
 	}
 	e.mem(op, reg, arm64.RSP, e.argOff(e.argPlace[i]))
 	if dst.Kind == ssa.LocSlot {
@@ -1007,8 +1066,13 @@ func (e *emitter) transfer(x []xfer) {
 	var dst, src []arm64.Reg
 	for _, m := range x {
 		if m.src.Kind == ssa.LocReg && m.dst.Kind == ssa.LocReg {
-			dst = append(dst, e.reg(m.dst.Reg))
-			src = append(src, e.reg(m.src.Reg))
+			d, dok := e.reg(m.dst.Reg)
+			ss, sok := e.reg(m.src.Reg)
+			if !dok || !sok {
+				return
+			}
+			dst = append(dst, d)
+			src = append(src, ss)
 		}
 	}
 	e.permute(dst, src)
@@ -1147,7 +1211,10 @@ func (e *emitter) callValue(v *ssa.Value) {
 			e.fail("v%d: the entry point of an indirect call is not in a register", v.ID)
 			return
 		}
-		reg := e.reg(r.Reg)
+		reg, ok := e.reg(r.Reg)
+		if !ok {
+			return
+		}
 		for _, p := range places {
 			if p.inReg && p.reg == reg {
 				e.fail("v%d: the entry point is in %v, which is also an argument register", v.ID, reg)
@@ -1192,7 +1259,11 @@ func (e *emitter) storeArg(a *ssa.Value, off int64) {
 	src := moveScratch
 	switch h.Kind {
 	case ssa.LocReg:
-		src = e.reg(h.Reg)
+		r, rok := e.reg(h.Reg)
+		if !rok {
+			return
+		}
+		src = r
 	case ssa.LocSlot:
 		e.load(src, h.Slot, a.Type)
 	default:
@@ -1343,7 +1414,10 @@ func (e *emitter) terminator(b *ssa.Block, next *ssa.Block) {
 			return
 		}
 		e.markLine(b.Control.Pos)
-		regs := e.operands(b.Control)
+		regs, rok := e.operands(b.Control)
+		if !rok {
+			return
+		}
 		f := fixup{block: b.Succs[0].ID}
 		switch c := b.Control; c.Op {
 		case ssa.OpARM64BRcond:
