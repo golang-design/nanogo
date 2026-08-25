@@ -30,11 +30,38 @@ type banned struct {
 // Add a phrase only when it has actually been removed. A gate that fails on
 // the day it is written is a gate people learn to skip.
 var bannedPhrases = []banned{{
-	phrase: "load-bearing",
+	phrase: "loadbearing",
 	why: "a metaphor that names no part of the thing it describes. " +
 		"Say what actually depends on what: \"the linker collects symbols by this prefix\" " +
-		"rather than \"this prefix is load-bearing\".",
+		"rather than \"this prefix is significant\".",
 }}
+
+// normalise reduces text to the form a phrase is matched in.
+//
+// It drops case, whitespace, hyphens and comment markers, so that one entry in
+// bannedPhrases catches every spelling of it. The phrase this gate was written
+// for was already in the repository three ways: hyphenated, spaced, and
+// hyphenated across a line break in a comment, where the continuation carries
+// a "//" of its own. A gate that matched one of those passed on the other two,
+// and the spaced form is the one that appears mid-sentence, where the hyphen
+// reads wrong. It was found by a reader of the first version rather than by
+// the gate itself, which is the argument for normalising rather than for
+// adding a second entry per spelling.
+//
+// The cost is a false positive when two unrelated words abut, and the message
+// prints the line so that a reader sees which it is.
+func normalise(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range strings.ToLower(s) {
+		switch r {
+		case '-', '/', '*', '_', ' ', '\t', '\n', '\r':
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 // TestTheBannedPhrasesStayGone reads every file this repository owns and fails
 // on a phrase that was removed from it.
@@ -76,17 +103,33 @@ func TestTheBannedPhrasesStayGone(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		lower := strings.ToLower(string(b))
+		flat := normalise(string(b))
 		for _, p := range bannedPhrases {
-			if !strings.Contains(lower, p.phrase) {
+			if !strings.Contains(flat, p.phrase) {
 				continue
 			}
 			rel, _ := filepath.Rel(root, path)
-			for i, line := range strings.Split(string(b), "\n") {
-				if strings.Contains(strings.ToLower(line), p.phrase) {
-					found = append(found, rel+":"+itoa(i+1)+": "+strings.TrimSpace(line)+
-						"\n\t\t"+p.why)
+			// Report the line. A phrase broken across a line break matches
+			// only when the two lines are joined, so each line is tried with
+			// its successor and the first of the pair is named.
+			lines := strings.Split(string(b), "\n")
+			hit := false
+			for i := range lines {
+				window := lines[i]
+				if i+1 < len(lines) {
+					window += "\n" + lines[i+1]
 				}
+				if !strings.Contains(normalise(window), p.phrase) {
+					continue
+				}
+				found = append(found, rel+":"+itoa(i+1)+": "+strings.TrimSpace(lines[i])+
+					"\n\t\t"+p.why)
+				hit = true
+			}
+			if !hit {
+				// The file matches and no pair of lines does, so the phrase is
+				// spread wider than a wrap. Name the file rather than nothing.
+				found = append(found, rel+": "+p.phrase+" spans more than two lines\n\t\t"+p.why)
 			}
 		}
 		return nil

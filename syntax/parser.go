@@ -20,8 +20,9 @@ import (
 // levels, so a method per level costs four calls on every expression parsed and
 // buys nothing that the one loop in binaryExpr does not.
 //
-// Two rules keep error recovery from producing cascades, and both are load
-// bearing rather than decorative:
+// Two rules keep error recovery from producing cascades. Neither is a matter
+// of taste: drop either one and one mistake in the source produces a list of
+// messages that describe the recovery rather than the mistake.
 //
 //  1. At most one error per position. A second error at a position already
 //     reported is a consequence of the first, so errorAt drops it.
