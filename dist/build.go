@@ -150,6 +150,11 @@ func installArchive(root, target string, p Package) (Record, error) {
 	return r, os.WriteFile(dst, b, fileMode)
 }
 
+// TreeName is the directory a tarball unpacks to, whatever the tree was built
+// in. Go's tarball unpacks to go, and a downloaded archive that scattered its
+// contents into the current directory would be a surprise nobody wants twice.
+const TreeName = "nanogo"
+
 // TarballName is the file a release publishes, in Go's shape:
 // nanogo0.1.0.darwin-arm64.tar.gz. The target is GOOS_GOARCH and the name
 // spells it with a hyphen, which is the convention every Go download follows.
