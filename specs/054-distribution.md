@@ -21,6 +21,7 @@ nanogo/
   src/...                    the pinned standard library sources
   src/LICENSE, src/PATENTS   Go's licence, beside the files it governs
   pkg/darwin_arm64/*.a       the archives built from them
+  pkg/darwin_arm64/MANIFEST  what compiled each one, and its checksum
   LICENSE                    nanogo's own
   VERSION                    the nanogo release, the Go release, and the tally
 ```
@@ -90,39 +91,62 @@ The producer therefore has to be recorded, and recorded by the producer.
 
 ### The record
 
-Each archive carries a `__.NANOGO` member:
+The producer is recorded in `pkg/GOOS_GOARCH/MANIFEST`, one line per archive:
 
 ```
-nanogo-package 1
-path internal/abi
-producer gc go1.27.0
+nanogo-manifest 1
+internal/abi gc go1.27.0 ce0645cd36b6f30f1d7c393aa08f4fd328ab96febdefd19e8405f582e46a6361
+internal/asan gc go1.27.0 99ac78067e75ee38b080d54cc973da59a54ed44eeda207efbfd80b5bc824aa8d
 ```
 
-Three properties, and each one is required:
+Path, tool, release, and the SHA-256 of the archive. Sorted by import path,
+strictly parsed, and `dist.TallyTree` checks three things on every read:
 
-1. **It is inside the archive.** A sidecar file can be lost, and a manifest can
-   be regenerated from what someone expected the tree to hold rather than from
-   what it holds.
-2. **It is appended, never prepended.** The compiler's importer requires
-   `__.PKGDEF` to be the archive's first member and reports `not a package file`
-   for anything else, which was found by putting the record first and watching
-   `os` stop importing. At the end it is invisible to both readers a build has:
-   `cmd/link` skips a member whose name is short and whose extension is not `.o`
-   or `.syso`, and the importer has already found what it came for.
-3. **Its absence is an error.** An unmarked archive is not assumed to be `gc`'s.
-   Defaulting it would recreate the delegation trap one level up: a tree that
-   reports what it was expected to hold. `dist.TallyTree` fails on the whole
-   tree if one archive cannot account for itself.
+1. **Every archive has a record.** One that appeared from somewhere else fails
+   the whole tally rather than going uncounted. An unmarked archive is never
+   assumed to be `gc`'s: defaulting it would recreate the delegation trap one
+   level up, in a tree that reports what it was expected to hold.
+2. **Every record has an archive.**
+3. **Every archive's hash matches its record.** This is what makes the manifest
+   a statement about bytes rather than about somebody's expectation. One
+   archive copied over another is the accidental version of this fault and the
+   one that actually happens, and the hash is what catches it.
 
-`dist.Build` never asserts a producer of its own. An archive that arrives with a
-record keeps it, which is the case a nanogo compile will produce. An unmarked
-one is `gc`'s, and the release it names is read out of *its own object header*
-rather than taken from the release job's belief about the toolchain.
+`dist.Build` never guesses a producer. A package nanogo compiled arrives with
+`Package.Producer` set, because a producer is declared by the producer. One that
+does not is `gc`'s, and the release it names is read out of *its own object
+header* rather than taken from the release job's belief about the toolchain.
+
+#### The record was inside the archive first, and could not stay there
+
+The first design appended a `__.NANOGO` member to each archive, so that the
+producer travelled inside the file it described. It was verified against the two
+readers a build has, and both accepted it: `go tool compile -importcfg` imported
+through it, and `go tool link` linked it into a program that ran.
+
+It broke `go tool nm` and `go tool objdump` on every archive in the tree.
+
+`cmd/internal/objfile` classifies every archive member. `__.PKGDEF` and two
+zero-length sentinels are skipped; a Go object and a host object are read; and
+**anything else is a hard error**, `unrecognized archive member`. Appending a
+member of one's own therefore makes a perfectly linkable archive that no
+diagnostic tool will open, which is the wrong trade: a downloaded archive a user
+cannot inspect is worse than a record they have to look up beside it.
+
+So the record moved out and grew a hash, and the archives in `pkg/` are now
+byte-for-byte what `gc` wrote. `go tool nm` reads 40,045 symbols out of the
+distribution's `runtime.a`.
+
+The hash is what the move bought back. An in-archive label is forged by
+appending a member; a manifest entry is forged by editing one line. Neither
+resists a determined author, and neither is meant to. What the hash resists is
+the failure that occurs in practice, an archive that is not the one the record
+describes, and an in-archive label could not have caught that at all.
 
 ### The tally, and the two denominators
 
 ```
-nanogo: 0 of 27 packages in the bootstrap closure compiled by nanogo; 27 by gc go1.27.0
+nanogo: 0 of 27 packages in this distribution compiled by nanogo; 27 by gc go1.27.0
 ```
 
 `nanogo-dist tally` prints it for any tree, and with no argument it reads the
@@ -146,6 +170,14 @@ alone reads as two packages lost somewhere.
 The count is measured by `dist/closure_test.go` on every run rather than pinned,
 because the closure moves between Go releases and a gate that failed on a Go
 upgrade is a gate people switch off.
+
+The line says **"in this distribution"** and not "in the bootstrap closure", and
+the difference is the same discipline as the rest of this spec. `dist.TallyLine`
+counts what is under `pkg/`; it has no way to know whether that set is still the
+closure, and the first time [051](051-build-integration.md)'s allowlist grows
+past it the closure phrasing would be describing a set the function did not
+measure. `internal/release` compares the two, because a test can call
+`dist.Closure` and a tally of an unpacked tarball cannot.
 
 ### The counter is checked, not just written
 
@@ -274,6 +306,11 @@ stop the driver from calling `dist.TallyLine`, which is the one function a
 `nanogo version -v` needs. The target directory is a string parameter rather
 than `driver.TargetDir()`, and the pin is defaulted in `cmd/nanogo-dist`, which
 may import both.
+
+The rule is carried by `dist/seam_test.go`, which walks `dist`'s imports and
+fails on any path inside this module. A cycle would otherwise not appear until
+somebody added the call in `driver`, which is a different package and a
+different day, and the rule would read as a comment nobody had reason to keep.
 
 ## Testing
 
