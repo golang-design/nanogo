@@ -57,7 +57,7 @@ func surface(pkg *types2.Package) []string {
 // the reader reconstructed.
 func roundTrip(t *testing.T, pkg *types2.Package) (*types2.Package, [8]byte) {
 	t.Helper()
-	payload, fp, err := Write(pkg)
+	payload, fp, err := Write(pkg, false)
 	if err != nil {
 		t.Fatalf("Write(%s): %v", pkg.Path(), err)
 	}
@@ -230,7 +230,7 @@ func TestWriteRefusesAGeneric(t *testing.T) {
 	}
 	resolve(t, pkg)
 
-	_, _, err = Write(pkg)
+	_, _, err = Write(pkg, false)
 	if err == nil {
 		t.Fatal("the fixture's generic declarations were written")
 	}
@@ -281,11 +281,11 @@ func TestWriteIsDeterministic(t *testing.T) {
 	}
 
 	pkg := read()
-	first, fp1, err := Write(pkg)
+	first, fp1, err := Write(pkg, false)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	second, fp2, err := Write(pkg)
+	second, fp2, err := Write(pkg, false)
 	if err != nil {
 		t.Fatalf("Write again: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestWriteIsDeterministic(t *testing.T) {
 		t.Errorf("two writes of one package have fingerprints %x and %x", fp1, fp2)
 	}
 
-	third, fp3, err := Write(read())
+	third, fp3, err := Write(read(), false)
 	if err != nil {
 		t.Fatalf("Write after a second read: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestWriteStandardLibrary(t *testing.T) {
 		}
 		resolve(t, pkg)
 
-		payload, _, err := Write(pkg)
+		payload, _, err := Write(pkg, false)
 		if err != nil {
 			if u, ok := err.(*UnsupportedError); ok {
 				refused = append(refused, u.Package+": "+u.Name)
@@ -421,7 +421,7 @@ func TestWriteDigestHelper(t *testing.T) {
 		t.Fatalf("Read: %v", err)
 	}
 	resolve(t, pkg)
-	payload, _, err := Write(pkg)
+	payload, _, err := Write(pkg, false)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestWriteReportsABrokenStreamAsAnError(t *testing.T) {
 	})
 	pkg.MarkComplete()
 
-	_, _, err := Write(pkg)
+	_, _, err := Write(pkg, false)
 	if err == nil {
 		t.Fatal("a package whose declaration cannot be decoded was written")
 	}
@@ -494,6 +494,33 @@ func TestWriteReportsABrokenStreamAsAnError(t *testing.T) {
 	for _, want := range []string{"nanogo.example/broken", "truncated"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error does not mention %q: %v", want, err)
+		}
+	}
+}
+
+// TestWriteCarriesTheInitialisationFlag checks the one bit of the private
+// root nanogo writes.
+//
+// An importer reads it and orders its own initialisation record after this
+// package's. A package that has a record and says it has none never runs its
+// initialisation, and nothing reports it; a package that says it has one and
+// has none is a link failure naming a symbol nothing defines.
+func TestWriteCarriesTheInitialisationFlag(t *testing.T) {
+	pkg := types2.NewPackage("nanogo.example/init", "init")
+	pkg.MarkComplete()
+
+	for _, hasInit := range []bool{false, true} {
+		payload, _, err := Write(pkg, hasInit)
+		if err != nil {
+			t.Fatalf("Write(hasInit=%v): %v", hasInit, err)
+		}
+		dec := pkgbits.NewPkgDecoder(pkg.Path(), string(payload))
+		r := dec.NewDecoder(pkgbits.SectionMeta, pkgbits.PrivateRootIdx, pkgbits.SyncPrivate)
+		if got := r.Bool(); got != hasInit {
+			t.Errorf("the private root says the package has an initialisation record: %v, want %v", got, hasInit)
+		}
+		if got := r.Len(); got != 0 {
+			t.Errorf("the private root lists %d function bodies, want none", got)
 		}
 	}
 }

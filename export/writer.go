@@ -51,7 +51,13 @@ func (e *UnsupportedError) Error() string {
 // two-step, so a declaration of another package that the exported surface
 // reaches is written out in full here. Only the universe and unsafe stay
 // stubs, which is what every reader of the format expects.
-func Write(pkg *types2.Package) (data []byte, fingerprint [8]byte, err error) {
+//
+// hasInit says the object carries the package's initialisation record. An
+// importer reads it and orders its own record after this one, so a package
+// that has a record and says it has none is a package whose initialisation
+// never runs, and a package that says it has one and has none is a link
+// failure. driver/inittask.go decides it.
+func Write(pkg *types2.Package, hasInit bool) (data []byte, fingerprint [8]byte, err error) {
 	pw := &pkgWriter{
 		PkgEncoder: pkgbits.NewPkgEncoder(Version),
 		curpkg:     pkg,
@@ -123,10 +129,10 @@ func Write(pkg *types2.Package) (data []byte, fingerprint [8]byte, err error) {
 	public.Sync(pkgbits.SyncEOF)
 	public.Flush()
 
-	// The private root. nanogo writes no function body and emits no package
-	// initialisation task, so both lists are empty. See README.md.
-	private.Bool(false) // no .inittask symbol
-	private.Len(0)      // no function bodies
+	// The private root: whether the object carries an initialisation record,
+	// and the function bodies, of which nanogo writes none. See README.md.
+	private.Bool(hasInit)
+	private.Len(0) // no function bodies
 	private.Sync(pkgbits.SyncEOF)
 	private.Flush()
 

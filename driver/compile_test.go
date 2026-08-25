@@ -743,7 +743,7 @@ func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
 
 	verifyToolchain = func() (*obj.Toolchain, error) { return nil, errors.New("no go command") }
 	err := writeOutput(&Config{Package: "strconv", Output: filepath.Join(t.TempDir(), "o.a")},
-		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"))
+		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"), false)
 	if err == nil || !strings.Contains(err.Error(), "strconv") || !strings.Contains(err.Error(), "no go command") {
 		t.Errorf("writeOutput = %v, want the probe failure with the package named", err)
 	}
@@ -754,7 +754,7 @@ func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
 	verifyToolchain = func() (*obj.Toolchain, error) { return &obj.Toolchain{Header: "not a header\n"}, nil }
 	out := filepath.Join(t.TempDir(), "o.a")
 	err = writeOutput(&Config{Package: "strconv", Output: out, Pack: true},
-		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"))
+		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"), false)
 	if err == nil || !strings.Contains(err.Error(), "strconv") {
 		t.Errorf("writeOutput = %v, want the writer's refusal with the package named", err)
 	}

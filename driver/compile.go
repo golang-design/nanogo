@@ -100,11 +100,11 @@ func Compile(cfg *Config) error {
 		return err
 	}
 
-	out, err := emitPackage(cfg, p, fset, imp.reader.Imports())
+	out, hasInit, err := emitPackage(cfg, p, fset, imp.reader.Imports())
 	if err != nil {
 		return err
 	}
-	return writeOutput(cfg, out, pkg)
+	return writeOutput(cfg, out, pkg, hasInit)
 }
 
 // checkSupported refuses the inputs nanogo has no answer for, before it reads
@@ -339,9 +339,9 @@ func checkTarget(pkg, arch string) error {
 // Declaration order, not map order: the object's symbol table is written by
 // walking the lists in the order symbols were added, so two runs over the same
 // input must add them in the same order (specs/053-determinism.md).
-func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []export.Import) (*obj.Package, error) {
+func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []export.Import) (*obj.Package, bool, error) {
 	if err := checkTarget(cfg.Package, cfg.TargetArch()); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	out := obj.NewPackage(p.Path)
 	out.Main = p.Name == "main"
@@ -381,17 +381,17 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 			// "func f() {}" leaves Body empty too and is a complete Go
 			// function that this compiler must compile.
 			if cfg.Complete {
-				return nil, fmt.Errorf("%s: missing function body", position(fset, fn.Pos, fn.Name))
+				return nil, false, fmt.Errorf("%s: missing function body", position(fset, fn.Pos, fn.Name))
 			}
 			continue
 		}
 		r, types, err := compileFunc(cfg, fn, target, out, fset)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		ref, err := r.Add(out)
 		if err != nil {
-			return nil, &UnsupportedError{Package: cfg.Package, What: "function " + fn.Name, Detail: err.Error()}
+			return nil, false, &UnsupportedError{Package: cfg.Package, What: "function " + fn.Name, Detail: err.Error()}
 		}
 		if isPackageInit(p, fn) {
 			initFns = append(initFns, ref)
@@ -410,13 +410,16 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// of NonPkgRefs continues that of NonPkgDefs, so a definition added after
 	// ssagen's references would move every one of them.
 	if err := addDescriptors(cfg, out, needed); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// The record goes in last. It names the init function by the reference
 	// r.Add returned, and it adds one non-package reference per import, so
 	// every definition this object holds is already in place.
-	addInitTask(out, imports, initFns)
-	return out, nil
+	//
+	// Whether one was written travels to the export data, because an importer
+	// orders its own record after this one only when the export data says
+	// there is one to order after (specs/015-export-data.md).
+	return out, addInitTask(out, imports, initFns), nil
 }
 
 // isPackageInit reports whether fn is the function ir.Build synthesised to run
@@ -682,12 +685,12 @@ var verifyToolchain = obj.VerifyToolchain
 // in its Autolib entry and the linker refuses a build whose two copies
 // disagree. A bare object has nowhere to put the __.PKGDEF member, so it
 // carries the fingerprint and not the data.
-func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package) error {
+func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package, hasInit bool) error {
 	tc, err := verifyToolchain()
 	if err != nil {
 		return fmt.Errorf("%s: %v", cfg.Package, err)
 	}
-	payload, fingerprint, err := export.Write(pkg)
+	payload, fingerprint, err := export.Write(pkg, hasInit)
 	if err != nil {
 		return err
 	}
