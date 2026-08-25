@@ -518,21 +518,36 @@ func (b *builder) dependencies(targets []*loader.Package, graph map[string]*load
 			resolved[p] = bp
 			continue
 		}
-		if b.tree != nil && graph[p] != nil && graph[p].Standard {
-			// Substituting the installed toolchain's copy here would produce a
-			// working program whose standard library did not come from the
-			// tree the build says it used, which is the one lie this command
-			// exists to avoid.
-			missing = append(missing, p)
-			continue
+		if b.tree != nil {
+			// Which of the two sources may supply a package is decided by
+			// whether it is a standard library package, so a dependency the
+			// listing did not describe is a question with no answer rather
+			// than a package to hand to the go command. Handing it over is
+			// the substitution this command exists to prevent, so an
+			// undescribed dependency stops the build.
+			dep := graph[p]
+			if dep == nil {
+				return nil, fmt.Errorf("%s: go list did not describe this dependency, so nanogo cannot tell "+
+					"whether the distribution at %s is the tree that must supply it", p, b.tree.Root)
+			}
+			if dep.Standard {
+				// Substituting the installed toolchain's copy here would
+				// produce a working program whose standard library did not
+				// come from the tree the build says it used, which is the one
+				// lie this command exists to avoid.
+				missing = append(missing, p)
+				continue
+			}
 		}
 		fromGo = append(fromGo, p)
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("the distribution at %s does not hold %s: its pkg/%s has %d packages, "+
-			"and a standard library package the tree does not carry cannot be taken from the installed "+
-			"toolchain, which would make this something other than a build against this tree",
-			b.tree.Root, strings.Join(missing, ", "), TargetDir(), b.tree.Packages)
+		return nil, fmt.Errorf("the distribution at %s holds %d packages and this program needs %s, "+
+			"which it does not carry: a standard library package the tree does not hold cannot be taken "+
+			"from the installed toolchain, which would make this something other than a build against "+
+			"this tree. A nanogo run from outside a distribution builds against the installed Go "+
+			"toolchain, which has them",
+			b.tree.Root, b.tree.Packages, someOf(missing, 5))
 	}
 
 	if len(fromGo) > 0 {
@@ -566,6 +581,18 @@ func (b *builder) dependencies(targets []*loader.Package, graph map[string]*load
 		out = append(out, resolved[p])
 	}
 	return out, nil
+}
+
+// someOf is a list of import paths, shortened.
+//
+// A program that imports os needs twenty-three packages the bootstrap closure
+// does not hold, and a refusal that names all of them is accurate and unread.
+// The first few and a count say the same thing in a line.
+func someOf(paths []string, n int) string {
+	if len(paths) <= n {
+		return strings.Join(paths, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(paths[:n], ", "), len(paths)-n)
 }
 
 // archivePaths splits a package list into the order the import configuration

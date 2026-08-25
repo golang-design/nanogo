@@ -61,6 +61,12 @@ nanogo copies the object header from it.
 
 ## Compile a program
 
+The examples below import `os`, which is outside the 27 packages a release
+tarball carries, so they are the `go install` path: nanogo takes the standard
+library from the toolchain on your machine. A tarball build is limited to what
+its tree holds until nanogo compiles more of the standard library, and it says
+which packages are missing when it is not.
+
 ```sh
 mkdir hello && cd hello && go mod init hello
 ```

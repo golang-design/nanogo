@@ -647,13 +647,53 @@ func TestBuildRefusesAStandardPackageTheDistributionDoesNotHold(t *testing.T) {
 	if err == nil {
 		t.Fatal("a dependency the distribution does not hold was accepted")
 	}
-	for _, want := range []string{root, "math/bits", "has 2 packages"} {
+	for _, want := range []string{root, "math/bits", "holds 2 packages"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %v does not mention %q", err, want)
 		}
 	}
 	if len(f.compiled) != 0 || len(f.linked) != 0 {
 		t.Error("the build compiled or linked after the dependency could not be resolved")
+	}
+}
+
+// TestBuildRefusesADependencyTheListingDidNotDescribe is the case with no
+// answer: nothing says whether the package is the tree's to supply, and the
+// only alternative to refusing is handing it to gc, which is the substitution
+// the command exists to prevent.
+func TestBuildRefusesADependencyTheListingDidNotDescribe(t *testing.T) {
+	root := writeDistribution(t, "runtime")
+	f := newFakeBuild(t, &buildOptions{Patterns: []string{"."}})
+	f.b.findRoot = func(string) (Root, error) {
+		return Root{Path: root, Origin: RootEnv, Nanogo: true}, nil
+	}
+	graph := f.b.loadPackages
+	f.b.loadPackages = func(export bool, patterns []string) ([]*loader.Package, error) {
+		pkgs, err := graph(export, patterns)
+		if err != nil || export {
+			return pkgs, err
+		}
+		return pkgs[:1], nil // the target, and none of what it depends on
+	}
+	err := f.b.run()
+	if err == nil {
+		t.Fatal("a dependency the listing did not describe was accepted")
+	}
+	for _, want := range []string{root, "math/bits", "did not describe"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %v does not mention %q", err, want)
+		}
+	}
+}
+
+// TestSomeOfShortensALongList keeps the refusal above readable. A program that
+// imports os needs twenty-three packages the closure does not hold.
+func TestSomeOfShortensALongList(t *testing.T) {
+	if got, want := someOf([]string{"io", "os"}, 5), "io, os"; got != want {
+		t.Errorf("someOf = %q, want %q", got, want)
+	}
+	if got, want := someOf([]string{"a", "b", "c"}, 2), "a, b and 1 more"; got != want {
+		t.Errorf("someOf = %q, want %q", got, want)
 	}
 }
 
