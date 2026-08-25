@@ -175,7 +175,7 @@ func checkAssembly(cfg *Config) error {
 func parseFiles(cfg *Config) ([]*syntax.File, *syntax.FileSet, error) {
 	fset := syntax.NewFileSet()
 	files := make([]*syntax.File, 0, len(cfg.Files))
-	var errs []error
+	var diags diagnostics
 	// The handler reports the position through the file set, because
 	// syntax.Error carries a bare offset and prints only its message. An
 	// error a user cannot locate is not a diagnostic (specs/052). A file that
@@ -183,28 +183,25 @@ func parseFiles(cfg *Config) ([]*syntax.File, *syntax.FileSet, error) {
 	// alternative is "<unknown position>: no such file", which says nothing.
 	current := ""
 	report := func(err syntax.Error) {
-		if len(errs) >= maxReportedErrors {
-			return
-		}
 		if p := fset.Position(err.Pos); p.Filename != "" {
-			errs = append(errs, fmt.Errorf("%s: %s", p, err.Msg))
+			diags.add(err.Pos, fmt.Errorf("%s: %s", p, err.Msg))
 			return
 		}
-		errs = append(errs, fmt.Errorf("%s: %s", current, err.Msg))
+		diags.add(err.Pos, fmt.Errorf("%s: %s", current, err.Msg))
 	}
 	for _, name := range cfg.Files {
 		current = name
 		f, err := syntax.ParseFile(fset, name, report, pragmaHandler, syntax.CheckBranches)
 		if f == nil {
-			if err != nil && len(errs) == 0 {
-				errs = append(errs, fmt.Errorf("%s: %v", name, err))
+			if err != nil && diags.len() == 0 {
+				diags.add(syntax.NoPos, fmt.Errorf("%s: %v", name, err))
 			}
 			continue
 		}
 		files = append(files, f)
 	}
-	if len(errs) > 0 {
-		return nil, nil, errors.Join(errs...)
+	if err := diags.err(); err != nil {
+		return nil, nil, err
 	}
 	return files, fset, nil
 }
@@ -262,16 +259,22 @@ func checkFiles(cfg *Config, imp *importer, files []*syntax.File, fset *syntax.F
 		Scopes:     make(map[syntax.Node]*types2.Scope),
 		Instances:  make(map[*syntax.Name]types2.Instance),
 	}
-	var errs []error
+	var diags diagnostics
 	conf := types2.Config{
 		Fset:      fset,
 		Sizes:     types2.SizesFor("gc", TargetArch),
 		GoVersion: cfg.Lang,
 		Importer:  imp,
 		Error: func(err error) {
-			if len(errs) < maxReportedErrors {
-				errs = append(errs, err)
+			// types2 reports one Error per mistake, with the continuation
+			// lines already folded into its message, so the position of the
+			// Error is the position the whole message is filed under.
+			var e types2.Error
+			if errors.As(err, &e) {
+				diags.add(e.Pos, err)
+				return
 			}
+			diags.add(syntax.NoPos, err)
 		},
 	}
 	// The name the checker is given is the import path, which is what
@@ -279,8 +282,8 @@ func checkFiles(cfg *Config, imp *importer, files []*syntax.File, fset *syntax.F
 	// command sends "main" for every main package, and that is the prefix the
 	// linker expects for one.
 	pkg, err = conf.Check(cfg.Package, files, info)
-	if len(errs) > 0 {
-		return nil, nil, errors.Join(errs...)
+	if e := diags.err(); e != nil {
+		return nil, nil, e
 	}
 	if err != nil {
 		return nil, nil, err

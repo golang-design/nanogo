@@ -76,15 +76,27 @@ At most ten errors are printed, then `too many errors`, unless `-e` is given.
 This matches `gc` and it matters for [004](004-conformance.md)'s L1 comparison,
 which compares first errors.
 
-Neither rule is implemented as written. `driver.Compile` collects errors in
-discovery order and joins them, and discovery order is file order because
-nothing in the compiler runs concurrently: `emitPackage` walks the function list
-and no goroutine is started anywhere in the non-test source. So the output is
-deterministic today for the reason the rule anticipated, and the rule is still
-what has to hold when [002](002-architecture.md)'s concurrent compile arrives.
-The limit is `driver.maxReportedErrors`, which is ten, and it stops collecting
-without printing the `too many errors` line that tells the reader there are
-more.
+The ordering rule is implemented. `driver.diagnostics` collects every message
+with the raw position it belongs to and sorts by that position before the limit
+is applied. Raw, not reported: `syntax.Pos` states that comparison uses raw and
+printing uses reported, and a raw position is a byte offset into the file set,
+so one comparison orders by file and then by offset. A message with no position
+sorts last, because an error the compiler could not locate must not displace the
+one the user can act on.
+
+Discovery order is not source order, and the corpus proved it rather than the
+reasoning. types2 reports a duplicate label where it meets it and an unused
+label only when it has finished the function body, so `test/label.go` came out
+with line 31 first and line 16 sixth. `test/import1.go`, `test/method1.go` and
+`test/method2.go` inverted the same way. All four were rejected for the right
+reason at the wrong first line until the sort was added. gc sorts in
+`base.FlushErrors` for this reason.
+
+The limit is `driver.maxReportedErrors`, which is ten. It is applied after the
+sort, so the ten messages kept are the ten the user reads first rather than the
+ten the checker found first. It still stops without printing the `too many
+errors` line that tells the reader there are more, and that half of the rule is
+unbuilt.
 
 ### Cascades
 
