@@ -19,12 +19,9 @@ import (
 // bytes padded to an even length.
 //
 // gc writes two members, __.PKGDEF holding the export data and _go_.o holding
-// the object. nanogo writes only the second, because specs/015-export-data.md
-// has no writer. That is legal for the two readers a build has: cmd/link skips
-// __.PKGDEF by name, and cmd/internal/archive, which go tool pack uses to
-// append the assembler's objects, treats it as optional. It is not legal for a
-// third: a package with no __.PKGDEF cannot be imported, which is the same
-// limit from the other side.
+// the object, and nanogo writes both. __.PKGDEF comes first, because
+// internal/exportdata.FindPackageDefinition reads member zero and does not
+// search. A package with no __.PKGDEF cannot be imported at all.
 const (
 	archiveMagic  = "!<arch>\n"
 	archiveHeader = 60
@@ -33,6 +30,10 @@ const (
 	// cmd/link skips a member whose name is short and whose extension is not
 	// .o or .syso, so the name is load-bearing and not a convention.
 	objectMember = "_go_.o"
+
+	// definitionMember is the name gc gives the export data. Every importer
+	// looks it up by this name.
+	definitionMember = "__.PKGDEF"
 )
 
 // writeTo writes the object, wrapped in an archive when pack is set.
@@ -45,6 +46,22 @@ func writeTo(w io.Writer, p *obj.Package, header string, pack bool) error {
 	if !pack {
 		return p.WriteObject(w, header)
 	}
+	return writeArchive(w, p, header, nil)
+}
+
+// writeArchive writes the archive -pack asks for.
+//
+// definition is the body of the __.PKGDEF member, which export.Definition
+// builds. When it is nil the archive carries the object alone, which is what
+// nanogo wrote before specs/015-export-data.md had a writer: legal for
+// cmd/link, which skips __.PKGDEF by name, and for cmd/internal/archive,
+// which treats it as optional, and not legal for an importer.
+//
+// Each member is built in memory first, because its header carries its length
+// and the length is only known once the member is written. Seeking back over
+// an io.Writer is not available and buffering is cheaper than making the
+// caller pass a file.
+func writeArchive(w io.Writer, p *obj.Package, header string, definition []byte) error {
 	var body sizedBuffer
 	if err := p.WriteObject(&body, header); err != nil {
 		return err
@@ -52,16 +69,26 @@ func writeTo(w io.Writer, p *obj.Package, header string, pack bool) error {
 	if _, err := io.WriteString(w, archiveMagic); err != nil {
 		return err
 	}
-	if err := writeArchiveHeader(w, objectMember, len(body.b)); err != nil {
+	if definition != nil {
+		if err := writeArchiveMember(w, definitionMember, definition); err != nil {
+			return err
+		}
+	}
+	return writeArchiveMember(w, objectMember, body.b)
+}
+
+// writeArchiveMember writes one member, its header and its padding.
+func writeArchiveMember(w io.Writer, name string, body []byte) error {
+	if err := writeArchiveHeader(w, name, len(body)); err != nil {
 		return err
 	}
-	if _, err := w.Write(body.b); err != nil {
+	if _, err := w.Write(body); err != nil {
 		return err
 	}
 	// A member is padded to an even length, and the padding is not counted in
 	// the header. A reader that trusts the header and not the padding lands
 	// one byte inside the next header without it.
-	if len(body.b)%2 != 0 {
+	if len(body)%2 != 0 {
 		if _, err := w.Write([]byte{0}); err != nil {
 			return err
 		}
