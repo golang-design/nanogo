@@ -288,3 +288,148 @@ func gcOutput(t *testing.T, h *harness) []byte {
 	defer os.Remove(out)
 	return runProgram(t, out)
 }
+
+// globalProgram reads every package-level variable it declares.
+//
+// The declarations cover the four kinds of data symbol. greeting and n hold
+// contents the linker writes: a string header pointing at a constant, and an
+// integer. zero and buf are zero-filled and cost no bytes in the object. p is
+// zero-filled and scanned, because a pointer variable is a root the collector
+// follows.
+//
+// sl and computed are the other half of the rule. Neither initialiser is a
+// constant, so both symbols start zero and the initialisation function assigns
+// them before main runs. A variable silently left zero would print 0 here and
+// the test would say so.
+const globalProgram = `package main
+
+var greeting = "hello"
+var n = 42
+var flag = true
+var zero int
+var empty string
+var buf [8]byte
+var p *int
+var sl = []int{1, 2, 3}
+var computed = n * 2
+
+type myInt int
+
+var typed myInt = 7
+
+func main() {
+	println(greeting)
+	println(n)
+	println(flag)
+	println(zero)
+	println(len(empty))
+	println(len(buf))
+	println(p == nil)
+	println(len(sl), sl[0], sl[2])
+	println(computed)
+	println(int(typed))
+}
+`
+
+// TestToolexecReadsPackageLevelVariables builds, links and runs a program
+// whose answers are all in package-level variables.
+func TestToolexecReadsPackageLevelVariables(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/globals\n\ngo 1.27\n",
+		"main.go": globalProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "globals", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	got := runProgram(t, filepath.Join(h.mod, "globals"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%q\nand gc's printed\n%q", got, want)
+	}
+	if want := "hello\n42\ntrue\n0\n0\n8\ntrue\n3 1 3\n84\n7\n"; string(got) != want {
+		t.Errorf("the program printed\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestGlobalSymbolsMatchGc compares the data symbols nanogo writes against the
+// ones gc writes for the same source.
+//
+// Three things have to agree, and go tool nm reports all three: the name,
+// because the linker resolves a variable by name and one character of drift is
+// an undefined symbol; the size, because the linker allocates it; and the
+// section letter, because it says whether the linker copies bytes or allocates
+// zeros.
+//
+// main.sl is the one divergence and it is stated rather than skipped. gc lays
+// a composite literal out into a static temporary and writes a slice header
+// pointing at it, so the symbol carries contents. nanogo has no static
+// temporary, so the symbol is zero-filled and the initialisation function
+// builds the slice before main runs. The size is the same and the program
+// prints the same answer; only who writes the bytes differs.
+func TestGlobalSymbolsMatchGc(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/globalsyms\n\ngo 1.27\n",
+		"main.go": globalProgram,
+	}, []string{"main"})
+
+	mine := dataSymbols(t, compileWithNanogo(t, h))
+	theirs := dataSymbols(t, compileWithGc(t, h))
+	for _, name := range []string{
+		"main.greeting", "main.n", "main.flag", "main.zero", "main.empty",
+		"main.buf", "main.p", "main.sl", "main.computed", "main.typed",
+	} {
+		got, ok := mine[name]
+		if !ok {
+			t.Errorf("nanogo's object defines no %s", name)
+			continue
+		}
+		want, ok := theirs[name]
+		if !ok {
+			t.Errorf("gc's object defines no %s, so the expectation is wrong", name)
+			continue
+		}
+		if name == "main.sl" {
+			if got != "24 B" || want != "24 D" {
+				t.Errorf("nanogo writes %s as %s and gc writes it as %s; the composite literal case changed", name, got, want)
+			}
+			continue
+		}
+		if got != want {
+			t.Errorf("nanogo writes %s as %s and gc writes it as %s", name, got, want)
+		}
+	}
+}
+
+// dataSymbols returns the size and the section letter of every symbol an
+// object defines under the main package's name.
+//
+// A definition has an address and a reference does not, which is how go tool
+// nm shows the difference: an undefined symbol prints as U with no size.
+// nanogo names a symbol of the package being compiled by name even when the
+// same object defines it, so one name can appear as both.
+func dataSymbols(t *testing.T, object string) map[string]string {
+	t.Helper()
+	cmd := exec.Command(goTool(t), "tool", "nm", "-size", object)
+	cmd.Env = env(nil)
+	b, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go tool nm -size %s: %v", object, err)
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		// address, size, code, name
+		if len(f) != 4 || !strings.HasPrefix(f[3], "main.") {
+			continue
+		}
+		if f[2] == "U" || f[2] == "T" {
+			continue
+		}
+		out[f[3]] = f[1] + " " + f[2]
+	}
+	return out
+}
