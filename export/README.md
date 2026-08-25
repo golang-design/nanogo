@@ -120,6 +120,17 @@ comes from `writer.go` for the public part of a declaration and from
 | A local alias is stripped to its right-hand side | Upstream does the same, to keep two local aliases from colliding on one symbol. |
 | An empty interface is written as a reference to `any` | Both spellings are one type. The reader has already lost the difference: `types2.NewInterfaceType` returns the one canonical empty interface for `interface{}` and for `any`, so the writer cannot tell them apart. Only the printed form differs. |
 
+### What the writer made required elsewhere
+
+A package that can be imported owes an importer more than its export data. gc
+refers to an imported type twice, directly for the runtime type descriptor and
+through DWARF for `go:info.<path>.<Type>`, and `cmd/link` builds the second out
+of the first, so both come back to `type:<path>.<Type>`. nanogo writes no
+descriptor for a declared type, and `driver/types.go` refuses such a package by
+name rather than letting the build fail at link time. The gap is
+[specs/032](../specs/032-type-descriptors-and-itabs.md) and not this package's;
+[specs/015](../specs/015-export-data.md) records the measurement.
+
 ### Why a generic declaration is refused
 
 A generic declaration cannot be written without a function body, and the

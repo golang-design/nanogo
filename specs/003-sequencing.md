@@ -199,7 +199,9 @@ language, and each one is there for a claim:
 | a package that imports `math/bits` and `strconv` | the same, against archives the toolchain ships |
 | a library nanogo compiled and an importer `gc` compiled | `gc` reads the export data nanogo *wrote* ([015](015-export-data.md)) |
 | a library that declares no function at all | the archive is export data and nothing else, so nothing but the format is under test |
-| `internal/goarch` and `internal/goos` on the allowlist | nanogo compiles two packages the closure of every Go program contains, and `gc` compiles the other 27 against them |
+| `internal/goos` on the allowlist | nanogo compiles a package the closure of every Go program contains, and `gc` compiles the other 28 against it |
+| six library shapes, each linked and run | the seam holds one step past the cross-read, where a symbol the library owes is first observable |
+| seven type declarations, each refused by name | a package an importer could not link against fails at compile time and not at link time ([032](032-type-descriptors-and-itabs.md)) |
 | a variadic call | the slice literal allocates, and the descriptor `rtype` emitted is one `mallocgc` accepts |
 | the same call under `runtime.GC()` | the collector follows the pointer mask nanogo wrote |
 | a read of `os.Stdout` | the standard library's `init` ran, so the initialisation record reaches it ([040](040-object-format.md)) |
