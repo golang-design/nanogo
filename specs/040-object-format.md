@@ -242,7 +242,9 @@ to be of size zero and leaves it out of the schedule. The cost is a record
 nanogo writes where `gc` writes none, for a package that has no init work and
 no import with any; it holds no functions, so the linker keeps it for ordering
 and the runtime never sees it. Guessing the other way would drop an edge and
-run an init late, which no test can see.
+run an init late. That failure is silent at link time: the program links, and
+only a program written to observe the order catches it, which is what
+`internal/e2e/inittask_test.go` does.
 
 Whether a record was written travels into the export data, so that an importer
 orders its own record after this one ([015](015-export-data.md)).
