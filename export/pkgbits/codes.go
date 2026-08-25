@@ -54,3 +54,23 @@ const (
 	ObjVar
 	ObjStub
 )
+
+// A Code is a value written with its own sync marker, so that a reader that
+// is checking markers can tell which enumeration it is decoding.
+//
+// nanogo's reader dropped this interface, because only the encoder calls it.
+// The writer half brings it back.
+type Code interface {
+	// Marker returns the SyncMarker for the Code's dynamic type.
+	Marker() SyncMarker
+	// Value returns the Code's ordinal value.
+	Value() int
+}
+
+func (c CodeVal) Marker() SyncMarker  { return SyncVal }
+func (c CodeType) Marker() SyncMarker { return SyncType }
+func (c CodeObj) Marker() SyncMarker  { return SyncCodeObj }
+
+func (c CodeVal) Value() int  { return int(c) }
+func (c CodeType) Value() int { return int(c) }
+func (c CodeObj) Value() int  { return int(c) }
