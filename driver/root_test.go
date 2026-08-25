@@ -12,9 +12,9 @@ import (
 	"testing"
 )
 
-// distribution writes a tree with the shape of a nanogo release: a VERSION
+// distributionTree writes a tree with the shape of a nanogo release: a VERSION
 // file and a per-target archive directory.
-func distribution(t *testing.T) string {
+func distributionTree(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "pkg", TargetDir()), 0o755); err != nil {
@@ -32,7 +32,7 @@ func distribution(t *testing.T) string {
 func noExecutable() (string, error) { return "", errors.New("unknown") }
 
 func TestFindRootPrefersTheEnvironment(t *testing.T) {
-	dir := distribution(t)
+	dir := distributionTree(t)
 	getenv := func(name string) string {
 		if name == RootEnv {
 			return dir
@@ -72,7 +72,7 @@ func TestFindRootRejectsAnEnvironmentThatIsNotADistribution(t *testing.T) {
 }
 
 func TestFindRootFindsTheTreeTheBinaryIsIn(t *testing.T) {
-	dir := distribution(t)
+	dir := distributionTree(t)
 	exe := func() (string, error) { return filepath.Join(dir, "bin", "nanogo"), nil }
 	root, err := FindRoot(func(string) string { return "" }, exe, "/usr/local/go")
 	if err != nil {
@@ -109,7 +109,7 @@ func TestFindRootWithNothingToFind(t *testing.T) {
 }
 
 func TestIsNanogoRoot(t *testing.T) {
-	full := distribution(t)
+	full := distributionTree(t)
 	if !IsNanogoRoot(full) {
 		t.Errorf("%s is a distribution and was not recognised", full)
 	}

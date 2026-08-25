@@ -118,9 +118,16 @@ type buildPackage struct {
 	// Archive is the file the linker reads.
 	Archive string
 
-	// Producer is who compiled it: "nanogo", or the identity of the toolchain
-	// that did.
+	// Producer is who compiled it: "nanogo", or the identity of the compiler
+	// that did. A distribution's archives carry the producer their manifest
+	// records, which is where "gc go1.27.0" comes from.
 	Producer string
+
+	// Nanogo reports whether nanogo compiled it. It is a field and not a
+	// comparison against [nanogoProducer], because a distribution records a
+	// nanogo archive with the build identity that wrote it and no two of
+	// those strings are equal.
+	Nanogo bool
 }
 
 // nanogoProducer is the producer string of a package nanogo compiled itself.
@@ -138,6 +145,13 @@ type builder struct {
 	dir   string // the working directory, which is what -o is relative to
 	work  string // the scratch directory holding the objects and the configurations
 	goCmd string // the go binary
+
+	// tree is the nanogo distribution the standard library comes from, and is
+	// nil when the build takes it from the installed Go toolchain.
+	tree *distribution
+
+	// goEnv is added to the environment of every go command this build runs.
+	goEnv []string
 
 	// runGo runs the go command and returns its standard output.
 	runGo func(args ...string) ([]byte, error)
@@ -161,10 +175,15 @@ type builder struct {
 // the packages the user named, and calls the linker itself, so there is no
 // allowlist, no environment variable and no -toolexec on the command line.
 //
-// What nanogo does not do, and must not appear to do: it compiles none of the
-// standard library and none of the runtime. Those archives are built by the
-// installed Go toolchain and the executable is produced by go tool link, per
-// specs/045-linker.md, which records that nanogo has no linker.
+// The standard library comes from a nanogo distribution when [FindRoot]
+// resolves one, archive by archive out of its pkg/GOOS_GOARCH tree, and from
+// the installed Go toolchain otherwise. Either way nanogo compiles none of it:
+// what nanogo compiled is counted per package and printed on every build, so a
+// program built entirely from gc's archives says so.
+//
+// The executable is produced by go tool link, per specs/045-linker.md, which
+// records that nanogo has no linker. That is stated in the report rather than
+// left for a reader to discover.
 func RunBuild(env *Env, args []string) (int, error) {
 	opts, err := ParseBuildArgs(args)
 	if err != nil {
@@ -185,7 +204,7 @@ func RunBuild(env *Env, args []string) (int, error) {
 func newBuilder(env *Env, opts *buildOptions) (*builder, error) {
 	goCmd, err := exec.LookPath("go")
 	if err != nil {
-		return nil, fmt.Errorf("nanogo build needs the go command for the standard library and the linker: %v", err)
+		return nil, fmt.Errorf("nanogo build needs the go command to resolve the packages you name and to link them: %v", err)
 	}
 	dir, err := os.Getwd()
 	if err != nil {
@@ -227,15 +246,23 @@ func (b *builder) run() error {
 		return err
 	}
 	if root.Nanogo {
-		// The distribution's own archives are the honest source, and nothing
-		// reads them yet. Reporting that is the only answer that does not
-		// hand the user gc-built archives under a nanogo label.
-		return fmt.Errorf("%s holds a nanogo distribution and nanogo cannot read its pkg/%s tree yet: "+
-			"the release job that builds it is unbuilt; unset %s to build against the installed Go toolchain",
-			root.Path, TargetDir(), RootEnv)
+		tree, err := openDistribution(root.Path)
+		if err != nil {
+			return err
+		}
+		if err := tree.checkToolchain(goversion); err != nil {
+			return err
+		}
+		b.tree = tree
+		// The tree's archives were built with CGO_ENABLED=0, per
+		// specs/000-decisions.md decision 8 and dist.Closure. Resolving the
+		// package graph with any other setting asks for a dependency set the
+		// tree was never built to hold, and the difference would arrive as a
+		// missing archive rather than as a decision anybody took.
+		b.goEnv = append(b.goEnv, "CGO_ENABLED=0")
 	}
 
-	targets, lang, err := b.targets()
+	targets, graph, lang, err := b.targets()
 	if err != nil {
 		return err
 	}
@@ -245,18 +272,17 @@ func (b *builder) run() error {
 	if err := b.checkOutput(mains); err != nil {
 		return err
 	}
-	deps, depPaths, err := b.dependencies(targets)
+	depPkgs, err := b.dependencies(targets, graph, goversion)
 	if err != nil {
 		return err
 	}
+	depPaths, deps := archivePaths(depPkgs)
 
 	// One producer record per package that reaches the link. The dependency
 	// records are written before anything is compiled, because the archives
-	// already exist by the time go list answered.
-	pkgs := make([]buildPackage, 0, len(targets)+len(depPaths))
-	for _, p := range depPaths {
-		pkgs = append(pkgs, buildPackage{Path: p, Archive: deps[p], Producer: goversion})
-	}
+	// already exist by the time they were resolved.
+	pkgs := make([]buildPackage, 0, len(targets)+len(depPkgs))
+	pkgs = append(pkgs, depPkgs...)
 
 	compileCfg, err := b.writeImportCfg("importcfg", depPaths, deps, nil)
 	if err != nil {
@@ -287,13 +313,13 @@ func (b *builder) run() error {
 			return err
 		}
 		own[t.ImportPath] = archive
-		pkgs = append(pkgs, buildPackage{Path: t.ImportPath, Archive: archive, Producer: nanogoProducer})
+		pkgs = append(pkgs, buildPackage{Path: t.ImportPath, Archive: archive, Producer: nanogoProducer, Nanogo: true})
 	}
 
 	if err := b.link(mains, depPaths, deps, own); err != nil {
 		return err
 	}
-	b.report(pkgs, root, goversion)
+	b.report(pkgs, root, len(mains) > 0)
 	return nil
 }
 
@@ -318,14 +344,19 @@ func (b *builder) toolchain() (goroot, goversion string, err error) {
 // the packages the patterns matched, which -deps cannot answer because it
 // mixes the matches with everything beneath them. The second loads the graph,
 // which is where the file lists and the dependency closure come from.
-func (b *builder) targets() ([]*loader.Package, string, error) {
+//
+// The graph is returned as well as the targets. It already says of every
+// dependency whether it is a standard library package, which is what decides
+// where the archive may come from, and asking the go command a third time
+// would be asking a question already answered.
+func (b *builder) targets() ([]*loader.Package, map[string]*loader.Package, string, error) {
 	names, lang, err := b.rootPaths()
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 	graph, err := b.loadPackages(false, b.opts.Patterns)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 	index := make(map[string]*loader.Package, len(graph))
 	for _, p := range graph {
@@ -335,7 +366,7 @@ func (b *builder) targets() ([]*loader.Package, string, error) {
 	for _, name := range names {
 		p := index[name]
 		if p == nil {
-			return nil, "", fmt.Errorf("go list named %s and then did not describe it", name)
+			return nil, nil, "", fmt.Errorf("go list named %s and then did not describe it", name)
 		}
 		targets = append(targets, p)
 	}
@@ -345,9 +376,9 @@ func (b *builder) targets() ([]*loader.Package, string, error) {
 	// below, because nanogo writes no export data.
 	sort.Slice(targets, func(i, j int) bool { return targets[i].ImportPath < targets[j].ImportPath })
 	if err := b.checkTargets(targets); err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
-	return targets, lang, nil
+	return targets, index, lang, nil
 }
 
 // rootPaths asks which packages the patterns matched, and what the main
@@ -428,9 +459,11 @@ func (b *builder) checkTargets(targets []*loader.Package) error {
 				return &UnsupportedError{
 					Package: t.ImportPath,
 					What:    "a package that depends on " + dep + ", which this command also compiles",
-					Detail: "the archive nanogo writes carries no export data, so nothing can import it; " +
-						"specs/015-export-data.md has no writer. Build " + dep + " with the go command, or " +
-						"name only one of the two",
+					Detail: "this command writes one import configuration before it compiles anything, so a " +
+						"target has no packagefile entry for another target. The archive nanogo writes does " +
+						"carry export data (specs/015-export-data.md), so this is an ordering nanogo build " +
+						"does not do yet and not a limit of the format. Build " + dep + " with the go " +
+						"command, or name only one of the two",
 				}
 			}
 		}
@@ -438,14 +471,24 @@ func (b *builder) checkTargets(targets []*loader.Package) error {
 	return nil
 }
 
-// dependencies resolves every package beneath the targets to an archive.
+// dependencies resolves every package beneath the targets to an archive and to
+// the compiler that produced it.
 //
-// The archives are the installed toolchain's, and asking for them is what
-// builds them. The dependency set is already transitively closed, so the go
-// command compiles exactly the packages beneath the targets and never the
-// targets themselves: a package the user asked nanogo to compile must not be
-// compiled by gc, however cheap that would be.
-func (b *builder) dependencies(targets []*loader.Package) (map[string]string, []string, error) {
+// Two sources, and which one a package comes from is decided by where it is
+// rather than by what is convenient. A nanogo distribution holds the standard
+// library, so every standard library dependency is taken from its
+// pkg/GOOS_GOARCH tree, named by the manifest and checked against it. Anything
+// else is the go command's to build, and asking for its archive is what builds
+// it. Without a distribution every dependency is the go command's, which is
+// what a source checkout does.
+//
+// The dependency set is transitively closed already, so the targets themselves
+// are never compiled by anything but nanogo: a package the user asked nanogo
+// to compile must not be compiled by gc, however cheap that would be.
+//
+// The result is sorted by import path, so that two runs over the same patterns
+// write the same import configuration (specs/053-determinism.md).
+func (b *builder) dependencies(targets []*loader.Package, graph map[string]*loader.Package, goversion string) ([]buildPackage, error) {
 	own := make(map[string]bool, len(targets))
 	for _, t := range targets {
 		own[t.ImportPath] = true
@@ -465,34 +508,76 @@ func (b *builder) dependencies(targets []*loader.Package) (map[string]string, []
 	if len(paths) == 0 {
 		// go list with no pattern lists the current directory, which would
 		// answer with the target itself.
-		return map[string]string{}, nil, nil
+		return nil, nil
 	}
 
-	pkgs, err := b.loadPackages(true, paths)
-	if err != nil {
-		return nil, nil, err
-	}
-	index := make(map[string]*loader.Package, len(pkgs))
-	for _, p := range pkgs {
-		index[p.ImportPath] = p
-	}
-	archives := make(map[string]string, len(paths))
+	resolved := make(map[string]buildPackage, len(paths))
+	var fromGo, missing []string
 	for _, p := range paths {
-		dep := index[p]
-		switch {
-		case dep == nil:
-			return nil, nil, fmt.Errorf("%s: the go command did not describe this dependency", p)
-		case dep.Err != nil:
-			return nil, nil, dep.Err
-		case dep.Export == "":
-			// A missing packagefile line reaches the user as an undefined
-			// symbol from the linker, which names neither the package nor the
-			// reason.
-			return nil, nil, fmt.Errorf("%s: the go command built no archive for this dependency", p)
+		if bp, ok := b.tree.lookup(p); ok {
+			resolved[p] = bp
+			continue
 		}
-		archives[p] = dep.Export
+		if b.tree != nil && graph[p] != nil && graph[p].Standard {
+			// Substituting the installed toolchain's copy here would produce a
+			// working program whose standard library did not come from the
+			// tree the build says it used, which is the one lie this command
+			// exists to avoid.
+			missing = append(missing, p)
+			continue
+		}
+		fromGo = append(fromGo, p)
 	}
-	return archives, paths, nil
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("the distribution at %s holds %d packages and none of them is %s: "+
+			"a standard library package the tree does not carry cannot be supplied from the installed "+
+			"toolchain without the build ceasing to be a build against this tree",
+			b.tree.Root, b.tree.Packages, strings.Join(missing, ", "))
+	}
+
+	if len(fromGo) > 0 {
+		pkgs, err := b.loadPackages(true, fromGo)
+		if err != nil {
+			return nil, err
+		}
+		index := make(map[string]*loader.Package, len(pkgs))
+		for _, p := range pkgs {
+			index[p.ImportPath] = p
+		}
+		for _, p := range fromGo {
+			dep := index[p]
+			switch {
+			case dep == nil:
+				return nil, fmt.Errorf("%s: the go command did not describe this dependency", p)
+			case dep.Err != nil:
+				return nil, dep.Err
+			case dep.Export == "":
+				// A missing packagefile line reaches the user as an undefined
+				// symbol from the linker, which names neither the package nor
+				// the reason.
+				return nil, fmt.Errorf("%s: the go command built no archive for this dependency", p)
+			}
+			resolved[p] = buildPackage{Path: p, Archive: dep.Export, Producer: goversion}
+		}
+	}
+
+	out := make([]buildPackage, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, resolved[p])
+	}
+	return out, nil
+}
+
+// archivePaths splits a package list into the order the import configuration
+// is written in and the path to archive lookup it is written from.
+func archivePaths(pkgs []buildPackage) ([]string, map[string]string) {
+	paths := make([]string, 0, len(pkgs))
+	archives := make(map[string]string, len(pkgs))
+	for _, p := range pkgs {
+		paths = append(paths, p.Path)
+		archives[p.Path] = p.Archive
+	}
+	return paths, archives
 }
 
 // writeImportCfg writes an import configuration and returns its path.
@@ -634,34 +719,83 @@ func sourceFiles(t *loader.Package) []string {
 // report says what nanogo compiled and what it did not.
 //
 // The summary is printed on every build and not only under -v. nanogo compiles
-// one package of the twenty-nine a program needs to start, and a command that
-// printed nothing would read as though it had built the program alone.
-func (b *builder) report(pkgs []buildPackage, root Root, goversion string) {
+// one package of the twenty-eight a program needs to start, and a command that
+// printed nothing would read as though it had built the program alone. Every
+// producer that is not nanogo is named with its count, so a program whose
+// whole standard library came from gc says so in the first line of output.
+//
+// The second line is printed on every build too. It says which tree the
+// standard library came from and that the executable was written by go tool
+// link, because a reader who is told what nanogo compiled and not what wrote
+// the program has been told half of it.
+func (b *builder) report(pkgs []buildPackage, root Root, linked bool) {
 	mine := 0
 	for _, p := range pkgs {
-		if p.Producer == nanogoProducer {
+		if p.Nanogo {
 			mine++
 		}
 	}
-	fmt.Fprintf(b.env.Stderr,
-		"nanogo: %d of %d packages compiled by nanogo; %d by %s (everything not named on the command line)\n",
-		mine, len(pkgs), len(pkgs)-mine, goversion)
+	var line strings.Builder
+	fmt.Fprintf(&line, "nanogo: %d of %d packages compiled by nanogo", mine, len(pkgs))
+	for _, g := range otherProducers(pkgs) {
+		fmt.Fprintf(&line, "; %d by %s", g.Count, g.Producer)
+	}
+	if mine < len(pkgs) {
+		line.WriteString(" (everything not named on the command line)")
+	}
+	fmt.Fprintln(b.env.Stderr, line.String())
+
+	fmt.Fprintf(b.env.Stderr, "nanogo: the standard library and the runtime come from %s (%s)\n", root.Path, root.Origin)
+	if linked {
+		fmt.Fprintf(b.env.Stderr, "nanogo: the executable was written by go tool link; nanogo has no linker (specs/045-linker.md)\n")
+	}
 	if !b.opts.Verbose {
 		return
 	}
-	fmt.Fprintf(b.env.Stderr, "nanogo: the standard library and the runtime come from %s (%s)\n", root.Path, root.Origin)
-	fmt.Fprintf(b.env.Stderr, "nanogo: the executable was written by go tool link; nanogo has no linker (specs/045-linker.md)\n")
 	for _, p := range pkgs {
-		if p.Producer == nanogoProducer {
+		if p.Nanogo {
 			fmt.Fprintf(b.env.Stderr, "nanogo: %s compiled by %s\n", p.Path, p.Producer)
 		}
 	}
+}
+
+// producerCount is one compiler and how many archives of a build it wrote.
+type producerCount struct {
+	Producer string
+	Count    int
+}
+
+// otherProducers counts the packages nanogo did not compile, grouped by
+// producer and ordered by producer name.
+//
+// A slice and not a map. specs/053-determinism.md forbids ranging over a map
+// on a path that produces output, and this path produces the line a user
+// reads.
+func otherProducers(pkgs []buildPackage) []producerCount {
+	index := make(map[string]int)
+	var out []producerCount
+	for _, p := range pkgs {
+		if p.Nanogo {
+			continue
+		}
+		if i, ok := index[p.Producer]; ok {
+			out[i].Count++
+			continue
+		}
+		index[p.Producer] = len(out)
+		out = append(out, producerCount{Producer: p.Producer, Count: 1})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Producer < out[j].Producer })
+	return out
 }
 
 // execGo runs the go command in the working directory.
 func (b *builder) execGo(args ...string) ([]byte, error) {
 	cmd := exec.Command(b.goCmd, args...)
 	cmd.Dir = b.dir
+	if len(b.goEnv) > 0 {
+		cmd.Env = append(os.Environ(), b.goEnv...)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -679,5 +813,8 @@ func (b *builder) execGo(args ...string) ([]byte, error) {
 // already knows how to ask the go command and decode the answer.
 func (b *builder) listPackages(export bool, patterns []string) ([]*loader.Package, error) {
 	g := &loader.GoList{Cmd: b.goCmd, Dir: b.dir, Export: export}
+	if len(b.goEnv) > 0 {
+		g.Env = append(os.Environ(), b.goEnv...)
+	}
 	return g.Load(patterns...)
 }

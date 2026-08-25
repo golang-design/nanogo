@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -255,7 +256,7 @@ func TestCheckTargetsRefusesByName(t *testing.T) {
 			{ImportPath: "m", Name: "main", GoFiles: []string{"a.go"},
 				ImportPaths: []string{"m/lib"}, Deps: []string{"m/lib"}},
 			{ImportPath: "m/lib", Name: "lib", GoFiles: []string{"b.go"}},
-		}, "no export data"},
+		}, "no packagefile entry for another target"},
 		// The edge may be transitive. dependencies drops a target from the
 		// closure, so an unchecked transitive edge would reach go tool link as
 		// a missing package instead of a diagnostic.
@@ -304,13 +305,14 @@ func TestDependenciesResolveArchives(t *testing.T) {
 		}, nil
 	}
 	targets := []*loader.Package{{ImportPath: "m", Deps: []string{"fmt", "internal/abi", unsafePkg, "m"}}}
-	archives, paths, err := b.dependencies(targets)
+	deps, err := b.dependencies(targets, nil, "go1.27.0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// unsafe has no archive and the target is not its own dependency. The
 	// order is sorted, so two runs write the same import configuration.
 	want := []string{"fmt", "internal/abi"}
+	paths, archives := archivePaths(deps)
 	if !reflect.DeepEqual(paths, want) {
 		t.Errorf("dependency paths = %q, want %q", paths, want)
 	}
@@ -320,18 +322,23 @@ func TestDependenciesResolveArchives(t *testing.T) {
 	if archives["fmt"] != "/cache/fmt.a" {
 		t.Errorf("fmt resolved to %q", archives["fmt"])
 	}
+	// The producer is the toolchain that built the archive, and it is what
+	// the report counts against nanogo's own work.
+	if deps[0].Producer != "go1.27.0" || deps[0].Nanogo {
+		t.Errorf("fmt was recorded as %+v, want gc's with Nanogo false", deps[0])
+	}
 }
 
 func TestDependenciesOfAPackageThatImportsNothing(t *testing.T) {
 	b, _ := testBuilder(t, &buildOptions{})
 	// The seam fails the test if it is called. go list with no pattern lists
 	// the current directory, which would answer with the target itself.
-	archives, paths, err := b.dependencies([]*loader.Package{{ImportPath: "m", Deps: []string{unsafePkg}}})
+	deps, err := b.dependencies([]*loader.Package{{ImportPath: "m", Deps: []string{unsafePkg}}}, nil, "go1.27.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) != 0 || len(archives) != 0 {
-		t.Errorf("dependencies = %q, %v, want both empty", paths, archives)
+	if len(deps) != 0 {
+		t.Errorf("dependencies = %v, want none", deps)
 	}
 }
 
@@ -352,7 +359,7 @@ func TestDependenciesRefuseAMissingArchive(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := testBuilder(t, &buildOptions{})
 			b.loadPackages = func(bool, []string) ([]*loader.Package, error) { return tt.listed, nil }
-			_, _, err := b.dependencies([]*loader.Package{{ImportPath: "m", Deps: []string{"fmt"}}})
+			_, err := b.dependencies([]*loader.Package{{ImportPath: "m", Deps: []string{"fmt"}}}, nil, "go1.27.0")
 			if err == nil {
 				t.Fatal("the dependency was accepted")
 			}
@@ -460,6 +467,8 @@ func newFakeBuild(t *testing.T, opts *buildOptions) *fakeBuild {
 	}
 	f.b.loadPackages = func(export bool, patterns []string) ([]*loader.Package, error) {
 		if !export {
+			// go list -deps describes the dependencies as well as the match,
+			// and Standard is what says where an archive may come from.
 			return []*loader.Package{{
 				ImportPath:  "example.com/hello",
 				Name:        "main",
@@ -467,6 +476,10 @@ func newFakeBuild(t *testing.T, opts *buildOptions) *fakeBuild {
 				GoFiles:     []string{"main.go"},
 				ImportPaths: []string{"math/bits"},
 				Deps:        []string{"math/bits", unsafePkg},
+			}, {
+				ImportPath: "math/bits",
+				Name:       "bits",
+				Standard:   true,
 			}}, nil
 		}
 		return []*loader.Package{{ImportPath: "math/bits", Export: "/cache/bits.a"}}, nil
@@ -562,19 +575,110 @@ func TestBuildStopsWhenTheCompilerRefuses(t *testing.T) {
 	}
 }
 
-func TestBuildRefusesANanogoDistributionItCannotRead(t *testing.T) {
+// TestBuildTakesTheStandardLibraryFromTheDistribution is the whole claim a
+// downloaded nanogo makes: the archives come out of the tree beside the
+// binary, and the go command never builds one of them.
+func TestBuildTakesTheStandardLibraryFromTheDistribution(t *testing.T) {
+	root := writeDistribution(t, "math/bits")
 	f := newFakeBuild(t, &buildOptions{Patterns: []string{"."}})
 	f.b.findRoot = func(string) (Root, error) {
-		return Root{Path: "/opt/nanogo", Origin: RootEnv, Nanogo: true}, nil
+		return Root{Path: root, Origin: "the tree the nanogo binary is installed in", Nanogo: true}, nil
+	}
+	graph := f.b.loadPackages
+	f.b.loadPackages = func(export bool, patterns []string) ([]*loader.Package, error) {
+		if export {
+			// Asking for an export file is what builds the package with gc. A
+			// distribution exists so that this call is never made for the
+			// standard library.
+			t.Errorf("the build asked the go command to build %q, which the distribution holds", patterns)
+		}
+		return graph(export, patterns)
+	}
+	if err := f.b.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	archive := filepath.Join(root, "pkg", TargetDir(), "math", "bits.a")
+	if len(f.compiled) != 1 {
+		t.Fatalf("nanogo compiled %d packages, want 1", len(f.compiled))
+	}
+	if file, ok := f.compiled[0].ImportCfg.PackageFile("math/bits"); !ok || file != archive {
+		t.Errorf("the import configuration resolves math/bits to %q, %v, want %q", file, ok, archive)
+	}
+	if len(f.linked) != 1 {
+		t.Fatalf("the linker ran %d times, want 1", len(f.linked))
+	}
+	if !strings.Contains(strings.Join(f.linked[0], " "), "tool link") {
+		t.Errorf("the link command was %q", f.linked[0])
+	}
+
+	// The honesty line, with the producer the manifest records rather than
+	// the release of the toolchain that happens to be installed.
+	out := f.stderr.String()
+	for _, want := range []string{
+		"nanogo: 1 of 2 packages compiled by nanogo; 1 by gc " + treeGoVersion,
+		"the standard library and the runtime come from " + root,
+		"go tool link",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not contain %q:\n%s", want, out)
+		}
+	}
+
+	// The tree's archives were built with cgo off, so the graph is resolved
+	// with cgo off. A different setting asks for dependencies the tree was
+	// never built to hold.
+	if !slices.Contains(f.b.goEnv, "CGO_ENABLED=0") {
+		t.Errorf("the go command environment is %q, want CGO_ENABLED=0 in it", f.b.goEnv)
+	}
+}
+
+// TestBuildRefusesAStandardPackageTheDistributionDoesNotHold is the one
+// refusal left on this path, and it says what is true: the tree does not carry
+// the package. Substituting the installed toolchain's copy would produce a
+// program whose standard library did not come from the tree the build named.
+func TestBuildRefusesAStandardPackageTheDistributionDoesNotHold(t *testing.T) {
+	root := writeDistribution(t, "runtime")
+	f := newFakeBuild(t, &buildOptions{Patterns: []string{"."}})
+	f.b.findRoot = func(string) (Root, error) {
+		return Root{Path: root, Origin: RootEnv, Nanogo: true}, nil
 	}
 	err := f.b.run()
 	if err == nil {
-		t.Fatal("a distribution nanogo cannot read was accepted")
+		t.Fatal("a dependency the distribution does not hold was accepted")
 	}
-	// The alternative is to fall back to the toolchain's archives while
-	// NANOGOROOT says the distribution was used, which is the one lie this
-	// command exists to avoid.
-	for _, want := range []string{"/opt/nanogo", "unbuilt", RootEnv} {
+	for _, want := range []string{root, "math/bits", "1 packages"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %v does not mention %q", err, want)
+		}
+	}
+	if len(f.compiled) != 0 || len(f.linked) != 0 {
+		t.Error("the build compiled or linked after the dependency could not be resolved")
+	}
+}
+
+// TestBuildRefusesADistributionBuiltWithAnotherRelease keeps the failure at
+// the front of the build. nanogo copies the object header from the installed
+// toolchain, so a tree built with another release links against objects whose
+// headers disagree.
+func TestBuildRefusesADistributionBuiltWithAnotherRelease(t *testing.T) {
+	root := writeDistribution(t, "math/bits")
+	f := newFakeBuild(t, &buildOptions{Patterns: []string{"."}})
+	f.b.findRoot = func(string) (Root, error) {
+		return Root{Path: root, Origin: RootEnv, Nanogo: true}, nil
+	}
+	run := f.b.runGo
+	f.b.runGo = func(args ...string) ([]byte, error) {
+		if args[0] == "env" {
+			return []byte("/usr/local/go\ngo1.28.1\n"), nil
+		}
+		return run(args...)
+	}
+	err := f.b.run()
+	if err == nil {
+		t.Fatal("a distribution built with another release was accepted")
+	}
+	for _, want := range []string{root, treeGoVersion, "go1.28.1"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %v does not mention %q", err, want)
 		}
@@ -622,7 +726,7 @@ func TestBuildNamesAPackageItCannotDescribe(t *testing.T) {
 	b, _ := testBuilder(t, &buildOptions{Patterns: []string{"."}})
 	b.runGo = func(...string) ([]byte, error) { return []byte("example.com/ghost\t1.27\n"), nil }
 	b.loadPackages = func(bool, []string) ([]*loader.Package, error) { return nil, nil }
-	_, _, err := b.targets()
+	_, _, _, err := b.targets()
 	if err == nil || !strings.Contains(err.Error(), "example.com/ghost") {
 		t.Fatalf("targets = %v, want it to name the package", err)
 	}
