@@ -1,6 +1,6 @@
 ---
 title: "Closures, defer, panic, and recover"
-status: draft
+status: in progress
 layer: runtime interface
 gate: G1
 depends_on:
@@ -14,32 +14,47 @@ Four features that share one property: each makes the frame itself a data
 structure that the runtime inspects. They are specified together because their
 interactions are where the bugs are.
 
-## None of the four is built
+## What is built
 
-Everything below this section is a design and not a description. The IR builder
-produces the nodes: `OClosure` for a function literal with its capture list,
-`ODefer`, `OGo`, `OPanic` and `ORecover`. **SSA construction refuses every one
-of them.** They are marked Go-specific, and the builder answers with "reached
-SSA construction" and names the form. Over 536 packages of the distribution
-that refusal accounts for 510 functions on `panic`, 461 on `closure` and 13 on
-`defer`.
+The captureless half of each feature is built, and every capture is refused.
+`ir/lower.go` performs the rows and `internal/e2e` runs each one as a program.
 
-So there is no closure object, no context register in use at a call, no
-`_defer` record in any of the three shapes, no `FUNCDATA_OpenCodedDeferInfo`
-(nanogo writes three funcdata indices and that is not one of them), and no call
-to `runtime.deferproc`, `deferreturn`, `gopanic` or `gorecover`. The four
-symbols are in `rtsym` and are checked against the runtime
-([031](031-runtime-lowering.md)); nothing generates a call to any of them.
+| Feature | State |
+| --- | --- |
+| a function literal that captures nothing | built; a one-word `funcval` holding the code pointer |
+| a method value, or a literal with a capture list | **refused**; a capture is read through the context register and no SSA operation reads one |
+| `defer f()` with no arguments and no captures | built; `runtime.deferproc`, plus the single exit below |
+| `defer` with arguments | **refused**; an argument becomes a capture |
+| `go f()` on the same terms | built; `runtime.newproc` takes the same one word |
+| `panic` | built; `runtime.gopanic`, and a deferred call runs off the chain while panicking |
+| `recover` | **not built**; no call to `runtime.gorecover` is generated |
+| open-coded `defer` and `FUNCDATA_OpenCodedDeferInfo` | **not built**; nanogo writes three funcdata indices and that is not one of them |
+| a heap `_defer` record built by the compiler | **not built**; `runtime.deferproc` builds it |
 
-**One decision below is already contradicted.** The section "Capture by value
-or by reference" hands the choice to [023](023-escape-analysis.md). There is no
-escape analysis, and the IR builder does not wait for one: it makes **every**
-capture a capture by reference. One `ir.Object` is shared by the enclosing
-function and the literal, and the builder sets `Addrtaken` on it
-unconditionally. That is correct and it is slow, and it is what a closure of a
-variable nobody assigns costs today. It was found by reading the builder for
-the decision the spec said belonged to [023](023-escape-analysis.md) and
-finding the decision already taken.
+**One thing the whole feature turns on does not exist: the context register.**
+A closure reads a capture through it, and no SSA operation reads it, so every
+form that needs a capture is refused rather than miscompiled. That single gap
+is what the refusals above have in common, and closing it is the work that
+unblocks the rest of this spec.
+
+### The single exit, which the linker requires
+
+A function that defers leaves through one epilogue, `.deferexit`, and that
+epilogue holds the only call to `runtime.deferreturn`. `cmd/link` records the
+offset of one such call per function in `pclntab`, so a function with two of
+them resumes at the wrong one after a panic. Every `return` in a function that
+defers becomes a `goto` to that label.
+
+### Capture is by reference, and this spec did not decide it
+
+The section "Capture by value or by reference" below hands the choice to
+[023](023-escape-analysis.md). There is no escape analysis, and the IR builder
+does not wait for one: it makes **every** capture a capture by reference. One
+`ir.Object` is shared by the enclosing function and the literal, and the
+builder sets `Addrtaken` on it unconditionally. That is correct and it is slow,
+and it is what a closure of a variable nobody assigns costs today.
+
+Everything past the sections above is a design and not a description.
 
 ## Closures
 
