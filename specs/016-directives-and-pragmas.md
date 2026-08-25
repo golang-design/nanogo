@@ -122,10 +122,12 @@ It is also the one row where the code contradicts this spec rather than lagging
 it. `ssagen/prologue.go` sets a function's `nosplit` flag from the frame size
 and from whether the function is a leaf, and never from a directive. Omitting
 the check for a function that cannot overflow is sound on its own terms. The
-consequence is that a `//go:nosplit` on any other function is dropped in
-silence, which is the exact failure mode rule 1 above exists to prevent. The
-chain-depth computation does not exist at all. This was found by reading
-`prologue.go` for its use of the word during this audit.
+consequence is that a `//go:nosplit` on any other function is dropped. It is no
+longer dropped in silence at the point it is written, because rule 1 now
+reports a directive that stands in the wrong place, but a directive in the
+right place still reaches no consumer. The chain-depth computation does not
+exist at all. This was found by reading `prologue.go` for its use of the word
+during this audit.
 
 `//go:linkname` deserves another. It breaks the package boundary and the
 standard library uses it heavily, in both directions: pulling a runtime symbol

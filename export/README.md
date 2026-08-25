@@ -113,7 +113,7 @@ comes from `writer.go` for the public part of a declaration and from
 | `pos` writes an absent position | The mirror of the reader's gap. See below. |
 | No function body, and the private root lists none | The body writer is [specs/015](../specs/015-export-data.md)'s other half. |
 | A generic declaration is refused by name | See below. |
-| `funcExt` writes no `//go:` directive and no linkname | nanogo's parser records none (`driver/compile.go`'s `pragmaHandler`, [specs/016](../specs/016-directives-and-pragmas.md)). |
+| `funcExt` writes no `//go:` directive and no linkname | The driver records the verb and its position (`driver/pragma.go`, [specs/016](../specs/016-directives-and-pragmas.md)) and nothing carries it this far: the flag bits there are nanogo's own numbering and this field is read with `gc`'s. |
 | `funcExt` writes `ABIInternal` and an empty escape note per receiver and parameter | Every function nanogo compiles is ABIInternal ([specs/030](../specs/030-abi.md)), and an empty note parses as "leaks to the heap", which is what a caller must assume when no escape analysis has run ([specs/026](../specs/026-escape-analysis.md) is unbuilt). |
 | `typeExt` writes -1 for both type descriptor symbol indices | The importer finds them by name. It is what `gc` writes before it has assigned indices of its own. |
 | The private root carries the initialisation flag and no function body | `driver/inittask.go` decides the flag: an importer orders its own record after this package's only when it is set. The body list is empty because there is no body writer. |

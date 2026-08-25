@@ -162,8 +162,10 @@ files already have, and the `-trimpath` rewriting that makes them the same on
 two machines ([053](053-determinism.md)).
 
 Two further things the writer does not carry, each of which an importer can
-observe. A `//go:` directive of any kind, because nanogo's parser records none
-([016](016-directives-and-pragmas.md)); that includes `//go:linkname`, so an
+observe. A `//go:` directive of any kind. The driver records the verb and its
+position now ([016](016-directives-and-pragmas.md)), and the writer carries
+none of it: the flag bits there are nanogo's own numbering and this field is
+read with `gc`'s. That includes `//go:linkname`, so an
 importer of a package nanogo compiled would call the declared name and not the
 linkname target. And escape analysis results, which are written as empty notes;
 an empty note parses as "leaks to the heap", which is the conservative answer a
