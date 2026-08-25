@@ -44,10 +44,10 @@ The measured facts, from a build of this commit on darwin/arm64:
 
 | | |
 | --- | --- |
-| Tarball | 23.0 MB compressed, 87 MB unpacked |
+| Tarball | 24,196,705 bytes compressed, 88 MB unpacked, 4,431 files |
 | `src/` | 57 MB, the standard library without `cmd`, tests and testdata |
 | `pkg/darwin_arm64/` | 18 MB, 27 archives |
-| `bin/` | 11 MB, two commands |
+| `bin/` | 12 MB, `nanogo` and `nanogo-dist` |
 | Compiled by nanogo | **0 of 27** |
 | Byte-reproducible | yes, across two build directories |
 
