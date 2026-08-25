@@ -300,3 +300,34 @@ func TestStringDataIsDefinedOnce(t *testing.T) {
 		t.Error("a string symbol with no object was accepted")
 	}
 }
+
+// TestAddressOfNoSymbolIsRefused checks that an address value carrying
+// something the emitter cannot resolve fails the emit.
+//
+// It is a compiler bug and not a program error. Encoding it against symbol
+// zero would produce an instruction the linker resolves to nothing, and the
+// program would compute an address in whatever the linker left there.
+func TestAddressOfNoSymbolIsRefused(t *testing.T) {
+	for _, aux := range []any{nil, (*ir.Object)(nil), "not a symbol", 42} {
+		p := obj.NewPackage("main")
+		e := &emitter{opt: Options{Sym: "main.f"}, pkg: p, syms: newSymbols(p)}
+		v := &ssa.Value{ID: 7, Op: ssa.OpARM64MOVDaddr, Aux: aux}
+		if _, ok := e.addrTarget(v); ok {
+			t.Errorf("an address with Aux %T was accepted", aux)
+		}
+		if err := e.err(); err == nil || !strings.Contains(err.Error(), "v7") {
+			t.Errorf("the failure of Aux %T does not name the value: %v", aux, err)
+		}
+	}
+	// A string symbol with no object is the same class of bug, and it must not
+	// become an unnamed definition the linker places itself.
+	p := obj.NewPackage("main")
+	e := &emitter{opt: Options{Sym: "main.f"}, pkg: p, syms: newSymbols(p)}
+	v := &ssa.Value{ID: 9, Op: ssa.OpARM64MOVDaddr, Aux: &ssa.StringSym{Text: "hi"}}
+	if _, ok := e.addrTarget(v); ok {
+		t.Error("a string symbol with no object was accepted")
+	}
+	if err := e.err(); err == nil || !strings.Contains(err.Error(), "v9") {
+		t.Errorf("the failure does not name the value: %v", err)
+	}
+}

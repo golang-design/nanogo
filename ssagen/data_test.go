@@ -360,3 +360,50 @@ func TestGlobalWideIntegerConstantIsRefused(t *testing.T) {
 		t.Fatal("a 16-byte integer constant was laid out into 8 bytes")
 	}
 }
+
+// TestGlobalErrorNamesTheVariable checks the message a refusal carries.
+//
+// The driver formats the position, and this is what it formats around, so a
+// message that lost the name would leave a user with a package and no
+// variable.
+func TestGlobalErrorNamesTheVariable(t *testing.T) {
+	e := &GlobalError{Obj: &ir.Object{Name: "main.n"}, Reason: "no descriptor"}
+	if got, want := e.Error(), "main.n: no descriptor"; got != want {
+		t.Errorf("the message is %q, want %q", got, want)
+	}
+	if got, want := (&GlobalError{Reason: "no variable"}).Error(), "no variable"; got != want {
+		t.Errorf("the message is %q, want %q", got, want)
+	}
+}
+
+// TestStaticInitsReadsOnlyConstantAssignments checks what counts as an
+// initialiser the linker can write.
+//
+// Everything else is code and stays code. A multiple assignment is the case
+// worth naming: its one value is a call, never a constant, and reading its
+// destinations as initialisers would write bytes the source never asked for.
+func TestStaticInitsReadsOnlyConstantAssignments(t *testing.T) {
+	ty := globalType(t, ir.Int64, nil, 0)
+	konst := &ir.Object{Name: "main.k", Type: ty, Class: ir.ClassGlobal}
+	pair := &ir.Object{Name: "main.a", Type: ty, Class: ir.ClassGlobal}
+	local := &ir.Object{Name: "x", Type: ty, Class: ir.ClassLocal}
+	global := func(o *ir.Object) ir.Expr { return &ir.Node{Op: ir.OGlobal, Type: ty, Obj: o} }
+	number := &ir.Node{Op: ir.OConst, Type: ty, Val: ir.Const{Val: constant.MakeInt64(3)}}
+	call := &ir.Node{Op: ir.OCall, Type: ty}
+	p := &ir.Package{Path: "main", Inits: []*ir.Func{{Name: "init", Body: []ir.Stmt{
+		nil,
+		{Op: ir.OCall, Type: ty},
+		{Op: ir.OAssign, X: global(konst), Y: number},
+		{Op: ir.OAssign, X: global(pair), Y: call},
+		{Op: ir.OAssign, Args: []ir.Expr{global(pair)}, Y: call},
+		{Op: ir.OAssign, X: &ir.Node{Op: ir.OLocal, Type: ty, Obj: local}, Y: number},
+		{Op: ir.OAssign, X: global(konst)},
+	}}}}
+	got := staticInits(p)
+	if len(got) != 1 {
+		t.Fatalf("%d initialisers, want one", len(got))
+	}
+	if got[konst] != ir.Value(ir.Const{Val: constant.MakeInt64(3)}) {
+		t.Errorf("the initialiser of main.k is %v", got[konst])
+	}
+}
