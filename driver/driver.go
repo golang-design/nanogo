@@ -186,6 +186,10 @@ func run(env *Env) (int, error) {
 		logDecision(env.Getenv, DecisionDelegated, pkg, err.Error())
 		return env.Exec(toolPath, toolArgs)
 	}
+	// The target is the build's, not this process's. The go command puts it
+	// in the environment rather than on the compile command line, so it is
+	// read here and not in ParseCompile.
+	cfg.GOARCH = env.Getenv("GOARCH")
 	if cfg.ImportCfgFile != "" {
 		cfg.ImportCfg, err = ReadImportCfg(cfg.ImportCfgFile)
 		if err != nil {

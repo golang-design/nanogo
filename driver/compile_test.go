@@ -661,21 +661,45 @@ func TestCompileRefusesAGenericFunction(t *testing.T) {
 	}
 }
 
-// TestCheckHostNamesTheArchitecture covers the refusal a host that is not
-// arm64 gets. It is a function of the architecture rather than of runtime, so
-// the arm64 runner checks the message the amd64 one sees.
-func TestCheckHostNamesTheArchitecture(t *testing.T) {
-	if err := checkHost("strconv", TargetArch); err != nil {
-		t.Errorf("the target host was refused: %v", err)
+// TestTheTargetDecidesTheArchCheck covers the refusal a build for an
+// architecture nanogo has no backend for gets.
+//
+// The check is a function of the architecture rather than of runtime, so the
+// arm64 runner checks the message the amd64 one sees.
+//
+// The architecture it is a function of is the **target's**, and that is the
+// regression. The check used to read runtime.GOARCH, which is the
+// architecture of the nanogo binary. On an arm64 host, GOARCH=amd64 therefore
+// passed it, nanogo emitted arm64 machine code into an object declared to be
+// amd64, and the first thing to notice was go tool link:
+//
+//	unknown reloc to os.Exit: 9 (R_CALLARM64)
+//
+// That message names neither the cause nor the fix. The old test could not see
+// this, because it called the check directly and so never asked where the
+// architecture came from.
+func TestTheTargetDecidesTheArchCheck(t *testing.T) {
+	if err := checkTarget("strconv", TargetArch); err != nil {
+		t.Errorf("the target nanogo emits for was refused: %v", err)
 	}
-	err := checkHost("strconv", "amd64")
+	err := checkTarget("strconv", "amd64")
 	if err == nil {
-		t.Fatal("a host that is not arm64 was accepted")
+		t.Fatal("a build for amd64 was accepted; nanogo has no amd64 backend")
 	}
 	for _, want := range []string{"strconv", "amd64", TargetArch, "specs/043"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the message does not carry %q:\n%v", want, err)
 		}
+	}
+
+	// Where the architecture comes from. An unset GOARCH is the host, which is
+	// what a build that names no target means. A Config that names one answers
+	// to it instead, whatever the host is.
+	if got := (&Config{}).TargetArch(); got != runtime.GOARCH {
+		t.Errorf("an unset GOARCH gave %q, want the host %q", got, runtime.GOARCH)
+	}
+	if got := (&Config{GOARCH: "amd64"}).TargetArch(); got != "amd64" {
+		t.Errorf("TargetArch gave %q, want the target the build named", got)
 	}
 }
 

@@ -281,6 +281,7 @@ func (b *builder) run() error {
 			Pack:      true,
 			Complete:  true,
 			Files:     sourceFiles(t),
+			GOARCH:    b.env.Getenv("GOARCH"),
 		}
 		if err := b.compile(cfg); err != nil {
 			return err

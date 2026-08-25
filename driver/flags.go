@@ -6,6 +6,7 @@ package driver
 
 import (
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -63,6 +64,24 @@ type Config struct {
 
 	// Files are the source files, in the order given.
 	Files []string
+
+	// GOARCH is the architecture the build is for, which is not the
+	// architecture nanogo is running on. The two differ whenever the go
+	// command is cross-compiling, and the code generator has to answer to the
+	// target rather than to the host: a compiler that reads runtime.GOARCH
+	// emits arm64 machine code for an amd64 build and the failure surfaces in
+	// the linker, as an unknown relocation, a long way from its cause.
+	//
+	// Empty means the host, which is what a build with no GOARCH set means.
+	GOARCH string
+}
+
+// TargetArch is the architecture the compiled code must run on.
+func (c *Config) TargetArch() string {
+	if c.GOARCH != "" {
+		return c.GOARCH
+	}
+	return runtime.GOARCH
 }
 
 // flagKind is how a flag takes its value.

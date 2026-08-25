@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"golang.design/x/nanogo/export"
@@ -313,17 +312,23 @@ func checkIR(cfg *Config, p *ir.Package) error {
 // checkHost refuses a host nanogo cannot emit code for.
 //
 // The check runs here and not at the top of [Compile] on purpose. Everything
-// above code generation is architecture independent, so a user on another host
-// still gets the parse errors, the type errors and the list of constructs
-// nanogo refuses. Only the backend is arm64.
-func checkHost(pkg, arch string) error {
+// above code generation is architecture independent, so a build for another
+// target still gets the parse errors, the type errors and the list of
+// constructs nanogo refuses. Only the backend is arm64.
+//
+// arch is the target's, not the host's. An earlier version read
+// runtime.GOARCH, which is the architecture of the nanogo binary, so
+// GOARCH=amd64 passed the check on an arm64 host and nanogo emitted arm64
+// machine code for an amd64 build. go tool link then reported an unknown
+// relocation, which names neither the cause nor the fix.
+func checkTarget(pkg, arch string) error {
 	if arch == TargetArch {
 		return nil
 	}
 	return &UnsupportedError{
 		Package: pkg,
-		What:    "for this host",
-		Detail: fmt.Sprintf("nanogo emits %s machine code and GOARCH is %s (specs/043-amd64-backend.md is unbuilt)",
+		What:    "for this target",
+		Detail: fmt.Sprintf("nanogo emits %s machine code and the build is for %s (specs/043-amd64-backend.md is unbuilt)",
 			TargetArch, arch),
 	}
 }
@@ -334,7 +339,7 @@ func checkHost(pkg, arch string) error {
 // walking the lists in the order symbols were added, so two runs over the same
 // input must add them in the same order (specs/053-determinism.md).
 func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []export.Import) (*obj.Package, error) {
-	if err := checkHost(cfg.Package, runtime.GOARCH); err != nil {
+	if err := checkTarget(cfg.Package, cfg.TargetArch()); err != nil {
 		return nil, err
 	}
 	out := obj.NewPackage(p.Path)
