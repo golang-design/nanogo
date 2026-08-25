@@ -633,6 +633,30 @@ func TestBuildTakesTheStandardLibraryFromTheDistribution(t *testing.T) {
 	}
 }
 
+// TestBuildCountsTheDistributionsOwnProducers is the line this whole command
+// is judged by, in the case that does not exist yet: a tree nanogo compiled.
+// The count comes from the manifest, so it moves when the tree does and not
+// when somebody remembers to change a string.
+func TestBuildCountsTheDistributionsOwnProducers(t *testing.T) {
+	root := writeNanogoDistribution(t, "math/bits")
+	f := newFakeBuild(t, &buildOptions{Patterns: []string{"."}})
+	f.b.findRoot = func(string) (Root, error) {
+		return Root{Path: root, Origin: RootEnv, Nanogo: true}, nil
+	}
+	if err := f.b.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	out := f.stderr.String()
+	if !strings.Contains(out, "nanogo: 2 of 2 packages compiled by nanogo\n") {
+		t.Errorf("the report does not say nanogo compiled both packages:\n%s", out)
+	}
+	// Nothing to attribute to anyone else, so nothing is claimed about anyone
+	// else.
+	if strings.Contains(out, "packages compiled by nanogo;") {
+		t.Errorf("the report named a producer of a tree that has none:\n%s", out)
+	}
+}
+
 // TestBuildRefusesAStandardPackageTheDistributionDoesNotHold is the one
 // refusal left on this path, and it says what is true: the tree does not carry
 // the package. Substituting the installed toolchain's copy would produce a

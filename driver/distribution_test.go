@@ -28,6 +28,19 @@ const treeGoVersion = "go1.27.0"
 // over whatever bytes are there.
 func writeDistribution(t *testing.T, paths ...string) string {
 	t.Helper()
+	return writeDistributionBy(t, dist.Producer{Tool: dist.GcTool, Version: treeGoVersion}, paths...)
+}
+
+// writeNanogoDistribution is the same tree with every archive recorded as
+// nanogo's work. It is the tree this project is building towards, and the one
+// case where the honesty line has nothing to say about gc.
+func writeNanogoDistribution(t *testing.T, paths ...string) string {
+	t.Helper()
+	return writeDistributionBy(t, dist.Producer{Tool: dist.NanogoTool, Version: "nanogo0.0.0-test"}, paths...)
+}
+
+func writeDistributionBy(t *testing.T, producer dist.Producer, paths ...string) string {
+	t.Helper()
 	root := t.TempDir()
 	dir := filepath.Join(root, "pkg", TargetDir())
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -42,7 +55,7 @@ func writeDistribution(t *testing.T, paths ...string) string {
 		if err := os.WriteFile(src, []byte("archive of "+p), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		pkgs = append(pkgs, dist.Package{Path: p, Archive: src, Producer: dist.Producer{Tool: dist.GcTool, Version: treeGoVersion}})
+		pkgs = append(pkgs, dist.Package{Path: p, Archive: src, Producer: producer})
 	}
 	var m dist.Manifest
 	for _, p := range pkgs {
@@ -62,7 +75,12 @@ func writeDistribution(t *testing.T, paths ...string) string {
 	if err := dist.WriteManifest(root, TargetDir(), m); err != nil {
 		t.Fatal(err)
 	}
-	v := dist.Version{Release: "nanogo0.0.0-test", Go: treeGoVersion, Target: TargetDir(), Packages: len(paths), ByGc: len(paths)}
+	v := dist.Version{Release: "nanogo0.0.0-test", Go: treeGoVersion, Target: TargetDir(), Packages: len(paths)}
+	if producer.IsNanogo() {
+		v.ByNanogo = len(paths)
+	} else {
+		v.ByGc = len(paths)
+	}
 	if err := os.WriteFile(filepath.Join(root, dist.VersionFile), []byte(v.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
