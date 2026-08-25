@@ -1027,3 +1027,52 @@ func TestDeterminismInOneProcess(t *testing.T) {
 	}
 	t.Logf("compared %d objects of %d bytes", 27, len(first))
 }
+
+// TestInitOrderRelocationCarriesNoBytes states the two properties cmd/link
+// relies on for an ordering edge between initialisation records.
+//
+// The relocation changes nothing: it has no offset, no width, and no addend,
+// so it can point at a symbol whose bytes this object never sees. relocsym
+// returns on a zero width before it looks at the target at all, which is what
+// lets a compiler emit one edge per import without first knowing which
+// imports have a record. The check that bounds a relocation by its symbol's
+// size must let a zero-width edge into a zero-length symbol through.
+func TestInitOrderRelocationCarriesNoBytes(t *testing.T) {
+	if R_INITORDER != 102 {
+		t.Fatalf("R_INITORDER = %d, want 102: cmd/internal/objabi's stringer asserts _ = x[R_INITORDER-102]", R_INITORDER)
+	}
+	p := NewPackage("p")
+	dep := p.AddNonPkgRef(&Symbol{Name: "q..inittask"})
+	// Eight bytes: the state word and the count, with no function pointers
+	// after them. That is the whole of the record for a package that has
+	// nothing of its own to run.
+	p.AddDef(&Symbol{
+		Name:   "p..inittask",
+		Type:   SNOPTRDATA,
+		Size:   8,
+		Align:  8,
+		Data:   make([]byte, 8),
+		Relocs: []Reloc{{Type: R_INITORDER, Sym: dep}},
+	})
+	b, err := p.Bytes()
+	if err != nil {
+		t.Fatalf("an ordering edge was refused: %v", err)
+	}
+	o := parse(t, b)
+	relocs := o.block(BlkReloc)
+	if len(relocs) != 23 {
+		t.Fatalf("the reloc block is %d bytes, want one 23 byte record", len(relocs))
+	}
+	if off := binary.LittleEndian.Uint32(relocs[0:]); off != 0 {
+		t.Errorf("the edge is at offset %d, want 0", off)
+	}
+	if size := relocs[4]; size != 0 {
+		t.Errorf("the edge is %d bytes wide, want 0: relocsym would then resolve its target", size)
+	}
+	if typ := binary.LittleEndian.Uint16(relocs[5:]); typ != uint16(R_INITORDER) {
+		t.Errorf("the edge has type %d, want %d", typ, R_INITORDER)
+	}
+	if add := binary.LittleEndian.Uint64(relocs[7:]); add != 0 {
+		t.Errorf("the edge has addend %d, want 0", add)
+	}
+}

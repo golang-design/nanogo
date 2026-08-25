@@ -224,6 +224,24 @@ const (
 	R_ARM64_LDST128
 )
 
+// R_INITORDER is an ordering edge between two initialisation records: from
+// the record of a package to the record of a package it imports. It changes
+// no bytes. cmd/link reads it in inittasks() to schedule the records, and
+// nothing else looks at it.
+//
+// The number is stated rather than counted. It is far above the entries
+// declared here, with more than fifty architecture relocations between them
+// that nanogo never emits, and cmd/internal/objabi's generated stringer
+// asserts it: reloctype_string.go holds "_ = x[R_INITORDER-102]", which fails
+// to compile if the value ever moves.
+//
+// The size of such a relocation is zero. cmd/link's relocsym skips a
+// zero-sized relocation before it looks at the target, so an edge to a
+// package that has no initialisation record resolves to nothing and costs
+// nothing. That is what lets a compiler emit one edge per import without
+// first knowing which imports have a record.
+const R_INITORDER RelocType = 102
+
 // R_WEAK marks a relocation as weak: the linker resolves it if the target
 // is present and leaves it zero if it is not.
 const (
