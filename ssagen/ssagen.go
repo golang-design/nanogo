@@ -598,14 +598,16 @@ func (e *emitter) value(v *ssa.Value) {
 		e.callValue(v)
 		return
 	}
+	var target obj.SymRef
 	if v.Op == ssa.OpARM64MOVDaddr {
-		// The symbol is read before the instruction is built, because the
+		// The symbol is resolved before the instruction is built, because the
 		// encoder for an address takes a destination register that a value
 		// with no home does not have.
-		if o, ok := v.Aux.(*ir.Object); !ok || o == nil {
-			e.fail("v%d: an address of no symbol", v.ID)
+		ref, ok := e.addrTarget(v)
+		if !ok {
 			return
 		}
+		target = ref
 	}
 	if e.a.Result[v.ID] == ssa.NoReg && !v.Op.MakesMemory() &&
 		v.Op != ssa.OpARM64LoweredNilCheck && v.Type != nil && v.Type.Size > 0 {
@@ -628,7 +630,7 @@ func (e *emitter) value(v *ssa.Value) {
 	}
 	if v.Op == ssa.OpARM64MOVDaddr {
 		// The pair is one edit and the linker splits the address across it.
-		e.addr(at, e.globalCallee(v.Aux.(*ir.Object)), v.AuxInt)
+		e.addr(at, target, v.AuxInt)
 	}
 	e.spill(v)
 }
@@ -732,6 +734,14 @@ func (e *emitter) remat(dst arm64.Reg, v *ssa.Value) {
 		e.wordIf(w, wok, "ADD $%d, RSP, %v", off, dst)
 		return
 	}
+	var target obj.SymRef
+	if v.Op == ssa.OpARM64MOVDaddr {
+		ref, ok := e.addrTarget(v)
+		if !ok {
+			return
+		}
+		target = ref
+	}
 	at := e.pc()
 	n, ok := ssa.ARM64Encode(v, dst, nil, e.out[:])
 	if !ok || n == 0 {
@@ -742,12 +752,7 @@ func (e *emitter) remat(dst arm64.Reg, v *ssa.Value) {
 		e.word(e.out[i])
 	}
 	if v.Op == ssa.OpARM64MOVDaddr {
-		o, okAux := v.Aux.(*ir.Object)
-		if !okAux || o == nil {
-			e.fail("v%d: an address of no symbol", v.ID)
-			return
-		}
-		e.addr(at, e.globalCallee(o), v.AuxInt)
+		e.addr(at, target, v.AuxInt)
 	}
 }
 

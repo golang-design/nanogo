@@ -11,6 +11,7 @@ import (
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
 	"golang.design/x/nanogo/rtsym"
+	"golang.design/x/nanogo/ssa"
 )
 
 // TestMorestackComesFromRtsym checks that the stack-growth tail names the
@@ -213,5 +214,89 @@ func TestGlobalReferencesAreABI0(t *testing.T) {
 	// every function nanogo compiles.
 	if c := e.globalCallee(&ir.Object{Name: "main.f", Class: ir.ClassFunc}); c.abi != obj.ABIInternal {
 		t.Errorf("a function is referenced at ABI %d, want ABIInternal", c.abi)
+	}
+}
+
+// TestStringConstantDefinesItsBytes checks that the address of a string
+// constant reaches a definition in this object.
+//
+// A string constant has no declaration, so there is no *ir.Object for it and
+// no symbol anywhere else to resolve the name against. The bytes are defined
+// here, content-addressably, and the relocation names that definition. Before
+// this the emitter refused the address with "an address of no symbol", which
+// is the whole reason a program that prints a literal did not compile.
+func TestStringConstantDefinesItsBytes(t *testing.T) {
+	c := compile(t, "package main\n\nfunc f() string { return \"hi\" }\n", "f")
+	p := obj.NewPackage("main")
+	r := emit(t, c, p)
+
+	var data *obj.Symbol
+	for _, rel := range r.Text.Relocs {
+		if rel.Type != obj.R_ADDRARM64 {
+			continue
+		}
+		if rel.Sym.PkgIdx != obj.PkgIdxHashed {
+			t.Errorf("the address of a string constant names index space %d, want the content-addressable one", rel.Sym.PkgIdx)
+			continue
+		}
+		data = p.Def(rel.Sym)
+	}
+	if data == nil {
+		t.Fatalf("no address relocation reached a definition; the relocations are %+v", r.Text.Relocs)
+	}
+	// The name is gc's, because the linker merges two definitions of one
+	// constant by name and by content hash together.
+	if got, want := data.Name, `go:string."hi"`; got != want {
+		t.Errorf("the symbol is named %q, want %q", got, want)
+	}
+	if got, want := string(data.Data), "hi"; got != want {
+		t.Errorf("the symbol holds %q, want %q", got, want)
+	}
+	if data.Size != 2 {
+		t.Errorf("the symbol has size %d, want 2", data.Size)
+	}
+	// Read-only, because a string is immutable and every holder of the
+	// constant shares these bytes.
+	if data.Type != obj.SRODATA {
+		t.Errorf("the symbol is of kind %d, want SRODATA", data.Type)
+	}
+	// gc marks the symbol DUPOK and LOCAL. obj refuses a content-addressable
+	// symbol with no alignment, because the linker places it itself.
+	if data.Flag&obj.SymFlagDupok == 0 || data.Flag&obj.SymFlagLocal == 0 {
+		t.Errorf("the symbol carries flags %#x, want dupok and local", data.Flag)
+	}
+	if data.Align != 1 {
+		t.Errorf("the symbol is aligned to %d, want 1", data.Align)
+	}
+}
+
+// TestStringDataIsDefinedOnce checks that one constant named twice in one
+// function is one definition.
+//
+// The symbol is content-addressable, so a second definition would still link.
+// It would also make the object hold the bytes twice and make two compiles of
+// one input differ in size for no reason.
+func TestStringDataIsDefinedOnce(t *testing.T) {
+	p := obj.NewPackage("main")
+	s := newSymbols(p)
+	sym := &ssa.StringSym{Obj: &ir.Object{Name: `go:string."hi"`}, Text: "hi"}
+	a, err := s.stringData(sym)
+	if err != nil {
+		t.Fatalf("stringData: %v", err)
+	}
+	b, err := s.stringData(&ssa.StringSym{Obj: &ir.Object{Name: `go:string."hi"`}, Text: "hi"})
+	if err != nil {
+		t.Fatalf("stringData: %v", err)
+	}
+	if a != b {
+		t.Errorf("one constant gave two definitions, %v and %v", a, b)
+	}
+	// A symbol with no name is a compiler bug, and an unnamed definition in
+	// the object would be a payload the linker places itself.
+	if _, err := s.stringData(nil); err == nil {
+		t.Error("a nil string symbol was accepted")
+	}
+	if _, err := s.stringData(&ssa.StringSym{}); err == nil {
+		t.Error("a string symbol with no object was accepted")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
 	"golang.design/x/nanogo/rtsym"
+	"golang.design/x/nanogo/ssa"
 )
 
 // Relocations, per specs/041-instruction-encoding.md.
@@ -91,13 +92,18 @@ func runtimeCallee(name string) (callee, bool) {
 type symbols struct {
 	pkg *obj.Package
 
-	// index is a lookup table and is never ranged over, so it produces no
-	// output order (specs/053-determinism.md).
+	// index and data are lookup tables and are never ranged over, so they
+	// produce no output order (specs/053-determinism.md).
 	index map[callee]obj.SymRef
+	data  map[string]obj.SymRef
 }
 
 func newSymbols(p *obj.Package) *symbols {
-	return &symbols{pkg: p, index: make(map[callee]obj.SymRef)}
+	return &symbols{
+		pkg:   p,
+		index: make(map[callee]obj.SymRef),
+		data:  make(map[string]obj.SymRef),
+	}
 }
 
 // ref returns the reference of a symbol, adding a reference to the object the
@@ -112,6 +118,43 @@ func (s *symbols) ref(c callee) obj.SymRef {
 	s.pkg.AddRefName(r, c.name)
 	s.index[c] = r
 	return r
+}
+
+// stringData returns the reference to the bytes of a string constant, defining
+// the symbol in this object the first time the constant is seen.
+//
+// It is a definition and not a reference: the bytes exist nowhere else, so
+// every object that names a constant carries a copy of it. It is
+// content-addressable, which is what makes the copies one symbol in the linked
+// binary. The linker merges them on the sixteen-byte content hash, and the
+// name is what a symbol table shows and what gc writes for the same constant
+// (specs/040-object-format.md).
+//
+// gc marks the symbol DUPOK, RODATA and LOCAL, and this does the same. RODATA
+// is not a preference: a string is immutable, so its bytes belong in the
+// read-only section, where a write to them faults instead of corrupting every
+// other holder of the same constant.
+func (s *symbols) stringData(sym *ssa.StringSym) (obj.SymRef, error) {
+	if sym == nil || sym.Obj == nil || sym.Obj.Name == "" {
+		return obj.SymRef{}, fmt.Errorf("a string constant with no symbol")
+	}
+	name := sym.Obj.Name
+	if r, ok := s.data[name]; ok {
+		return r, nil
+	}
+	r := s.pkg.AddHashedDef(&obj.Symbol{
+		Name: name,
+		Type: obj.SRODATA,
+		Flag: obj.SymFlagDupok | obj.SymFlagLocal,
+		Size: uint32(len(sym.Text)),
+		// The bytes of a string are read one at a time and need no
+		// alignment. obj refuses a content-addressable symbol with none,
+		// because the linker places such a symbol itself.
+		Align: 1,
+		Data:  []byte(sym.Text),
+	})
+	s.data[name] = r
+	return r, nil
 }
 
 // callTarget returns the callee a static call value names.
@@ -188,12 +231,42 @@ func (e *emitter) call(off int32, c callee) {
 // The size is eight because the pair is one edit: the linker computes the
 // page of the target for the ADRP and the offset inside the page for the ADD,
 // and it needs both instructions to do it.
-func (e *emitter) addr(off int32, c callee, add int64) {
+func (e *emitter) addr(off int32, ref obj.SymRef, add int64) {
 	e.relocs = append(e.relocs, obj.Reloc{
 		Off:  off,
 		Size: 8,
 		Type: obj.R_ADDRARM64,
 		Add:  add,
-		Sym:  e.syms.ref(c),
+		Sym:  ref,
 	})
+}
+
+// addrTarget returns the reference an address value names.
+//
+// Two kinds of symbol reach it. An *ir.Object is a declaration: a
+// package-level variable, a function or a type descriptor, all of which are
+// resolved by name because the definition is somewhere the linker will find.
+// An *ssa.StringSym is a constant with no declaration, so the bytes are
+// defined here and the reference is to that definition.
+//
+// A value that carries neither is a compiler bug and not a program error, so
+// it fails the emit rather than being encoded against symbol zero, which the
+// linker would resolve to nothing and the program would jump into.
+func (e *emitter) addrTarget(v *ssa.Value) (obj.SymRef, bool) {
+	switch aux := v.Aux.(type) {
+	case *ir.Object:
+		if aux == nil {
+			break
+		}
+		return e.syms.ref(e.globalCallee(aux)), true
+	case *ssa.StringSym:
+		ref, err := e.syms.stringData(aux)
+		if err != nil {
+			e.fail("v%d: %v", v.ID, err)
+			return obj.SymRef{}, false
+		}
+		return ref, true
+	}
+	e.fail("v%d: an address of no symbol", v.ID)
+	return obj.SymRef{}, false
 }
