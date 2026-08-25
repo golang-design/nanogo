@@ -630,17 +630,23 @@ func TestTheFactsAreCurrent(t *testing.T) {
 					factsPath, k, format(old), format(got[k]))
 			}
 		case elastic[k]:
-			// The corpus is whatever this machine holds. A count above the
-			// documented one means the document undersells the work; a count
-			// of zero means the corpus went missing and the test measured
-			// nothing, which is the failure worth catching.
-			switch {
-			case got[k] == 0 && !zeroIsLegitimate[k]:
+			// The corpus is whatever this machine and this platform hold, so a
+			// count that differs is information about the host rather than
+			// drift.
+			//
+			// The rule here used to be "a count above the documented one means
+			// the document undersells the work", and that was wrong for a
+			// count whose direction is not a quality. linux resolves 525
+			// packages where darwin resolves 521, because a build constraint
+			// includes a different set, and neither number is the better one.
+			// Requiring the documented figure to be the maximum made the
+			// gate fail on whichever platform happened to have more.
+			//
+			// What is left is the check that catches a real fault: a
+			// measurement of zero means the corpus went missing and the test
+			// proved nothing, whatever the platform.
+			if got[k] == 0 && !zeroIsLegitimate[k] {
 				t.Errorf("%s measured nothing; the corpus is missing and the test proved nothing", k)
-			case got[k] > old:
-				t.Errorf("%s says %s is %s and the tests compare %s, which is more.\n"+
-					"Refresh it with NANOGO_REFRESH_FACTS=1 so the documents do not undersell it.",
-					factsPath, k, format(old), format(got[k]))
 			}
 		case old != got[k]:
 			t.Errorf("%s says %s is %s and the tests produce %s.\n"+

@@ -98,6 +98,7 @@ const gcHelpers = `package main
 import (
 	"runtime"
 	"sync/atomic"
+	"time"
 )
 
 var finalized int32
@@ -117,20 +118,20 @@ func gcNow() {
 	// Several collections, because a finaliser is queued by one collection
 	// and run by the finaliser goroutine afterwards.
 	//
-	// The loop runs many more rounds than it used to, because Gosched only
-	// yields: it returns as soon as this goroutine is runnable again, which on
-	// an idle machine is usually after the finaliser goroutine has run and on
-	// a loaded one is often before it. Eight rounds passed on a developer's
-	// machine and failed on a busy CI runner, which is a flaky test rather
-	// than a compiler bug.
+	// The wait sleeps. runtime.Gosched only yields: it returns as soon as this
+	// goroutine is runnable again, which on an idle machine is usually after
+	// the finaliser goroutine has run and on a loaded one is often before it.
+	// Eight rounds of Gosched passed here and failed on CI; two thousand
+	// rounds passed here and still failed on CI, which is the evidence that
+	// yielding more is not the same as waiting.
 	//
-	// The import set is fixed by the importcfg this caller is compiled
-	// against, so this cannot sleep; it yields more times instead. The loop is
-	// still bounded, because a case that must report zero finalisers would
-	// otherwise spend its whole budget on every run.
-	for i := 0; i < 2000 && atomic.LoadInt32(&finalized) == 0; i++ {
+	// A sleep gives the finaliser goroutine a scheduling opportunity that does
+	// not depend on this one becoming unrunnable. The loop is bounded, so a
+	// case that must report zero finalisers spends at most its budget, and it
+	// stops as soon as the count moves.
+	for i := 0; i < 200 && atomic.LoadInt32(&finalized) == 0; i++ {
 		runtime.GC()
-		runtime.Gosched()
+		time.Sleep(2 * time.Millisecond)
 	}
 	duringGC = atomic.LoadInt32(&finalized)
 }

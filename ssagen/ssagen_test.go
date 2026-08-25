@@ -427,8 +427,14 @@ func (c *linkCfg) build(t *testing.T) {
 		}
 		files := map[string]string{
 			"go.mod": "module nanogo.example/link\n\ngo 1.27\n",
-			"main.go": "package main\n\nimport (\n\t\"runtime\"\n\t\"sync/atomic\"\n)\n\n" +
-				"var n int32\n\nfunc main() {\n\truntime.GC()\n\tatomic.AddInt32(&n, 1)\n}\n",
+			// The imports of this probe decide the importcfg every caller in
+			// this package is compiled against, so a caller may import only
+			// what appears here. time is present because the finaliser tests
+			// have to wait for another goroutine to run, and runtime.Gosched
+			// only yields: it returns as soon as the caller is runnable again,
+			// which on a loaded machine is often before the finaliser has run.
+			"main.go": "package main\n\nimport (\n\t\"runtime\"\n\t\"sync/atomic\"\n\t\"time\"\n)\n\n" +
+				"var n int32\n\nfunc main() {\n\truntime.GC()\n\tatomic.AddInt32(&n, 1)\n\ttime.Sleep(0)\n}\n",
 		}
 		for name, body := range files {
 			if c.err = os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); c.err != nil {
