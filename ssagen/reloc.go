@@ -140,11 +140,37 @@ func callTarget(aux any) (callee, error) {
 // for one that is imported. That is a gap in specs/020-ir.md's object model
 // rather than a decision here: a global needs a linker symbol exactly as a
 // function does.
+//
+// A type descriptor is the exception, and it is not a special case of the
+// rule: its name is not a Go identifier at all. specs/032 requires the name to
+// be a function of the type alone, so that two packages that name one type
+// produce one symbol the linker merges. type:p.T survives the rule by
+// accident, because it holds a dot, and type:int, type:[]int and
+// type:interface {} do not: each would become main.type:int, a symbol nothing
+// defines and cmd/link never collects into runtime.typelinks.
 func (e *emitter) symbolName(o *ir.Object) string {
+	if strings.HasPrefix(o.Name, ir.TypeSymbolPrefix) {
+		return o.Name
+	}
 	if strings.Contains(o.Name, ".") {
 		return o.Name
 	}
 	return e.pkg.Path + "." + o.Name
+}
+
+// globalCallee returns the reference an address of an object names.
+//
+// The ABI is half of a symbol's identity and cmd/link resolves a by-name
+// reference by name and ABI together: its abiToVer maps ABIInternal to one
+// version and everything a data symbol carries to another. gc gives a data
+// symbol no ABI, so a package-level variable and a type descriptor are both
+// ABI0, and a reference to one under ABIInternal names a symbol nothing
+// defines. Only a text symbol is ABIInternal.
+func (e *emitter) globalCallee(o *ir.Object) callee {
+	if o.Class == ir.ClassGlobal {
+		return callee{name: e.symbolName(o), abi: obj.ABI0}
+	}
+	return callee{name: e.symbolName(o), abi: obj.ABIInternal}
 }
 
 // call records the relocation of a BL at off.

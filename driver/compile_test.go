@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
 	"golang.design/x/nanogo/syntax"
 )
@@ -128,7 +129,17 @@ func TestCompileIsDeterministic(t *testing.T) {
 	needGoCommand(t)
 	dir := t.TempDir()
 	src := filepath.Join(dir, "a.go")
-	if err := os.WriteFile(src, []byte("package p\n\nfunc a(x int) int { return x * 2 }\n\nfunc b(x int) int { return x + 3 }\n"), 0o600); err != nil {
+	// One of the functions makes a variadic call, so the object carries type
+	// descriptors as well as text symbols. The union of the per function lists
+	// and the tables addDescriptors resolves relocations through are exactly
+	// the shapes specs/053-determinism.md is about, and a run over the same
+	// source that ordered them differently would produce different bytes here.
+	body := "package p\n\n" +
+		"func a(x int) int { return x * 2 }\n\n" +
+		"func b(x int) int { return x + 3 }\n\n" +
+		"func c(xs ...int) int { return len(xs) }\n\n" +
+		"func d(x int) int { return c(x, x) + c(x) }\n"
+	if err := os.WriteFile(src, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// The same source file, because the file name reaches the pc-file table
@@ -200,13 +211,28 @@ func TestCompileRefusals(t *testing.T) {
 			want: []string{"/pkg/v.a"},
 		},
 		{
-			// The construct this case names has to be one construction still
-			// refuses, and the assignment statement it used to name is built
-			// now. A composite literal is the largest remaining row of
-			// specs/020-ir.md's lowering table.
-			name: "a construct construction refuses names the function and the pass",
-			src:  "package main\n\ntype p struct{ x int }\n\nfunc f(a int) int {\n\treturn p{a}.x\n}\n",
-			want: []string{"function f", "a.go:5:6", "ssa.Build", "compositelit"},
+			// The construct this case names has to be one the pipeline still
+			// refuses, and the struct literal it used to name is lowered now
+			// that ir.Lower runs. A map is the largest row of
+			// specs/020-ir.md's lowering table that specs/032 still blocks:
+			// a map descriptor's tail names the runtime's own group type.
+			//
+			// The stage in the message is ir.Lower and not ssa.Lower, and the
+			// two are different decks. A refusal that named the wrong one
+			// would send a reader to the wrong spec.
+			name: "a construct lowering refuses names the function and the pass",
+			src:  "package main\n\nfunc f() int {\n\tm := make(map[int]int)\n\treturn len(m)\n}\n",
+			want: []string{"function f", "a.go:3:6", "ir.Lower", "make", "specs/032"},
+		},
+		{
+			// The second refusal site specs/032 opens. Lowering refuses a type
+			// it cannot name; rtype refuses one whose bytes it cannot fill in,
+			// and a defined type is named and not fillable. The message names
+			// the type rather than the function, because the gap is the type
+			// boundary of specs/020-ir.md and not this function.
+			name: "a type with no writable descriptor is refused by name",
+			src:  "package main\n\ntype point struct{ x, y int }\n\nfunc f() int {\n\tp := &point{1, 2}\n\treturn p.x\n}\n",
+			want: []string{"a type its code needs a descriptor for", "main.point", "method set"},
 		},
 		{
 			name: "a package-level variable is refused",
@@ -267,6 +293,146 @@ func TestCompileRefusals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCompileLowersWhatConstructionRefuses is the first change of specs/032's
+// seam, stated as a program rather than as a pass list.
+//
+// ssa.Build refuses every node Op.IsGoSpecific reports, so until ir.Lower
+// joined the list a composite literal was refused by the compiler a user runs
+// even though the pass that lowers it was built and measured. This is the
+// exact source TestCompileRefusals used to check the refusal with.
+func TestCompileLowersWhatConstructionRefuses(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	src := "package main\n\ntype p struct{ x int }\n\nfunc f(a int) int {\n\treturn p{a}.x\n}\n\nfunc main() { f(1) }\n"
+	if _, err := compileSource(t, src, nil); err != nil {
+		t.Fatalf("a struct literal is still refused: %v", err)
+	}
+}
+
+// TestCompileEmitsTypeDescriptors is the second change, and it is the one that
+// keeps the first from being a link-time failure.
+//
+// A variadic call is the largest row that needs a descriptor: the builder packs
+// the arguments into a slice literal, the literal allocates, and
+// runtime.newarray takes the element type. So the object has to carry type:int,
+// the pointer bitmask it points at, and the func value of the equality routine.
+// Without the descriptors the object still writes and the link reports type:int
+// as undefined, which is why the names are read out of the object here.
+func TestCompileEmitsTypeDescriptors(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	src := "package main\n\nfunc count(xs ...int) int { return len(xs) }\n\nfunc main() { count(1, 2, 3) }\n"
+	out, err := compileSource(t, src, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The names live in the object's string table, so a search over the bytes
+	// says the symbol reached the writer under the name specs/032 requires.
+	for _, want := range []string{
+		"type:int",                  // the descriptor, under its canonical name
+		"runtime.gcbits.",           // the bitmask GCData points at
+		"runtime.memequal64\u00b7f", // the func value Equal holds
+		"runtime.newarray",          // the call that reads the descriptor
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("the object does not carry %q", want)
+		}
+	}
+}
+
+// TestAddDescriptorsEmitsEachSymbolOnce checks the union, without a compile.
+//
+// A descriptor is named once however many functions reach it, and two
+// descriptors share one pointer bitmask whenever their pointer maps agree. The
+// check is that a list with repetitions writes the same object as the list
+// without them: a second definition of one name would move every later symbol
+// index and change the bytes.
+func TestAddDescriptorsEmitsEachSymbolOnce(t *testing.T) {
+	elem := &ir.Type{Kind: ir.Int64, Name: "int"}
+	if err := ir.Layout(elem); err != nil {
+		t.Fatal(err)
+	}
+	slice := &ir.Type{Kind: ir.Slice, Elem: elem}
+	if err := ir.Layout(slice); err != nil {
+		t.Fatal(err)
+	}
+	write := func(types []*ir.Type) []byte {
+		t.Helper()
+		p := obj.NewPackage("p")
+		if err := addDescriptors(&Config{Package: "p"}, p, types); err != nil {
+			t.Fatalf("addDescriptors: %v", err)
+		}
+		b, err := p.Bytes()
+		if err != nil {
+			t.Fatalf("the object does not write: %v", err)
+		}
+		return b
+	}
+	once := write([]*ir.Type{elem, slice})
+	twice := write([]*ir.Type{elem, slice, elem, slice})
+	if string(once) != string(twice) {
+		t.Error("naming a type twice emitted its descriptor twice")
+	}
+	if !strings.Contains(string(once), "type:[]int") {
+		t.Error("the object does not carry type:[]int")
+	}
+}
+
+// TestAddDescriptorsRefusesATypeWithNoMethodSet covers the refusal that arrives
+// after the function it came from compiled.
+//
+// Naming and filling in are two questions and specs/032 keeps them apart. The
+// lowering pass names a defined type without trouble, so the refusal can only
+// come from here, and it has to say which type stopped the compile.
+func TestAddDescriptorsRefusesATypeWithNoMethodSet(t *testing.T) {
+	defined := &ir.Type{Kind: ir.Struct, Name: "p.T", Fields: []ir.Field{{Name: "x", Type: &ir.Type{Kind: ir.Int64, Name: "int"}}}}
+	if err := ir.Layout(defined); err != nil {
+		t.Fatal(err)
+	}
+	err := addDescriptors(&Config{Package: "p"}, obj.NewPackage("p"), []*ir.Type{defined})
+	if err == nil {
+		t.Fatal("addDescriptors accepted a type whose method set is unknown")
+	}
+	var ue *UnsupportedError
+	if !errors.As(err, &ue) {
+		t.Fatalf("the failure is not an UnsupportedError: %v", err)
+	}
+	for _, want := range []string{"p.T", "method set"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message does not carry %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestTargetABIFollowsTheSymbol checks the half of a symbol's identity that is
+// not its name.
+//
+// cmd/link resolves a by-name reference by name and ABI together, so a data
+// symbol referenced under ABIInternal names a symbol nothing defines. Every
+// symbol a descriptor points at is data except the equality routine.
+func TestTargetABIFollowsTheSymbol(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		want uint16
+	}{
+		{"runtime.gcbits.0100000000000000", obj.ABI0},
+		{"type:.namedata.int-", obj.ABI0},
+		{"type:int", obj.ABI0},
+		{"runtime.memequal64", obj.ABIInternal},
+		// A symbol that exists only in assembly is ABI0, for the reason
+		// ssagen's morestackCallee records.
+		{"runtime.morestack_noctxt", obj.ABI0},
+	} {
+		if got := targetABI(tt.name); got != tt.want {
+			t.Errorf("targetABI(%q) = %d, want %d", tt.name, got, tt.want)
+		}
 	}
 }
 

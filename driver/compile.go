@@ -15,6 +15,8 @@ import (
 	"golang.design/x/nanogo/export"
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
+	"golang.design/x/nanogo/rtsym"
+	"golang.design/x/nanogo/rtype"
 	"golang.design/x/nanogo/ssa"
 	"golang.design/x/nanogo/ssa/rules"
 	"golang.design/x/nanogo/ssagen"
@@ -348,6 +350,14 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	}
 	target := ssa.NewArm64Target()
 	compiled := 0
+	// The type descriptors the lowered code names, unioned over the package.
+	//
+	// specs/032-type-descriptors-and-itabs.md makes the set a package emits
+	// exactly the set its code names, and every reference comes from lowering:
+	// an allocation passes a *_type to the runtime. The union is a slice in
+	// first-use order rather than a set, because the object's symbol table is
+	// written in the order symbols were added (specs/053-determinism.md).
+	var needed []*ir.Type
 	for _, fn := range p.Funcs {
 		if len(fn.Body) == 0 {
 			// A bodyless declaration is satisfied by assembly, and
@@ -359,13 +369,14 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 			}
 			continue
 		}
-		r, err := compileFunc(cfg, fn, target, out, fset)
+		r, types, err := compileFunc(cfg, fn, target, out, fset)
 		if err != nil {
 			return nil, err
 		}
 		if _, err := r.Add(out); err != nil {
 			return nil, &UnsupportedError{Package: cfg.Package, What: "function " + fn.Name, Detail: err.Error()}
 		}
+		needed = append(needed, types...)
 		compiled++
 	}
 	if compiled == 0 {
@@ -375,30 +386,148 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 			Detail:  "nanogo writes text symbols and nothing else, so such an object holds nothing",
 		}
 	}
+	// The descriptors go in after the text symbols because the list is not
+	// complete until the last function is lowered. Nothing here adds a
+	// non-package definition, which is what makes that safe: the index space
+	// of NonPkgRefs continues that of NonPkgDefs, so a definition added after
+	// ssagen's references would move every one of them.
+	if err := addDescriptors(cfg, out, needed); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-// compileFunc takes one function from IR to a symbol.
+// addDescriptors writes the type descriptors of the types the code names.
+//
+// A type reaches this list because the lowering pass could *name* it. Whether
+// its bytes can be filled in is a second question, and specs/032 keeps the two
+// apart: an ir.Type carries no method set, so rtype refuses a defined type and
+// a pointer to one because a descriptor that claimed an empty method set would
+// make reflect report one and an itab find no functions. That refusal arrives
+// here, after the function it came from compiled, so it names the type rather
+// than the function.
+//
+// The descriptor itself is a named definition and the data it points at is
+// content-addressable. That is gc's split, not a choice: cmd/link reads no
+// name for a symbol in the hashed index space, so a hashed descriptor could
+// not be resolved by name from another object and would not be collected into
+// runtime.typelinks. specs/032 says AddHashedDef for all of them, and it is
+// wrong about the first one.
+func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type) error {
+	// defs and refs are lookup tables and are never ranged over
+	// (specs/053-determinism.md). A symbol is emitted once however many types
+	// name it: two descriptors share one pointer bitmask whenever their
+	// pointer maps agree.
+	defs := make(map[string]obj.SymRef)
+	refs := make(map[string]obj.SymRef)
+	// The relocations are applied in a second pass, because a descriptor
+	// names symbols that come later in its own list and names the descriptor
+	// of another type, which may be emitted by another package.
+	var (
+		syms   []*obj.Symbol
+		relocs [][]rtype.Reloc
+	)
+	for _, t := range types {
+		set, err := rtype.Descriptor(t)
+		if err != nil {
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "a type its code needs a descriptor for",
+				Detail:  err.Error(),
+			}
+		}
+		for i, s := range set {
+			if _, ok := defs[s.Name]; ok {
+				continue
+			}
+			d := &obj.Symbol{
+				Name:  s.Name,
+				Type:  s.Kind,
+				Size:  uint32(len(s.Data)),
+				Align: s.Align,
+				Data:  s.Data,
+			}
+			if s.Dupok {
+				d.Flag |= obj.SymFlagDupok
+			}
+			// rtype documents the first symbol as the descriptor and the rest
+			// as the data it points at.
+			if i == 0 {
+				defs[s.Name] = out.AddDef(d)
+			} else {
+				defs[s.Name] = out.AddHashedDef(d)
+			}
+			syms = append(syms, d)
+			relocs = append(relocs, s.Relocs)
+		}
+	}
+	for i, s := range syms {
+		for _, r := range relocs[i] {
+			ref, ok := defs[r.Target]
+			if !ok {
+				if ref, ok = refs[r.Target]; !ok {
+					ref = out.AddNonPkgRef(&obj.Symbol{Name: r.Target, ABI: targetABI(r.Target)})
+					// go tool nm and go tool objdump print a name only for a
+					// symbol the RefName block covers.
+					out.AddRefName(ref, r.Target)
+					refs[r.Target] = ref
+				}
+			}
+			s.Relocs = append(s.Relocs, obj.Reloc{
+				Off: r.Off, Size: r.Size, Type: r.Type, Add: r.Add, Sym: ref,
+			})
+		}
+	}
+	return nil
+}
+
+// targetABI returns the ABI of a symbol a descriptor points at.
+//
+// The ABI is half of a symbol's identity and cmd/link resolves a by-name
+// reference by name and ABI together, so a reference under the wrong one names
+// a symbol nothing defines. Almost everything a descriptor points at is data,
+// which gc leaves at ABI0. The exception is the equality routine the Equal
+// closure holds: it is a runtime function, and rtsym is what says so, because
+// specs/031-runtime-lowering.md makes rtsym the only place a runtime symbol is
+// spelled. A runtime symbol that exists only in assembly is ABI0 again, for
+// the reason ssagen's morestackCallee records.
+func targetABI(name string) uint16 {
+	if s := rtsym.Lookup(name); s != nil && !s.Assembly {
+		return obj.ABIInternal
+	}
+	return obj.ABI0
+}
+
+// compileFunc takes one function from IR to a symbol, and returns the types
+// whose descriptors the lowered tree names.
 //
 // The passes are a list and not a sequence of statements because every one of
 // them reports the same way: a failure names the pass, the function and the
 // position, and the pass name is what tells a reader which spec owns the gap.
 //
-// The order is specs/002-architecture.md's: decomposition, then
-// specs/030-abi.md's assignment, then selection. The assignment runs between
-// them because it finishes work decomposition stopped at its bound and because
-// the rewrites it makes still need lowering rules. The verifier runs after each
-// of the two rewriting passes, so a violation names the pass that made it.
-func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package, fset *syntax.FileSet) (*ssagen.Result, error) {
+// The order is specs/002-architecture.md's: specs/020-ir.md's lowering table,
+// then construction, then decomposition, then specs/030-abi.md's assignment,
+// then selection. Lowering is first because ssa.Build refuses every
+// Go-specific node, which is what keeps that table a finite list rather than a
+// habit. The assignment runs between decomposition and selection because it
+// finishes work decomposition stopped at its bound and because the rewrites it
+// makes still need lowering rules. The verifier runs after each of the two
+// rewriting passes, so a violation names the pass that made it.
+//
+// The stage is named ir.Lower and not "lowering" because ssa.Lower is in the
+// same list, and a refusal has to say which of the two spec decks owns the gap.
+func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package, fset *syntax.FileSet) (*ssagen.Result, []*ir.Type, error) {
 	var (
-		f *ssa.Func
-		a *ssa.Alloc
-		r *ssagen.Result
+		f      *ssa.Func
+		a      *ssa.Alloc
+		r      *ssagen.Result
+		needed []*ir.Type
 	)
 	passes := []struct {
 		name string
 		run  func() error
 	}{
+		{"ir.Lower", func() (err error) { needed, err = ir.LowerAndCollect(fn); return err }},
 		{"ssa.Build", func() (err error) { f, err = ssa.Build(fn); return err }},
 		{"decomposition", func() error { ssa.Decompose(f); return nil }},
 		{"the ABI assignment", func() error { return ssa.AssignABI(f, target) }},
@@ -424,14 +553,14 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 	}
 	for _, p := range passes {
 		if err := p.run(); err != nil {
-			return nil, &UnsupportedError{
+			return nil, nil, &UnsupportedError{
 				Package: cfg.Package,
 				What:    "function " + fn.Name + " at " + position(fset, fn.Pos, fn.Name),
 				Detail:  p.name + ": " + err.Error(),
 			}
 		}
 	}
-	return r, nil
+	return r, needed, nil
 }
 
 // verify runs the SSA invariant checks and turns a finding into an error.

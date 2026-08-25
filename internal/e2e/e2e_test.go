@@ -458,3 +458,133 @@ func count(lines []string, prefix string) int {
 	}
 	return n
 }
+
+// The program that allocates.
+//
+// A variadic call is the row specs/032-type-descriptors-and-itabs.md unblocks
+// that reaches the most code: the builder packs a variadic call's arguments
+// into a slice literal, the literal allocates an array on the heap, and
+// runtime.newarray takes the element type's descriptor. So this program is the
+// first one in this repository whose object carries a data symbol of its own
+// and the first that allocates.
+//
+// Every part of the chain is asserted by the answer. total(1, 2, 3, 4) is ten
+// only if the array was allocated with the right size, if every element store
+// landed in it, and if the header the call receives carries the length the
+// literal built. The empty call is the other end: an arity of zero must still
+// produce a header with a length of zero rather than a nil slice the loop
+// reads through.
+//
+// The exit status is the assertion, as in the other programs here: a wrong
+// answer divides by zero and the process dies.
+const variadicProgram = `package main
+
+func total(xs ...int) int {
+	sum := 0
+	for i := 0; i < len(xs); i++ {
+		sum = sum + xs[i]
+	}
+	return sum
+}
+
+func main() {
+	d := total(1, 2, 3, 4) - 10
+	if d != 0 {
+		d = d / (d - d)
+	}
+	e := total()
+	if e != 0 {
+		e = e / (e - e)
+	}
+}
+`
+
+// The program that runs a collection over what it allocated.
+//
+// The element type is a pointer on purpose. mallocgc reads the descriptor's
+// GCData, and an array of integers has an empty pointer mask, so it goes into
+// a noscan span and the collector never walks it. An array of pointers is
+// scanned, so the collector reads the mask this compiler emitted and follows
+// what it says. The array is live in total's frame while runtime.GC() runs, so
+// the stack map ssagen wrote for the call is what keeps it and its two
+// pointees reachable.
+//
+// This is not a proof that nanogo's output is collector-safe. One small
+// allocation in a program that does nothing else exercises one object and one
+// frame, and a mask that named too few words would free nothing that anything
+// else would reuse. It is the cheapest statement that the descriptor is a
+// structure the runtime accepts rather than bytes that only happen to link.
+//
+// It imports the runtime because there is no other way to ask for a
+// collection. The import is not the claim: import_test.go owns the claim about
+// reading gc's export data.
+const collectedProgram = `package main
+
+import "runtime"
+
+func total(xs ...*int) int {
+	runtime.GC()
+	sum := 0
+	for i := 0; i < len(xs); i++ {
+		sum = sum + *xs[i]
+	}
+	return sum
+}
+
+func main() {
+	a := new(int)
+	*a = 3
+	b := new(int)
+	*b = 7
+	d := total(a, b) - 10
+	if d != 0 {
+		d = d / (d - d)
+	}
+}
+`
+
+// TestToolexecVariadicCallAllocates is what specs/032's seam was holding back.
+//
+// Before the three wiring changes this program was refused at compile time:
+// driver's pass list started at ssa.Build, so the pass that lowers a slice
+// literal never ran, and ssa.Build refuses every Go-specific node. Running it
+// is the statement that lowering, descriptor emission and the descriptor's own
+// symbol name all reached a linked program, because each one of the three is
+// enough on its own to stop it.
+func TestToolexecVariadicCallAllocates(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/vararg\n\ngo 1.27\n",
+		"main.go": variadicProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "vararg", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	if b, err := exec.Command(filepath.Join(h.mod, "vararg")).CombinedOutput(); err != nil {
+		t.Fatalf("the program nanogo compiled did not run: %v\n%s", err, b)
+	}
+}
+
+// TestToolexecCollectsAHeapAllocation runs the collector over the object the
+// variadic call allocated.
+func TestToolexecCollectsAHeapAllocation(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/collect\n\ngo 1.27\n",
+		"main.go": collectedProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "collect", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	if b, err := exec.Command(filepath.Join(h.mod, "collect")).CombinedOutput(); err != nil {
+		t.Fatalf("the collector rejected what nanogo allocated: %v\n%s", err, b)
+	}
+}

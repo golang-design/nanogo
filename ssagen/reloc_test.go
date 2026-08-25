@@ -166,3 +166,52 @@ func TestAddressRelocations(t *testing.T) {
 		t.Errorf("the disassembly does not name the global:\n%s", text)
 	}
 }
+
+// TestTypeDescriptorNamesSurviveThePrefix is the third change of specs/032's
+// seam.
+//
+// symbolName puts this package's path back onto a name with no dot in it,
+// because ir.Object holds a package-level variable's name as written. A type
+// descriptor's name is not a Go identifier and is already a linker symbol, so
+// the rule does not apply to it: type:p.T survived by accident because it
+// holds a dot, and type:int, type:[]int and type:interface {} became
+// main.type:int and friends, symbols nothing defines and cmd/link never
+// collects into runtime.typelinks.
+func TestTypeDescriptorNamesSurviveThePrefix(t *testing.T) {
+	// The name and the ABI are decided by the package path alone, so the
+	// emitter needs nothing else.
+	e := &emitter{pkg: obj.NewPackage("test")}
+	for _, name := range []string{"type:int", "type:[]int", "type:interface {}", "type:*int", "type:p.T"} {
+		if got := e.symbolName(&ir.Object{Name: name, Class: ir.ClassGlobal}); got != name {
+			t.Errorf("the descriptor %q became %q", name, got)
+		}
+	}
+	// The rule the exception is carved out of still holds.
+	if got := e.symbolName(&ir.Object{Name: "G", Class: ir.ClassGlobal}); got != "test.G" {
+		t.Errorf("a package-level name became %q, want test.G", got)
+	}
+}
+
+// TestGlobalReferencesAreABI0 checks the half of a symbol's identity that is
+// not its name.
+//
+// cmd/link resolves a by-name reference by name and ABI together, so a data
+// symbol referenced under ABIInternal names a symbol nothing defines and the
+// link reports the descriptor as undefined. gc gives a data symbol no ABI,
+// which is ABI0.
+func TestGlobalReferencesAreABI0(t *testing.T) {
+	// The name and the ABI are decided by the package path alone, so the
+	// emitter needs nothing else.
+	e := &emitter{pkg: obj.NewPackage("test")}
+	if c := e.globalCallee(&ir.Object{Name: "type:int", Class: ir.ClassGlobal}); c.abi != obj.ABI0 {
+		t.Errorf("a type descriptor is referenced at ABI %d, want ABI0", c.abi)
+	}
+	if c := e.globalCallee(&ir.Object{Name: "G", Class: ir.ClassGlobal}); c.name != "test.G" || c.abi != obj.ABI0 {
+		t.Errorf("a package-level variable is referenced as %+v, want test.G at ABI0", c)
+	}
+	// A text symbol keeps ABIInternal, which is what specs/030-abi.md gives
+	// every function nanogo compiles.
+	if c := e.globalCallee(&ir.Object{Name: "main.f", Class: ir.ClassFunc}); c.abi != obj.ABIInternal {
+		t.Errorf("a function is referenced at ABI %d, want ABIInternal", c.abi)
+	}
+}
