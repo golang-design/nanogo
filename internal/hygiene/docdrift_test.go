@@ -875,8 +875,27 @@ func coverageFacts(t *testing.T, root string) map[string]float64 {
 	return out
 }
 
+// childTimeout is the timeout given to every go test this file spawns.
+//
+// A child gets the 10 minute default unless it is told otherwise, and the
+// derivation's children run whole corpora: the four corpus packages together
+// passed 10 minutes once the lowering pass reached more functions, and the
+// coverage child runs ./... . The failure is a test binary panicking on its
+// own alarm, which reads as a compiler bug rather than as a budget.
+//
+// The comment on TestTheFactsAreCurrent already recorded that the derivation
+// "takes minutes and blows the default go test timeout". That was true of the
+// child as well, and only the parent was given a way out, through -short. So
+// the gate was flaky by construction and CI's -timeout 40m could not save it,
+// because a timeout on the parent is not inherited.
+const childTimeout = "40m"
+
 func goTest(t *testing.T, root string, corpus bool, args ...string) string {
 	t.Helper()
+	// After "test", so that it is a go test flag and not a go flag.
+	if len(args) > 0 && args[0] == "test" {
+		args = append([]string{"test", "-timeout", childTimeout}, args[1:]...)
+	}
 	cmd := exec.Command("go", args...)
 	cmd.Dir = root
 	env := childEnv()
