@@ -256,7 +256,7 @@ It is not in this deck's scope but nothing here excludes it.
 
 What is gated today:
 
-- **Differential disassembly** per [041](041-instruction-encoding.md): 963,460
+- **Differential disassembly** per [041](041-instruction-encoding.md): 981,124
   encodings agree with `go tool asm`, summed over 43 tests.
 - **Source text to a running process.** `ssagen`'s `TestLinkAndRun` compiles a
   function with nanogo, links it against the real Go runtime with

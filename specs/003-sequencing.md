@@ -219,7 +219,7 @@ package:
 | `syntax` | 99% | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) |
 | `types2` | excluded | [012](012-type-checking.md); gated by upstream's suite |
 | `loader` | 98% | [014](014-package-loader.md), G1 half |
-| `ir` | 94% | [020](020-ir.md); builds 536 packages of the distribution |
+| `ir` | 95% | [020](020-ir.md); builds 536 packages of the distribution |
 | `ssa` | 96% | [021](021-ssa-construction.md), with the verifier of that spec |
 | `ssa/rules` | 97% | [025](025-lowering-and-rules.md), [042](042-arm64-backend.md) |
 | `ssagen` | 92% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |

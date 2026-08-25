@@ -121,7 +121,7 @@ not needed. On `amd64` it is, and [043](043-amd64-backend.md) owns it.
   sweep of operand values, compare nanogo's bytes against what `go tool asm`
   produces for the equivalent instruction. This is an exact oracle and it is
   exhaustive over the operand ranges, not sampled. The measured total is
-  **963,460 comparisons with zero disagreements**.
+  **981,124 comparisons with zero disagreements**.
 
   The package counts them itself. `comparisons` is an atomic that every
   comparison increments, and `TestMain` prints the total when the package
@@ -132,7 +132,7 @@ not needed. On `amd64` it is, and [043](043-amd64-backend.md) owns it.
   audit summed the per-test log lines, got 913,069, and changed this spec to
   say so. The sum is smaller than the truth because not every comparison
   happens inside a test that logs a count, and the audit had also double
-  counted `TestMain`'s own line in one variant of the same sum. 963,460 is the
+  counted `TestMain`'s own line in one variant of the same sum. 981,124 is the
   figure the package reports and it is the one to quote.
 
   The lesson is worth more than the number. A total that is reconstructed by

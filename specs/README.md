@@ -109,7 +109,7 @@ believed.
 | | | | |
 | --- | --- | --- | --- |
 | [040](040-object-format.md) | Object files | `in progress` | `goobj`, and why not assembly text |
-| [041](041-instruction-encoding.md) | Instruction encoding | `complete` | 963,460 encodings agree with `go tool asm` |
+| [041](041-instruction-encoding.md) | Instruction encoding | `complete` | 981,124 encodings agree with `go tool asm` |
 | [042](042-arm64-backend.md) | arm64 backend | `in progress` | the first target |
 | [043](043-amd64-backend.md) | amd64 backend | `draft` | the test of target neutrality; not written |
 | [044](044-plan9-assembler.md) | Plan 9 assembler | `draft` | G3; not written |

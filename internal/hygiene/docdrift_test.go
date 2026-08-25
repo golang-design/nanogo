@@ -141,6 +141,16 @@ func buildClaims() []claim {
 	addPhrase("loader.constraint.files", readme, `([\d,]+) files on two platforms agree with `+"`go/build`")
 	addPhrase("loader.golist.packages", readme, `([\d,]+) packages agree with `+"`go list`")
 	addPhrase("arm64.encodings", readme, `([\d,]+) encodings agree with `+"`go tool asm`")
+	// The encoding count is written in five places and the gate watched one.
+	// When the conditional select class was added it moved to 981,124 in
+	// README.md and stayed stale in four specs, which is exactly the drift
+	// this gate exists to stop, happening in the documents it was not reading.
+	//
+	// A number worth gating is worth gating everywhere it is written down.
+	addPhrase("arm64.encodings", "specs/README.md", `([\d,]+) encodings agree with `+"`go tool asm`")
+	addPhrase("arm64.encodings", "specs/041-instruction-encoding.md", `\*\*([\d,]+) comparisons with zero disagreements\*\*`)
+	addPhrase("arm64.encodings", "specs/042-arm64-backend.md", `041-instruction-encoding\.md\): ([\d,]+)`)
+	addPhrase("arm64.encodings", "specs/004-conformance.md", `([\d,]+), counted by the package itself`)
 	addPhrase("rtsym.symbols", readme, `([\d,]+) runtime signatures checked`)
 	addPhrase("types2.subtests", readme, `([\d,]+) subtests`)
 	addPhrase("types2.errorcheck.entries", readme, `a ([\d,]+)-entry errorcheck corpus`)
