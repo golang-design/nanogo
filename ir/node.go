@@ -376,6 +376,19 @@ type Func struct {
 	// the body. The decision is made when the function is compiled, not when it
 	// is imported, so the exporter decides and the importer obeys.
 	Inlinable bool
+
+	// Bodyless records that the declaration had no body block at all.
+	//
+	// An empty body and an absent body both leave Body empty, and the two mean
+	// opposite things. "func f() {}" is a complete Go function that does
+	// nothing and must be compiled. "func f()" with no block is satisfied
+	// elsewhere, by assembly or by a //go:linkname, and there is nothing to
+	// compile. A consumer that read only len(Body) refused the first for the
+	// reason that belongs to the second, which is a legal program rejected.
+	//
+	// The sense is negative so that a Func built by hand, which always has a
+	// body, needs no field set.
+	Bodyless bool
 }
 
 // Package is one compiled package.

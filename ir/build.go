@@ -846,6 +846,8 @@ func (b *builder) buildFunc(d *syntax.FuncDecl, nth int) *Func {
 	if d.Body != nil {
 		b.free = make(map[*Object]bool)
 		fn.Body = b.block(d.Body.List)
+	} else {
+		fn.Bodyless = true
 	}
 	b.fn, b.sig, b.sinks, b.free = saveFn, saveSig, saveSinks, saveFree
 	return fn
