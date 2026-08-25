@@ -163,7 +163,7 @@ hole-free intervals from definition to last use. Under that model disjointness
 already implies the pointer clause, so the clause never rejects a sharing that
 disjointness accepted. It is implemented anyway, computed independently from the
 safepoint live sets, because it stops being redundant the moment ranges gain
-holes, and a rule that is load-bearing later should not be absent now.
+holes, and a rule that is required later should not be absent now.
 
 **Incomplete, in a way that matters more.** Disjointness is not sufficient.
 Two values may share a slot only when they also have **identical size,

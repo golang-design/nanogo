@@ -166,7 +166,7 @@ const (
 	Recv  // <- as a receive
 	Tilde // ~ in a type constraint element
 
-	// Binary operators, in increasing precedence. The order is load-bearing:
+	// Binary operators, in increasing precedence. The order matters:
 	// Precedence indexes ranges of it.
 	OrOr   // ||
 	AndAnd // &&

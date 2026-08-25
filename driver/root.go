@@ -89,10 +89,10 @@ func FindRoot(getenv func(string) string, executable func() (string, error), gor
 
 // IsNanogoRoot reports whether dir holds a nanogo distribution.
 //
-// Two things are required and both are load-bearing. VERSION says which
-// release the tree is, and pkg/GOOS_GOARCH holds the archives the linker
-// reads. A tree with the sources and no archives is a checkout, and a build
-// against it would have nothing to link.
+// Two things are required. VERSION says which release the tree is, and
+// pkg/GOOS_GOARCH holds the archives the linker reads. A tree with the sources
+// and no archives is a checkout, and a build against it would have nothing to
+// link.
 func IsNanogoRoot(dir string) bool {
 	if fi, err := os.Stat(filepath.Join(dir, "VERSION")); err != nil || fi.IsDir() {
 		return false

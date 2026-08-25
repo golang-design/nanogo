@@ -98,7 +98,7 @@ path internal/abi
 producer gc go1.27.0
 ```
 
-Three properties, and each one is load-bearing:
+Three properties, and each one is required:
 
 1. **It is inside the archive.** A sidecar file can be lost, and a manifest can
    be regenerated from what someone expected the tree to hold rather than from

@@ -26,7 +26,7 @@ import (
 // derived from anything in this package. Every encoder is swept over its
 // operand range and compared byte for byte.
 //
-// Three properties of the harness are load-bearing.
+// The harness depends on three properties.
 //
 // First, go tool asm does not report an out-of-range immediate. It expands the
 // instruction through R27 instead. So every comparison asserts that one source

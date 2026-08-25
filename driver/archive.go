@@ -28,7 +28,7 @@ const (
 
 	// objectMember is the name gc gives the object inside the archive.
 	// cmd/link skips a member whose name is short and whose extension is not
-	// .o or .syso, so the name is load-bearing and not a convention.
+	// .o or .syso, so the name is required and not a convention.
 	objectMember = "_go_.o"
 
 	// definitionMember is the name gc gives the export data. Every importer

@@ -96,7 +96,7 @@ const (
 // onto output sections, so the kind decides whether a symbol is code, is
 // read only, is zero filled, and whether the garbage collector scans it.
 //
-// The values are the objabi.SymKind values and the order is load bearing:
+// The values are the objabi.SymKind values and the order matters:
 // the linker indexes a table with them.
 type SymKind uint8
 

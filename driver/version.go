@@ -22,7 +22,7 @@ const unknownIdentity = "unknown"
 
 // BuildIdentity is nanogo's own identity, as it appears in the -V=full line.
 //
-// This value is load-bearing. The go command turns the whole -V=full line into
+// This value matters. The go command turns the whole -V=full line into
 // the compiler's build ID and mixes it into every cache key, so a nanogo change
 // invalidates the packages nanogo compiled only if the line changes with it. A
 // driver that echoed gc's version string would build once and then reuse stale
