@@ -490,7 +490,8 @@ func TestTheLineBudgetHolds(t *testing.T) {
 	budget := documentedNumber(t, text, `\*\*([\d,]+) lines for v1\*\*`, "the v1 budget")
 	if float64(measured) > budget {
 		t.Errorf("the compiler is %d lines and decision 10 budgets %.0f. "+
-			"Decision 10 says what to give up rather than what to raise.", measured, budget)
+			"The budget was raised once, in August 2026, and decision 10 says "+
+			"the next overrun is answered by naming what to give up.", measured, budget)
 	}
 
 	stated := documentedNumber(t, text, `\*\*([\d,]+)\*\* lines of compiler`, "the measured total")
