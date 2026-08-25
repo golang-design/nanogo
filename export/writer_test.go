@@ -6,7 +6,10 @@ package export
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -398,5 +401,70 @@ func TestWriteStandardLibrary(t *testing.T) {
 	}
 	if written == 0 {
 		t.Fatal("no package round tripped")
+	}
+}
+
+// digestEnv names the archive a subprocess of [TestWriteIsDeterministic]
+// should read, write and report a digest for.
+const digestEnv = "NANOGO_EXPORT_DIGEST_ARCHIVE"
+
+// TestWriteDigestHelper is the subprocess half of the two-process
+// determinism check. It is a no-op unless the parent asked for it.
+func TestWriteDigestHelper(t *testing.T) {
+	file := os.Getenv(digestEnv)
+	if file == "" {
+		t.Skip("not the subprocess of TestWriteIsDeterministicAcrossProcesses")
+	}
+	r := NewReader()
+	pkg, err := r.Read("net/url", file)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	resolve(t, pkg)
+	payload, _, err := Write(pkg)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	fmt.Printf("DIGEST %x\n", sha256.Sum256(payload))
+}
+
+// TestWriteIsDeterministicAcrossProcesses is the half of
+// specs/053-determinism.md that one process cannot check.
+//
+// A walk whose order comes from a pointer value, or from anything else the
+// runtime chooses per process, agrees with itself for as long as the process
+// lives. Two processes over the same archive are what catches it, and it is
+// the shape the fixed point of G1 needs: nanogo compiling nanogo is many
+// processes.
+//
+// net/url is the package, because it has interfaces, a self-referential type,
+// maps and a type with methods, and it declares nothing generic.
+func TestWriteIsDeterministicAcrossProcesses(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module nanogo.example/det2\n\ngo 1.27\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := exportFile(t, dir, "net/url")
+
+	digest := func() string {
+		t.Helper()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestWriteDigestHelper$", "-test.v")
+		cmd.Env = append(os.Environ(), digestEnv+"="+file)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("the subprocess failed: %v\n%s", err, out)
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			if s, ok := strings.CutPrefix(strings.TrimSpace(line), "DIGEST "); ok {
+				return s
+			}
+		}
+		t.Fatalf("the subprocess reported no digest:\n%s", out)
+		return ""
+	}
+
+	first, second := digest(), digest()
+	if first != second {
+		t.Errorf("two processes wrote different export data for net/url: %s and %s", first, second)
 	}
 }
