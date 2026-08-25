@@ -265,7 +265,7 @@ find . -name '*.go' -not -name '*_test.go' \
     -not -path './types2/*' -not -path './spikes/*' | xargs wc -l
 ```
 
-The compiler is **42,338** lines of compiler source today, against the 60,000
+The compiler is **44,541** lines of compiler source today, against the 60,000
 the decision now budgets. What the accounting got wrong is below, under "What
 the estimates got wrong".
 
@@ -277,20 +277,27 @@ two rows cannot claim the same file.
 | Positions, scanner, parser | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) | `syntax/` | 7,522 (`syntax`) | 7,500 | 6,386 |
 | Type checker | [012](012-type-checking.md) | `types2/` | 23,222 (`types2`) | **excluded**, forked | 25,162, plus 1,311 for its generator |
 | Package loader, G1 form | [014](014-package-loader.md) | `loader/` | | 300 | 1,025 |
-| Export data | [015](015-export-data.md) | `export/`, `export/pkgbits/` | 1,568 + 8,097 + 772 | 7,000 | 3,178 |
+| Export data | [015](015-export-data.md) | `export/`, `export/pkgbits/` | 1,568 + 8,097 + 772 | 7,000 | 3,184 |
 | Typed IR, and its lowering pass | [020](020-ir.md) | `ir/` | 10,216 (`ir`) | 6,000 with escape and inlining | 6,033 |
 | Escape analysis, inlining | [023](023-escape-analysis.md), [024](024-inlining-and-devirtualization.md) | | 3,601 (`escape`) | same row | **0, not written** |
-| SSA construction and its passes | [021](021-ssa-construction.md), [022](022-optimization-passes.md) | `ssa/` less the eight files below | 11,609 hand-written | 8,000 | 5,929 |
+| SSA construction and its passes | [021](021-ssa-construction.md), [022](022-optimization-passes.md) | `ssa/` less the eight files below | 11,609 hand-written | 8,000 | 5,982 |
 | Lowering rules, one target | [025](025-lowering-and-rules.md) | `ssa/rules/`, `ssa/lower.go`, `ssa/macharm64.go` | 18,704 (`_gen`, all targets) | 3,000 | 3,142 |
 | Register allocation, liveness | [026](026-register-allocation.md), [027](027-liveness-and-stackmaps.md) | `ssa/regalloc.go`, `ssa/liveness.go`, `ssa/stackmap.go` | | 3,000 | 2,988 |
 | ABI, runtime symbols, descriptors | [030](030-abi.md) to [032](032-type-descriptors-and-itabs.md) | `ssa/abi.go`, `rtsym/`, `rtype/` | 2,938 (`reflectdata`) | 2,500 | 2,437 |
-| SSA to machine code | no spec owns it | `ssagen/` | | **no row existed** | 2,682 |
-| Object writer | [040](040-object-format.md) | `obj/` | 1,559 (`goobj`) | 1,500 | 1,382 |
+| SSA to machine code | no spec owns it | `ssagen/` | | **no row existed** | 3,146 |
+| Object writer | [040](040-object-format.md) | `obj/` | 1,559 (`goobj`) | 1,500 | 1,415 |
 | `arm64` encoder | [041](041-instruction-encoding.md) | `obj/arm64/` | 36,224 (`obj/arm64`, whole ISA) | 2,000 | 2,183 |
-| Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | `driver/`, `cmd/nanogo/` | | 1,000 | 3,079 |
+| Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | `driver/`, `cmd/nanogo/` | | 1,000 | 3,197 |
 | Distribution build | [054](054-distribution.md), [062](062-distribution-build.md) | `dist/`, `cmd/nanogo-dist/` | | **no row existed** | 1,424 |
-| The gates and the package doc | no spec owns them | `internal/covercheck/`, `doc.go` | | **no row existed** | 470 |
-| | | | | **≈41,800** | **42,338** |
+| The gates and the package doc | [004](004-conformance.md) owns the corpus harness | `internal/covercheck/`, `internal/gotest/`, `doc.go` | | **no row existed** | 1,999 |
+| | | | | **≈41,800** | **44,541** |
+
+The gates row grew from 470 to 1,999 in August 2026, and it is the only row
+that grew for a reason worth naming here. `internal/gotest` carries out Go's
+own test corpus ([004](004-conformance.md)): it vendors the 356 files of
+`$GOROOT/test` and does what each one's header says, with `gc` as the oracle.
+It is 1,529 lines that compile nothing, which is the trade this decision's
+budget is supposed to be spent on deliberately rather than by accident.
 
 The measured column is not a smaller version of the estimate column, and the
 difference between them is the interesting part.
