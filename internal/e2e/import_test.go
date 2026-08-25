@@ -188,11 +188,10 @@ const (
 	Mask   = 1 << 62
 )
 
+// An alias and not a defined type. A defined type is refused, because an
+// importer needs a runtime type descriptor for it that nanogo cannot write;
+// see TestNanogoRefusesATypeAnImporterCouldNotLinkAgainst.
 type Word = int
-
-type Pair struct {
-	A, B Word
-}
 `
 
 // dataImporter is the program that reads it.
@@ -201,14 +200,13 @@ const dataImporter = `package main
 import "nanogo.example/data/data"
 
 func main() {
-	p := data.Pair{A: data.Width, B: 2}
-	d := p.A + p.B - 10
+	var w data.Word = data.Width
+	d := w + 2 - 10
 	if d != 0 {
 		d = d / (d - d)
 	}
-	var w data.Word = data.Width
-	e := w - 8
-	if e != 0 {
+	e := data.Mask >> 62
+	if e != 1 {
 		e = e / (e - e)
 	}
 	if len(data.Name) != 4 {
@@ -274,11 +272,16 @@ func TestNanogoImportsWhatNanogoWrote(t *testing.T) {
 
 // TestNanogoCompilesAStandardLibraryPackage is the keystone claim.
 //
-// internal/goarch and internal/goos are in the closure of every Go program:
-// each is constants and type aliases, each compiles to no symbol at all, and
-// the runtime imports both. With them on the allowlist, nanogo compiles them
-// and gc compiles the other twenty-seven packages of the build against the
-// export data nanogo wrote, runtime included. The program then runs.
+// internal/goos is in the closure of every Go program: it is constants and
+// nothing else, it compiles to no symbol at all, and the runtime imports it.
+// With it on the allowlist, nanogo compiles it and gc compiles the other
+// twenty-eight packages of the build against the export data nanogo wrote,
+// runtime included. The program then runs.
+//
+// internal/goarch is the same shape and is not here, because it declares one
+// defined type, ArchFamilyType, and a package that declares one is refused:
+// see TestNanogoRefusesATypeAnImporterCouldNotLinkAgainst for what the
+// refusal is about.
 //
 // This is what specs/015-export-data.md's missing writer was blocking, and
 // these two packages are where it was most visible: the driver refused them
@@ -290,17 +293,15 @@ func TestNanogoCompilesAStandardLibraryPackage(t *testing.T) {
 	h := setup(t, map[string]string{
 		"go.mod":  "module nanogo.example/goarch\n\ngo 1.27\n",
 		"main.go": stdlibProgram,
-	}, []string{"internal/goarch", "internal/goos"})
+	}, []string{"internal/goos"})
 
 	out, err := h.build(t, "-o", "prog", ".")
 	if err != nil {
 		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
 	}
 	lines := h.decisions(t)
-	for _, pkg := range []string{"internal/goarch", "internal/goos"} {
-		if !compiled(lines, pkg) {
-			t.Fatalf("nanogo delegated %s:\n%s", pkg, strings.Join(lines, "\n"))
-		}
+	if !compiled(lines, "internal/goos") {
+		t.Fatalf("nanogo delegated internal/goos:\n%s", strings.Join(lines, "\n"))
 	}
 	if compiled(lines, "runtime") {
 		t.Fatalf("nanogo compiled the runtime, so the test says nothing about importing:\n%s",
@@ -384,5 +385,170 @@ func TestGcOrdersInitAfterAPackageNanogoCompiled(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("the traceback does not name %q:\n%s", want, got)
 		}
+	}
+}
+
+// linkShape is one library shape and an importer that uses it.
+//
+// The importer is gc's and the library is nanogo's, and the assertion is the
+// process exit status: every program below exits 42 when every value crossed
+// the boundary intact.
+type linkShape struct {
+	name string
+	lib  string
+	main string
+}
+
+// linkingShapes are the library shapes gc can compile against, link and run.
+//
+// Each one is here for a part of the export data that only the linker can
+// check. The cross-read test in export/ compiles an importer and stops there,
+// which is one step short of the consumer: a relocation is emitted at compile
+// time and resolved at link time, so a symbol the library owes and does not
+// write is invisible until the link.
+var linkingShapes = []linkShape{
+	{
+		name: "a constant and a function",
+		lib:  "const S = 21\n\nfunc Double(x int) int { return x * 2 }\n",
+		main: "\tos.Exit(lib.Double(lib.S))\n",
+	},
+	{
+		name: "a function with several parameters and results",
+		lib:  "func Split(x int) (int, int) { return x / 2, x - x/2 }\n",
+		main: "\ta, b := lib.Split(42)\n\tos.Exit(a + b)\n",
+	},
+	{
+		name: "a variadic function",
+		lib:  "func Sum(xs ...int) int {\n\ttotal := 0\n\tfor _, x := range xs {\n\t\ttotal = total + x\n\t}\n\treturn total\n}\n",
+		main: "\tos.Exit(lib.Sum(20, 20, 2))\n",
+	},
+	{
+		name: "a type alias, which declares no type",
+		lib:  "type Word = int\n\nfunc Widen(w Word) Word { return w }\n",
+		main: "\tvar w lib.Word = 42\n\tos.Exit(int(lib.Widen(w)))\n",
+	},
+	{
+		name: "a function that calls another in the same package",
+		lib:  "func inner(x int) int { return x + 2 }\n\nfunc Outer(x int) int { return inner(x) }\n",
+		main: "\tos.Exit(lib.Outer(40))\n",
+	},
+	{
+		name: "a package whose only content is constants",
+		lib:  "const (\n\tA = 40\n\tB = 2\n)\n",
+		main: "\tos.Exit(lib.A + lib.B)\n",
+	},
+}
+
+// TestGcLinksAndRunsAgainstWhatNanogoWrote is the cross-read carried one step
+// further, to the consumer.
+//
+// export/crossread_test.go has gc compile an importer of every standard
+// library package nanogo wrote, which exercises both of gc's readers and
+// nothing else. It cannot see a symbol the library owes: the reference is
+// emitted at compile time and resolved at link time. This test links and runs,
+// and the shape that found the gap is in the refusal table below rather than
+// here.
+func TestGcLinksAndRunsAgainstWhatNanogoWrote(t *testing.T) {
+	for _, s := range linkingShapes {
+		t.Run(s.name, func(t *testing.T) {
+			h := setup(t, shapeModule(s), []string{"nanogo.example/shape/lib"})
+
+			out, err := h.build(t, "-o", "prog", ".")
+			if err != nil {
+				t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+			}
+			if !compiled(h.decisions(t), "nanogo.example/shape/lib") {
+				t.Fatalf("nanogo delegated the library, so gc linked against gc's own object:\n%s",
+					strings.Join(h.decisions(t), "\n"))
+			}
+
+			b, err := exec.Command(filepath.Join(h.mod, "prog")).CombinedOutput()
+			code := 0
+			if ee, ok := err.(*exec.ExitError); ok {
+				code = ee.ExitCode()
+			} else if err != nil {
+				t.Fatalf("the program did not run: %v\n%s", err, b)
+			}
+			if code != 42 {
+				t.Errorf("the program exited %d, want 42\n%s", code, b)
+			}
+		})
+	}
+}
+
+// shapeModule is the two-package module one shape is built in.
+func shapeModule(s linkShape) map[string]string {
+	return map[string]string{
+		"go.mod":     "module nanogo.example/shape\n\ngo 1.27\n",
+		"lib/lib.go": "package lib\n\n" + s.lib,
+		"main.go": "package main\n\nimport (\n\t\"os\"\n\n\t\"nanogo.example/shape/lib\"\n)\n\n" +
+			"func main() {\n" + s.main + "}\n",
+	}
+}
+
+// refusedShapes are the library shapes nanogo will not compile, and the type
+// each refusal has to name.
+//
+// Every one of them declares a type. gc, told by the export data that the type
+// exists, compiles an importer that refers to it twice over: directly, where
+// the code needs the runtime type descriptor, and through DWARF, where a
+// variable of that type names go:info.<path>.<Type>. cmd/link builds the DWARF
+// entry out of the descriptor, so both come back to the one symbol the
+// defining package owes and nanogo cannot write, type:<path>.<Type>.
+var refusedShapes = []linkShape{
+	{name: "a struct", lib: "type Point struct{ X, Y int }\n", main: "Point"},
+	{name: "a struct with a pointer field", lib: "type Node struct {\n\tN *Node\n\tV int\n}\n", main: "Node"},
+	{name: "a named slice", lib: "type List []int\n", main: "List"},
+	{name: "a named map", lib: "type M map[string]int\n", main: "M"},
+	{name: "an interface", lib: "type I interface{ F() int }\n", main: "I"},
+	{name: "a named basic type", lib: "type Code int\n", main: "Code"},
+	{name: "a type with a method", lib: "type Code int\n\nfunc (c Code) V() int { return int(c) }\n", main: "Code"},
+}
+
+// TestNanogoRefusesATypeAnImporterCouldNotLinkAgainst is the other half of the
+// seam, and the reason a named basic type is in the table above it.
+//
+// The library is not the variable. The same library, compiled by nanogo,
+// linked against one importer and not against another: "os.Exit(int(lib.F()))"
+// linked and "c := lib.F(); os.Exit(int(c))" did not, because the second put
+// the imported type on a local variable and gc emitted a DWARF reference for
+// it. So no property of the library separates the safe case from the unsafe
+// one, and a compiler that refused only the unsafe ones would be guessing
+// about a package it cannot see.
+//
+// nanogo therefore refuses at compile time, and the message names the package,
+// the type, its position, the symbol an importer needs and the spec that owns
+// the gap. What it replaces is a link failure that names none of them:
+//
+//	sym 5: relocation target go:info.xread/lib.Point not defined
+func TestNanogoRefusesATypeAnImporterCouldNotLinkAgainst(t *testing.T) {
+	for _, s := range refusedShapes {
+		t.Run(s.name, func(t *testing.T) {
+			files := shapeModule(linkShape{lib: s.lib, main: "\tos.Exit(42)\n"})
+			// The importer must not mention the library's type, so that what
+			// the build reports is the refusal and not a type error.
+			files["main.go"] = "package main\n\nimport (\n\t\"os\"\n\n\t_ \"nanogo.example/shape/lib\"\n)\n\n" +
+				"func main() { os.Exit(42) }\n"
+			h := setup(t, files, []string{"nanogo.example/shape/lib"})
+
+			out, err := h.build(t, "-o", "prog", ".")
+			if err == nil {
+				t.Fatalf("the build succeeded although the library declares a type nanogo cannot describe:\n%s", out)
+			}
+			for _, want := range []string{
+				"nanogo.example/shape/lib", // the package
+				s.main,                     // the type
+				"lib.go:",                  // where it is declared
+				"type:nanogo.example/shape/lib." + s.main, // the symbol an importer needs
+				"specs/032", // the spec that owns the gap
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the refusal does not mention %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "relocation target") {
+				t.Errorf("the build reached the linker, so the refusal did not fire:\n%s", out)
+			}
+		})
 	}
 }
