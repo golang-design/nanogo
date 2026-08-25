@@ -77,7 +77,7 @@ believed.
 | [001](001-bootstrap-gates.md) | Bootstrap gates | `draft` | G1, G2, G3, and the fixed point |
 | [002](002-architecture.md) | Architecture | `in progress` | pipeline, two IRs, package layout |
 | [003](003-sequencing.md) | Sequencing | `in progress` | milestones M0 to M10, risks, deviations |
-| [004](004-conformance.md) | Conformance | `in progress` | four levels of proof |
+| [004](004-conformance.md) | Conformance | `in progress` | four levels of proof; L1 and L2 built, L3 partial, L4 blocked |
 
 ### Front end
 

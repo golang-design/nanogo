@@ -111,6 +111,14 @@ source does not use.
 **Done when** the `test/` corpus passes: `run`, `runoutput`, `errorcheck`,
 `compile`, and `build` directives all honoured.
 
+That gate is now measurable rather than aspirational. `internal/gotest` vendors
+the corpus and carries out `run`, `compile` and `errorcheck` against `gc` as
+the oracle ([004](004-conformance.md)), and
+`internal/gotest/testdata/ratchet.txt` records what passes today. M5 is
+finished when the refusals in that report are gone; the report's ranked
+breakdown of refusal reasons is the work list, in the order that buys the most
+files.
+
 ### M6: G1
 
 Self-host. [060](060-selfhost.md).

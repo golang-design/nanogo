@@ -29,18 +29,19 @@ flowchart TD
 
 Each level catches a class the level above cannot.
 
-**One level is built, one exists in a narrow form, and two do not exist.** L1
-is built and large for the front end. L3 runs as a differential against `gc` at
-the instruction and the ABI boundary, and it now runs whole programs, but it
-does not build the same program twice and compare the two outputs. L2 has no
-harness at all, and L4 cannot be run until [060](060-selfhost.md) reports
-otherwise. The table below is the state of each level, and each section says
+**Two levels are built, one is partial, and one cannot be run.** L1 is built
+and large for the front end. L2 now has a harness: `internal/gotest` vendors
+Go's `test/` directory and carries out the single-file recipes, with `gc` as
+the oracle. That harness is also the first thing in the repository that
+performs L3 as decision 6 states it, building the same program with both
+compilers and comparing the two outputs, so the two levels now share a gate.
+L4 cannot be run until [060](060-selfhost.md) reports otherwise. The table below is the state of each level, and each section says
 what stands and what does not.
 
 | Level | State | What runs today |
 | --- | --- | --- |
 | L1 agreement | built for the front end, partial for the checker | scanner, parser, build constraints and `go list`, over the distribution |
-| L2 corpus | **not built** | nothing reads `~/dev/go.dev/go/test` |
+| L2 corpus | built for the single-file kinds | 356 files vendored, each doing what its header says, `internal/gotest` |
 | L3 differential execution | partial | instruction encodings, runtime symbols, prologues, 18 mixed-toolchain link-and-run cases, and whole programs built through a real `go build -toolexec=nanogo` and run |
 | L4 fixed point | **not built** | no stage is runnable, per [060](060-selfhost.md) |
 
@@ -72,35 +73,134 @@ judgements are not.
 
 ### L2: Go's test corpus
 
-`~/dev/go.dev/go/test` is 356 files driven by directive comments. The directives
-that matter here:
+`$GOROOT/test` is 356 files driven by directive comments. They are vendored
+into `internal/gotest/testdata/go/test`, verbatim, with Go's `LICENSE` and
+`PATENTS` beside them, because a gate whose inputs come from whichever Go
+happens to be installed changes under you and cannot be reproduced from a
+checkout. A tag must be able to say which corpus it passed.
 
-| Directive | Asserts |
-| --- | --- |
-| `// run` | compiles, runs, exits 0 |
-| `// runoutput` | the program's output matches the expected block |
-| `// errorcheck` | the compiler rejects, at exactly the annotated position, with a message matching the annotated pattern |
-| `// compile` | compiles, is not run |
-| `// build` | compiles and links |
+The directives, and what `internal/gotest` does with each:
 
-`errorcheck` is the strict one and the valuable one. It pins positions, which is
-the part of a front end that silently rots.
+| Directive | Asserts | State |
+| --- | --- | --- |
+| `// run` | compiles, runs, behaves as `gc`'s build of the same source does | carried out |
+| `// compile` | compiles, is not run | carried out |
+| `// errorcheck` | the compiler rejects, at the annotated position | carried out |
+| `// runoutput`, `// build` | the program's output, and linking | counted, not carried out |
+| the directory kinds | a package spread over several files | counted, not carried out; their inputs are the subdirectories of `$GOROOT/test`, which are not vendored |
 
-nanogo runs this corpus with its own driver rather than the distribution's, so
-that a failure names a nanogo spec. Known-unsupported files are listed in an
-explicit exclusion file with a reason and the milestone that removes them.
-An empty exclusion list is a gate for M5, not a starting condition.
+**`gc` is the oracle, not a golden file.** Each program is built twice, from the
+same source at the same path, and the two are compared on exit status and
+output. An expectation derived from the installed toolchain on the spot cannot
+go stale the way a recorded one can, and a recorded expectation for a corpus
+this size would be a second corpus to maintain.
 
-**None of this is built.** No test in the repository reads
-`~/dev/go.dev/go/test`, there is no driver for the directives above, and there is
-no exclusion file. The 356 files are still there and still the right corpus; the
-harness is the missing part.
+#### A refusal is not a failure
 
-The 375-entry `errorcheck` corpus that does run is a different corpus and it is
-easy to conflate with this one. It is `types2/upstream/testdata`, vendored with
-the fork, and it proves the checker against the checker it was forked from
-([012](012-type-checking.md)). It says nothing about position agreement over the
-distribution, which is what L2 asks for.
+nanogo cannot compile most of Go yet. A file it refuses is recorded as refused,
+with the message, and the sweep continues. What fails the build is narrower and
+sharper:
+
+$$
+\mathrm{fail} \iff \exists P:\; \mathrm{run}(\mathrm{compile}(\mathrm{nanogo}, P)) \neq \mathrm{run}(\mathrm{compile}(gc, P))
+$$
+
+and, separately, any file that passed yesterday and does not today.
+
+#### Every file lands in exactly one class
+
+```mermaid
+flowchart LR
+  F["a corpus file"] --> R{"recipe?"}
+  R -->|"unreadable"| NR["no-recipe"]
+  R -->|"skip"| SK["recipe-says-skip"]
+  R -->|"a kind or flag<br/>this harness cannot honour"| NI["kind- / recipe-<br/>not-implemented"]
+  R -->|"excluded here"| PX["platform-excluded"]
+  R -->|"carried out"| G{"gc"}
+  G -->|"cannot build it"| OF["oracle-failed"]
+  G -->|"builds it"| N{"nanogo"}
+  N -->|"names what it cannot compile"| RF["refused"]
+  N -->|"panics"| CR["crashed"]
+  N -->|"rejects legal Go"| FE["false-error"]
+  N -->|"builds it"| B{"behaviour"}
+  B -->|"as gc"| OK["matched"]
+  B -->|"not as gc"| MM["mismatched"]
+```
+
+`Report.CheckTotals` asserts that the classes sum to the file count, and the
+test fails when they do not. This is the point of the design, not a detail of
+it. A corpus test that returns silently on the file it cannot handle produces a
+number that can only rise, because the file it dropped left the denominator
+instead of entering a category. This repository has been caught by that before
+and [003](003-sequencing.md) records the occasion.
+
+The four distinctions that make the corpus worth running, rather than a pass
+count, are `mismatched` against `refused`, and `false-error` and
+`wrong-position` against both. A refusal is a gap and is expected. A mismatch
+is a miscompilation. A false error is nanogo rejecting legal Go, and a wrong
+position is nanogo rejecting the right program at the wrong place. Merging any
+of them into "did not pass" would hide the three that are bugs behind the one
+that is not.
+
+#### The ratchet
+
+`internal/gotest/testdata/ratchet.txt` records what the corpus proved, and
+records two things:
+
+- the **pass set**, one line per file. A file that passed and no longer does
+  fails the build. So does a pass that weakened: a file recorded as `matched`
+  that only `compiled` today stopped being run, which is a claim withdrawn.
+- the **census**, one count per recipe kind, and the file count. A harness that
+  stopped finding files would otherwise go green having swept fewer of them,
+  and a pass set alone cannot see that.
+
+Growth never fails the build. nanogo is expected to compile more of Go every
+week and a gate that failed on improvement is a gate people route around; a run
+that proves new files says so and prints the refresh command. The file is
+sorted by file name so that a refresh produces a diff and not a reshuffle
+([053](053-determinism.md)).
+
+#### What the corpus is for
+
+The ranked breakdown, not the pass count. Every refusal is grouped by a
+normalised reason and the groups are printed largest first, so the output ends
+with a list of what to build next in the order that buys the most files. The
+normalisation matters: nanogo's refusal repeats the function's name inside the
+stage chain, so without it every file would be its own bucket and the ranking
+would be a list of ones.
+
+#### Where the numbers are
+
+Not here. The counts move every week, and a number that was true once and is
+wrong now is worse than no number. The run prints the class table and the
+ranked reasons; `ratchet.txt` records the passes and the census. The two
+structural numbers this document does state are gated against that file by
+`TestTheSpecStatesWhatTheRatchetRecords`, so they cannot rot in silence:
+
+- the corpus is **356** files.
+- **80** of them pass, at the first sweep.
+
+The remaining 276 are not failures. They are refusals with a reason, kinds this
+harness does not carry out, recipes whose compiler flags nanogo has no
+equivalent of, and files this platform excludes. Every one of them is counted
+and named in the report.
+
+#### Not to be confused with the other errorcheck corpus
+
+The 375-entry `errorcheck` corpus that also runs is a different corpus and the
+two are easy to conflate. It is `types2/upstream/testdata`, vendored with the
+fork, and it proves the checker against the checker it was forked from
+([012](012-type-checking.md)). It says nothing about `$GOROOT/test`, and
+`$GOROOT/test` says nothing about it.
+
+#### What this level still owes
+
+The directory kinds, `runoutput` and `build`, and the recipes that need
+compiler flags. The last of those is the largest single group and it is not a
+harness gap: those recipes ask for `-m`, `-l` and `-d=ssa/...`, which are
+`gc` debug outputs nanogo has no equivalent of, so carrying them out would
+require nanogo to grow the flags first. Skipping them **loudly**, with a count
+and the flag printed, is the honest handling until then.
 
 ### L3: differential execution
 
@@ -203,12 +303,23 @@ against `go/scanner` and `go/parser` over the distribution, at 19,674 and 16,293
 files, and the type checker is compared against `go/types` on 14 packages. The
 count and the split were found by reading what the corpus tests report.
 
-**L2 was written as though its harness existed, and it does not.** The 356 files
-are read by nothing in the repository. This matters more than an ordinary gap
-because a reader who sees the 375-entry `errorcheck` corpus passing will assume
-L2 is covered, and that corpus is upstream `types2` testdata, which proves the
-fork rather than the compiler. The confusion was found by tracing the corpus
-constant in `types2/errorcheck_test.go` to `types2/upstream/testdata`.
+**L2 was written as though its harness existed, and for a long time it did
+not.** The 356 files were read by nothing in the repository. This mattered more
+than an ordinary gap because a reader who saw the 375-entry `errorcheck` corpus
+passing would assume L2 was covered, and that corpus is upstream `types2`
+testdata, which proves the fork rather than the compiler. `internal/gotest` now
+carries out the single-file recipes and the corpus is vendored, so the harness
+exists; the note stays because the confusion between the two errorcheck corpora
+does not go away with it.
+
+**The syntax slice of L2 was wired and the execution slice was not, and the
+difference was invisible.** All 356 files were tokenised by
+`syntax/scanner_test.go` and the `test/syntax/` errorcheck files were parsed
+with their positions compared, which reads in a summary as "the corpus is
+tested". Nothing had ever compiled one of those files or run it. The lesson is
+the one this document keeps arriving at from a new direction: a corpus is
+covered by the strongest thing done to it, not by the largest count reported
+about it.
 
 **L3 was listed as the strongest level and is the least built.** Its three
 sources are all absent. What the deck can claim instead is differential against
