@@ -178,9 +178,9 @@ structural numbers this document does state are gated against that file by
 `TestTheSpecStatesWhatTheRatchetRecords`, so they cannot rot in silence:
 
 - the corpus is **356** files.
-- **80** of them pass, at the first sweep.
+- **86** of them pass.
 
-The remaining 276 are not failures. They are refusals with a reason, kinds this
+The remaining 270 are not failures. They are refusals with a reason, kinds this
 harness does not carry out, recipes whose compiler flags nanogo has no
 equivalent of, and files this platform excludes. Every one of them is counted
 and named in the report.

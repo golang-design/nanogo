@@ -715,8 +715,10 @@ func (w *writer) varExt() {
 
 // pragmaFlag writes an empty set of //go: directives.
 //
-// nanogo's parser records none (driver/compile.go's pragmaHandler), so there
-// is nothing to write. specs/016-directives-and-pragmas.md owns the gap and
+// The driver records the directives a declaration carries (driver/pragma.go)
+// and nothing carries them this far: the flag bits there are nanogo's own
+// numbering, and this field is read with gc's, so writing them would need the
+// two to be one table. specs/016-directives-and-pragmas.md owns the gap and
 // README.md records what it costs an importer.
 func (w *writer) pragmaFlag() {
 	w.Sync(pkgbits.SyncPragma)

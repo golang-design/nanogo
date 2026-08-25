@@ -64,6 +64,8 @@ pass rejected convlit1.go
 pass rejected copy1.go
 pass rejected ddd1.go
 pass rejected declbad.go
+pass rejected directive.go
+pass rejected directive2.go
 pass rejected embedfunc.go
 pass compiled empty.go
 pass matched env.go
@@ -80,6 +82,7 @@ pass matched gc.go
 pass matched gc1.go
 pass rejected goto.go
 pass matched helloworld.go
+pass rejected import1.go
 pass rejected import5.go
 pass rejected import6.go
 pass rejected indirect1.go
@@ -88,12 +91,15 @@ pass rejected initexp.go
 pass rejected initializerr.go
 pass rejected initloop.go
 pass matched int_lit.go
+pass rejected label.go
 pass rejected label1.go
 pass rejected mainsig.go
 pass rejected makechan.go
 pass rejected makemap.go
 pass rejected makenew.go
 pass rejected map1.go
+pass rejected method1.go
+pass rejected method2.go
 pass rejected method6.go
 pass rejected named1.go
 pass matched printbig.go
