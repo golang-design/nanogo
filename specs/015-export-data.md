@@ -46,10 +46,11 @@ The measured result:
 | packages with export data in the closure of an empty `main` that write | 23 of 27 |
 
 The allowlist can now grow in either direction, which is what the writer was
-blocking. `internal/goarch` and `internal/goos` are the demonstration: each is constants
-and type aliases, each compiles to no symbol at all, and every Go program
-imports both through the runtime. nanogo compiles the pair and `gc` compiles
-the other 27 packages of the build against the export data nanogo wrote
+blocking. `internal/goarch` and `internal/goos` are the demonstration: each is
+constants and type aliases, each compiles to no symbol at all, and every Go
+program imports both through the runtime. nanogo compiles the pair and `gc`
+compiles the other 27 packages of the build against the export data nanogo
+wrote
 (`internal/e2e/import_test.go`). Both were refused until the writer existed,
 under a message about having no function bodies, which said the export data
 was missing and not that code generation could not reach them.
