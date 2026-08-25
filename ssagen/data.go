@@ -284,6 +284,12 @@ func staticValue(t *ir.Type, v ir.Value) ([]byte, []dataReloc, error) {
 			data[0] = 1
 		}
 	case t.Kind.IsInteger():
+		// An integer wider than a machine word has no constant in the
+		// language and would be written short by putUint below, which is a
+		// variable silently holding part of its value.
+		if t.Size > 8 {
+			return nil, nil, fmt.Errorf("an integer constant of %d bytes, and a machine word is %d", t.Size, 8)
+		}
 		n, ok := c.Uint64()
 		if !ok {
 			i, ok := c.Int64()
@@ -301,9 +307,17 @@ func staticValue(t *ir.Type, v ir.Value) ([]byte, []dataReloc, error) {
 		binary.LittleEndian.PutUint64(data, math.Float64bits(f))
 	case t.Kind == ir.String:
 		return stringHeader(t, c)
+	default:
+		// A constant of a kind with no layout here is refused and not left
+		// zero. Leaving it zero would put the value in the hands of the
+		// assignment in the initialisation function, and that assignment is
+		// exactly as unbuilt: a complex constant reaches SSA construction as
+		// OpConstNil, so the variable would hold zero and the program would
+		// run and be wrong. Complex is the only such kind the language has.
+		return nil, nil, fmt.Errorf("a constant of type %v, which has no static layout and no assignment either", t)
 	}
-	// Every other kind whose constant is the predeclared nil is already the
-	// zero bytes above, and every other kind has no constant at all.
+	// A kind whose constant is the predeclared nil is already the zero bytes
+	// above, because a nil Val returned before this switch.
 	return data, nil, nil
 }
 
@@ -332,12 +346,10 @@ func stringHeader(t *ir.Type, c ir.Const) ([]byte, []dataReloc, error) {
 	}}, nil
 }
 
-// putUint writes n into the width of the destination.
+// putUint writes n into the width of the destination, which the caller has
+// already checked is a machine word or less.
 func putUint(b []byte, n uint64) {
 	for i := range b {
-		if i >= 8 {
-			return
-		}
 		b[i] = byte(n >> (8 * i))
 	}
 }

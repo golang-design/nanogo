@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"go/constant"
+	"go/token"
 	"testing"
 
 	"golang.design/x/nanogo/ir"
@@ -307,5 +308,55 @@ func TestGlobalWithoutTypeIsRefused(t *testing.T) {
 	}
 	if err := CheckGlobals(nil); err != nil {
 		t.Errorf("CheckGlobals of no package gave %v", err)
+	}
+}
+
+// TestGlobalComplexConstantIsRefused checks that a constant this compiler has
+// no layout for is refused rather than left zero.
+//
+// Leaving it zero puts the value in the hands of the assignment in the
+// initialisation function, and that assignment is exactly as unbuilt: a
+// complex constant reaches SSA construction as OpConstNil. The variable would
+// hold zero, the program would run, and the answer would be wrong, which is
+// the failure a refusal exists to prevent.
+func TestGlobalComplexConstantIsRefused(t *testing.T) {
+	ty := &ir.Type{Kind: ir.Complex128, Name: "complex128"}
+	if err := ir.Layout(ty); err != nil {
+		t.Fatalf("layout: %v", err)
+	}
+	g := &ir.Object{Name: "main.c", Type: ty, Class: ir.ClassGlobal}
+	p := &ir.Package{Path: "main", Globals: []*ir.Object{g}, Inits: []*ir.Func{{
+		Name: "init", Sym: "main.init", Body: []ir.Stmt{{
+			Op: ir.OAssign,
+			X:  &ir.Node{Op: ir.OGlobal, Type: ty, Obj: g},
+			Y: &ir.Node{Op: ir.OConst, Type: ty, Val: ir.Const{
+				Val: constant.BinaryOp(constant.MakeInt64(1), token.ADD,
+					constant.MakeImag(constant.MakeInt64(2)))}},
+		}},
+	}}}
+	var ge *GlobalError
+	if err := CheckGlobals(p); !errors.As(err, &ge) || ge.Obj != g {
+		t.Fatalf("CheckGlobals gave %v, want a refusal naming main.c", err)
+	}
+	// A complex variable with no initialiser is not refused: zero is its
+	// value, and the refusal is about a constant that would be lost.
+	p.Inits = nil
+	if err := CheckGlobals(p); err != nil {
+		t.Errorf("a complex variable with no initialiser was refused: %v", err)
+	}
+}
+
+// TestGlobalWideIntegerConstantIsRefused checks the guard on putUint.
+//
+// No integer kind in the language is wider than a machine word, so this cannot
+// be reached from Go source today. It is checked because the alternative to
+// the guard is a variable that holds the low eight bytes of its value and
+// reports nothing, which is the same class of failure as the complex case and
+// is not a class to leave open on the assumption that a table stays bounded.
+func TestGlobalWideIntegerConstantIsRefused(t *testing.T) {
+	ty := &ir.Type{Kind: ir.Int64, Name: "int64", Size: 16, Align: 8}
+	_, _, err := staticValue(ty, ir.Const{Val: constant.MakeInt64(1)})
+	if err == nil {
+		t.Fatal("a 16-byte integer constant was laid out into 8 bytes")
 	}
 }
