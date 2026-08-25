@@ -251,7 +251,7 @@ func TestCompileRefusals(t *testing.T) {
 			// wrong.
 			name: "a package-level variable is refused by name and position",
 			src:  "package main\n\nvar n = 1\n\nfunc f() int { return n }\n",
-			want: []string{"package-level variable n", "a.go:3:5", "data symbol"},
+			want: []string{"package-level variable main.n", "a.go:3:5", "data symbol"},
 		},
 		{
 			name: "-complete makes a bodyless declaration an error",

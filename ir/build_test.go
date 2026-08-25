@@ -1236,7 +1236,10 @@ func init() { g = 2 }
 			order = append(order, s.X.Obj.Name)
 		}
 	}
-	want := []string{"b", "a", "cd", "p.init.0", "p.init.1"}
+	// The names are the linker symbols: a package-level variable carries its
+	// package as a function does, so that every package that reads it names
+	// the same symbol.
+	want := []string{"p.b", "p.a", "p.cp.d", "p.init.0", "p.init.1"}
 	if strings.Join(order, ",") != strings.Join(want, ",") {
 		t.Errorf("the init order is %v, want %v\n%s", order, want, buildDump(init))
 	}
@@ -2091,8 +2094,43 @@ func f(s string) (bool, error) {
 	if len(out.Inits) != 1 {
 		t.Fatalf("%d init functions", len(out.Inits))
 	}
-	if len(out.Globals) != 1 || out.Globals[0].Name != "ErrX" {
-		t.Errorf("the globals are %v", out.Globals)
+	// The package is part of the symbol, as it is for a function. A global
+	// that carried the bare name would be relocated against the package
+	// being compiled, so a read of errors.ErrUnsupported would name
+	// q.ErrUnsupported, which nothing defines.
+	if len(out.Globals) != 1 || out.Globals[0].Name != "q.ErrX" {
+		t.Errorf("the globals are %v, want one named q.ErrX", out.Globals)
+	}
+}
+
+// TestBuildGlobalOfAnotherPackageKeepsItsPackage is the read side of the same
+// rule.
+//
+// The declaration is in one package and the read is in another, and both name
+// one symbol in the program. The name an ir.Object carries is what ssagen
+// relocates against, and the only package available there is the package
+// being compiled: a bare "Stdout" became "main.Stdout", which the linker
+// reported as an undefined symbol with no source position on it.
+func TestBuildGlobalOfAnotherPackageKeepsItsPackage(t *testing.T) {
+	pkg, files, info := buildTypecheckWithImports(t, `package q
+
+import "os"
+
+func f() *os.File { return os.Stdout }
+`)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	fn := buildFuncOf(t, out, "f")
+	var names []string
+	for _, n := range buildFind(fn, OGlobal) {
+		if n.Obj != nil && n.Obj.Class == ClassGlobal {
+			names = append(names, n.Obj.Name)
+		}
+	}
+	if len(names) != 1 || names[0] != "os.Stdout" {
+		t.Errorf("the globals read are %v, want [os.Stdout]", names)
 	}
 }
 

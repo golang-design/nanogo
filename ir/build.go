@@ -399,6 +399,7 @@ func (b *builder) obj(o types2.Object) *Object {
 		switch o.Kind() {
 		case types2.PackageVar:
 			out.Class = ClassGlobal
+			out.Name = varSym(o)
 		case types2.ParamVar, types2.RecvVar:
 			out.Class = ClassParam
 		case types2.ResultVar:
@@ -444,6 +445,27 @@ func (b *builder) noteUse(o *Object) {
 		return
 	}
 	b.free[o] = true
+}
+
+// varSym is the linker symbol of a package-level variable.
+//
+// The package is part of the symbol and not part of the name the source
+// wrote, exactly as it is for a function: a package-level variable is one
+// symbol in the program, and every package that reads it names the same one.
+// An object that carried the bare name left the package to be put back
+// downstream, where the only path available is the package being compiled, so
+// a read of os.Stdout emitted a relocation against main.Stdout, which nothing
+// defines. The linker reported an undefined symbol with no source position on
+// it.
+//
+// A variable of the package being compiled goes through the same rule and
+// comes out with the same symbol gc gives it.
+func varSym(v *types2.Var) string {
+	name := v.Name()
+	if p := v.Pkg(); p != nil && p.Path() != "" {
+		return p.Path() + "." + name
+	}
+	return name
 }
 
 // funcSym is the linker symbol of a function or method.
