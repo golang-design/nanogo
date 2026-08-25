@@ -784,3 +784,41 @@ func TestAnonymousSymbol(t *testing.T) {
 		t.Fatal("the object is empty")
 	}
 }
+
+// TestDefReadsBackAReference checks that a reference resolves to the symbol it
+// was made from, in every index space that holds definitions.
+//
+// A relocation names an index pair and nothing else. Without a way back, a
+// caller that emitted a relocation cannot say what it points at, and neither
+// can a test.
+func TestDefReadsBackAReference(t *testing.T) {
+	p := NewPackage("main")
+	text := &Symbol{Name: "main.f", Type: STEXT, Size: 4, Data: []byte{0, 0, 0, 0}}
+	short := &Symbol{Name: "short", Type: SRODATA, Size: 8, Align: 8, Data: make([]byte, 8)}
+	str := &Symbol{Name: `go:string."hi"`, Type: SRODATA, Size: 2, Align: 1, Data: []byte("hi")}
+	other := &Symbol{Name: "main.aux", Type: SRODATA, Size: 1, Align: 1, Data: []byte{1}}
+	for _, c := range []struct {
+		ref SymRef
+		sym *Symbol
+	}{
+		{p.AddDef(text), text},
+		{p.AddHashed64Def(short), short},
+		{p.AddHashedDef(str), str},
+		{p.AddNonPkgDef(other), other},
+	} {
+		if got := p.Def(c.ref); got != c.sym {
+			t.Errorf("%v resolved to %v, want %s", c.ref, got, c.sym.Name)
+		}
+	}
+	// A reference to another package is not a definition, and neither is an
+	// index past the end of a list.
+	if got := p.Def(SymRef{PkgIdxSelf, 99}); got != nil {
+		t.Errorf("an index past the end resolved to %s", got.Name)
+	}
+	if got := p.Def(SymRef{1, 0}); got != nil {
+		t.Errorf("a reference to another package resolved to %s", got.Name)
+	}
+	if got := p.Def(SymRef{}); got != nil {
+		t.Errorf("the nil reference resolved to %s", got.Name)
+	}
+}

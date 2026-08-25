@@ -250,6 +250,39 @@ func (p *Package) lists() [][]*Symbol {
 	return [][]*Symbol{p.defs, p.hashed64Defs, p.hashedDefs, p.nonPkgDefs}
 }
 
+// Def returns the symbol a reference names, or nil when the reference is to
+// something this package does not define.
+//
+// It reads back what an Add call put in. A caller that has just added a symbol
+// holds it already, so this exists for the caller that holds only the
+// reference: a relocation names an index pair, and the only way to say what
+// that pair means is to ask the object.
+//
+// A reference to another package, or to a symbol resolved by name, is not a
+// definition and returns nil rather than a symbol of no content.
+func (p *Package) Def(r SymRef) *Symbol {
+	var list []*Symbol
+	switch r.PkgIdx {
+	case PkgIdxSelf:
+		list = p.defs
+	case PkgIdxHashed64:
+		list = p.hashed64Defs
+	case PkgIdxHashed:
+		list = p.hashedDefs
+	case PkgIdxNone:
+		if int(r.SymIdx) < len(p.nonPkgDefs) {
+			return p.nonPkgDefs[r.SymIdx]
+		}
+		return nil
+	default:
+		return nil
+	}
+	if int(r.SymIdx) >= len(list) {
+		return nil
+	}
+	return list[r.SymIdx]
+}
+
 // Bytes returns the goobj representation of p.
 //
 // The result is the block sequence specs/040-object-format.md lists,
