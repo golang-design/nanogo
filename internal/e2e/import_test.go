@@ -366,18 +366,23 @@ func TestGcOrdersInitAfterAPackageNanogoCompiled(t *testing.T) {
 	if err == nil {
 		t.Fatalf("the program exited zero, so the library's initialisation never ran:\n%s", b)
 	}
-	// The library's init function has to be named in what the process
-	// printed. That is the whole claim: the runtime reached a function in a
-	// package nanogo compiled, which it can only do through the ordering edge
-	// gc wrote from this bit.
+	// The message and not only the name. A name in a traceback is not
+	// evidence that the traceback is right: the runtime resolves the name of
+	// the function that panicked from its program counter and prints it
+	// before it fails on the frame above, so "initlib.init" appears in the
+	// broken output as well. Until ssagen padded the return address of a
+	// panic call, this test read
 	//
-	// The message is a traceback failure and not "integer divide by zero",
-	// because the runtime cannot walk out of a frame nanogo generated for a
-	// synthesised init: it reports an unexpected return pc for
-	// initlib.init.0. That is a gap in the frame nanogo writes for the init
-	// function and not in the export data, and it is evidence for this test
-	// either way, because a name in the traceback is a function that ran.
-	if !strings.Contains(string(b), "initlib.init") {
-		t.Errorf("the program failed for some other reason than the library's init:\n%s", b)
+	//	runtime: g 1: unexpected return pc for initlib.init.0
+	//
+	// and passed.
+	got := string(b)
+	if !strings.Contains(got, "integer divide by zero") {
+		t.Errorf("the program failed for some other reason than the library's init:\n%s", got)
+	}
+	for _, want := range []string{"initlib.boom()", "initlib.init.0()", "initlib.init()"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the traceback does not name %q:\n%s", want, got)
+		}
 	}
 }
