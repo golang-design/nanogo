@@ -1317,9 +1317,14 @@ func TestAddWritesTheAuxiliarySymbols(t *testing.T) {
 // TestEmitRejectsWhatItCannotEncode checks the failures are named rather than
 // producing an instruction that is not the one meant.
 func TestEmitRejectsWhatItCannotEncode(t *testing.T) {
-	// A conditional set has no encoder in obj/arm64, which
-	// ssa.ARM64MissingEncoder reports. A comparison whose result is a value
-	// rather than a branch is lowered to one.
+	// This test used to assert that a conditional set had no encoder, which
+	// was true until obj/arm64 gained the conditional select class. Every
+	// operation a rule can produce is now encodable, so there is no operation
+	// left to reject and that half of the test is gone rather than weakened.
+	//
+	// ssagen.ARM64MissingEncoder and the guard that reads it stay, because
+	// they are the counter for the next gap of this kind. The end of a gap is
+	// not the end of the mechanism that reports one.
 	c := hand(t, "cset", func(f *ssa.Func) {
 		e := f.Entry
 		e.Kind = ssa.BlockRet
@@ -1330,12 +1335,8 @@ func TestEmitRejectsWhatItCannotEncode(t *testing.T) {
 		e.Control = e.NewValue(0, ssa.OpMakeResult, ssa.MemType, less, mem)
 	})
 	p := obj.NewPackage("main")
-	_, err := Emit(c.f, c.a, p, Options{Sym: "main.cset"})
-	if err == nil {
-		t.Fatal("the conditional set was emitted, and obj/arm64 has no encoder for it")
-	}
-	if !strings.Contains(err.Error(), "no encoder") {
-		t.Errorf("the error is %q, and it should name the missing encoder", err)
+	if _, err := Emit(c.f, c.a, p, Options{Sym: "main.cset"}); err != nil {
+		t.Fatalf("a comparison whose result is a value did not emit: %v", err)
 	}
 
 	// The arguments of Emit are checked, because a mismatched allocation
@@ -1637,16 +1638,18 @@ func TestEmitterNamesEveryFailure(t *testing.T) {
 		e.value(b.NewValue(0, ssa.OpARM64MOVDaddr, typeInt))
 		// A frame address of nothing.
 		e.value(b.NewValue(0, ssa.OpARM64ADDframe, typeInt))
-		// The conditional set, which obj/arm64 does not encode.
-		e.value(b.NewValue(0, ssa.OpARM64CSET, typeInt))
-		// A value with a width that the allocation gave nowhere to go.
+		// A value with a width that the allocation gave nowhere to go. The
+		// conditional set used to be listed here as the operation obj/arm64
+		// could not encode; it encodes now, so it reports the same missing
+		// register as any other operation and adds nothing this line does not
+		// already cover.
 		e.value(b.NewValue(0, ssa.OpARM64ADD, typeInt))
 		err := e.err()
 		if err == nil {
 			t.Fatal("nothing was reported")
 		}
 		for _, want := range []string{"not a machine operation", "follows no call", "address of no symbol",
-			"frame address of no object", "no encoder", "gives it no register"} {
+			"frame address of no object", "gives it no register"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("the errors do not name %q:\n%v", want, err)
 			}

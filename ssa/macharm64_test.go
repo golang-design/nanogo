@@ -134,7 +134,10 @@ func machValue(f *Func, op Op) *Value {
 		v.AddArg(f.Entry.NewValue(0, OpArg, argTypes[i]))
 	}
 	switch op {
-	case OpARM64BRcond:
+	case OpARM64BRcond, OpARM64CSET:
+		// The condition is in Aux for both, and it is the same value for the
+		// same comparison: one branches on the flags and the other reads them
+		// into a register.
 		v.Aux = arm64.LT
 	case OpARM64TSTconst, OpARM64TSTWconst, OpARM64ANDconst, OpARM64ORRconst,
 		OpARM64EORconst, OpARM64BICconst:
@@ -233,12 +236,15 @@ func TestARM64Encoders(t *testing.T) {
 			t.Errorf("%v did not encode", op)
 		}
 	}
-	// The list is expected to be exactly one operation long. specs/042 group 1
-	// needs a conditional set to put a comparison into a register, and
-	// obj/arm64 has no CSET, CSEL or CSINC. The rules emit CSET anyway, so
-	// that one missing encoder does not hide every comparison rule, and this
-	// is where the gap stays counted.
-	want := []string{"ARM64CSET"}
+	// The list is expected to be empty. It held ARM64CSET, the conditional
+	// set of specs/042 group 1, until obj/arm64 got the conditional select
+	// class; with that in, every operation the rules emit reaches an encoder,
+	// which is the agreement specs/041 describes.
+	//
+	// The assertion is on the whole list and not on the absence of one name,
+	// so a rule group that lands ahead of its encodings fails here and is not
+	// discovered by a program that will not compile.
+	var want []string
 	if strings.Join(gaps, ",") != strings.Join(want, ",") {
 		t.Errorf("operations with no encoder: %v, want %v", gaps, want)
 	}
@@ -294,6 +300,14 @@ func TestARM64EncodeAgreesWithEncoder(t *testing.T) {
 		{"MOVDstore", enc(OpARM64MOVDstore, 8, nil, nil), str},
 		{"MOVDloadidx8", enc(OpARM64MOVDloadidx8, 0, nil, nil), idx},
 		{"BRcond", enc(OpARM64BRcond, 0, arm64.LT, nil), bcc},
+		// The conditional set carries the same condition as the branch above
+		// it and reads the same flags, so the pair is here together. The width
+		// comes from the result type, as it does for every other value: a bool
+		// is narrower than a word and computes in the 32-bit form.
+		{"CSET", enc(OpARM64CSET, 0, arm64.LT, nil),
+			mustEnc(arm64.Cset(arm64.Size64, arm64.R0, arm64.LT))},
+		{"CSET 32-bit", enc(OpARM64CSET, 0, arm64.LO, lowI32),
+			mustEnc(arm64.Cset(arm64.Size32, arm64.R0, arm64.LO))},
 		{"CBNZ", enc(OpARM64CBNZ, 0, nil, nil), mustEnc(arm64.Cbnz(arm64.Size64, arm64.R1, 0))},
 		{"CALLclosure", enc(OpARM64CALLclosure, 0, nil, nil), arm64.Blr(arm64.R1)},
 		{"RET", enc(OpARM64RET, 0, nil, nil), arm64.Ret(arm64.RegLink)},
@@ -301,6 +315,25 @@ func TestARM64EncodeAgreesWithEncoder(t *testing.T) {
 	for _, tc := range tests {
 		if tc.got != tc.want {
 			t.Errorf("%s encoded as %#08x, the encoder says %#08x", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// TestARM64ConditionNeedsAux checks that the two operations which carry a
+// condition are refused when nothing put one there.
+//
+// Aux is an any, so a rule that forgets the condition would otherwise encode
+// as the zero Cond, which is EQ. That is an instruction that assembles, runs,
+// and tests the wrong flag, and no later stage could tell it from the one the
+// rule meant.
+func TestARM64ConditionNeedsAux(t *testing.T) {
+	f := NewFunc("f")
+	out := make([]uint32, 8)
+	for _, op := range []Op{OpARM64CSET, OpARM64BRcond} {
+		v := machValue(f, op)
+		v.Aux = nil
+		if _, ok := ARM64Encode(v, arm64.R0, []arm64.Reg{arm64.R1}, out); ok {
+			t.Errorf("%v encoded with no condition in Aux", op)
 		}
 	}
 }

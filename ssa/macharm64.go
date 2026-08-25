@@ -243,6 +243,7 @@ const (
 	encMemIdx                        // MemOp, rt, base, index, extend, scaled
 	encAddr                          // ADRP and ADD
 	encFrame                         // ADD from RSP
+	encCondSet                       // CSET, with the condition in Aux
 	encBranchCond                    // B.cond
 	encCompareBranch                 // CBZ, CBNZ
 	encCall                          // BL
@@ -350,7 +351,7 @@ var arm64Ops = [opARM64End - OpARM64ADD]arm64Op{
 	OpARM64TSTconst - OpARM64ADD:  ai("ARM64TSTconst", 1, encLogicalCmpImm).aux().w64(),
 	OpARM64TSTWconst - OpARM64ADD: ai("ARM64TSTWconst", 1, encLogicalCmpImm).aux().w32(),
 
-	OpARM64CSET - OpARM64ADD: ai("ARM64CSET", 1, encNone),
+	OpARM64CSET - OpARM64ADD: ai("ARM64CSET", 1, encCondSet),
 
 	OpARM64BRcond - OpARM64ADD: ai("ARM64BRcond", 1, encBranchCond),
 	OpARM64CBZ - OpARM64ADD:    ai("ARM64CBZ", 1, encCompareBranch),
@@ -634,13 +635,16 @@ func ARM64IndexOp(op Op, scaled bool) (Op, bool) {
 // ARM64MissingEncoder reports that an operation the rules emit has no encoder
 // in obj/arm64 yet.
 //
-// specs/041 says a rule with no encoder must be a build failure rather than a
-// crash. It cannot be one here, because the gap is in the other direction: the
-// conditional-set instruction is the only way to put a general condition into
-// a register on this architecture, and obj/arm64 has no CSET, CSEL or CSINC.
-// Lowering emits CSET anyway, because leaving every comparison unlowered would
-// hide the whole rule set behind one missing encoder. This function is how the
-// gap stays counted: a test asserts that this is the complete list.
+// Nothing answers true today. The list held one operation, the conditional set
+// of specs/042 group 1, from the day the comparison rules were written until
+// obj/arm64 got the conditional select class. specs/041 says a rule with no
+// encoder must be a build failure rather than a crash, and the two are now
+// what that spec describes: every operation the rules emit encodes.
+//
+// The function stays, and so does the test that reads it. It is the counter
+// for the next gap: a rule group that lands before its encodings has one place
+// to declare the fact, and a list that grows without the test being edited is
+// the failure specs/041 asks for.
 func ARM64MissingEncoder(op Op) bool { return arm64Row(op).enc == encNone }
 
 // ARM64Encode writes the instructions for v into out and returns how many.
@@ -770,6 +774,18 @@ func ARM64Encode(v *Value, dst arm64.Reg, args []arm64.Reg, out []uint32) (int, 
 		return 2, true
 	case encFrame:
 		return oneIf(arm64.AddRegImm(arm64.Size64, dst, arm64.RSP, v.AuxInt))
+	case encCondSet:
+		// Aux holds the condition, and it is the same value a conditional
+		// branch on the same comparison carries. specs/042 group 4 folds a
+		// conditional set that is a block control into a B.cond and moves
+		// this Aux across unchanged, so the two encoders must read one code
+		// the same way. Both do: neither derives a condition, each encodes
+		// the one the rule chose.
+		c, ok := v.Aux.(arm64.Cond)
+		if !ok {
+			return 0, false
+		}
+		return oneIf(arm64.Cset(sz, dst, c))
 	case encBranchCond:
 		c, ok := v.Aux.(arm64.Cond)
 		if !ok {
