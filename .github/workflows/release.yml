@@ -191,6 +191,47 @@ jobs:
         "$root/bin/nanogo-dist" tally | tee "$RUNNER_TEMP/tally.txt"
         "$root/bin/nanogo" version
 
+    # The one thing a person who downloads a compiler does, against the very
+    # bytes this job is about to publish. internal/release proves the same
+    # claim against a tarball it builds itself; this step proves it against
+    # the artefact, because v0.1.0 passed every check above and shipped a
+    # nanogo build that refused every program.
+    - name: Build a program with the tarball's own nanogo
+      run: |
+        set -eu
+        root="$RUNNER_TEMP/unpacked/nanogo"
+        prog="$RUNNER_TEMP/downloaded"
+        mkdir -p "$prog"
+        cd "$prog"
+        printf 'module nanogo.example/hello\n\ngo 1.27\n' > go.mod
+        cat > main.go <<'PROGRAM'
+        package main
+
+        var greeting = "hello from nanogo"
+
+        func sum(xs []int) int {
+        	n := 0
+        	for _, x := range xs {
+        		n += x
+        	}
+        	return n
+        }
+
+        func main() {
+        	println(greeting)
+        	println(sum([]int{1, 2, 3, 4, 5, 6}))
+        }
+        PROGRAM
+        env -u GOROOT -u NANOGOROOT "$root/bin/nanogo" build -o hello .
+        got=$(./hello 2>&1)
+        want=$(printf 'hello from nanogo\n21')
+        if [ "$got" != "$want" ]; then
+          echo "the downloaded compiler printed:"
+          echo "$got"
+          exit 1
+        fi
+        echo "the tarball's nanogo compiled and ran a program"
+
     # The end-to-end test of specs/054-distribution.md, run against the same
     # toolchain that just built the tarball. It unpacks a tarball of its own
     # and links a program against nothing but the tree.
