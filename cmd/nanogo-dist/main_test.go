@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"golang.design/x/nanogo/driver"
 )
 
 // goCommand is the go command, or a skip. CI sets NANOGO_REQUIRE_LINK where
@@ -78,6 +80,7 @@ func TestUsage(t *testing.T) {
 		{"no arguments", nil, 2, "usage:"},
 		{"an unknown command", []string{"frobnicate"}, 2, `unknown command "frobnicate"`},
 		{"help", []string{"help"}, 0, "nanogo-dist tally"},
+		{"pin", []string{"pin"}, 0, driver.PinnedGoVersion},
 		{"a bad flag", []string{"build", "-nonesuch"}, 1, ""},
 		{"build with no output", []string{"build"}, 1, "needs -out and -binary"},
 		{"build with no goroot", []string{"build", "-out", "x", "-binary", "y"}, 1, "needs -goroot"},

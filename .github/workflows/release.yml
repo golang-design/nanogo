@@ -1,0 +1,225 @@
+# Copyright 2026 The golang.design Initiative Authors.
+# All rights reserved. Use of this source code is governed by
+# a BSD-style license that can be found in the LICENSE file.
+
+name: release
+
+# The tarball of specs/054-distribution.md, built on a tag and attached to the
+# release with a SHA256SUMS file.
+#
+# One platform, darwin/arm64. specs/000-decisions.md decision 9 names it first
+# and linux/amd64 second, and specs/043-amd64-backend.md is unbuilt, so nanogo
+# emits arm64 machine code and nothing else. ci.yml's cross-compile job proves
+# the compiler builds from any host; it does not make a second target exist. A
+# release for a platform nanogo does not target would be a download that cannot
+# compile anything, and naming one here would be the same untruth this whole
+# spec is written against.
+#
+# The job asserts far more than it builds. The tarball's VERSION states how
+# much of itself nanogo compiled, dist recomputes that from the bytes of every
+# archive, and a disagreement fails the release rather than shipping. The pin
+# is checked the same way: the resolved toolchain must be the release
+# driver.PinnedGoVersion names, because setup-go's version range can resolve to
+# a patch release the pin does not, and the archives would then say one thing
+# while VERSION said another.
+
+on:
+  push:
+    tags: [ 'v*' ]
+  # A release is worth rehearsing without cutting one. The dry run builds
+  # everything and asserts everything, and publishes nothing.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tarball:
+    name: darwin/arm64 tarball
+    # macos-latest is the arm64 runner, which is the target. The archives are
+    # gc's work and gc cross-compiles, but the release must run the binary it
+    # ships, and a tarball nobody ran is a tarball nobody has tested.
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.27.x'
+        check-latest: true
+
+    - name: Assert the runner is the target
+      run: |
+        set -eu
+        test "$(uname -s)" = "Darwin"
+        test "$(uname -m)" = "arm64"
+
+    # -trimpath, for the reason dist passes it to go list: without it the
+    # binaries carry the absolute path of the directory they were built in and
+    # two releases of the same commit differ.
+    - name: Build the commands
+      run: |
+        set -eu
+        mkdir -p "$RUNNER_TEMP/bin"
+        go build -trimpath -o "$RUNNER_TEMP/bin/nanogo" ./cmd/nanogo
+        go build -trimpath -o "$RUNNER_TEMP/bin/nanogo-dist" ./cmd/nanogo-dist
+
+    # The pin lives in Go source, in driver.PinnedGoVersion, and the command
+    # prints it rather than this file repeating it. setup-go resolves a version
+    # range and a range moves, so the check is against what the toolchain on
+    # this runner actually is. Without it the archives would carry one release
+    # and VERSION would claim another, which dist.VerifyTree would catch at the
+    # end of a long job instead of at the start of a short one.
+    - name: Check the toolchain against the pin
+      id: pin
+      run: |
+        set -eu
+        pin=$("$RUNNER_TEMP/bin/nanogo-dist" pin)
+        have=$(go env GOVERSION)
+        echo "the pin is $pin and this runner has $have"
+        if [ "$pin" != "$have" ]; then
+          echo "::error::the toolchain is $have and driver.PinnedGoVersion is $pin; every archive would carry $have and VERSION would claim $pin"
+          exit 1
+        fi
+        echo "go=$pin" >> "$GITHUB_OUTPUT"
+
+    # A tag names the release. A dry run has no tag, so it builds a version
+    # nobody can mistake for one.
+    - name: Name the release
+      id: name
+      run: |
+        set -eu
+        case "${GITHUB_REF}" in
+          refs/tags/*) version="nanogo${GITHUB_REF#refs/tags/v}" ;;
+          *)           version="nanogo0.0.0-dev-$(git rev-parse --short HEAD)" ;;
+        esac
+        echo "version is $version"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - name: Build the tarball
+      id: build
+      env:
+        VERSION: ${{ steps.name.outputs.version }}
+        PIN: ${{ steps.pin.outputs.go }}
+      run: |
+        set -eu
+        out="$RUNNER_TEMP/dist"
+        mkdir -p "$out"
+        tarball="$out/$VERSION.darwin-arm64.tar.gz"
+        "$RUNNER_TEMP/bin/nanogo-dist" build \
+          -version "$VERSION" \
+          -go "$PIN" \
+          -goroot "$(go env GOROOT)" \
+          -binary "$RUNNER_TEMP/bin/nanogo" \
+          -self "$RUNNER_TEMP/bin/nanogo-dist" \
+          -license LICENSE \
+          -out "$RUNNER_TEMP/tree" \
+          -tarball "$tarball"
+        echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+        echo "dir=$out" >> "$GITHUB_OUTPUT"
+        ls -l "$tarball"
+
+    # specs/053-determinism.md is a rule about the compiler and a distribution
+    # is not the exception. The second build runs from a different absolute
+    # path, which is the check that finds a leaked working directory; two
+    # builds in one place cannot.
+    - name: Build it again, elsewhere, and compare
+      env:
+        VERSION: ${{ steps.name.outputs.version }}
+        PIN: ${{ steps.pin.outputs.go }}
+        FIRST: ${{ steps.build.outputs.tarball }}
+      run: |
+        set -eu
+        second="$RUNNER_TEMP/again/deeper/still"
+        mkdir -p "$second"
+        "$RUNNER_TEMP/bin/nanogo-dist" build \
+          -version "$VERSION" \
+          -go "$PIN" \
+          -goroot "$(go env GOROOT)" \
+          -binary "$RUNNER_TEMP/bin/nanogo" \
+          -self "$RUNNER_TEMP/bin/nanogo-dist" \
+          -license LICENSE \
+          -out "$second/tree" \
+          -tarball "$second/again.tar.gz"
+        if ! cmp "$FIRST" "$second/again.tar.gz"; then
+          echo "::error::the two tarballs differ; specs/053-determinism.md says the same inputs produce the same bytes"
+          exit 1
+        fi
+        echo "the tarball is byte-identical across two build directories"
+
+    # The gate this release exists for. The tarball is unpacked into a clean
+    # directory and the tree it produces is made to account for itself: VERSION
+    # against the bytes of every archive, and the tally printed by the binary
+    # the tarball ships.
+    - name: Unpack it and make it account for itself
+      env:
+        TARBALL: ${{ steps.build.outputs.tarball }}
+      run: |
+        set -eu
+        clean="$RUNNER_TEMP/unpacked"
+        mkdir -p "$clean"
+        tar -xzf "$TARBALL" -C "$clean"
+        root="$clean/nanogo"
+        test -x "$root/bin/nanogo"
+        test -f "$root/src/LICENSE"
+        test -f "$root/src/PATENTS"
+        "$root/bin/nanogo-dist" verify
+        "$root/bin/nanogo-dist" tally | tee "$RUNNER_TEMP/tally.txt"
+        "$root/bin/nanogo" version
+
+    # The end-to-end test of specs/054-distribution.md, run against the same
+    # toolchain that just built the tarball. It unpacks a tarball of its own
+    # and links a program against nothing but the tree.
+    - name: Test the distribution end to end
+      env:
+        NANOGO_REQUIRE_LINK: '1'
+      run: go test -timeout 30m ./internal/release/... ./dist/... ./cmd/nanogo-dist/...
+
+    - name: Checksums
+      env:
+        DIR: ${{ steps.build.outputs.dir }}
+      run: |
+        set -eu
+        cd "$DIR"
+        shasum -a 256 *.tar.gz > SHA256SUMS
+        cat SHA256SUMS
+
+    # Kept whether or not this is a tag, so a dry run leaves something to
+    # inspect.
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.name.outputs.version }}.darwin-arm64
+        path: ${{ steps.build.outputs.dir }}
+
+    # The release notes carry the tally. A download whose accompanying text
+    # does not say how much of it nanogo compiled is a download that reads as
+    # more finished than it is.
+    - name: Publish
+      if: startsWith(github.ref, 'refs/tags/')
+      env:
+        GH_TOKEN: ${{ github.token }}
+        DIR: ${{ steps.build.outputs.dir }}
+      run: |
+        set -eu
+        tag="${GITHUB_REF#refs/tags/}"
+        notes="$RUNNER_TEMP/notes.md"
+        {
+          echo "nanogo for darwin/arm64, pinned to $(go env GOVERSION)."
+          echo
+          echo "What this tarball's own archives say about themselves:"
+          echo
+          echo '```'
+          cat "$RUNNER_TEMP/tally.txt"
+          echo '```'
+          echo
+          echo "Unpack it and put its bin directory on your PATH:"
+          echo
+          echo '```'
+          echo "tar -xzf nanogo${tag#v}.darwin-arm64.tar.gz -C /usr/local"
+          echo 'export PATH=/usr/local/nanogo/bin:$PATH'
+          echo '```'
+        } > "$notes"
+        gh release create "$tag" \
+          --title "$tag" \
+          --notes-file "$notes" \
+          "$DIR"/*.tar.gz "$DIR/SHA256SUMS"

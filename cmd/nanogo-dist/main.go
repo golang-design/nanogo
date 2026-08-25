@@ -7,6 +7,7 @@
 //	nanogo-dist build -version nanogo0.1.0 -out dist    build the tree and the tarball
 //	nanogo-dist tally [root]                            what compiled each archive
 //	nanogo-dist verify [root]                           check VERSION against the archives
+//	nanogo-dist pin                                     the pinned Go release
 //
 // It ships inside the tarball as bin/nanogo-dist, so that a tree can be asked
 // about itself with nothing else installed. That is the point of it: the
@@ -29,6 +30,7 @@ import (
 	"runtime"
 
 	"golang.design/x/nanogo/dist"
+	"golang.design/x/nanogo/driver"
 )
 
 func main() {
@@ -39,6 +41,7 @@ const usage = `usage:
 	nanogo-dist build [flags]    build a distribution tree and its tarball
 	nanogo-dist tally [root]     report what compiled each archive in a tree
 	nanogo-dist verify [root]    check a tree's VERSION against its archives
+	nanogo-dist pin              the Go release a distribution is pinned to
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -54,6 +57,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = tally(args[1:], stdout)
 	case "verify":
 		err = verify(args[1:], stdout)
+	case "pin":
+		fmt.Fprintln(stdout, driver.PinnedGoVersion)
+		return 0
 	case "help", "-h", "-help", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
@@ -78,7 +84,11 @@ func build(args []string, stdout io.Writer) error {
 	fs.SetOutput(stdout)
 	var (
 		release = fs.String("version", "", "the nanogo release, as nanogo0.1.0")
-		pin     = fs.String("go", "", "the Go release the tree is pinned to, as go1.27.0")
+		// The pin lives in driver.PinnedGoVersion and is defaulted from
+		// there, so a release job never restates it. dist itself must not
+		// import driver, because an import either way would stop the driver
+		// calling dist.TallyLine; a command may import both.
+		pin     = fs.String("go", driver.PinnedGoVersion, "the Go release the tree is pinned to")
 		goroot  = fs.String("goroot", "", "the toolchain to copy the standard library from")
 		goCmd   = fs.String("gocmd", "go", "the go command to resolve the bootstrap closure with")
 		target  = fs.String("target", defaultTarget(), "the GOOS_GOARCH the archives are for")
