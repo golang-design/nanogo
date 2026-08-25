@@ -59,6 +59,7 @@ func roundTrip(t *testing.T, pkg *types2.Package) (*types2.Package, [8]byte) {
 		t.Fatalf("Write(%s): %v", pkg.Path(), err)
 	}
 	dec := pkgbits.NewPkgDecoder(pkg.Path(), string(payload))
+	checkStubs(t, pkg.Path(), &dec)
 	if dec.Fingerprint() != fp {
 		t.Errorf("%s: Write returned fingerprint %x and the payload carries %x", pkg.Path(), fp, dec.Fingerprint())
 	}
@@ -69,11 +70,45 @@ func roundTrip(t *testing.T, pkg *types2.Package) (*types2.Package, [8]byte) {
 	return got, fp
 }
 
+// checkStubs pins the one invariant a file's export data has to satisfy: the
+// only declaration without a definition is one from the universe or from
+// unsafe.
+//
+// gc writes a stub for every declaration of another package and its linker
+// resolves each one by copying the definition in. What reaches a file has no
+// other stub left, and every reader of the format asserts it: gc reports a
+// stub it cannot resolve as an internal compiler error, naming a declaration
+// that is nowhere near the package that wrote it.
+func checkStubs(t *testing.T, path string, dec *pkgbits.PkgDecoder) {
+	t.Helper()
+	for i := range dec.NumElems(pkgbits.SectionName) {
+		pkgPath, name, tag := dec.PeekObj(pkgbits.Index(i))
+		if tag != pkgbits.ObjStub {
+			continue
+		}
+		if pkgPath != "builtin" && pkgPath != "unsafe" {
+			t.Errorf("%s: object %d, %s.%s, is a stub with no definition", path, i, pkgPath, name)
+		}
+	}
+}
+
 // compareSurface reports every declaration that did not survive the round
 // trip, and returns the number of lines compared.
 func compareSurface(t *testing.T, path string, want, got *types2.Package) int {
 	t.Helper()
 	a, b := surface(want), surface(got)
+	// The empty interface prints two ways and they are one type. gc's
+	// checker builds a distinct Interface for a source "interface{}" and
+	// shares one for "any", and the reader cannot tell them apart:
+	// types2.NewInterfaceType returns the one canonical empty interface for
+	// both, so a package that came back through the reader has already lost
+	// the spelling. Comparing the spelling would report a reader property as
+	// a writer failure.
+	for _, lines := range [][]string{a, b} {
+		for i, line := range lines {
+			lines[i] = strings.ReplaceAll(line, "interface{}", "any")
+		}
+	}
 	if len(a) != len(b) {
 		t.Errorf("%s: the surface has %d lines and the round trip produced %d\nwant:\n%s\ngot:\n%s",
 			path, len(a), len(b), strings.Join(a, "\n"), strings.Join(b, "\n"))
@@ -345,7 +380,9 @@ func TestWriteStandardLibrary(t *testing.T) {
 			t.Errorf("%s: Write: %v", path, err)
 			continue
 		}
-		back := ReadPackage(types2.NewContext(), map[string]*types2.Package{}, pkgbits.NewPkgDecoder(path, string(payload)))
+		dec := pkgbits.NewPkgDecoder(path, string(payload))
+		checkStubs(t, path, &dec)
+		back := ReadPackage(types2.NewContext(), map[string]*types2.Package{}, dec)
 		if back == nil {
 			t.Errorf("%s: reading back what was written produced no package", path)
 			continue
