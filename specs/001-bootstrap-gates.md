@@ -186,9 +186,9 @@ establishes.
 
 No gate is reached, and none has a mechanical test in the repository. The
 three-stage build above is a procedure nobody can run yet, for the reason
-[060](060-selfhost.md) records: nanogo refuses a package that imports another,
-that declares a package-level variable, or that has an `init` function, and
-nanogo's own packages have all three.
+[060](060-selfhost.md) records: nanogo refuses a package with assembly in it,
+and one whose declared types or package-level variables need a run-time type
+descriptor [032](032-type-descriptors-and-itabs.md) cannot write.
 
 What exists is the ladder's first rung. `gc` seeds the build, `go list` resolves
 the import graph ([014](014-package-loader.md)'s G1 half), and `go tool link`

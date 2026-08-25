@@ -71,8 +71,7 @@ cost.
 | `-+` | the runtime rules of [034](034-write-barriers.md) and [035](035-goroutines-and-stack-growth.md) are unbuilt |
 | `-embedcfg` | see [`go:embed`](#goembed) below |
 | a package with an assembly definition in `-symabis` | the ABI wrapper of [030](030-abi.md) is unbuilt |
-| a package with a package-level variable, or an `init` | neither has a data symbol or an init task yet |
-| a package with no function bodies | nanogo writes text symbols and the descriptors its code names, and nothing else |
+| a package-level variable whose type holds a pointer and whose descriptor `rtype` cannot build | the collector reads the pointer map of a data symbol through its type descriptor ([032](032-type-descriptors-and-itabs.md)) |
 | a type its code needs a descriptor for and `rtype` cannot fill in | [032](032-type-descriptors-and-itabs.md)'s method set gap |
 | a function no pass in the list accepts | the pass names itself and the error names the function and its position |
 
@@ -257,9 +256,11 @@ a string or byte slice or `embed.FS` structure. It is listed here so it is not
 forgotten, since a standard library package uses it and G3 needs it.
 
 None of it is written. `checkSupported` refuses `-embedcfg` outright, which is
-the honest state. nanogo emits one kind of data symbol, the type descriptors of
-[032](032-type-descriptors-and-itabs.md), and nothing binds a data symbol to a
-package-level variable, which is what an embedded file needs.
+the honest state. The data symbol an embedded file needs is no longer the
+missing piece: `ssagen.AddGlobals` binds a data symbol to a package-level
+variable and `ssagen`'s string constants write read-only bytes. What is missing
+is the front end, which reads the config, resolves the patterns and builds the
+`embed.FS` structure.
 
 ## Exit status and output
 

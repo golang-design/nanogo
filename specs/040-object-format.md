@@ -180,6 +180,88 @@ The pc-value rows are a correction. An earlier version of this spec said
 symbol, and a writer that packs them into `AuxFuncInfo` produces an object the
 linker reads as having none.
 
+## Data symbols
+
+A text symbol is one of two things an object carries. The other is data, and
+nanogo writes three kinds of it: the type descriptors of
+[032](032-type-descriptors-and-itabs.md), the bytes of a string constant, and
+one symbol per package-level variable.
+
+### The kind is two independent questions
+
+| | contents | no contents |
+| --- | --- | --- |
+| **holds a pointer** | `SDATA` | `SBSS` |
+| **holds no pointer** | `SNOPTRDATA` | `SNOPTRBSS` |
+
+Whether the collector scans the symbol is the pointer question. Whether the
+linker copies bytes or allocates zeros is the contents question. They are
+independent, so there are four kinds and not two, and `obj` enforces the
+consequence: a zero-filled symbol has a size and no `Data`, and every other
+kind has `Size == len(Data)`.
+
+### A scanned symbol carries its type descriptor
+
+`cmd/link` builds the pointer bitmap of the data and bss sections from the type
+descriptor each symbol names through an `AuxGotype` entry, in `GCProg.AddSym`.
+A symbol in a scanned section with no descriptor is
+`missing Go type information for global symbol`, and a symbol in an unscanned
+section needs none.
+
+That is the whole pointer-map rule for data, and it is why a package-level
+variable whose type holds a pointer is **refused** when
+[032](032-type-descriptors-and-itabs.md) cannot build its descriptor. Moving it
+into an unscanned section instead would link and would be wrong: the collector
+would not follow the pointer, and what it points at would be freed while it is
+live.
+
+`gc` attaches a descriptor to every global. nanogo attaches one only where it
+is read, because a descriptor demanded where nothing reads it would refuse a
+variable this compiler can otherwise emit. The cost is that a debugger sees no
+type for such a variable, which `cmd/link` handles by skipping it.
+
+### String constants
+
+The bytes of a string constant are `SRODATA`, `dupok`, local, aligned to one,
+and content-addressable. They are a **definition** in every object that names
+the constant, because they exist nowhere else, and the content hash is what
+makes the copies one symbol in the linked binary.
+
+The name is `gc`'s and is not this compiler's to choose. `gc` names a constant
+of at most 100 bytes by its contents, quoted with `strconv.Quote`, and a longer
+one by its length and the first sixteen bytes of the toolchain's 32-byte hash,
+base64 encoded:
+
+| Constant | Symbol |
+| --- | --- |
+| `"hi"` | `go:string."hi"` |
+| 106 bytes of digits | `go:string..gostring.106.cauplPwZt46y0gKg9FL5SQ==` |
+
+The linker merges two definitions of one constant by name and by content hash
+together, so a name one character away from `gc`'s is a second symbol holding
+bytes the binary already carries, and nothing reports it. The expectations in
+`ssa/decompose_test.go` are read off a `gc`-built object with `go tool nm`, so
+the oracle is external.
+
+A string variable is two words: a relocation of type `R_ADDR` at offset 0
+naming those bytes, and the length at offset 8. The empty string points at
+nothing, because a symbol of no bytes is a definition the linker has to place
+for a pointer nothing dereferences.
+
+### What is written statically and what is assigned
+
+An initialiser the type checker reduced to a constant is written into the
+symbol's bytes. Anything else leaves the symbol zero and is assigned by the
+initialisation function below, which runs before any of the package's code
+does. The assignment stays in place either way, so a value written statically
+is written again at run time; removing it would mean rewriting the function
+whose ordering [012](012-type-checking.md) computed.
+
+The one visible difference from `gc` is a composite literal. `gc` lays it into
+a static temporary and writes a header pointing at it, so `var s = []int{1,2,3}`
+is `SDATA` there and `SBSS` here, with the slice built at run time. The
+size is the same and the program prints the same answer.
+
 ## The initialisation record
 
 Every package nanogo compiles gets a symbol named `<path>..inittask`. It is

@@ -92,15 +92,19 @@ everything by reference, as the note at the top of this spec records.
 On the stack when the closure does not outlive the frame, on the heap when it
 does.
 
-**Nothing puts one in the frame today**, and the reason is two unbuilt things
-rather than an oversight. Deciding that a closure does not outlive its frame is
-[023](023-escape-analysis.md)'s judgement, and there is no escape analysis. And
-a captureless `funcval` is one word of read-only data, which wants a data
-symbol, and the only channel to a data symbol runs through
-[032](032-type-descriptors-and-itabs.md)'s descriptors. So every func value
-`ir/lower.go` builds is a heap allocation and a store, where `gc` has neither.
-That is the cost, it is correct, and the fix is a channel for data symbols
-rather than anything in this spec.
+**Nothing puts one in the frame today**, and the reason is unbuilt work rather
+than an oversight. Deciding that a closure does not outlive its frame is
+[023](023-escape-analysis.md)'s judgement, and there is no escape analysis. So
+every func value `ir/lower.go` builds is a heap allocation and a store, where
+`gc` has neither. That is the cost and it is correct.
+
+A captureless `funcval` is the separable half of it. It is one word of
+read-only data and needs no escape judgement at all, because it captures
+nothing and outlives everything. The channel it was waiting on exists:
+`ssagen/data.go` writes a data symbol with its contents and its relocations,
+and `ssagen/reloc.go` defines the bytes of a string constant the same way. What
+is left is the lowering that names the symbol instead of allocating, which is
+this spec's and is unbuilt.
 
 ## Defer
 

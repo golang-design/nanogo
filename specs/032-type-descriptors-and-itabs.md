@@ -32,7 +32,15 @@ text-assembly seam in [000](000-decisions.md) decision 3.
 | Itabs | nowhere | **not built**, and blocked on the IR rather than on this spec |
 
 The `gclocals·` and `go:string.` rows of the namespace table are produced
-elsewhere, in `ssagen/stackmap.go` and `ssa/decompose.go`.
+elsewhere. `ssagen/stackmap.go` builds the stack maps, `ssa/decompose.go` names
+a string constant the way `gc` names it, and `ssagen/reloc.go` defines its
+bytes in the object ([040](040-object-format.md)).
+
+A type descriptor is no longer the only data symbol nanogo writes.
+`ssagen/data.go` writes one per package-level variable, and it reads this
+spec's writer for the pointer map: a variable whose type holds a pointer
+carries its descriptor through an `AuxGotype` entry, so the method set gap
+below refuses such a variable by name and position.
 
 What reaches a running program today: a variadic call, a slice literal, `make`
 of a slice, and `new` of a type whose descriptor can be filled in. Those

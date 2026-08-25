@@ -15,21 +15,27 @@ The G1 gate of [001](001-bootstrap-gates.md), as a procedure that can be run.
 ## This procedure cannot be run yet
 
 Stage 1 does not start. The blocker is not a percentage of the language, it is
-three categorical refusals in `driver.Compile`, and nanogo's own packages trip
-all three:
+what `driver.Compile` refuses, and nanogo's own packages trip it:
 
 | Refused | Why | Owner |
 | --- | --- | --- |
-| a package with a package-level variable | a global needs a data symbol | [020](020-ir.md), [040](040-object-format.md) |
-| a package with an `init` function | an init needs a package init task | [040](040-object-format.md) |
 | a package with assembly | an assembly definition is ABI0 and needs a wrapper | [030](030-abi.md) |
+| a declared type an importer would need a descriptor for | an `ir.Type` carries no method set | [032](032-type-descriptors-and-itabs.md) |
+| a package-level variable whose type holds a pointer and whose descriptor `rtype` cannot build | the collector reads a data symbol's pointer map through its type descriptor | [032](032-type-descriptors-and-itabs.md) |
 
-A fourth refusal is gone. `export/` reads `gc`'s export data and writes it, so
-a package that imports is no longer refused and a package nanogo compiled can
-be imported. That removes the one blocker every nanogo package tripped, and it
-removes no other: every nanogo package also has a package-level variable or an
-`init`. The count of nanogo packages that nanogo compiles today is still zero,
-and no arithmetic over the language subset changes that.
+Three earlier refusals are gone. `export/` reads `gc`'s export data and writes
+it, so a package that imports is no longer refused. `driver/` writes the
+initialisation record, so a package with an `init` is no longer refused. And
+`ssagen/data.go` writes the data symbol of a package-level variable, so a
+package that declares one is no longer refused for that reason alone.
+
+What is left is [032](032-type-descriptors-and-itabs.md)'s method set gap,
+which the two remaining data rows above both name, and [030](030-abi.md)'s
+wrapper. Measured over the 28 packages a `func main() {}` needs, nanogo
+compiles 5 and refuses 23: 10 for a declared type's descriptor, 8 for assembly,
+1 for a package-level variable of type `error`, and 4 for constructs in a
+function body. The count of nanogo packages that nanogo compiles today is still
+zero, and no arithmetic over the language subset changes that.
 
 One export-data limit is still in the way of this gate specifically. The writer
 refuses a generic declaration, and nanogo's own source uses generics, so stage
