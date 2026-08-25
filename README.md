@@ -1,7 +1,9 @@
 <h1 align="center">nanogo</h1>
 
 <p align="center">
-  <strong>A small Go compiler that aims to compile itself.</strong>
+  <strong>A small Go compiler that compiles Go programs to native arm64 code.</strong>
+  <br>
+  Small enough to read end to end. Early enough that much of Go is still refused.
 </p>
 
 <p align="center">
@@ -14,74 +16,243 @@
 
 ---
 
-> [!IMPORTANT]
-> **nanogo compiles some Go programs, and most of Go is not among them.** The
-> whole pipeline is built, from source text to a `goobj` file that `go tool
-> link` links against the real Go runtime into a binary that runs. What it
-> accepts is far narrower than Go. It refuses a closure, `append`, a type
-> assertion, `defer`, and every map and channel operation, so about three
-> functions in five of the standard library get past construction. Do not
-> depend on this.
+nanogo compiles Go source to native arm64 machine code. It writes the same
+object files the Go toolchain writes, so `go tool link` links its output
+against the real Go runtime into a program that runs.
 
-nanogo is a compiler for the Go language as defined by the
-[Go language specification](https://go.dev/ref/spec). It is small on purpose:
-the goal is a compiler that can be read end to end, under a stated budget of
-40,000 lines, and the measure of the project is that it compiles its own source
-to a fixed point.
+nanogo is early. It accepts a part of Go, not all of Go. It compiles the
+package you name and takes the standard library from the Go toolchain you
+already have. The target is one: `darwin/arm64`.
 
-## Use it
+## Install
 
 ```sh
 go install golang.design/x/nanogo/cmd/nanogo@latest
 ```
 
-nanogo runs as the go command's compiler, for the packages you name and no
-others:
+> [!NOTE]
+> `nanogo build` is not in a tagged release yet. Until it is, build the command
+> from a clone of this repository: `go build -o nanogo ./cmd/nanogo`.
+
+## Compile a program
 
 ```sh
-cat > allowlist <<'EOF'
-# the package nanogo owns in this build. A main package is spelled "main",
-# because that is the name the go command passes in -p.
-main
-EOF
-
-NANOGO_ALLOWLIST=./allowlist go build -toolexec=nanogo ./...
+mkdir hello && cd hello && go mod init hello
 ```
-
-Everything not on the list is handed to `gc`, so a build is part nanogo and
-part the real toolchain. Set `NANOGO_LOG=./log` and nanogo records what it
-compiled, what it delegated, and what it refused:
-
-```
-compiled main /var/folders/.../b001/_pkg_.a
-delegated internal/cpu not on the allowlist
-```
-
-A refusal names the function and the construct rather than emitting something
-wrong:
-
-```
-nanogo: main: cannot compile function main at ./main.go:5:6:
-        ssa.Build: ssa: main: compositelit reached SSA construction
-```
-
-That is the honest state of the compiler: this program compiles and runs,
 
 ```go
+// main.go
 package main
 
-func compute(a, b int) int { return a*b + 1 }
+import "os"
 
-func main() { compute(20, 3) }
+func fib(n int) int {
+	if n < 2 {
+		return n
+	}
+	return fib(n-1) + fib(n-2)
+}
+
+func main() {
+	os.Exit(fib(10))
+}
 ```
 
-and so does the same program with `x := a * b` in it, which it did not until
-SSA construction learned the assignment statement. Adding `p := point{1, 2}`
-still does not. `nanogo help` lists the subset. One target, `darwin/arm64`.
+```console
+$ nanogo build .
+nanogo: 1 of 51 packages compiled by nanogo; 50 by go1.27.0, which nanogo cannot compile yet
+$ ./hello; echo $?
+55
+```
 
-## The three gates
+That number is real. nanogo compiled `fib` and `main` into arm64 instructions,
+`go tool link` linked them against the Go runtime, and the process returned 55.
 
-"Bootstrap" names three separate properties, and nanogo keeps them separate.
+The line nanogo prints is the honest part. nanogo compiled 1 package. The Go
+toolchain compiled the other 50, because a Go program needs a scheduler, an
+allocator and a garbage collector before `main` runs, and nanogo compiles none
+of those yet.
+
+### Print something
+
+`fmt.Println` does not work yet. The reason is below. To see output today, put
+the printing in a package nanogo does not compile:
+
+```sh
+mkdir count && cd count && go mod init count
+```
+
+```go
+// say/say.go
+package say
+
+import "syscall"
+
+// Number writes n and a newline to standard output.
+// The Go toolchain compiles this package, so it may use anything Go has.
+func Number(n int) {
+	syscall.Write(1, []byte{byte('0' + n/10), byte('0' + n%10), '\n'})
+}
+```
+
+```go
+// main.go
+package main
+
+import "count/say"
+
+func sum(xs ...int) int {
+	total := 0
+	for _, x := range xs {
+		total = total + x
+	}
+	return total
+}
+
+func main() {
+	say.Number(sum(1, 2, 3, 4))
+}
+```
+
+```console
+$ nanogo build .
+nanogo: 1 of 38 packages compiled by nanogo; 37 by go1.27.0, which nanogo cannot compile yet
+$ ./count
+10
+```
+
+nanogo compiled the variadic function, the range loop and the call. The
+toolchain compiled `say` and the standard library under it.
+
+## What nanogo compiles today
+
+Integer arithmetic, comparisons, conversions between numeric types, and
+indexing. Function calls, including recursive calls and variadic calls.
+
+A call into a package the Go toolchain compiled also works, as `os.Exit` and
+`say.Number` above show. A read of a package variable does not. The compiler
+refuses it, and the variable would be nil anyway, because no package
+initialization runs. So `os.Exit` works and `os.Stdout` does not.
+
+Statements: `return`, assignment, `:=`, multi-value assignment such as
+`a, b = b, a`, `if`, `for`, `switch` including the expressionless form,
+`fallthrough`, `break`, `continue`, labels and `goto`.
+
+Values: slice literals, `make([]int, n)`, `new(int)`, `len`, index and slice
+expressions, `range` over a slice or an integer, and a struct type declared in
+the package being compiled.
+
+`nanogo help` prints the current list.
+
+## What nanogo refuses
+
+nanogo names the function, the position and the construct. It does not emit
+code it cannot emit correctly:
+
+```console
+$ nanogo build .
+nanogo: main: nanogo cannot compile function main at /tmp/hello/main.go:5:6: ir.Lower: ir: lowering main: append: no row of the lowering table is built for it yet
+```
+
+Refused today: `append`, `defer`, `panic`, a type assertion, a type switch,
+`print` and `println`, every map operation, every channel operation, a
+conversion to an interface, and a closure that captures a variable. A closure
+that captures nothing and is called where it is declared compiles.
+
+The interface conversion is why `fmt.Println` does not work. Every argument to
+`fmt` converts to `any`:
+
+```console
+$ nanogo build .
+nanogo: main: nanogo cannot compile function main at /tmp/hello/main.go:12:6: ssa.Build: ssa: main: convert: a conversion from int to interface is not built yet
+```
+
+A type descriptor is refused for a type that may carry methods, so
+`make([]byte, n)` and `make([]point, n)` are refused while `make([]int, n)`
+compiles.
+
+One construct does not refuse cleanly. Floating-point arithmetic reaches the
+arm64 encoder and panics there:
+
+```console
+$ nanogo build .
+panic: arm64: ZR used where the encoding means a floating-point register
+```
+
+Use integers until that is finished.
+
+## What nanogo does not do
+
+**It does not compile the standard library.** Every package your program
+imports comes from the Go toolchain on your machine. nanogo reads the export
+data that toolchain wrote.
+
+**It does not link.** `go tool link` writes the executable. nanogo has no
+linker yet. See [`specs/045-linker.md`](specs/045-linker.md).
+
+**It does not run package initialization.** A program nanogo compiles starts
+without initializing the packages it imports. So a package variable such as
+`os.Stdout` is nil. Give the `say` package above a `fmt.Println` instead of a
+`syscall.Write`, and the program crashes at run time with nothing from nanogo
+in the traceback:
+
+```console
+$ ./count
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x0 pc=0x1008b3974]
+
+goroutine 1 [running]:
+os.(*File).write(...)
+	.../os/file_posix.go:47
+```
+
+This is the one failure nanogo does not announce. Do not put a nanogo-compiled
+package into a program you care about.
+
+**It writes no export data.** The archive holds the object and nothing a
+compiler can import, so no other package may import a package nanogo compiled.
+nanogo takes packages from the top of the import graph downwards.
+
+**It has one target.** nanogo emits arm64 machine code and refuses to run on a
+host that is not arm64. It does not yet refuse a `GOARCH` that is not arm64. It
+emits arm64 code and `go tool link` reports an unknown relocation.
+
+## How it works
+
+```
+source -> scanner -> parser -> type checker -> typed IR -> SSA -> machine ops -> goobj
+```
+
+Two intermediate representations and no more. A typed tree that still speaks
+Go, and an SSA graph that starts target-neutral and ends target-specific.
+[`specs/002-architecture.md`](specs/002-architecture.md) has the pipeline and
+the package layout.
+
+Four decisions shape the rest:
+
+- **The parser is written and the type checker is forked.** Rewriting Go's type
+  checker is the largest correctness risk in the project, and it buys nothing
+  that bootstrapping needs. The reference Go compiler carries a forked
+  `go/types` of its own for the same reason.
+  [`specs/012`](specs/012-type-checking.md)
+- **The compiler emits object files, not assembly text.** Two experiments
+  decided this, and both are in [`spikes/`](spikes/).
+  [`specs/040`](specs/040-object-format.md)
+- **The objects are compatible with `gc`.** That is why one package can be
+  compiled by nanogo inside a build the Go toolchain otherwise owns, and why a
+  failure has one suspect. [`specs/051`](specs/051-build-integration.md)
+- **The size is a budget, not an adjective.** The compiler is meant to be read
+  end to end, and [`specs/000`](specs/000-decisions.md) states the line budget,
+  the accounting, and the two places to recover it if it runs out.
+
+Generics will be fully stenciled rather than passed a dictionary. The language
+guarantees that terminates. [`specs/013`](specs/013-generics.md)
+
+## The measure of the project
+
+The goal is a fixed point. nanogo compiles its own source, and the compiler
+that results is byte-identical to itself. That has not happened yet.
+"Bootstrap" names three separate properties, and nanogo keeps them apart.
 
 | Gate | Means | Reached |
 | --- | --- | --- |
@@ -92,37 +263,39 @@ still does not. `nanogo help` lists the subset. One target, `darwin/arm64`.
 G2 and G3 are siblings. Neither needs the other.
 [`specs/001-bootstrap-gates.md`](specs/001-bootstrap-gates.md) has the
 definitions and the fixed-point protocol.
+[`specs/003-sequencing.md`](specs/003-sequencing.md) says which milestone owns
+each missing piece.
 
-## Shape of the compiler
+## Working on nanogo
+
+`nanogo build` is the front door. The seam below it is `-toolexec`, and that is
+how nanogo is tested against real packages: the go command runs nanogo in place
+of each toolchain invocation, nanogo compiles the packages on an allowlist, and
+the real tool gets everything else.
+
+```sh
+cat > allowlist <<'EOF'
+# The import paths nanogo owns in this build. A main package is spelled
+# "main", because that is the name the go command passes in -p.
+main
+EOF
+
+NANOGO_ALLOWLIST=./allowlist NANOGO_LOG=./log go build -toolexec=nanogo .
+```
+
+`NANOGO_LOG` records one line per invocation, so a build reports what the
+allowlist selected. This is the `count` module above:
 
 ```
-source -> scanner -> parser -> type checker -> typed IR -> SSA -> machine ops -> goobj
+delegated count/say not on the allowlist
+compiled main /var/folders/.../b001/_pkg_.a
 ```
 
-Two intermediate representations and no more: a typed tree that still speaks Go,
-and an SSA graph that starts target-neutral and ends target-specific.
-[`specs/002-architecture.md`](specs/002-architecture.md) has the pipeline and the
-package layout.
+An allowlist that names nothing delegates everything, and the build then
+succeeds without nanogo compiling a line. That is why the log exists.
 
-Some decisions worth knowing before reading further:
-
-- **The parser is written; the type checker is forked.** Rewriting Go's type
-  checker is the largest correctness risk in the project and buys nothing that
-  bootstrapping needs. The reference Go compiler has a forked `go/types` of its
-  own. [`specs/012`](specs/012-type-checking.md)
-- **The compiler emits object files, not assembly text.** Two spikes decided
-  this, and both are in [`spikes/`](spikes/). [`specs/040`](specs/040-object-format.md)
-- **It is meant to fit 40,000 lines for v1.** The compiler is 36,237 lines
-  today, and escape analysis, inlining and generics instantiation are not
-  written, nor is the export data writer. [`specs/000`](specs/000-decisions.md) carries the accounting
-  and the two places to recover the budget if it runs out.
-- **It is object-compatible with `gc`**, so `go build -toolexec=nanogo` can
-  compile one package with nanogo while `gc` compiles the rest. That is how the
-  compiler is brought up and how a failure gets one suspect.
-  [`specs/051`](specs/051-build-integration.md)
-- **Generics are fully stenciled.** The language guarantees this terminates, and
-  the guarantee arrives with the forked checker.
-  [`specs/013`](specs/013-generics.md)
+`nanogo version` prints the release the objects are compatible with.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the rest.
 
 ## What is built
 
@@ -153,83 +326,53 @@ Coverage is stated rounded down, and the gate is 90% per package.
 is a fork, and the gate that replaces coverage is upstream's own test suite,
 ported with the sources.
 
+The back end is proved by running programs. `ssagen`'s `TestLinkAndRun` is the
+proof: 18 programs go from source text through the whole pipeline to a process
+that returns the right answer, and several of them call into, or are called
+from, code the Go toolchain compiled, so the calling convention is checked
+across the toolchain boundary. The stack maps are proved by a collector: an object
+reachable only from a nanogo frame slot survives a collection, the same object
+with the slot killed is freed, and 200,000 frames are grown, copied and
+unwound.
+
 ## How far it reaches
 
-**nanogo compiles Go source to a running program.** `ssagen`'s `TestLinkAndRun`
-is the proof: 18 programs go from source text through the whole pipeline to a
-process that returns the right answer, and several of them call into, or are
-called from, `gc`-compiled code, so the calling convention is checked across the
-toolchain boundary. Its stack maps are proved by a collector: an object
-reachable only from a nanogo frame slot survives a collection, the same object
-with the slot killed is freed, and 200,000 frames are grown, copied and unwound.
-
-The honest measure of reach is the corpus, and it is one number with two halves.
+The Go distribution is the measure of reach. The `ir` row above builds a typed
+tree from all of it, 39,947 functions. How much of that tree the middle end
+accepts is the number below.
 
 **17,905 of those functions reach SSA construction** from a tree the lowering
 pass has not touched, and 17,809 of them lower completely to arm64 machine
-operations. 17,758 of the 17,905 carry a stack map. What is left undecomposed
-is 87 functions holding a wide `SelectN`, 12 holding an array and 93 holding a
-struct.
+operations. 17,758 of the 17,905 carry a stack map.
 
-The other 22,042 functions of that tree never reach SSA at all. Construction
-refuses them by name, and the counts say what is missing:
-
-| Functions refused | Because construction does not build |
-| --- | --- |
-| 4,841 | a composite literal |
-| 2,800 | `len` |
-| 2,253 | a conversion to an interface, which needs a type descriptor |
-| 1,605 | `range` |
-| 1,371 | a method selected out of an interface |
-| 1,132 | a closure |
-| 1,052 | the address of a composite literal |
-| 934 | `panic` |
-| 903 | a slice expression |
-| 843 | `make` |
-| 672 | `defer` |
-| 529 | `append` |
-| 450 | a multi-value assignment from a type assertion |
-| 346 | an index of a map |
-| 334 | `new` |
-| the rest | the address of a value, a two-value map read, type switches, type assertions, `print`, `recover`, `copy`, `min` and `max`, `select`, `send`, `recv`, `cap`, `clear`, and the `unsafe` intrinsics |
-
-Every row of that table is a row of [`specs/020`](specs/020-ir.md)'s lowering
-table that no pass performs, or the type descriptor those rows need. A row that
-was not, a multi-value assignment whose results are wider than a register at
-2,191 functions, is gone: it was a limit in the pass below construction, where
-`SelectN` names a result before decomposition and a machine word of the result
-area after it, and the renumbering between the two was only correct for the
-first result.
-
-The lowering pass performs part of that table, and the driver runs it ahead of
-construction, so a real compile reaches further than the two numbers above:
+The lowering pass builds part of [`specs/020`](specs/020-ir.md)'s table, and
+the driver runs it before construction, so a real compile reaches further:
 **24,095 of them get past construction once the lowering pass has run**. A
 composite literal, `len`, a slice expression, `new`, and `make` of a slice are
-lowered and no longer refused, and a slice literal and a variadic call reach a
-linked program that allocates on the heap. A closure, `append`, a type
-assertion, `defer`, and every map and channel operation are still refused, and
-so is a descriptor for any defined type, because an `ir.Type` carries no method
-set.
+lowered and no longer refused.
+
+What stops the rest is one list: a capturing closure, `defer`, `panic`,
+`append`, a type assertion, a type switch, a conversion to an interface, and
+every map and channel operation. Each is a row of that lowering table that no
+pass performs, or the type descriptor those rows need.
 
 So the back half of the compiler is real and the front of the middle end is not
 finished. What stands between here and
 [`specs/060`](specs/060-selfhost.md)'s fixed point is the language itself.
-[`specs/003`](specs/003-sequencing.md) says which milestone owns each piece.
 
 ## Specs
 
-[`specs/`](specs/) is the design deck: 41 specs. Start with
+[`specs/`](specs/) is the design deck. Start with
 [`specs/000-decisions.md`](specs/000-decisions.md), which is normative, then
 [`specs/003-sequencing.md`](specs/003-sequencing.md) for the order of work.
 
 The specs are corrected by the code rather than defended against it. Each spec
-carries a status: `draft` means nothing is built, `in progress` means part of it
-is, `complete` means its scope is built and gated. Where the code disproved a
-spec, the spec says what was wrong and how it was found, because that record is
-worth more than the claim it replaced.
+carries a status: `draft` means nothing is built, `in progress` means part of
+it is, `complete` means its scope is built and gated. Where the code disproved
+a spec, the spec says what was wrong and how it was found, because that record
+is worth more than the claim it replaced.
 
-The numbers in this file and in
-[`specs/003-sequencing.md`](specs/003-sequencing.md) are gated. A test in
+The numbers in this file are gated. A test in
 [`internal/hygiene/`](internal/hygiene/) reads them out of the prose and fails
 when they disagree with what the tests measure, because every one of them was
 true on the day it was written and several had stopped being true.
