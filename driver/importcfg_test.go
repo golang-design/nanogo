@@ -65,8 +65,41 @@ func TestImportCfgNil(t *testing.T) {
 	if _, ok := cfg.PackageFile("fmt"); ok {
 		t.Error("PackageFile on a nil ImportCfg reported found")
 	}
+	if _, ok := cfg.PackageShlib("fmt"); ok {
+		t.Error("PackageShlib on a nil ImportCfg reported found")
+	}
 	if got := cfg.Resolve("fmt"); got != "fmt" {
 		t.Errorf("Resolve on a nil ImportCfg = %q, want %q", got, "fmt")
+	}
+}
+
+// TestPackageShlibDoesNotShadowPackageFile is specs/015-export-data.md's
+// warning, as a test.
+//
+// A packageshlib directive names a shared library for the linker. The compiler
+// never reads one, and gc's own compiler refuses the directive rather than
+// storing it. Folding the two into one table is the obvious shortcut and it
+// makes a configuration that carries both for one path resolve to whichever
+// line came last, so the importer would try to read a shared library as export
+// data. The order is reversed in the second case for that reason.
+func TestPackageShlibDoesNotShadowPackageFile(t *testing.T) {
+	tests := []struct{ name, body string }{
+		{"the archive first", "packagefile fmt=/pkg/fmt.a\npackageshlib fmt=/pkg/libstd.so\n"},
+		{"the shared library first", "packageshlib fmt=/pkg/libstd.so\npackagefile fmt=/pkg/fmt.a\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseImportCfg("importcfg", []byte(tt.body))
+			if err != nil {
+				t.Fatalf("ParseImportCfg: %v", err)
+			}
+			if got, ok := cfg.PackageFile("fmt"); !ok || got != "/pkg/fmt.a" {
+				t.Errorf("PackageFile(fmt) = %q, %v, want the archive", got, ok)
+			}
+			if got, ok := cfg.PackageShlib("fmt"); !ok || got != "/pkg/libstd.so" {
+				t.Errorf("PackageShlib(fmt) = %q, %v, want the shared library", got, ok)
+			}
+		})
 	}
 }
 

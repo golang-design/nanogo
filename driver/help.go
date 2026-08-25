@@ -28,6 +28,9 @@ What nanogo compiles:
 
 	One target. nanogo emits arm64 machine code. It refuses to compile on
 	any other host.
+	A package that imports. nanogo reads gc's export data, so an import
+	resolves to what the archive -importcfg names for it declares, and a
+	call reaches the symbol that package defines.
 	Functions whose bodies are return statements, assignments and short
 	variable declarations, if, for, switch with fallthrough, labels, goto,
 	break, continue, calls, arithmetic, comparisons, conversions and
@@ -35,8 +38,6 @@ What nanogo compiles:
 
 What nanogo refuses, by name, with the reason:
 
-	A package that imports anything. nanogo cannot read gc's export data,
-	so it cannot see what an import declares.
 	A composite literal, a range statement, a closure, defer, panic, a
 	slice expression, a conversion to an interface, and most builtins
 	including len, make and append. Nothing performs the lowering
@@ -52,9 +53,13 @@ What nanogo refuses, by name, with the reason:
 What a nanogo-compiled package cannot do:
 
 	Be imported. The archive nanogo writes holds the object and no
-	export data, so gc cannot compile a package that imports it. A main
-	package has no importer, which is why it is the one package a whole
-	build can hand to nanogo today.
+	export data, so gc cannot compile a package that imports it. nanogo
+	reads export data and does not write it, so it takes packages from
+	the top of the import graph downwards.
+
+	Report a position inside an imported package. An imported
+	declaration has no position in the file set of the package being
+	compiled, so a diagnostic about one says the position is unknown.
 
 Environment:
 

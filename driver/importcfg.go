@@ -35,16 +35,37 @@ type ImportCfg struct {
 	ImportMaps    []ImportMapping
 	ModInfo       string
 
-	byPath map[string]string
-	byOld  map[string]string
+	byPath  map[string]string
+	byShlib map[string]string
+	byOld   map[string]string
 }
 
-// PackageFile reports the file that holds the named package.
+// PackageFile reports the file that holds the named package's export data.
+//
+// It answers from the packagefile directives and from those only. A
+// packageshlib directive names a shared library for the linker, not an
+// archive, and gc's own compiler refuses the directive outright rather than
+// reading it. A configuration that carries both for one path must resolve to
+// the archive whichever order the two lines are in.
 func (c *ImportCfg) PackageFile(path string) (string, bool) {
 	if c == nil {
 		return "", false
 	}
 	f, ok := c.byPath[path]
+	return f, ok
+}
+
+// PackageShlib reports the shared library that holds the named package.
+//
+// Nothing in nanogo reads one yet. The accessor exists so that the two tables
+// have the same shape when specs/045-linker.md needs the second one, and so
+// that a caller reaching for a shared library cannot get an archive by
+// accident.
+func (c *ImportCfg) PackageShlib(path string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	f, ok := c.byShlib[path]
 	return f, ok
 }
 
@@ -76,8 +97,9 @@ func ReadImportCfg(name string) (*ImportCfg, error) {
 // command described.
 func ParseImportCfg(name string, data []byte) (*ImportCfg, error) {
 	cfg := &ImportCfg{
-		byPath: make(map[string]string),
-		byOld:  make(map[string]string),
+		byPath:  make(map[string]string),
+		byShlib: make(map[string]string),
+		byOld:   make(map[string]string),
 	}
 	for i, line := range strings.Split(string(data), "\n") {
 		lineNo := i + 1
@@ -101,7 +123,7 @@ func ParseImportCfg(name string, data []byte) (*ImportCfg, error) {
 				return nil, syntaxError(name, lineNo, "packageshlib", "packageshlib path=filename")
 			}
 			cfg.PackageShlibs = append(cfg.PackageShlibs, PackageEntry{Path: before, File: after})
-			cfg.byPath[before] = after
+			cfg.byShlib[before] = after
 		case "importmap":
 			if !hasEq || before == "" || after == "" {
 				return nil, syntaxError(name, lineNo, "importmap", "importmap old=new")

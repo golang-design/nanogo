@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 
+	"golang.design/x/nanogo/export"
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
 	"golang.design/x/nanogo/ssa"
@@ -85,7 +86,8 @@ func Compile(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	pkg, info, err := checkFiles(cfg, files, fset)
+	imp := newImporter(cfg)
+	pkg, info, err := checkFiles(cfg, imp, files, fset)
 	if err != nil {
 		return err
 	}
@@ -97,7 +99,7 @@ func Compile(cfg *Config) error {
 		return err
 	}
 
-	out, err := emitPackage(cfg, p, fset)
+	out, err := emitPackage(cfg, p, fset, imp.reader.Imports())
 	if err != nil {
 		return err
 	}
@@ -233,11 +235,21 @@ func pragmaHandler(_ syntax.Pos, _ bool, _ string, _ syntax.Pragma) syntax.Pragm
 
 // checkFiles type-checks the package.
 //
-// The importer is where the missing half of specs/015-export-data.md shows up,
-// so a package with an import fails here with the reason and not with a
-// confusing follow-on error about an undefined name.
-func checkFiles(cfg *Config, files []*syntax.File, fset *syntax.FileSet) (*types2.Package, *types2.Info, error) {
-	info := &types2.Info{
+// The importer reads gc's export data (specs/015-export-data.md), so an import
+// resolves to the package the archive -importcfg names for it.
+//
+// The deferred recover is not defensive. Export data is decoded lazily: a
+// declaration is read when the checker first looks it up, which is after the
+// importer returned and has no error channel left to use, so the reader
+// signals a stream it cannot decode by panicking. This frame is the last one
+// that still knows which package the build asked nanogo to compile.
+func checkFiles(cfg *Config, imp *importer, files []*syntax.File, fset *syntax.FileSet) (pkg *types2.Package, info *types2.Info, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			pkg, info, err = nil, nil, imp.recovered(v)
+		}
+	}()
+	info = &types2.Info{
 		Types:      make(map[syntax.Expr]types2.TypeAndValue),
 		Defs:       make(map[*syntax.Name]types2.Object),
 		Uses:       make(map[*syntax.Name]types2.Object),
@@ -251,7 +263,7 @@ func checkFiles(cfg *Config, files []*syntax.File, fset *syntax.FileSet) (*types
 		Fset:      fset,
 		Sizes:     types2.SizesFor("gc", TargetArch),
 		GoVersion: cfg.Lang,
-		Importer:  &noExportData{cfg: cfg},
+		Importer:  imp,
 		Error: func(err error) {
 			if len(errs) < maxReportedErrors {
 				errs = append(errs, err)
@@ -262,7 +274,7 @@ func checkFiles(cfg *Config, files []*syntax.File, fset *syntax.FileSet) (*types
 	// specs/032-type-descriptors-and-itabs.md makes the symbol prefix. The go
 	// command sends "main" for every main package, and that is the prefix the
 	// linker expects for one.
-	pkg, err := conf.Check(cfg.Package, files, info)
+	pkg, err = conf.Check(cfg.Package, files, info)
 	if len(errs) > 0 {
 		return nil, nil, errors.Join(errs...)
 	}
@@ -319,12 +331,21 @@ func checkHost(pkg, arch string) error {
 // Declaration order, not map order: the object's symbol table is written by
 // walking the lists in the order symbols were added, so two runs over the same
 // input must add them in the same order (specs/053-determinism.md).
-func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet) (*obj.Package, error) {
+func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []export.Import) (*obj.Package, error) {
 	if err := checkHost(cfg.Package, runtime.GOARCH); err != nil {
 		return nil, err
 	}
 	out := obj.NewPackage(p.Path)
 	out.Main = p.Name == "main"
+	// One Autolib entry per direct import. The linker builds its list of
+	// libraries to load from these, so a call to an imported function whose
+	// package no entry names is reported as an undefined symbol even though
+	// -importcfg told the linker where the archive is. The fingerprint is the
+	// export data's, and the linker refuses the build when it disagrees with
+	// the one in that package's own object.
+	for _, im := range imports {
+		out.AddImport(im.Path, im.Fingerprint)
+	}
 	target := ssa.NewArm64Target()
 	compiled := 0
 	for _, fn := range p.Funcs {

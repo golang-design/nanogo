@@ -184,12 +184,12 @@ func TestCompileRefusals(t *testing.T) {
 			want: []string{"errors", "no entry"},
 		},
 		{
-			name: "an import with a configuration entry names the archive",
+			name: "an import whose archive is not there names the file",
 			src:  "package main\n\nimport \"errors\"\n\nvar _ = errors.New\n",
 			edit: func(c *Config) {
 				c.ImportCfg = mustImportCfg(t, "packagefile errors=/pkg/errors.a\n")
 			},
-			want: []string{"errors", "/pkg/errors.a", "export data"},
+			want: []string{"errors", "/pkg/errors.a", "no such file"},
 		},
 		{
 			name: "an importmap is applied before the lookup",
@@ -319,30 +319,6 @@ func mustImportCfg(t *testing.T, body string) *ImportCfg {
 		t.Fatal(err)
 	}
 	return cfg
-}
-
-func TestImportErrorMessages(t *testing.T) {
-	e := &ImportError{Path: "errors", Package: "strconv"}
-	if !strings.Contains(e.Error(), "no entry") {
-		t.Errorf("an import with no configuration entry reads %q", e)
-	}
-	e.File = "/pkg/errors.a"
-	if !strings.Contains(e.Error(), "/pkg/errors.a") {
-		t.Errorf("an import with an entry does not name the archive: %q", e)
-	}
-
-	// The importer works with no configuration at all, because a package that
-	// imports nothing gets no -importcfg and must still fail readably if the
-	// source names an import the go command did not list.
-	var n noExportData
-	pkg, err := n.Import("errors")
-	if pkg != nil {
-		t.Error("the importer returned a package")
-	}
-	var ie *ImportError
-	if !errors.As(err, &ie) {
-		t.Fatalf("Import = %v (%T), want *ImportError", err, err)
-	}
 }
 
 func TestUnsupportedErrorMessage(t *testing.T) {

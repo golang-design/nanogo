@@ -175,12 +175,10 @@ func compiled(lines []string, pkg string) bool {
 
 // The program nanogo compiles.
 //
-// It is a main package with no imports, and that is not a simplification. A
-// package nanogo compiles cannot be imported, because the archive it writes
-// carries no export data (specs/015-export-data.md has no writer), and a
-// package nanogo compiles cannot import, because there is no reader either. A
-// main package is the one package in a build that neither imports nor is
-// imported, so it is the only one a whole `go build` can hand to nanogo today.
+// It is a main package with no imports, which keeps this test about code
+// generation and nothing else. import_test.go carries the packages that do
+// import, because reading gc's export data is a separate claim and a failure
+// in one must not be reported as a failure in the other.
 //
 // The body is a counted loop, and it is the end-to-end check on the two things
 // SSA construction learned along with the assignment statement: a short
@@ -193,13 +191,6 @@ func compiled(lines []string, pkg string) bool {
 // The exit status is the assertion. A wrong sum divides by zero and the
 // process dies, and the guard is what makes a loop that does not advance fail
 // in a second rather than hang until the test times out.
-//
-// It is a main package with no imports, and that is not a simplification. A
-// package nanogo compiles cannot be imported, because the archive it writes
-// carries no export data (specs/015-export-data.md has no writer), and a
-// package nanogo compiles cannot import, because there is no reader either. A
-// main package is the one package in a build that neither imports nor is
-// imported, so it is the only one a whole `go build` can hand to nanogo today.
 const helloProgram = `package main
 
 func compute(a, b int) int {
@@ -322,33 +313,6 @@ func TestToolexecProgramPrints(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("the output does not contain %q:\n%s", want, got)
 		}
-	}
-}
-
-// TestToolexecImportIsRefused states the limit that decides everything else.
-//
-// nanogo has no reader for gc's export data, so a package with an import fails
-// rather than compiling something that does not know what the import declares.
-// The message names the import and says why, because a user who sees it needs
-// to know that it is a missing component and not a broken build.
-func TestToolexecImportIsRefused(t *testing.T) {
-	h := setup(t, map[string]string{
-		"go.mod":  "module nanogo.example/imports\n\ngo 1.27\n",
-		"main.go": "package main\n\nimport \"strconv\"\n\nfunc main() { println(strconv.IntSize) }\n",
-	}, []string{"main"})
-
-	out, err := h.build(t, ".")
-	if err == nil {
-		t.Fatalf("the build succeeded although nanogo cannot read export data:\n%s", out)
-	}
-	for _, want := range []string{"strconv", "export data"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("the failure does not mention %q:\n%s", want, out)
-		}
-	}
-	lines := h.decisions(t)
-	if len(lines) == 0 || !strings.HasPrefix(lines[len(lines)-1], "failed main ") {
-		t.Errorf("the log does not record the failure:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
