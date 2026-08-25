@@ -21,7 +21,8 @@ This spec is the complete table, with what nanogo must do and when.
 
 **No directive changes generated code today.** The table below is a plan.
 
-What is built is the plumbing, and it is built up to its last step:
+What is built is the plumbing and the placement rule, everything except a
+consumer:
 
 | Stage | State |
 | --- | --- |
@@ -29,12 +30,15 @@ What is built is the plumbing, and it is built up to its last step:
 | The parser accumulates directives and binds them to the declaration that follows | built |
 | The parser hands back a directive that no declaration claimed, so the handler can reject it | built |
 | `ir.Func` carries the directives of the declaration it was built from | built |
-| The driver's handler records anything | **not built**: `pragmaHandler` in `driver/compile.go` returns nil |
+| The driver's handler records the verb and its position | built: `driver/pragma.go` |
+| A misplaced directive is an error | built: `newPragmaHandler` and `checkDirectives` |
 | Any pass reads a directive | **not built** |
 
-Because the handler returns nil, `ir.Func.Pragma` is always nil, and the one
-place the type checker tests a pragma, upstream's `Nointerface` check in
-`types2/decl.go`, cannot fire. The chain is complete except at its two ends.
+`ir.Func.Pragma` now carries a `*driver.pragma` for a function that was marked,
+and nothing below reads it. The chain is complete except at its far end, and
+`driver.TestNosplitIsStillDropped` gates that end: two packages that differ
+only by a `//go:nosplit` must produce the same object until somebody makes one
+of them not.
 
 ## Attachment
 
@@ -59,12 +63,35 @@ Two rules:
    warning elsewhere, because new directives appear in new Go releases and
    [000](000-decisions.md) decision 11 pins nanogo to one.
 
-Neither rule is enforced yet, and that is a design choice rather than an
-omission. The parser decides neither. It calls the handler a second time with
-the directives no declaration claimed, and the handler decides whether a
-misplaced directive is worth an error. `clearPragma` says so in as many words.
-Both rules therefore remain decisions this spec owns, and the code that will
-carry them is `driver`, not `syntax`.
+Rule 1 is enforced, in `driver`, not in `syntax`. The parser decides nothing:
+it attaches a pending directive to whatever declaration follows and calls the
+handler a second time with the ones no declaration claimed, which is
+`clearPragma`. The driver decides in two places, because a directive goes wrong
+in two ways:
+
+- **Unclaimed.** `newPragmaHandler` gets the empty text from `clearPragma` and
+  reports every recorded directive. This is the `//go:noinline` before a
+  statement, before a declaration group, or at the end of a file.
+- **Claimed by a declaration with no use for it.** `checkDirectives` walks the
+  file after it parses and compares what each declaration collected against
+  what its kind accepts: `//go:build` on the file, `funcPragmas` on a function
+  declaration, nothing anywhere else. This is the `//go:noinline` before a
+  `var`, which the parser does attach, to a declaration no pass will read it
+  from.
+
+A directive that shares its line with code is a third case and is decided in
+the handler at once, from the scanner's `blank` flag. Nothing in the text of
+`//go:noinline` says whether it stood alone.
+
+Rule 2 is not enforced. An unrecognised verb maps to no flag, so it is neither
+recorded nor reported, which makes it a comment wherever it stands on a line of
+its own. That is deliberate for the release-skew reason above, and the missing
+half is the error in nanogo's own source and the warning elsewhere.
+
+The corpus proves both halves of rule 1: `test/directive.go` and
+`test/directive2.go` were accepted in full before this, which
+[004](004-conformance.md)'s harness classes as `missed`, and they now report
+the same message at the same twenty positions as `go tool compile`.
 
 ## The table
 

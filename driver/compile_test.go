@@ -5,7 +5,9 @@
 package driver
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -576,12 +578,6 @@ func TestPositionFallsBackToTheName(t *testing.T) {
 	}
 }
 
-func TestPragmaHandlerRecordsNothing(t *testing.T) {
-	if p := pragmaHandler(0, false, "go:noinline", nil); p != nil {
-		t.Errorf("pragmaHandler = %v, want nil", p)
-	}
-}
-
 // TestCompileEmitsAnInitTaskForADeclaredInit reads the archive with the tool
 // that reads objects.
 //
@@ -777,26 +773,51 @@ func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
 //
 // specs/016-directives-and-pragmas.md classes //go:nosplit as required for
 // correctness: a function marked with it must get no stack-growth check,
-// because it runs where the call that check makes is not allowed. nanogo drops
-// every //go: directive at the parser, so a marked function today compiles
-// with the check in it.
+// because it runs where the call that check makes is not allowed. The parser
+// now records the directive and it reaches ir.Func.Pragma, but no pass reads
+// it, so a marked function still compiles with the check in it.
 //
 // Nothing reachable is miscompiled, because the runtime is the only consumer
-// of that group and nanogo does not compile the runtime. This test fails the
-// moment the handler starts recording, which is the point: it turns closing
-// the gap into a change somebody has to look at.
+// of that group and nanogo does not compile the runtime. The gate is on the
+// consumer rather than on the handler: two packages that differ only by the
+// directive must produce the same object today, and the day one of them stops
+// doing so is the day somebody has to look at this.
 func TestNosplitIsStillDropped(t *testing.T) {
-	for _, directive := range []string{
-		"go:nosplit",
-		"go:nowritebarrier",
-		"go:systemstack",
-		"go:noescape",
-	} {
-		if p := pragmaHandler(0, false, directive, nil); p != nil {
-			t.Errorf("%s now reaches the compiler.\n"+
-				"Remove this test, and make ssa and ssagen honour it: "+
-				"specs/016-directives-and-pragmas.md says which of them are "+
-				"required for correctness rather than for speed.", directive)
+	arm64Only(t)
+	needGoCommand(t)
+	// The two sources differ in one comment and in nothing else, not even in
+	// line count, and they are compiled from the same path. Anything else
+	// would move the positions the object records and the objects would
+	// differ for a reason that is not the directive.
+	const body = "package main\n\n%s\nfunc f(x int) int { return x*3 + 1 }\n\nfunc main() { f(7) }\n"
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.go")
+	compile := func(comment, out string) []byte {
+		t.Helper()
+		if err := os.WriteFile(src, []byte(fmt.Sprintf(body, comment)), 0o600); err != nil {
+			t.Fatal(err)
 		}
+		cfg := &Config{
+			Package:   "main",
+			Output:    filepath.Join(dir, out),
+			Lang:      "go1.27",
+			GoVersion: PinnedGoVersion,
+			Files:     []string{src},
+		}
+		if err := Compile(cfg); err != nil {
+			t.Fatalf("Compile %s: %v", comment, err)
+		}
+		b, err := os.ReadFile(cfg.Output)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	if !bytes.Equal(compile("// nosplit.", "plain.a"), compile("//go:nosplit", "marked.a")) {
+		t.Errorf("//go:nosplit now changes the object nanogo writes.\n" +
+			"Remove this test, and make specs/035-goroutines-and-stack-growth.md's " +
+			"chain-depth computation the thing that decides: " +
+			"specs/016-directives-and-pragmas.md says which directives are " +
+			"required for correctness rather than for speed.")
 	}
 }
