@@ -4,10 +4,11 @@ All rights reserved. Use of this source code is governed by
 a BSD-style license that can be found in the LICENSE file.
 -->
 
-# The export data reader
+# The export data reader and writer
 
-This package reads the export data `gc` writes, so that nanogo can compile a
-package that imports one `gc` compiled. See
+This package reads the export data `gc` writes and writes export data `gc`
+reads, so that nanogo can compile a package that imports one `gc` compiled and
+a package `gc` compiles can import one nanogo compiled. See
 [specs/015-export-data.md](../specs/015-export-data.md) for why the format is
 `gc`'s and not nanogo's own.
 
@@ -38,6 +39,7 @@ format and the code that wrote it come from the same tree by construction.
 | `reader.go` | `src/cmd/compile/internal/importer/ureader.go` |
 | `support.go` | `src/cmd/compile/internal/importer/support.go` |
 | `read.go` | written here; see below |
+| `writer.go` | `src/cmd/compile/internal/noder/writer.go` and `linker.go`; see below |
 
 ## Which upstream reader, and why
 
@@ -57,6 +59,11 @@ in [specs/015](../specs/015-export-data.md): inlining across packages
 generic declared in another package ([013](../specs/013-generics.md)) both need
 bodies, and this reader has none.
 
+`gc` reads what nanogo writes with two readers, not one. `noder.readPackage`
+walks the object list and `importer.ReadPackage`, the reader ported here,
+builds the types. Both run over nanogo's bytes in
+`crossread_test.go`.
+
 ## Divergences
 
 Every entry is a place the copy differs from upstream and the reason. A line
@@ -66,10 +73,13 @@ that is not here is upstream's.
 
 | Change | Why |
 | --- | --- |
-| `encoder.go` not ported | nanogo has no writer. [specs/015](../specs/015-export-data.md)'s writer half brings it. |
-| `codes.go`: the `Code` interface and the `Marker`/`Value` methods are dropped | Only the encoder calls them. |
+| `encoder.go`: `NewPkgEncoder` takes no frame count and `Encoder.Sync` is a no-op | Upstream can write a sync marker before every field. nanogo writes none, for the reason the decoder's `Sync` records from the other side: the ported reader desyncs on marked data at the first object that stands in for another package's declaration, so data nanogo marked is data nanogo cannot read. The calls stay, so the writer reads as the mirror of the reader. |
+| `encoder.go`: `DumpTo` returns its error | Upstream asserts it away. The caller is writing a file the build asked for. |
+| `encoder.go`: `fmtFrames` is not ported | It formats the writer's stack for a sync marker, and there are none. |
 | `sync.go`: `fmtFrames` and `walkFrames` are dropped | They format the reader's own backtrace for a desync report, and the panic below carries that backtrace already. |
-| `decoder.go`: `SyncMarkers`, `TotalElems`, `Int`, `Strings`, `PeekPkgPath`, `PeekObj` are dropped | The linker and the writer call them; this reader does not. |
+| `decoder.go`: `SyncMarkers`, `TotalElems`, `Int` and `Strings` are dropped | The linker calls them; neither half here does. |
+| `codes.go`: the `Code` interface and the `Marker`/`Value` methods are back | Only the encoder calls them, and there is an encoder now. |
+| `decoder.go`: `PeekPkgPath` and `PeekObj` are back | They answer what an element is without decoding it, which is what a writer checking its own output needs. |
 | `decoder.go`: `NewPkgDecoder`'s header reads report truncation by name | Upstream asserts. A file the build handed nanogo has to be reported as a file, and "assertion failed" names nothing. |
 | `decoder.go`: `Decoder.checkErr` names the package and the element | Upstream reports the error alone, because `gc` prints it next to the file it was reading. nanogo's driver holds only the package it was asked to compile. |
 | `decoder.go`: `Decoder.Sync` panics instead of calling `os.Exit(1)` | `gc` treats a desync as a compiler bug and ends the process. nanogo is a library the driver calls, so the same event has to come back as an error about the package being compiled. |
@@ -79,11 +89,58 @@ that is not here is upstream's.
 | Change | Why |
 | --- | --- |
 | Import paths point at nanogo's `types2`, `syntax` and `export/pkgbits` | The whole point of the port. |
-| `pos` consumes the position and returns `syntax.NoPos`; `posBases`, `posBase` and `posBaseIdx` are deleted | nanogo's `syntax.Pos` is an offset into the `FileSet` the compiled files were parsed with ([specs/010](../specs/010-scanner-and-positions.md)), and a file in another package is not in it. The fields are still read: they are inline in the element, and skipping them desyncs everything after. The position base is a reference to another element, so that element is never visited. |
+| `pos` consumes the position and returns `syntax.NoPos`; `posBases`, `posBase` and `posBaseIdx` are deleted | nanogo's `syntax.Pos` is an offset into the `FileSet` the compiled files were parsed with ([specs/010](../specs/010-scanner-and-positions.md)), and a file in another package is not in it. The fields are still read: they are inline in the element, and skipping them desyncs everything after. The position base is a reference to another element, so that element is never visited. The writer has the same gap from the other side: it writes every position as absent, so `SectionPosBase` is empty and a `gc` diagnostic about a declaration nanogo compiled says the position is unknown. |
 | `base.FatalfAt`, `base.Fatalf` and `base.Assertf` become `panicf` and `assertf` | Same reason as `Decoder.Sync`. |
 | `enableAlias` and its branch are removed | It selects between the alias representations of two `go/types` releases. nanogo is pinned to one. |
 | `readerTypeBound` is removed | Unused upstream as well. |
 | `ObjFunc` reads a generic method instead of asserting there is none | See below. |
+
+### The writer, `writer.go`
+
+The writer is not a port of one file. `noder/writer.go` encodes a package from
+the type checker's output and produces the **stub** form, in which a
+declaration of another package is a name with no definition. `noder/linker.go`
+turns that into the **linked** form by copying each stub's definition out of
+the archive it came from, and the linked form is the only one that ever
+reaches a file. `writer.go` produces the linked form directly, so its shape
+comes from `writer.go` for the public part of a declaration and from
+`linker.go` for the extension data.
+
+| Change | Why |
+| --- | --- |
+| No stub for a declaration of another package | A file's export data has no stub left except the universe's and unsafe's, and every reader asserts it. nanogo has no linker pass, so a foreign declaration the exported surface reaches is written out in full at the point it is reached. |
+| The public root lists every object in the file | This is `linker.go`'s list and not `writer.go`'s. `gc` builds its stub resolution table from it, so a root naming only nanogo's own declarations leaves `gc` unable to resolve, say, `io.Reader` in a `bufio` signature. |
+| `pos` writes an absent position | The mirror of the reader's gap. See below. |
+| No function body, and the private root lists none | The body writer is [specs/015](../specs/015-export-data.md)'s other half. |
+| A generic declaration is refused by name | See below. |
+| `funcExt` writes no `//go:` directive and no linkname | nanogo's parser records none (`driver/compile.go`'s `pragmaHandler`, [specs/016](../specs/016-directives-and-pragmas.md)). |
+| `funcExt` writes `ABIInternal` and an empty escape note per receiver and parameter | Every function nanogo compiles is ABIInternal ([specs/030](../specs/030-abi.md)), and an empty note parses as "leaks to the heap", which is what a caller must assume when no escape analysis has run ([specs/026](../specs/026-escape-analysis.md) is unbuilt). |
+| `typeExt` writes -1 for both type descriptor symbol indices | The importer finds them by name. It is what `gc` writes before it has assigned indices of its own. |
+| The private root says the package has no `.inittask` | nanogo emits none. A package with initialisation that nanogo compiled is not initialised, which is a gap in code generation and not in the format. |
+| A local alias is stripped to its right-hand side | Upstream does the same, to keep two local aliases from colliding on one symbol. |
+| An empty interface is written as a reference to `any` | Both spellings are one type. The reader has already lost the difference: `types2.NewInterfaceType` returns the one canonical empty interface for `interface{}` and for `any`, so the writer cannot tell them apart. Only the printed form differs. |
+
+### Why a generic declaration is refused
+
+A generic declaration cannot be written without a function body, and the
+format says so rather than the implementation guessing it. `linker.go` writes
+the relocated extension data for a function as `Bool(true)` followed by the
+ABI, the escape notes and the inlining cost; but it takes that branch only
+when the object has a definition, and a generic function never does. For a
+generic it copies the stub extension data verbatim, which is `Bool(false)`
+followed by a reference to a `SectionBody` element. There is no third shape.
+
+`gc`'s reader agrees from the other side: for an instantiation it sets
+`name.Defn` and then asserts `name.Defn == nil` inside the `Bool(true)`
+branch, so a generic written that way fails on the first importer that
+instantiates it, with a message that names neither the generic nor the
+package.
+
+So the writer refuses, and the message names the declaration. 100 of the 375
+standard library packages are refused for it, and 4 of the 27 packages with
+export data in the closure of an empty `main`: `internal/abi`,
+`internal/bytealg`, `internal/runtime/atomic` and `runtime`. All four are
+refused by the driver for other reasons as well.
 
 ### The archive, `read.go`
 
@@ -100,6 +157,9 @@ build already answered.
 `internal/exportdata` reads the archive through a `bufio.Reader` and assumes
 `__.PKGDEF` is the first member. `read.go` walks the members instead, because
 that assumption is not in the format, and reports each malformed shape by name.
+`writer.go`'s `Definition` builds the same member and `driver/archive.go`
+writes it first, because that assumption *is* in `internal/exportdata`'s
+reader and nanogo has to satisfy it.
 
 ## What upstream cannot read and this can
 

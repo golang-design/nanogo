@@ -159,15 +159,15 @@ Risks are listed with the milestone that retires them, not with a probability.
 
 ## Where the work stands
 
-**M0 and M1 are complete. M2 is complete except for the export data writer.
-M3 meets every clause of its gate but one. M4 is partly built and its gate is
-not met.**
+**M0 and M1 are complete. M2 is complete except for a generic declaration in
+export data. M3 meets every clause of its gate but one. M4 is partly built and
+its gate is not met.**
 
 | Milestone | State | Gate |
 | --- | --- | --- |
 | M0 skeleton | done | a `go build -a -toolexec=nanogo` completes by delegating |
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
-| M2 types | done, less the export data writer | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads gc's export data |
+| M2 types | done, less a generic declaration in export data | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads and writes gc's export data |
 | M3 first binary | **in progress** | a leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs; the clause "with its tests passing" is unmet, because `go test -toolexec` is not run |
 | M4 runtime interface | **in progress** | liveness, stack maps, the ABI, the stack growth check and type descriptors are built, a nanogo-allocated object survives a collection, and `panic`, `defer`, `go` and a closure work as long as nothing is captured; itabs, write barriers, `recover` and every capture are not built |
 | M5 to M10 | not started | |
@@ -197,6 +197,9 @@ language, and each one is there for a claim:
 | a wide multi-value result | the ABI homes a result the register set cannot hold |
 | a package that imports a `gc`-compiled library | `export/` reads `gc`'s export data ([015](015-export-data.md)) |
 | a package that imports `math/bits` and `strconv` | the same, against archives the toolchain ships |
+| a library nanogo compiled and an importer `gc` compiled | `gc` reads the export data nanogo *wrote* ([015](015-export-data.md)) |
+| a library that declares no function at all | the archive is export data and nothing else, so nothing but the format is under test |
+| `internal/goarch` and `internal/goos` on the allowlist | nanogo compiles two packages the closure of every Go program contains, and `gc` compiles the other 27 against them |
 | a variadic call | the slice literal allocates, and the descriptor `rtype` emitted is one `mallocgc` accepts |
 | the same call under `runtime.GC()` | the collector follows the pointer mask nanogo wrote |
 
@@ -309,19 +312,23 @@ indistinguishable by their bytes, and the producer has to be recorded by the
 producer. [054](054-distribution.md) has the format and the three properties
 that make it hard to fake.
 
-**M2 was recorded as done and one third of its gate was never built. Half of
-that third is built now.** M2's scope names [015](015-export-data.md) and its
-gate says "round-trips export data for every standard library package". The
-reader half is built: `export/` reads gc's export data, and a package that
-imports compiles and runs under `-toolexec`. The writer is not, so nothing
-round-trips and the gate is still unmet. The two other parts of the gate, type
+**M2 was recorded as done and one third of its gate was never built.** M2's
+scope names [015](015-export-data.md) and its gate says "round-trips export
+data for every standard library package". Neither half of that existed. The
+reader came first, because nanogo started at a `main` package, which imports
+and is imported by nothing; the writer came second and closed the loop, so an
+archive nanogo produces now carries a `__.PKGDEF` and can be imported.
+
+The gate is still not met, and what is left of it is narrower than it was and
+is measured: 275 of the 375 standard library packages round-trip, and `gc`
+reads all 275 of them back. The other 100 are refused by name for a generic
+declaration, which cannot be written without a function body.
+[013](013-generics.md) owns that. The two other parts of the gate, type
 checking the distribution and matching `errorcheck`, are met and gated.
 
-The consequence has moved rather than gone. nanogo can compile a package that
-imports, so M3's gate is no longer blocked by this spec; what it is blocked by
-is the language nanogo accepts. What the missing writer blocks is the other
-direction: a package nanogo compiled cannot be imported, so the allowlist can
-only hold packages nothing else in the build imports.
+The lesson is about which half to build first. Both directions are required and
+neither is more fundamental, so the order is decided by where the allowlist
+starts, not by the format. [015](015-export-data.md) states that rule.
 
 **M3 was recorded as done and its gate was not met.** The first version of
 this section marked M3 done in the table and said in the same paragraph that

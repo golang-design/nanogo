@@ -18,18 +18,67 @@ from [000](000-decisions.md) decision 11 and is what makes the incremental
 bring-up of [051](051-build-integration.md) possible: a package compiled by
 nanogo can be imported by a package compiled by `gc`, and the reverse.
 
-## The reader is built and the writer is not
+## What is built
 
-`export/` reads gc's export data and produces the `*types2.Package` values
-nanogo's checker imports. `driver/importer.go` turns an import path into a file
-through `-importcfg` and hands it to that reader, so a package that imports
-compiles. `export/README.md` records what was ported and every divergence.
+Both directions, for everything but a generic declaration.
 
-There is no writer. The archive nanogo produces carries the object and no
-`__.PKGDEF` (`driver/archive.go`), so a package nanogo compiled cannot be
-imported. The consequence is the reverse of the one this spec used to record:
-nanogo takes packages from the top of the import graph downwards, and the
-allowlist grows towards the leaves rather than away from them.
+| Part | Where | State |
+| --- | --- | --- |
+| The container's read half | `export/pkgbits/` | built |
+| The container's write half | `export/pkgbits/` | built |
+| The declaration reader | `export/read.go`, `export/reader.go` | built; produces the `*types2.Package` values nanogo's checker imports |
+| The declaration writer | `export/writer.go` | built; refuses a generic declaration by name |
+| The `__.PKGDEF` archive member | `driver/archive.go` | built; nanogo writes both members `gc` writes |
+| `-importcfg` parsing | `driver/importcfg.go` | built; all four directives, in separate tables, and an unknown directive is an error |
+| Function bodies | nowhere | **not read and not written**; see below |
+
+`driver/importer.go` turns an import path into a file through `-importcfg` and
+hands it to the reader, so a package that imports compiles.
+`export/README.md` records what was ported and every divergence.
+
+The measured result:
+
+| Claim | Number |
+| --- | --- |
+| standard library packages whose surface round-trips through nanogo's own reader | 275 of 375, 18,122 declarations |
+| the same packages read back by `gc` | 275 of 275 |
+| packages refused, each by name | 100, every one for a generic declaration |
+| packages with export data in the closure of an empty `main` that write | 23 of 27 |
+
+The allowlist can now grow in either direction, which is what the writer was
+blocking. `internal/goarch` and `internal/goos` are the demonstration: each is constants
+and type aliases, each compiles to no symbol at all, and every Go program
+imports both through the runtime. nanogo compiles the pair and `gc` compiles
+the other 27 packages of the build against the export data nanogo wrote
+(`internal/e2e/import_test.go`). Both were refused until the writer existed,
+under a message about having no function bodies, which said the export data
+was missing and not that code generation could not reach them.
+
+### Why a generic declaration is refused
+
+The refusal names the declaration, and the reason is in the format rather than
+in the implementation.
+
+`gc` writes export data twice. `noder/writer.go` produces the **stub** form
+from the type checker's output, and `noder/linker.go` turns it into the
+**linked** form by copying each stub's definition out of the archive it came
+from. Only the linked form reaches a file. In the linked form a function's
+extension data is `Bool(true)` followed by the ABI, the escape analysis notes
+and the inlining cost; `linker.go` takes that branch only when the object has a
+definition in the compiler's IR, and a generic function never does. For a
+generic it copies the stub extension data verbatim, and that is `Bool(false)`
+followed by a reference to a `SectionBody` element. **There is no shape for a
+generic declaration that does not name a body.**
+
+`gc`'s reader says the same from the other side. Reading an instantiation it
+sets `name.Defn` and then asserts `name.Defn == nil` inside the `Bool(true)`
+branch, so a generic written as a body-less declaration fails on the first
+importer that instantiates it, with a message naming neither the generic nor
+the package that wrote it.
+
+So the writer refuses rather than writing something a build would get halfway
+through. Closing it needs the body writer, which is the same gap that stops the
+stenciler; [013](013-generics.md) owns both.
 
 The `types2` fork carries a hand-written `srcimporter_test.go`, which
 type-checks an imported package from source. Upstream's `importer_test.go` is
@@ -41,7 +90,7 @@ unknown directive. It sits in `driver` and not in an export package, because
 the driver is what reads the command line and the parser was built with
 [050](050-driver.md)'s flag handling.
 
-### What the reader does not carry
+### What neither half carries
 
 Positions and bodies, and each one costs something named elsewhere in the deck.
 
@@ -52,6 +101,24 @@ place in it. A diagnostic about an imported declaration therefore says the
 position is unknown, which is a gap in [052](052-diagnostics.md). Closing it
 needs a `FileSet` that can hold a foreign file's line table, which is a change
 to `syntax` and not to the reader.
+
+The writer has the same gap in mirror image: every position it writes is
+absent, so the position base section is empty and a `gc` diagnostic about a
+declaration nanogo compiled says the position is unknown. Closing that one
+needs no change to `syntax`, only the file names and line numbers the compiled
+files already have, and the `-trimpath` rewriting that makes them the same on
+two machines ([053](053-determinism.md)).
+
+Three further things the writer does not carry, each of which an importer can
+observe. A `//go:` directive of any kind, because nanogo's parser records none
+([016](016-directives-and-pragmas.md)); that includes `//go:linkname`, so an
+importer of a package nanogo compiled would call the declared name and not the
+linkname target. A package initialisation task, because nanogo emits none; a
+package with initialisation that nanogo compiled is not initialised, which is a
+gap in code generation and not in the format. And escape analysis results,
+which are written as empty notes; an empty note parses as "leaks to the heap",
+which is the conservative answer a caller must assume
+([023](023-escape-analysis.md)).
 
 No function body of any kind is read, because the reader is the types-only one.
 That blocks [024](024-inlining-and-devirtualization.md) entirely, and it blocks
@@ -104,16 +171,18 @@ The costs are real and are accepted:
    here measures 1,948 lines including the container's read half and the
    archive, against an estimate of 7,000 for the whole component.
 
-   What is left of the estimate is the writer and the body reader, and both are
-   real. nanogo still needs the container's write half, a declaration writer,
-   and `noder`'s reader for the bodies below.
+   What is left of the estimate is the function bodies. The container's write
+   half and the declaration writer landed after that sentence was written and
+   measure 900 lines together, including the archive member; `noder`'s reader
+   for the bodies below, and the writer that produces them, are still owed.
 3. **Both directions are required, and which one comes first depends on where
    the allowlist starts.** A leaf package has no imports, so compiling it with
    nanogo exercises no reader, but anything that imports it reads what nanogo
    *wrote*. A `main` package is the opposite: it imports and nothing imports it,
    so it exercises the reader and no writer. nanogo started at `main`
-   ([051](051-build-integration.md)), so the reader came first, and the writer
-   is what the allowlist needs before it can hold a package anything imports.
+   ([051](051-build-integration.md)), so the reader came first. The writer
+   followed, and it is what lets the allowlist hold a package that something
+   else imports.
 
 ## Structure
 
@@ -125,7 +194,33 @@ build time.
 
 Types are interned and referenced by index. A cyclic type graph (a struct with
 a pointer to itself) is expressed by the index reference, which is why the
-format is a graph encoding and not a tree encoding.
+format is a graph encoding and not a tree encoding. The writer claims an
+element's index before it writes the element, which is what makes a type that
+refers to itself terminate.
+
+### The stub form and the linked form
+
+A file's export data is the **linked** form, and this is the fact the writer
+was built around. `gc` produces a **stub** form first, in which a declaration
+of another package is a name with no definition, and its linker resolves every
+stub by copying the definition out of the archive it came from. Two properties
+follow, and a writer that misses either one produces bytes `gc` reports as an
+internal compiler error a long way from the package that wrote them:
+
+1. **A file has no stub left except the universe's and unsafe's.** So a
+   declaration of another package that the exported surface reaches is written
+   out in full. nanogo has no linker pass, so the writer does it at the point
+   the declaration is reached.
+2. **The public root lists every object in the file, not the package's own
+   exported names.** `gc` builds its stub-resolution table from that list. A
+   root naming only nanogo's own declarations left `gc` unable to resolve
+   `io.Reader` in the signature of a `bufio` function it had just imported.
+
+The first property is what makes the writer's cost proportional to the
+exported surface's transitive closure rather than to the package. The second
+was found by the cross-read test and by nothing else: nanogo's own reader
+round-tripped the same bytes without complaint, because it does not build that
+table.
 
 ## The importcfg file
 
@@ -153,9 +248,18 @@ failure, not a line nanogo skips.
 ## Determinism
 
 Export data is part of a compiled package's bytes, so [053](053-determinism.md)
-applies without exception. Declarations are written in source order, not in map
-order. Types are interned in first-use order. A type's methods are written
-sorted by name.
+applies without exception. Types are interned in first-use order, and the walk
+that fixes that order is fixed itself: the package-scope declarations are
+visited in `Scope.Names` order, which is sorted.
+
+Two sentences this section used to carry were wrong, and building the writer
+found both. Declarations are **not** written in source order: `gc` writes them
+in sorted name order and nanogo does the same, so that the two compilers'
+export data for one package stays comparable. A type's methods are **not**
+sorted by name: `gc` writes them in declaration order, which is the order the
+checker holds them in, and sorting them would make nanogo's output differ from
+`gc`'s for no gain. Neither is a determinism question. Both orders are fixed
+by the input, which is all determinism asks.
 
 This is the most likely single place for the G1 fixed point to break, because
 the type checker's internal maps are the natural thing to range over and the
@@ -184,14 +288,42 @@ What the reader has:
   that imports `math/bits` and `strconv`. Both programs run
   (`internal/e2e/import_test.go`).
 
-What the writer will need, unchanged from before:
+What the writer has:
 
-- Round trip: write nanogo's export data for every standard library package,
-  read it back, and compare the reconstructed package surface against the
-  original type checker output.
-- Cross-read: `gc` reads nanogo's export data, nanogo reads `gc`'s, for the same
-  package, and the two reconstructions agree.
-- Byte determinism: compile the same package twice in one process and in two,
-  and compare bytes.
+- The container: one element carrying every primitive the format has, written
+  and read back, and one check that no sync marker reaches the bytes
+  (`export/pkgbits/encoder_test.go`).
+- Agreement on a fixture: the reader's fixture without its generic
+  declarations, written and read back and compared declaration by declaration
+  (`export/writer_test.go`).
+- Round trip: every standard library package, read from `gc`'s archive,
+  written, read back, and compared surface line by surface line. 275 of 375
+  pass and 18,122 declarations are compared; the other 100 are refused by name
+  and counted. Both numbers are logged, and a refusal that is not the generic
+  one is a failure rather than a skip.
+- **Cross-read: `gc` reads what nanogo wrote.** For each of the same 375
+  packages, nanogo writes an archive carrying nothing but the export data and
+  the installed toolchain compiles a file naming every exported declaration of
+  it. That runs both of `gc`'s readers over nanogo's bytes: the object list
+  walk in `noder` and the `types2` reader that resolves each name. `gc` reads
+  all 275 (`export/crossread_test.go`). This is the test that found the public
+  root defect above, which the round trip could not.
+- Byte determinism: the same package written twice in one process, written
+  again after a second read, and written by two separate processes, compared
+  each time. The two-process case is the one that catches an order taken from
+  a pointer value, and it is the shape the G1 fixed point needs.
+- The invariant underneath the format: the only declaration in the bytes
+  without a definition is one from the universe or from unsafe, checked over
+  every package of the corpus.
+- End to end: `go build -toolexec=nanogo` over four modules. `gc` compiles a
+  package that imports a library nanogo compiled; `gc` imports a package that
+  declares no function at all, so what it reads is the export data and nothing
+  else; nanogo imports its own export data; and nanogo compiles
+  `internal/goarch` while `gc` compiles the other 28 packages of the build
+  against it. All four programs run (`internal/e2e/import_test.go`).
+
+What the writer still needs:
+
 - Generic bodies: an importer instantiates a generic declared in a package it
-  only has export data for, and the instantiation compiles and runs.
+  only has export data for, and the instantiation compiles and runs. This is
+  the whole of what is refused, and it needs the body writer.
