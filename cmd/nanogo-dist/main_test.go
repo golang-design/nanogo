@@ -122,7 +122,7 @@ func TestBuildWritesATreeATallyAndATarball(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("build failed with %d: %s%s", code, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "packages in the bootstrap closure compiled by nanogo") {
+	if !strings.Contains(stdout, "packages in this distribution compiled by nanogo") {
 		t.Errorf("build did not print the tally: %q", stdout)
 	}
 	if !strings.Contains(stdout, ".tar.gz") {

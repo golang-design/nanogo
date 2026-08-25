@@ -156,8 +156,19 @@ func TestTheTarballUnpacksIntoAWorkingDistribution(t *testing.T) {
 	if out := run(t, work, distCmd, "verify"); !strings.Contains(out, "agrees with its 27 archives") {
 		t.Errorf("verify said %q", strings.TrimSpace(out))
 	}
+	// 27 is the bootstrap closure, checked against the closure itself rather
+	// than written down here. The tally line says "in this distribution",
+	// because dist counts what is in pkg and cannot know whether that is
+	// still the closure; this test can, and does.
+	closure, err := dist.Closure(b.goCmd, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closure) != 27 {
+		t.Fatalf("the bootstrap closure is %d archives and this test expects 27", len(closure))
+	}
 	line := strings.TrimSpace(run(t, work, distCmd, "tally"))
-	want := "nanogo: 0 of 27 packages in the bootstrap closure compiled by nanogo; 27 by gc " + driver.PinnedGoVersion
+	want := "nanogo: 0 of 27 packages in this distribution compiled by nanogo; 27 by gc " + driver.PinnedGoVersion
 	if line != want {
 		t.Errorf("tally said\n\t%s\nwant\n\t%s", line, want)
 	}
