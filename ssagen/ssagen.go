@@ -597,7 +597,7 @@ func (e *emitter) value(v *ssa.Value) {
 	}
 	if v.Op == ssa.OpARM64MOVDaddr {
 		// The pair is one edit and the linker splits the address across it.
-		e.addr(at, callee{name: e.symbolName(v.Aux.(*ir.Object)), abi: obj.ABIInternal}, v.AuxInt)
+		e.addr(at, e.globalCallee(v.Aux.(*ir.Object)), v.AuxInt)
 	}
 	e.spill(v)
 }
@@ -698,7 +698,7 @@ func (e *emitter) remat(dst arm64.Reg, v *ssa.Value) {
 			e.fail("v%d: an address of no symbol", v.ID)
 			return
 		}
-		e.addr(at, callee{name: e.symbolName(o), abi: obj.ABIInternal}, v.AuxInt)
+		e.addr(at, e.globalCallee(o), v.AuxInt)
 	}
 }
 
