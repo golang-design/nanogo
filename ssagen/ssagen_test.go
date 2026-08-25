@@ -2141,3 +2141,64 @@ func TestRegRefusesAFloatRegister(t *testing.T) {
 		t.Errorf("an integer register was refused: %v", err)
 	}
 }
+
+// TestRematerialisationIntoASlotStoresIt covers the move the allocator asks
+// for when a rematerialisable value is live across a call.
+//
+// specs/026-register-allocation.md keeps a constant, a frame address and a
+// symbol address out of the frame by recomputing them at each use. That is
+// where the value comes from, not where it lives: a call clobbers every
+// register under specs/030-abi.md, so a value live across one is given a slot
+// as well. The emitter then has to write a computed value to memory, and no
+// instruction does that, so it is the recomputation followed by a store.
+//
+// The case reached the emitter with no arm of the move table to take, and
+// reported "no move from - to s1". It was found by compiling
+//
+//	for _, x := range xs { n = add(n, x) }
+//
+// where the slice's base address is rematerialisable and the call in the loop
+// body is what makes it live across one. Before the fix nanogo refused that
+// loop; after it, the program compiles and runs.
+func TestRematerialisationIntoASlotStoresIt(t *testing.T) {
+	f := ssa.NewFunc("f")
+	a := &ssa.Alloc{
+		Target:  ssa.NewArm64Target(),
+		Home:    make([]ssa.Loc, 4),
+		Fixed:   make([]ssa.Reg, 4),
+		Result:  make([]ssa.Reg, 4),
+		Args:    make([][]ssa.Reg, 4),
+		Remat:   make([]bool, 4),
+		Spilled: make([]bool, 4),
+	}
+	for i := range a.Fixed {
+		a.Fixed[i] = ssa.NoReg
+		a.Result[i] = ssa.NoReg
+	}
+	e := &emitter{
+		f: f, a: a,
+		opt:    Options{Sym: "test.f", File: "t.go"},
+		pkg:    obj.NewPackage("test"),
+		frames: map[*ir.Object]int64{},
+		done:   map[ssa.ID]bool{},
+	}
+	e.syms = newSymbols(e.pkg)
+	e.slotOff = []int64{8}
+
+	c := f.Entry.NewValue(0, ssa.OpARM64MOVDconst, typeInt)
+	c.AuxInt = 42
+
+	// The source has no kind, which is how a rematerialised value is spelled.
+	e.move(ssa.SlotLoc(0), ssa.Loc{}, c)
+	if err := e.err(); err != nil {
+		t.Fatalf("a rematerialisation into a slot gave %v", err)
+	}
+	if len(e.text) < 2 {
+		t.Fatalf("%d instructions, want the recomputation and the store", len(e.text))
+	}
+	// The store is last, and it writes the reserved register rather than one
+	// the allocator handed out, because no value of the function is in it.
+	if got := e.text[len(e.text)-1]; got == 0 {
+		t.Errorf("the store is not encoded")
+	}
+}

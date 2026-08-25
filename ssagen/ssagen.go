@@ -662,6 +662,24 @@ func (e *emitter) move(dst, src ssa.Loc, v *ssa.Value) {
 		e.store(e.reg(src.Reg), dst.Slot, v.Type)
 	case dst.Kind == ssa.LocReg && src.Kind == ssa.LocNone:
 		e.remat(e.reg(dst.Reg), v)
+	case dst.Kind == ssa.LocSlot && src.Kind == ssa.LocNone:
+		// A rematerialised value whose home is a slot. specs/026 keeps a
+		// constant, a frame address and a symbol address out of the frame by
+		// recomputing them at each use, but the allocator still gives one a
+		// slot when it is live across a call: the call clobbers every
+		// register, so the value has to be somewhere, and recomputing it is
+		// what the definition does rather than where it lives.
+		//
+		// There is no instruction that writes a computed value to memory, so
+		// this is the recomputation followed by the store, staged through the
+		// same reserved register argValue uses. That register holds no value
+		// of the function, so nothing is destroyed between the two.
+		//
+		// Found by compiling `for _, x := range xs { n = add(n, x) }`, where
+		// the slice's base address is rematerialisable and lives across the
+		// call in the loop body.
+		e.remat(moveScratch, v)
+		e.store(moveScratch, dst.Slot, v.Type)
 	default:
 		e.fail("v%d: no move from %v to %v", v.ID, src, dst)
 	}
