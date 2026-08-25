@@ -32,6 +32,14 @@ func TestHelpStatesTheLimits(t *testing.T) {
 		LogEnv,
 		"-fallback",
 		"specs/050-driver.md",
+		// nanogo build, and the three limits a user must not discover by
+		// hitting them: one target, whose standard library it is, and who
+		// writes the executable.
+		"nanogo build",
+		"the installed Go toolchain",
+		"go tool link",
+		"specs/045-linker.md",
+		RootEnv,
 	} {
 		if !strings.Contains(Help, want) {
 			t.Errorf("the help does not mention %q", want)

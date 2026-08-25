@@ -4,10 +4,16 @@
 
 // Package driver implements nanogo's command line.
 //
-// The command line is [cmd/compile]'s, because the go command substitutes
-// nanogo for each toolchain invocation through -toolexec and constructs the
-// arguments itself. See specs/050-driver.md for the flag set and
-// specs/051-build-integration.md for the substitution model.
+// There are two ways in, and they answer to different callers.
+//
+// "nanogo build" is the front end a person uses. It resolves the package
+// graph, compiles the packages named on the command line with nanogo, and
+// links. See [RunBuild].
+//
+// Everything else is [cmd/compile]'s command line, because the go command
+// substitutes nanogo for each toolchain invocation through -toolexec and
+// constructs the arguments itself. See specs/050-driver.md for the flag set
+// and specs/051-build-integration.md for the substitution model.
 //
 // The package holds all the logic so that it is testable without a process.
 // cmd/nanogo is a shell over [Run].
@@ -83,17 +89,28 @@ func Run(env Env) int {
 	return code
 }
 
-// usage is the one line form, used when the command line is malformed.
-const usage = "usage: nanogo [-fallback] <tool> [arguments]"
+// usage is the short form, used when the command line is malformed. It names
+// both modes, because the two are reached by different people: a person runs
+// "nanogo build", and the go command runs the tool form.
+const usage = "usage:\n\tnanogo build [-o output] [-v] [packages]\n\tnanogo [-fallback] <tool> [arguments]"
 
 func run(env *Env) (int, error) {
 	args := env.Args
 
+	// A human types "nanogo build". The go command never does: -toolexec
+	// appends an absolute tool path, so the first argument of a real
+	// invocation is a path and not a word, and no tool is named "build".
+	//
+	// This is the front end, not the substitution. It resolves the package
+	// graph itself, compiles the packages the user named with the same
+	// [Compile], and links. See [RunBuild].
+	if len(args) > 0 && args[0] == "build" {
+		return RunBuild(env, args[1:])
+	}
+
 	// A human types "nanogo help" or "nanogo version". The go command never
-	// does: -toolexec appends an absolute tool path, so the first argument of
-	// a real invocation is a path and not a word. The two forms cannot be
-	// confused, and a driver whose limits are only discoverable by hitting
-	// them is a driver that wastes a user's afternoon.
+	// does either, for the same reason. A driver whose limits are only
+	// discoverable by hitting them is a driver that wastes a user's afternoon.
 	if len(args) == 1 {
 		switch args[0] {
 		case "help", "-h", "-help", "--help":
