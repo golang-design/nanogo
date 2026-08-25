@@ -64,13 +64,20 @@ func Write(pkg *types2.Package) (data []byte, fingerprint [8]byte, err error) {
 	// way the reader reports a stream it cannot decode: the refusal is found
 	// deep inside a recursive walk and every frame between it and here would
 	// otherwise have to carry an error it cannot act on.
+	//
+	// The walk also forces declarations the checker had not looked at yet,
+	// because an imported package is decoded lazily. So a malformed archive
+	// can raise the reader's panic here, after the importer returned and has
+	// no error channel left, and it has to come back as an error naming the
+	// package rather than as a stack trace.
 	defer func() {
 		if v := recover(); v != nil {
+			data, fingerprint = nil, [8]byte{}
 			if u, ok := v.(*UnsupportedError); ok {
-				data, fingerprint, err = nil, [8]byte{}, u
+				err = u
 				return
 			}
-			panic(v)
+			err = fmt.Errorf("export: %s: %v", pkg.Path(), v)
 		}
 	}()
 
@@ -558,7 +565,7 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		named := obj.Type().(*types2.Named)
 		w.pos()
 		w.typeParamNames()
-		wext.typeExt(named)
+		wext.typeExt()
 		w.typ(named.Underlying())
 
 		// The methods, in the order the checker holds them, which is the
@@ -675,7 +682,16 @@ func (w *writer) funcExt(sig *types2.Signature, isMethod bool) {
 	w.Sync(pkgbits.SyncEOF)
 }
 
-func (w *writer) typeExt(named *types2.Named) {
+// typeExt writes the extension data of a defined type.
+//
+// Three fields and no more. Each method's extension data follows in the same
+// element, and [writer.method] is what writes it: gc's linker re-encodes a
+// type and its methods together, and gc's writer, which is the one this
+// mirrors, writes the three fields here and leaves the methods to the loop
+// that encodes them. Writing them in both places appends a second copy that
+// no reader consumes, which nothing observes and which doubles the extension
+// data of every method in the package.
+func (w *writer) typeExt() {
 	w.Sync(pkgbits.SyncTypeExt)
 	w.pragmaFlag()
 
@@ -684,15 +700,6 @@ func (w *writer) typeExt(named *types2.Named) {
 	// before it has assigned indices of its own.
 	w.Int64(-1)
 	w.Int64(-1)
-
-	// An interface has no methods of its own to describe here; its method
-	// set is part of the type.
-	if _, isInterface := named.Underlying().(*types2.Interface); isInterface {
-		return
-	}
-	for i := 0; i < named.NumMethods(); i++ {
-		w.funcExt(named.Method(i).Signature(), true)
-	}
 }
 
 func (w *writer) varExt() {

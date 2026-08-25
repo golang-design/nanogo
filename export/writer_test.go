@@ -468,3 +468,32 @@ func TestWriteIsDeterministicAcrossProcesses(t *testing.T) {
 		t.Errorf("two processes wrote different export data for net/url: %s and %s", first, second)
 	}
 }
+
+// TestWriteReportsABrokenStreamAsAnError is the write path's half of the
+// promise read.go makes.
+//
+// An imported package is decoded lazily, so the walk the writer does forces
+// declarations the type checker never looked at. A malformed archive raises
+// the decoder's panic there, after the importer returned and has no error
+// channel left. It has to come back as an error naming the package, because a
+// stack trace names nothing a user can act on.
+func TestWriteReportsABrokenStreamAsAnError(t *testing.T) {
+	pkg := types2.NewPackage("nanogo.example/broken", "broken")
+	pkg.Scope().InsertLazy("Broken", func() types2.Object {
+		panic(fmt.Errorf("pkgbits: %q: export data is truncated", "nanogo.example/broken"))
+	})
+	pkg.MarkComplete()
+
+	_, _, err := Write(pkg)
+	if err == nil {
+		t.Fatal("a package whose declaration cannot be decoded was written")
+	}
+	if _, ok := err.(*UnsupportedError); ok {
+		t.Fatalf("a broken stream was reported as a refusal: %v", err)
+	}
+	for _, want := range []string{"nanogo.example/broken", "truncated"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q: %v", want, err)
+		}
+	}
+}
