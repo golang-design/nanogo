@@ -96,6 +96,30 @@ jobs:
         echo "version is $version"
         echo "version=$version" >> "$GITHUB_OUTPUT"
 
+    # Go's own test corpus, before anything is built for release.
+    #
+    # A release says what nanogo compiles. specs/004-conformance.md L2 is the
+    # only gate that answers that against source nanogo's authors did not
+    # write, and the ratchet in internal/gotest/testdata/ratchet.txt names
+    # every file this tag is allowed to claim. A tag that compiled a corpus
+    # program into one that behaves differently from gc's build of it is a tag
+    # that ships a miscompiler, and it must not be cut.
+    #
+    # First, because it is a minute and the tarball is not. A release that
+    # fails should fail before it builds anything.
+    - name: The corpus gate
+      env:
+        NANOGO_REQUIRE_CORPUS: '1'
+        NANOGO_REQUIRE_LINK: '1'
+      run: |
+        set -eu -o pipefail
+        go test -timeout 30m -v -run 'TestCorpus$' ./internal/gotest/ 2>&1 | tee "$RUNNER_TEMP/corpus.txt"
+        grep -q 'swept [0-9]* files' "$RUNNER_TEMP/corpus.txt" || {
+          echo "::error::the corpus gate produced no measurement, so this tag proved nothing"
+          exit 1
+        }
+        sed -n '/swept 3/,/TOTAL/p' "$RUNNER_TEMP/corpus.txt"
+
     - name: Build the tarball
       id: build
       env:

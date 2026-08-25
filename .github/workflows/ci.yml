@@ -95,6 +95,77 @@ jobs:
     - name: Test under the race detector
       run: go test -timeout 60m -race ./...
 
+  # Go's own test corpus, run as an execution gate.
+  #
+  # specs/004-conformance.md L2. The 356 files of $GOROOT/test are vendored
+  # into internal/gotest/testdata, and this job does what each file's header
+  # says: build the program with gc and with nanogo, run both, compare. gc is
+  # the oracle rather than a golden file, so the expectation cannot go stale.
+  #
+  # It runs on macos-latest because that is the arm64 runner and nanogo emits
+  # arm64 machine code. On the amd64 runner nothing it compiled could run, and
+  # a corpus job there would be a job that linked nothing.
+  #
+  # The test job already runs this test inside `go test ./...`. This job exists
+  # anyway, for two reasons. A red light here names the corpus rather than
+  # "test (macos-latest)", and -v puts the report in the log: the class table,
+  # the totals, and the refusals ranked by reason. That ranked list is the
+  # answer to "what should I build next" and it is worth a minute of runner
+  # time on every commit.
+  corpus:
+    name: go test corpus
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.27.x'
+        check-latest: true
+
+    - name: Assert the runner can run what nanogo compiles
+      run: |
+        set -eu
+        test "$(uname -m)" = "arm64"
+
+    # Both variables turn a skip into a failure. Without them a run that swept
+    # nothing would read exactly like a run that swept everything, which is the
+    # failure mode this repository has been caught by before.
+    - name: Sweep
+      env:
+        NANOGO_REQUIRE_CORPUS: '1'
+        NANOGO_REQUIRE_LINK: '1'
+      run: |
+        set -eu -o pipefail
+        go test -timeout 30m -v -run 'TestCorpus$' ./internal/gotest/ 2>&1 | tee "$RUNNER_TEMP/corpus.txt"
+
+    # The test above cannot skip, because both variables above make a skip a
+    # fatal error. This asserts it anyway: the two lines that carry the
+    # measurement must be in the log, so a test that passed having compared
+    # nothing cannot be mistaken for a green gate.
+    - name: Assert the sweep measured something
+      run: |
+        set -eu
+        log="$RUNNER_TEMP/corpus.txt"
+        grep -q 'swept [0-9]* files' "$log" || {
+          echo "::error::the corpus test produced no measurement; it passed having swept nothing"
+          exit 1
+        }
+        grep -qE '^\s+TOTAL\s+[0-9]+' "$log" || {
+          echo "::error::the corpus report has no total, so its classes were never made to add up"
+          exit 1
+        }
+        if grep -q -- '--- SKIP' "$log"; then
+          echo "::error::the corpus test skipped despite NANOGO_REQUIRE_CORPUS and NANOGO_REQUIRE_LINK"
+          exit 1
+        fi
+        sed -n '/swept /,/TOTAL/p' "$log"
+
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: corpus-report
+        path: ${{ runner.temp }}/corpus.txt
+
   # A compiler must build from any host: nanogo targets arm64 and amd64, and
   # neither target may need a host of the same architecture. This job exists
   # because that was broken and the ordinary test matrix did not say so: a file
