@@ -27,8 +27,8 @@ text-assembly seam in [000](000-decisions.md) decision 3.
 | --- | --- | --- |
 | The canonical name, both spellings | `ir/rtype.go` | built; the expected spellings were read out of a `gc` object with `go tool nm`, and the hash below re-checks the link string against a running `gc` binary |
 | The descriptor bytes | `rtype/` | built for the types below, checked field by field against `reflect` |
-| The reference from generated code | `ir/lower.go` | built for `new`, `&T{...}`, a slice literal and `make([]T, n)` |
-| The descriptor as a data symbol in the object | nowhere | **not built**, see the seam below |
+| The reference from generated code | `ir/lower.go` | built for `new`, `&T{...}`, a slice literal and `make([]T, n)`, and the pass runs in a real compile |
+| The descriptor as a data symbol in the object | `driver/compile.go` | built, see the seam below |
 | Itabs | nowhere | **not built**, and blocked on the IR rather than on this spec |
 
 The `gclocals·` and `go:string.` rows of the namespace table are produced as
@@ -98,36 +98,65 @@ of this spec: they are blocked on a different thing, the type boundary itself,
 and so is every defined type's descriptor. Extending [020](020-ir.md) to carry
 a method set is the work that unblocks both.
 
-### The seam that is left
+### The seam, and what closing it corrected
 
-Nothing writes a descriptor into an object file, and nothing runs the lowering
-pass in a real build either. Three changes close the seam and all three are
-wiring:
+The seam was that nothing wrote a descriptor into an object file and nothing
+ran the lowering pass in a real build. It is closed. This section is kept
+because two of the three changes it named were not right, and a reader who
+follows the same reasoning again would make the same two mistakes.
 
-1. **`driver/compile.go` does not call `ir.Lower`.** Its pass list starts at
-   `ssa.Build`, and there is no caller of `ir.Lower` outside a test anywhere in
-   the tree. So the whole of [020](020-ir.md)'s lowering table, this spec's
-   rows included, is measured by `ir/lower_corpus_test.go` and reaches no
-   compiled program. This is not a gap in this spec and it is the first thing
-   a reader of the corpus number has to know: the number says what the pass
-   would buy, and today it buys it only in the test.
-2. `emitPackage` collects `ir.LowerAndCollect`'s per function lists, calls
-   `rtype.Descriptor` on the union, and adds each symbol with
-   `Package.AddHashedDef`, resolving each `rtype.Reloc` target by name.
-   `rtype`'s own test does that wiring against a real `obj.Package` and writes
-   the object, so the shape is checked; what is missing is the call site.
-3. `ssagen/reloc.go`'s `symbolName` prefixes `pkg.Path + "."` onto any global
-   whose name holds no dot. `type:p.T` survives that and `type:int`,
-   `type:[]int` and `type:interface {}` do not. It must leave a `type:` name
+1. **`driver/compile.go` now calls `ir.Lower`.** It is the first stage of
+   `compileFunc`'s pass list, ahead of `ssa.Build`, and it is named `ir.Lower`
+   rather than "lowering" because `ssa.Lower` is in the same list and the two
+   are different decks. The corpus number is no longer a measurement of what
+   the pass would buy: 24,095 of 39,947 distribution functions get past
+   construction with the pass, and 17,905 without it.
+2. `emitPackage` collects `ir.LowerAndCollect`'s per function lists, unions
+   them in first-use order, calls `rtype.Descriptor` on each, and resolves each
+   `rtype.Reloc` target by name. **The descriptor itself is `AddDef`, not
+   `AddHashedDef`, and this spec was wrong to say otherwise.** `cmd/link` reads
+   no name for a symbol in the hashed index space, so a hashed descriptor is
+   nameless to the linker: no reference from another object resolves to it and
+   nothing collects it into `runtime.typelinks`. `gc` agrees. It sets
+   `AttrContentAddressable` on `type:.importpath.`, `type:.namedata.`,
+   `runtime.gcbits.` and itabs, and never on the descriptor. So the descriptor
+   is a named `dupok` definition and the data it points at is hashed, which is
+   what `rtype` documents when it returns the descriptor first.
+3. `ssagen/reloc.go`'s `symbolName` prefixed `pkg.Path + "."` onto any global
+   whose name held no dot. `type:p.T` survived that and `type:int`,
+   `type:[]int` and `type:interface {}` did not. It leaves a `type:` name
    alone.
+4. **A fourth change this spec did not name.** A symbol's identity is its name
+   *and* its ABI, and `cmd/link` resolves a by-name reference with both:
+   `abiToVer` maps `ABIInternal` to one version and everything else to
+   another, and `regabiwrappers` is always on for arm64, so the two versions
+   are not the same. `gc` gives a data symbol no ABI, so a descriptor is ABI0,
+   and `ssagen` referenced every global at `ABIInternal`. With changes 1 to 3
+   and not this one the link reports
 
-Until all three land, a program that reaches one of these rows is refused at
-compile time exactly as before, because the pass that would lower it does not
-run. Once 1 lands without 2, such a program compiles and reports the descriptor
-as undefined at link time, which is a loud failure and not a silent one. That
-ordering is why the lowering rows are built ahead of the writer: a row blocked
-on a writer in another package should not be counted as a row blocked on the
-lowering table.
+   ```
+   main.main: relocation target type:int not defined for ABIInternal (but is defined for ABI0)
+   ```
+
+   which was measured, not predicted. The reference now follows the object's
+   class: `ClassGlobal` is ABI0 and a text symbol is `ABIInternal`. The
+   equality routine a descriptor's `Equal` closure points at is the one target
+   that is not data, and `rtsym` is what says so.
+
+The ordering the seam had was still the right one. A program that reached one
+of these rows was refused at compile time before change 1, and after change 1
+without change 2 it compiles and reports the descriptor as undefined at link
+time, which is loud rather than silent. That is why the lowering rows were
+built ahead of the writer: a row blocked on a writer in another package should
+not be counted as a row blocked on the lowering table.
+
+**What reaches a running program.** A variadic call, a slice literal, `make` of
+a slice and `new` of a type whose descriptor can be filled in are compiled,
+linked against the real runtime and run. A defined type is refused, and the
+refusal now arrives from `rtype` after the function it came from compiled,
+because lowering can name `main.point` without trouble and only the encoder
+knows that its method set is not in the IR. That is the same gap that stops
+itabs, met from the driver.
 
 ## The type descriptor
 

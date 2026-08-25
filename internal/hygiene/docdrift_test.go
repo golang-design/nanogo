@@ -165,6 +165,17 @@ func buildClaims() []claim {
 		addPhrase("ssa.corpus.reached", f, `([\d,]+) of those functions reach SSA construction`)
 		addPhrase("ssa.corpus.mapped", f, `([\d,]+) of the [\d,]+ carry a stack map`)
 	}
+	// The same corpus with the lowering pass run first, which is what the
+	// driver does. It is a second number and not a correction of the one
+	// above: the pair is what says how much of the reach is construction's
+	// and how much is specs/020-ir.md's lowering table.
+	addPhrase("ir.lowered.reached", readme, `([\d,]+) of them get past construction once the lowering pass has run`)
+	// The same pair is written in the spec that owns the seam, and a number
+	// worth gating is worth gating everywhere it is written down.
+	desc := "specs/032-type-descriptors-and-itabs.md"
+	addPhrase("ir.lowered.reached", desc, `([\d,]+) of [\d,]+ distribution functions get past`)
+	addPhrase("ir.corpus.functions", desc, `[\d,]+ of ([\d,]+) distribution functions get past`)
+	addPhrase("ssa.corpus.reached", desc, `construction with the pass, and ([\d,]+) without it`)
 
 	// Coverage. The package name anchors each row, so a table that is
 	// reordered or reformatted still matches and a renamed package does not.
@@ -606,6 +617,7 @@ func TestTheFactsAreCurrent(t *testing.T) {
 		"ssa.corpus.lowered":      true,
 		"ssa.corpus.mapped":       true,
 		"ssa.corpus.functions":    true,
+		"ir.lowered.reached":      true,
 		// The link tests run only where nanogo's output can run, which is an
 		// arm64 host, so this is zero on the amd64 runner by design.
 		"ssagen.linkandrun.cases": true,
@@ -716,6 +728,7 @@ func deriveFacts(t *testing.T, root string) map[string]float64 {
 				{"ssa.corpus.reached", regexp.MustCompile(`(\d+) functions reached SSA`)},
 				{"ssa.corpus.lowered", regexp.MustCompile(`functions reached SSA, (\d+) lowered completely`)},
 				{"ssa.corpus.mapped", regexp.MustCompile(`\d+ lowered, (\d+) mapped`)},
+				{"ir.lowered.reached", regexp.MustCompile(`functions, (\d+) past construction with the pass`)},
 			},
 		},
 		{

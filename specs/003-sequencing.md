@@ -228,7 +228,7 @@ package:
 | `rtype` | 96% | [032](032-type-descriptors-and-itabs.md) |
 | `export` | 96% | [015](015-export-data.md) |
 | `export/pkgbits` | 92% | [015](015-export-data.md) |
-| `driver` | 97% | [050](050-driver.md), [051](051-build-integration.md) |
+| `driver` | 98% | [050](050-driver.md), [051](051-build-integration.md) |
 | `internal/covercheck` | 97% | the gate itself |
 | `cmd/nanogo` | excluded | one statement; the reason is in the exclusions file |
 

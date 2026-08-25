@@ -18,10 +18,10 @@
 > **nanogo compiles some Go programs, and most of Go is not among them.** The
 > whole pipeline is built, from source text to a `goobj` file that `go tool
 > link` links against the real Go runtime into a binary that runs. What it
-> accepts is far narrower than Go. SSA construction refuses a composite
-> literal, a `range`, a closure, `defer`, `panic` and most builtins, so about
-> two functions in five of the standard library get past it. Do not depend on
-> this.
+> accepts is far narrower than Go. It refuses a closure, `append`, a type
+> assertion, `defer`, and every map and channel operation, so about three
+> functions in five of the standard library get past construction. Do not
+> depend on this.
 
 nanogo is a compiler for the Go language as defined by the
 [Go language specification](https://go.dev/ref/spec). It is small on purpose:
@@ -146,7 +146,7 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | [`ssagen`](ssagen/) | 92% | emits machine code that **links and runs**, and stack maps a real collector honours |
 | [`rtsym`](rtsym/) | 100% | 59 runtime signatures checked against the runtime's own source |
 | [`rtype`](rtype/) | 96% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
-| [`driver`](driver/) | 97% | a real `go build -toolexec` completes |
+| [`driver`](driver/) | 98% | a real `go build -toolexec` completes |
 
 `types2` is excluded from the coverage gate, with the reason recorded in
 [`internal/covercheck/exclusions.txt`](internal/covercheck/exclusions.txt): it
@@ -165,13 +165,14 @@ with the slot killed is freed, and 200,000 frames are grown, copied and unwound.
 
 The honest measure of reach is the corpus, and it is one number with two halves.
 
-**17,905 of those functions reach SSA construction**, and 17,809 of them lower
-completely to arm64 machine operations. 17,758 of the 17,905 carry a stack map.
-What is left undecomposed is 87 functions holding a wide `SelectN`, 12 holding
-an array and 93 holding a struct.
+**17,905 of those functions reach SSA construction** from a tree the lowering
+pass has not touched, and 17,809 of them lower completely to arm64 machine
+operations. 17,758 of the 17,905 carry a stack map. What is left undecomposed
+is 87 functions holding a wide `SelectN`, 12 holding an array and 93 holding a
+struct.
 
-The remaining 22,042 functions never reach SSA at all. Construction refuses
-them by name, and the counts say what is missing:
+The other 22,042 functions of that tree never reach SSA at all. Construction
+refuses them by name, and the counts say what is missing:
 
 | Functions refused | Because construction does not build |
 | --- | --- |
@@ -199,6 +200,16 @@ was not, a multi-value assignment whose results are wider than a register at
 `SelectN` names a result before decomposition and a machine word of the result
 area after it, and the renumbering between the two was only correct for the
 first result.
+
+The lowering pass performs part of that table, and the driver runs it ahead of
+construction, so a real compile reaches further than the two numbers above:
+**24,095 of them get past construction once the lowering pass has run**. A
+composite literal, `len`, a slice expression, `new`, and `make` of a slice are
+lowered and no longer refused, and a slice literal and a variadic call reach a
+linked program that allocates on the heap. A closure, `append`, a type
+assertion, `defer`, and every map and channel operation are still refused, and
+so is a descriptor for any defined type, because an `ir.Type` carries no method
+set.
 
 So the back half of the compiler is real and the front of the middle end is not
 finished. What stands between here and
