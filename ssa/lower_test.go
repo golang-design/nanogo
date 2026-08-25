@@ -541,3 +541,54 @@ func TestLowerBlockRuleRunsAfterValues(t *testing.T) {
 		t.Errorf("the function did not verify: %v\n%s", vs, p.f)
 	}
 }
+
+// TestLowerManySplitsInOneBlock covers the visit cap's accounting.
+//
+// The cap was 8*(len(f.Blocks)+16), read once before the walk. A cut adds two
+// blocks and queues one of them, so a block full of bounds checks needs about
+// two visits per check, and the cap described none of that: it described the
+// block count the function had before any of the checks was lowered. A
+// function that converges fine crashed with
+//
+//	ssa: lower: determinant: b135 v-1: Invalid: the block queue did not drain
+//
+// Go's own test corpus reaches it on test/torture.go, whose determinant enters
+// lowering as one block, leaves as 385, and needs exactly 385 visits: one per
+// block and none repeated. The one-term cap allowed 136.
+//
+// Eighty checks in one block is past that cap and well inside the two-term
+// one, so this test crashes without the fix and passes with it.
+func TestLowerManySplitsInOneBlock(t *testing.T) {
+	const checks = 80
+
+	p := lowNew()
+	idx := p.b.NewValue(0, OpArg, lowI64)
+	limit := p.b.NewValue(0, OpArg, lowI64)
+	mem := p.mem
+	for i := 0; i < checks; i++ {
+		mem = p.b.NewValue(0, OpBoundsCheck, MemType, idx, limit, mem)
+	}
+	p.mem = mem
+	f := p.ret()
+
+	rules := lowRules(map[Op]ValueRule{
+		OpMakeResult: retRule,
+		OpBoundsCheck: func(v *Value, e *Edit) bool {
+			flags := e.Insert(v.Pos, OpARM64CMP, FlagsType, v.Args[0], v.Args[1])
+			br := e.Insert(v.Pos, OpARM64BRcond, FlagsType, flags)
+			fail, _ := e.Check(v, br)
+			c := fail.NewValue(v.Pos, OpARM64CALLstatic, MemType, v.Args[2])
+			fail.Kind = BlockExit
+			fail.Control = c
+			return true
+		},
+	})
+	Lower(f, rules)
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify after %d splits: %v", checks, vs)
+	}
+	// Two blocks per check, plus the one the function started with.
+	if want := 2*checks + 1; len(f.Blocks) != want {
+		t.Errorf("%d blocks after %d splits, want %d", len(f.Blocks), checks, want)
+	}
+}

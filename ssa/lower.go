@@ -255,7 +255,28 @@ func (l *lowerer) run() {
 	// A split adds a block that holds the tail of the one it split, and that
 	// tail still has to be lowered. The queue grows rather than being walked
 	// twice, and the cap below is the assertion that it stops growing.
-	visits, maxVisits := 0, 8*(len(f.Blocks)+16)
+	//
+	// The cap has two terms because the queue has two sources.
+	//
+	// The first is the walk itself: every block the function enters lowering
+	// with is visited once, and the factor of eight is the slack that leaves
+	// for a re-visit.
+	//
+	// The second is the splits, which the first term does not describe at
+	// all. Two rules split a block, the bounds check and the divide guard.
+	// Each cuts at the value it is lowering and then removes or rewrites that
+	// value in the same step, so a value is cut at most once and the number
+	// of splits cannot exceed the number of values the function enters
+	// lowering with. One split costs two visits: the continuation, which is
+	// queued, and the re-visit of the block that was cut. The failure block
+	// is never queued. So two visits per value bounds the whole of it.
+	//
+	// Without the second term the cap was an assertion about how many checks
+	// a function contains and not about convergence, and it was reachable by
+	// a program that converges. test/torture.go's determinant enters lowering
+	// as one block, leaves as 385, and needs exactly 385 visits, one per
+	// block and none repeated, where the one-term cap allowed 136.
+	visits, maxVisits := 0, 8*(len(f.Blocks)+16)+2*f.NumValues()
 	for i := 0; i < len(queue); i++ {
 		b := queue[i]
 		visits++
