@@ -1,0 +1,497 @@
+// Copyright 2026 The golang.design Initiative Authors.
+// All rights reserved. Use of this source code is governed by
+// a BSD-style license that can be found in the LICENSE file.
+
+package rtype_test
+
+import (
+	"encoding/binary"
+	"fmt"
+	"reflect"
+	"strings"
+	"testing"
+	"unsafe"
+
+	"golang.design/x/nanogo/ir"
+	"golang.design/x/nanogo/obj"
+	"golang.design/x/nanogo/rtype"
+	"golang.design/x/nanogo/syntax"
+	"golang.design/x/nanogo/types2"
+)
+
+// The oracle is the runtime's own view of the same type.
+//
+// specs/032-type-descriptors-and-itabs.md asks for exactly this check: emit a
+// descriptor with nanogo and read it back with reflect in a gc-compiled
+// program running in the same binary. Hosted mode makes it direct, because the
+// descriptor nanogo produces is meant to be byte-for-byte what gc produces for
+// the same type, and gc produced the one reflect is reading.
+//
+// reflect does not expose Hash, TFlag, PtrBytes or the pointer bitmask, so the
+// descriptor is reached through the interface word instead of through
+// reflect's own accessors. A reflect.Type is an interface holding a *abi.Type
+// in its data word, which is the descriptor itself.
+
+// abiType mirrors internal/abi.Type so the test can read every field.
+//
+// Mirrored in the test and not in the package under test: the package writes
+// the offsets down as constants, because they are the layout of the target's
+// runtime rather than of the compiler building nanogo, and a mirror there
+// would be the compiler's answer to a question about the target. Here the
+// mirror is the point, because this file runs in the target's own binary.
+type abiType struct {
+	Size_       uintptr
+	PtrBytes    uintptr
+	Hash        uint32
+	TFlag       uint8
+	Align_      uint8
+	FieldAlign_ uint8
+	Kind_       uint8
+	Equal       func(unsafe.Pointer, unsafe.Pointer) bool
+	GCData      *byte
+	Str         int32
+	PtrToThis   int32
+}
+
+type eface struct{ typ, data unsafe.Pointer }
+
+// abiOf returns the descriptor gc emitted for rt.
+func abiOf(rt reflect.Type) *abiType {
+	return (*abiType)((*eface)(unsafe.Pointer(&rt)).data)
+}
+
+// corpus is the type written twice: once as the type checker reads it, and
+// once as the compiler that built this test laid it out.
+var corpus = []struct {
+	src string
+	rt  reflect.Type
+}{
+	{"bool", reflect.TypeOf(false)},
+	{"int", reflect.TypeOf(int(0))},
+	{"int8", reflect.TypeOf(int8(0))},
+	{"int16", reflect.TypeOf(int16(0))},
+	{"int32", reflect.TypeOf(int32(0))},
+	{"int64", reflect.TypeOf(int64(0))},
+	{"uint", reflect.TypeOf(uint(0))},
+	{"uint8", reflect.TypeOf(uint8(0))},
+	{"uint16", reflect.TypeOf(uint16(0))},
+	{"uint32", reflect.TypeOf(uint32(0))},
+	{"uint64", reflect.TypeOf(uint64(0))},
+	{"uintptr", reflect.TypeOf(uintptr(0))},
+	{"float32", reflect.TypeOf(float32(0))},
+	{"float64", reflect.TypeOf(float64(0))},
+	{"complex64", reflect.TypeOf(complex64(0))},
+	{"complex128", reflect.TypeOf(complex128(0))},
+	{"string", reflect.TypeOf("")},
+	{"unsafe.Pointer", reflect.TypeOf(unsafe.Pointer(nil))},
+	{"[]int", reflect.TypeOf([]int(nil))},
+	{"[]byte", reflect.TypeOf([]byte(nil))},
+	{"[]string", reflect.TypeOf([]string(nil))},
+	{"[]any", reflect.TypeOf([]any(nil))},
+	{"[][]int", reflect.TypeOf([][]int(nil))},
+	{"[]*int", reflect.TypeOf([]*int(nil))},
+	{"*int", reflect.TypeOf((*int)(nil))},
+	{"*[]byte", reflect.TypeOf((*[]byte)(nil))},
+	{"**int", reflect.TypeOf((**int)(nil))},
+	{"*any", reflect.TypeOf((*any)(nil))},
+	{"[0]int", reflect.TypeOf([0]int{})},
+	{"[1]int", reflect.TypeOf([1]int{})},
+	{"[3]int", reflect.TypeOf([3]int{})},
+	{"[3]byte", reflect.TypeOf([3]byte{})},
+	{"[2]*int", reflect.TypeOf([2]*int{})},
+	{"[4]uint32", reflect.TypeOf([4]uint32{})},
+	{"[2][3]int", reflect.TypeOf([2][3]int{})},
+	{"[1]string", reflect.TypeOf([1]string{})},
+	{"[16]byte", reflect.TypeOf([16]byte{})},
+	{"any", reflect.TypeOf((*any)(nil)).Elem()},
+}
+
+// corpusTypes type-checks the corpus and returns one IR type per row.
+//
+// A variable and not a type declaration. A declaration makes a defined type,
+// whose descriptor carries a method set the IR does not hold, and the corpus
+// is about the type literals that carry none.
+func corpusTypes(t *testing.T) []*ir.Type {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("package p\n\nimport \"unsafe\"\n\nvar _ unsafe.Pointer\n")
+	for i, c := range corpus {
+		fmt.Fprintf(&b, "var v%d %s\n", i, c.src)
+	}
+	src := b.String()
+
+	fset := syntax.NewFileSet()
+	file, err := syntax.Parse(fset.AddFile("x.go", len(src)), []byte(src), nil, nil, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	conf := types2.Config{
+		Fset:     fset,
+		Importer: unsafeImporter{},
+		Sizes:    types2.SizesFor("gc", "arm64"),
+	}
+	pkg, err := conf.Check("p", []*syntax.File{file}, nil)
+	if err != nil {
+		t.Fatalf("type-check: %v", err)
+	}
+
+	c := ir.NewConverter()
+	out := make([]*ir.Type, len(corpus))
+	for i := range corpus {
+		o := pkg.Scope().Lookup(fmt.Sprintf("v%d", i))
+		if o == nil {
+			t.Fatalf("v%d is not declared", i)
+		}
+		got, err := c.Convert(o.Type())
+		if err != nil {
+			t.Fatalf("%s: convert: %v", corpus[i].src, err)
+		}
+		out[i] = got
+	}
+	return out
+}
+
+// unsafeImporter resolves package unsafe and nothing else.
+type unsafeImporter struct{}
+
+func (unsafeImporter) Import(path string) (*types2.Package, error) {
+	if path == "unsafe" {
+		return types2.Unsafe, nil
+	}
+	return nil, fmt.Errorf("no importer for %q", path)
+}
+
+// find returns the symbol with the given name.
+func find(syms []rtype.Symbol, name string) (rtype.Symbol, bool) {
+	for _, s := range syms {
+		if s.Name == name {
+			return s, true
+		}
+	}
+	return rtype.Symbol{}, false
+}
+
+// reloc returns the relocation at an offset.
+func reloc(s rtype.Symbol, off int32) (rtype.Reloc, bool) {
+	for _, r := range s.Relocs {
+		if r.Off == off {
+			return r, true
+		}
+	}
+	return rtype.Reloc{}, false
+}
+
+// TestDescriptorAgainstReflect compares every field of an emitted descriptor
+// with the one gc emitted for the same type.
+//
+// This is the strongest check available and it is the one specs/032 asks for.
+// A field that agrees here agrees with the runtime that will read it.
+func TestDescriptorAgainstReflect(t *testing.T) {
+	types := corpusTypes(t)
+	for i, c := range corpus {
+		t.Run(c.src, func(t *testing.T) {
+			syms, err := rtype.Descriptor(types[i])
+			if err != nil {
+				t.Fatalf("descriptor: %v", err)
+			}
+			want := abiOf(c.rt)
+			d := syms[0]
+
+			if got := binary.LittleEndian.Uint64(d.Data[0:]); got != uint64(want.Size_) {
+				t.Errorf("Size_ %d, want %d", got, want.Size_)
+			}
+			if got := binary.LittleEndian.Uint64(d.Data[8:]); got != uint64(want.PtrBytes) {
+				t.Errorf("PtrBytes %d, want %d", got, want.PtrBytes)
+			}
+			if got := binary.LittleEndian.Uint32(d.Data[16:]); got != want.Hash {
+				t.Errorf("Hash %#08x, want %#08x", got, want.Hash)
+			}
+			if got := d.Data[20]; got != want.TFlag {
+				t.Errorf("TFlag %#06b, want %#06b", got, want.TFlag)
+			}
+			if got := d.Data[21]; got != want.Align_ {
+				t.Errorf("Align_ %d, want %d", got, want.Align_)
+			}
+			if got := d.Data[22]; got != want.FieldAlign_ {
+				t.Errorf("FieldAlign_ %d, want %d", got, want.FieldAlign_)
+			}
+			if got := d.Data[23]; got != want.Kind_ {
+				t.Errorf("Kind_ %d, want %d", got, want.Kind_)
+			}
+		})
+	}
+}
+
+// TestHashAgainstReflect checks the type hash on its own.
+//
+// It is a check of the link string as much as of the hash: gc hashes the link
+// string, so a hash that matches proves the two compilers spell the type the
+// same way, which is what makes the linker's deduplication by name correct.
+func TestHashAgainstReflect(t *testing.T) {
+	types := corpusTypes(t)
+	for i, c := range corpus {
+		got, err := rtype.Hash(types[i])
+		if err != nil {
+			t.Errorf("%s: %v", c.src, err)
+			continue
+		}
+		if want := abiOf(c.rt).Hash; got != want {
+			t.Errorf("%s: hash %#08x, want %#08x", c.src, got, want)
+		}
+	}
+}
+
+// TestGCDataAgainstPtrBits checks the collector's view against the compiler's.
+//
+// specs/032 requires the descriptor's bitmask to be derived from
+// ir.Type.PtrBits rather than computed again, so that the two cannot disagree.
+// This asserts the derivation both ways: the emitted bytes are what PtrBits
+// says, and they are also what gc emitted for the same type.
+func TestGCDataAgainstPtrBits(t *testing.T) {
+	types := corpusTypes(t)
+	for i, c := range corpus {
+		t.Run(c.src, func(t *testing.T) {
+			syms, err := rtype.Descriptor(types[i])
+			if err != nil {
+				t.Fatalf("descriptor: %v", err)
+			}
+			r, ok := reloc(syms[0], 32)
+			if !ok {
+				t.Fatal("no relocation for GCData")
+			}
+			bits, ok := find(syms, r.Target)
+			if !ok {
+				t.Fatalf("the bitmask symbol %s is not emitted", r.Target)
+			}
+			if r.Type != obj.R_ADDR || r.Size != 8 {
+				t.Errorf("GCData relocation is %v/%d, want a pointer", r.Type, r.Size)
+			}
+
+			words := types[i].PtrBytes() / ir.PtrSize
+			if n := int64(len(bits.Data)); n%ir.PtrSize != 0 {
+				t.Errorf("the bitmask is %d bytes, which the runtime reads as words", n)
+			}
+			want := abiOf(c.rt)
+			for w := int64(0); w < words; w++ {
+				got := bits.Data[w/8]&(1<<uint(w%8)) != 0
+				// The mask must be exactly what ir.Type.PtrBits says.
+				// specs/032 makes that the definition of the field, so this is
+				// the check that the derivation happened and that no second
+				// computation crept in.
+				if from := ptrBit(types[i].PtrBits, w); got != from {
+					t.Errorf("word %d: bit %v, PtrBits says %v", w, got, from)
+				}
+				gc := *(*byte)(unsafe.Add(unsafe.Pointer(want.GCData), w/8))&(1<<uint(w%8)) != 0
+				switch {
+				case got == gc:
+				case gc && !got:
+					// Never permitted. A pointer gc describes and nanogo does
+					// not is a pointer the collector will not trace.
+					t.Errorf("word %d: gc says pointer and nanogo does not", w)
+				case ifaceTypeWord(types[i], w):
+					// nanogo marks both words of an interface and gc marks only
+					// the data word, because an itab lives in persistentalloc
+					// space and a compile-time _type lives in the read-only
+					// section, so neither keeps anything alive. nanogo's answer
+					// is conservative and safe, and it is not gc's. The
+					// divergence is in ir.scalarPtrBits and is recorded there.
+				default:
+					t.Errorf("word %d: nanogo says pointer and gc does not", w)
+				}
+			}
+			// Every bit past the pointer prefix must be clear, because
+			// PtrBytes is a prefix length and the collector stops there.
+			for w := words; w < int64(len(bits.Data))*8; w++ {
+				if bits.Data[w/8]&(1<<uint(w%8)) != 0 {
+					t.Errorf("word %d is past PtrBytes and is set", w)
+				}
+			}
+		})
+	}
+}
+
+// TestEqualIsAClosure checks that the Equal field points at a func value.
+//
+// The field's type is func(unsafe.Pointer, unsafe.Pointer) bool, so it holds
+// the address of a one-word symbol holding the code address, not the code
+// address itself. Pointing it at the function makes the runtime call whatever
+// the function's first instruction encodes.
+func TestEqualIsAClosure(t *testing.T) {
+	types := corpusTypes(t)
+	for i, c := range corpus {
+		syms, err := rtype.Descriptor(types[i])
+		if err != nil {
+			t.Errorf("%s: %v", c.src, err)
+			continue
+		}
+		r, ok := reloc(syms[0], 24)
+		comparable := c.rt.Comparable()
+		if ok != comparable {
+			t.Errorf("%s: Equal set %v, want %v", c.src, ok, comparable)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		closure, ok := find(syms, r.Target)
+		if !ok {
+			t.Errorf("%s: the closure %s is not emitted", c.src, r.Target)
+			continue
+		}
+		if len(closure.Data) < 8 {
+			t.Errorf("%s: the closure is %d bytes", c.src, len(closure.Data))
+			continue
+		}
+		cr, ok := reloc(closure, 0)
+		if !ok || !strings.HasPrefix(cr.Target, "runtime.") {
+			t.Errorf("%s: the closure does not point at a runtime function", c.src)
+		}
+	}
+}
+
+// TestStrIsAnOffset checks that the name reference is an offset and not a
+// pointer.
+//
+// specs/032 states the consequence of getting this wrong: a binary that fails
+// at load. The check is on the relocation's width and kind, which is where the
+// difference lives.
+func TestStrIsAnOffset(t *testing.T) {
+	types := corpusTypes(t)
+	for i, c := range corpus {
+		syms, err := rtype.Descriptor(types[i])
+		if err != nil {
+			t.Errorf("%s: %v", c.src, err)
+			continue
+		}
+		r, ok := reloc(syms[0], 40)
+		if !ok {
+			t.Errorf("%s: no relocation for Str", c.src)
+			continue
+		}
+		if r.Type != obj.R_ADDROFF || r.Size != 4 {
+			t.Errorf("%s: Str relocation is %v/%d, want R_ADDROFF/4", c.src, r.Type, r.Size)
+		}
+		nd, ok := find(syms, r.Target)
+		if !ok {
+			t.Fatalf("%s: the name data %s is not emitted", c.src, r.Target)
+		}
+		// The encoding is a flag byte, the length as a uvarint, then the
+		// bytes. The name is "*T" so that T and *T share one string.
+		want := c.rt.String()
+		if !strings.HasPrefix(want, "*") {
+			want = "*" + want
+		}
+		got := string(nd.Data[2 : 2+len(want)])
+		if got != want {
+			t.Errorf("%s: name data holds %q, want %q", c.src, got, want)
+		}
+		// PtrToThis is deliberately zero, so nothing may relocate it.
+		if _, ok := reloc(syms[0], 44); ok {
+			t.Errorf("%s: PtrToThis is relocated and the package leaves it zero", c.src)
+		}
+	}
+}
+
+// TestTailsAreReferences checks the kind-specific fields.
+func TestTailsAreReferences(t *testing.T) {
+	types := corpusTypes(t)
+	for i, c := range corpus {
+		syms, err := rtype.Descriptor(types[i])
+		if err != nil {
+			t.Errorf("%s: %v", c.src, err)
+			continue
+		}
+		d := syms[0]
+		switch c.rt.Kind() {
+		case reflect.Pointer, reflect.Slice:
+			if len(d.Data) != rtype.TypeSize+8 {
+				t.Errorf("%s: %d bytes, want %d", c.src, len(d.Data), rtype.TypeSize+8)
+			}
+			r, ok := reloc(d, rtype.TypeSize)
+			if !ok {
+				t.Errorf("%s: no element reference", c.src)
+				continue
+			}
+			want, err := ir.TypeSymbol(types[i].Elem)
+			if err != nil {
+				t.Fatalf("%s: %v", c.src, err)
+			}
+			if r.Target != want {
+				t.Errorf("%s: element is %s, want %s", c.src, r.Target, want)
+			}
+		case reflect.Array:
+			if len(d.Data) != rtype.TypeSize+24 {
+				t.Errorf("%s: %d bytes, want %d", c.src, len(d.Data), rtype.TypeSize+24)
+			}
+			got := binary.LittleEndian.Uint64(d.Data[rtype.TypeSize+16:])
+			if got != uint64(c.rt.Len()) {
+				t.Errorf("%s: length %d, want %d", c.src, got, c.rt.Len())
+			}
+			if _, ok := reloc(d, rtype.TypeSize+8); !ok {
+				t.Errorf("%s: no slice reference", c.src)
+			}
+		case reflect.Interface:
+			if len(d.Data) != rtype.TypeSize+32 {
+				t.Errorf("%s: %d bytes, want %d", c.src, len(d.Data), rtype.TypeSize+32)
+			}
+		default:
+			if len(d.Data) != rtype.TypeSize {
+				t.Errorf("%s: %d bytes, want %d", c.src, len(d.Data), rtype.TypeSize)
+			}
+		}
+	}
+}
+
+// TestSymbolNamesMatchGC checks the symbol names against the names gc gives
+// the same symbols.
+//
+// The names are not cosmetic. specs/032 makes the linker's deduplication a
+// function of the name, so a descriptor nanogo names differently from gc is a
+// second descriptor for a type that already has one.
+func TestSymbolNamesMatchGC(t *testing.T) {
+	types := corpusTypes(t)
+	for i, c := range corpus {
+		syms, err := rtype.Descriptor(types[i])
+		if err != nil {
+			t.Errorf("%s: %v", c.src, err)
+			continue
+		}
+		if !strings.HasPrefix(syms[0].Name, "type:") {
+			t.Errorf("%s: the descriptor is named %q", c.src, syms[0].Name)
+		}
+		for _, s := range syms {
+			if !s.Dupok {
+				t.Errorf("%s: %s is not dupok and the linker merges the copies", c.src, s.Name)
+			}
+			if s.Kind != obj.SRODATA && s.Kind != obj.SNOPTRDATA {
+				t.Errorf("%s: %s is kind %v", c.src, s.Name, s.Kind)
+			}
+			if int64(len(s.Data)) == 0 && !strings.HasPrefix(s.Name, "runtime.gcbits.") {
+				t.Errorf("%s: %s has no data", c.src, s.Name)
+			}
+		}
+	}
+}
+
+// ptrBit reports whether bit i of a pointer map is set.
+func ptrBit(b []byte, i int64) bool {
+	if i < 0 || i/8 >= int64(len(b)) {
+		return false
+	}
+	return b[i/8]&(1<<uint(i%8)) != 0
+}
+
+// ifaceTypeWord reports whether word w of t is the first word of an interface.
+//
+// It is the one place nanogo's pointer map is knowingly wider than gc's, so it
+// is a predicate rather than an exception in a list: a second divergence would
+// fail the test instead of hiding behind the name of this one. The corpus here
+// holds no struct, so an interface is either the whole type or the element of
+// an array of them.
+func ifaceTypeWord(t *ir.Type, w int64) bool {
+	for t.Kind == ir.Array && t.Elem != nil && t.Elem.Size > 0 {
+		w %= t.Elem.Size / ir.PtrSize
+		t = t.Elem
+	}
+	return t.Kind == ir.Interface && w == 0
+}

@@ -136,6 +136,41 @@ var syms = []Sym{
 	{Name: "runtime.memclrHasPointers", Sig: "func(unsafe.Pointer, uintptr)", Group: GroupMemory},
 	{Name: "runtime.memequal", Sig: "func(unsafe.Pointer, unsafe.Pointer, uintptr) bool", Group: GroupMemory},
 
+	// The equality algorithms a type descriptor's Equal field points at.
+	//
+	// specs/032-type-descriptors-and-itabs.md calls Equal "a function the
+	// compiler must emit". That is true only for a struct or an array whose
+	// parts do not compare as one region of memory. Every other comparable
+	// type reaches one of these, and a descriptor that named a generated
+	// function where one of these belongs would emit a function per type for
+	// work the runtime already does.
+	//
+	// The descriptor's field is a func value, not a code address, so what it
+	// points at is a one-word closure symbol holding the address of the
+	// function named here. rtype writes that symbol; the name checked against
+	// the runtime is the function's.
+	{Name: "runtime.memequal0", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.memequal8", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.memequal16", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.memequal32", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.memequal64", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.memequal128", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	// memequal_varlen takes the length out of the closure it is called
+	// through, which is why a region of a size the fixed-width forms do not
+	// cover still needs no generated function.
+	{Name: "runtime.memequal_varlen", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.strequal", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.f32equal", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.f64equal", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.c64equal", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	{Name: "runtime.c128equal", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupMemory},
+	// interequal reads an *itab out of the first word and nilinterequal reads
+	// a *_type, which is specs/031's rule about ifaceeq and efaceeq applied to
+	// the descriptor's Equal field: the choice follows the interface's layout
+	// and is never a guess.
+	{Name: "runtime.interequal", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupInterface},
+	{Name: "runtime.nilinterequal", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupInterface},
+
 	// Panics. Every one of these never returns.
 	{Name: "runtime.gopanic", Sig: "func(any)", NoReturn: true, Group: GroupPanic},
 	{Name: "runtime.gorecover", Sig: "func() any", Group: GroupPanic},
