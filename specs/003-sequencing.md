@@ -50,8 +50,8 @@ grammar including generics. No type checking.
 `go/parser` parses, and rejects every file `go/parser` rejects. Disagreements are
 enumerated, not tolerated.
 
-This gate is worth its cost. It is a corpus of roughly 14,000 files that exercise
-every corner of the grammar, and it is free.
+This gate is worth its cost. The corpus is 16,293 files that exercise every
+corner of the grammar, and it costs nothing to collect.
 
 ### M2: types
 
@@ -154,26 +154,28 @@ Risks are listed with the milestone that retires them, not with a probability.
 | GC metadata is wrong in a way that only shows under load | M4 | Allocation stress with `GOGC=1` and `GODEBUG=gccheckmark=1`, not a unit test. |
 | The forked type checker cannot be re-pointed at nanogo's syntax tree cheaply | M2 | [012](012-type-checking.md) names the interface it is re-pointed through. If the fork resists, the fallback is to keep `go/ast` under the checker and translate, at a cost stated in that spec. |
 | Generics instantiation is a rewrite rather than a port | M5 | Deferred deliberately: nanogo's own source uses generics, so M6 cannot be reached without it, and M5 is where it is confronted with the corpus available. |
-| The v1 line budget is exceeded | M4 | The tree measures 36,237 lines against a budget of 40,000, with the export data writer, escape analysis, inlining and generics instantiation still unwritten and estimated at 14,700. [000](000-decisions.md) decision 10 carries the accounting and the two recovery points, [022](022-optimization-passes.md) and [015](015-export-data.md). `internal/hygiene` gates the figure. |
+| The v1 line budget is exceeded | M4 | **Fired.** The tree is over 40,000 lines and `internal/hygiene` fails on it, with four components still unwritten. [000](000-decisions.md) decision 10 carries the accounting, the estimate still ahead, and the two recovery points, [022](022-optimization-passes.md) and [015](015-export-data.md). Decision 10 says what to give up rather than what to raise, so the number stays and the scope moves. |
 | `//go:linkname` and `//go:nosplit` semantics are subtler than documented | M9 | The runtime is the only consumer that cares, and M9 is where it is compiled. |
 
 ## Where the work stands
 
-**M0 and M1 are complete. M2 is complete except for the export data writer. M3
-and M4 are partly built and neither gate is met.**
+**M0 and M1 are complete. M2 is complete except for the export data writer.
+M3 meets every clause of its gate but one. M4 is partly built and its gate is
+not met.**
 
 | Milestone | State | Gate |
 | --- | --- | --- |
 | M0 skeleton | done | a `go build -a -toolexec=nanogo` completes by delegating |
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
 | M2 types | done, less the export data writer | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads gc's export data |
-| M3 first binary | **in progress** | the pipeline is built end to end and a compiled function links against the real runtime and runs; a leaf package under `-toolexec` does not compile |
-| M4 runtime interface | **in progress** | liveness, stack maps, the ABI, the stack growth check and type descriptors are built, and a descriptor reaches no object file yet; itabs, closures, `defer`, `panic`, write barriers and goroutines are not |
+| M3 first binary | **in progress** | a leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs; the clause "with its tests passing" is unmet, because `go test -toolexec` is not run |
+| M4 runtime interface | **in progress** | liveness, stack maps, the ABI, the stack growth check and type descriptors are built, a nanogo-allocated object survives a collection, and `panic`, `defer`, `go` and a closure work as long as nothing is captured; itabs, write barriers, `recover` and every capture are not built |
 | M5 to M10 | not started | |
+| the distribution | built, and reporting a zero | a tarball unpacks into a tree `driver.FindRoot` resolves, and its 27 archives account for themselves: 0 by nanogo, 27 by `gc` |
 
 ### What M3 reached, and what it did not
 
-The pipeline exists from source text to a `goobj` file. `ssagen`'s
+The pipeline runs from source text to a `goobj` file. `ssagen`'s
 `TestLinkAndRun` takes 18 programs through all of it to a process that returns
 the right answer, and several of them call into or are called from
 `gc`-compiled code. That retired the milestone's stated risk: **`go tool link`
@@ -181,20 +183,63 @@ links a nanogo-written object against the real Go runtime into a binary that
 runs.** [040](040-object-format.md) records the result, and the object format
 decision of [000](000-decisions.md) decision 3 is no longer a judgement call.
 
-M3's own gate is a leaf package compiled under `-toolexec`, and that is not
-met, because the language nanogo accepts is narrower than any real package.
+M3's own gate is a leaf package compiled under `-toolexec`, and
+`internal/e2e` meets most of it. A real `go build -toolexec=nanogo` over a
+module nobody wrote for a harness gives nanogo the main package and `gc`
+everything beneath it, the real linker joins the two, and the program runs and
+returns the answer it computed. The programs that go that route grow with the
+language, and each one is there for a claim:
 
-The corpus says how much narrower, and it is one measurement with two halves.
-The IR builder produces a typed tree for 536 packages of the Go distribution,
-39,947 functions and 4,188,075 nodes.
-**17,905 of those functions reach SSA construction**, and 17,809 of them
-lower completely to arm64 machine operations. 17,758 of the 17,905 carry a
-stack map, over 120,493 safepoints, and 10,727 of them have a pointer bit set.
+| Program | What it proves |
+| --- | --- |
+| a counted loop | the assignment statement, a short variable declaration in a loop body, and a `for` post list |
+| an integer division by zero | the traceback names both frames with the right file and line |
+| a wide multi-value result | the ABI homes a result the register set cannot hold |
+| a package that imports a `gc`-compiled library | `export/` reads `gc`'s export data ([015](015-export-data.md)) |
+| a package that imports `math/bits` and `strconv` | the same, against archives the toolchain ships |
+| a variadic call | the slice literal allocates, and the descriptor `rtype` emitted is one `mallocgc` accepts |
+| the same call under `runtime.GC()` | the collector follows the pointer mask nanogo wrote |
 
-The remaining 22,042 functions never reach SSA. Construction refuses them by
-name. A composite literal accounts for 4,841 of them, then `len` for 2,800, a
-conversion to an interface for 2,253, `range` for 1,605 and a method selected
-out of an interface for 1,371. The README carries the full table. [021](021-ssa-construction.md) owns the pass and the gap.
+The gate's last clause is unmet. It says "with its tests passing", and nothing
+runs `go test -toolexec`, so no package's own tests have been compiled by
+nanogo. Past the gate, and belonging to M4 rather than to M3, no standard
+library package compiles, because the language nanogo accepts is narrower than
+any real package.
+
+The corpus says how much narrower. The IR builder produces a typed tree for
+536 packages of the Go distribution, 39,947 functions and 4,188,075 nodes. The
+reach past that point is two numbers, not one, because the driver runs
+[020](020-ir.md)'s lowering pass before SSA construction and the corpus
+measures both orders:
+
+| Measurement | Functions |
+| --- | --- |
+| reach SSA construction with no lowering pass | 17,905 |
+| get past construction once the lowering pass has run, which is what the driver does | 24,095 |
+| lower completely to arm64 machine operations | 17,809 |
+| carry a stack map | 17,758 |
+
+**17,905 of those functions reach SSA construction** without the pass. 17,758
+of the 17,905 carry a stack map, over 120,493 safepoints, and 10,727 of them
+have a pointer bit set. 162 have a stack object.
+
+Construction refuses the rest by name. The causes below are measured without
+the lowering pass, so a cause the pass now performs does not reach construction
+in a real compile; [020](020-ir.md)'s **State** column says which. The largest
+are all rows of that table:
+
+| Refused by | Functions |
+| --- | --- |
+| a composite literal | 4,841 |
+| `len` | 2,800 |
+| a conversion to an interface | 2,253 |
+| `range` | 1,605 |
+| a method selected out of an interface | 1,371 |
+| a closure | 1,132 |
+| the address of a composite literal | 1,052 |
+
+The README carries the full table. [021](021-ssa-construction.md) owns the
+pass and the gap, and [020](020-ir.md) owns the table.
 
 ### Why part of M4 was built before M3 was finished
 
@@ -203,12 +248,22 @@ M4 was reached out of order, the same way M3 was. [027](027-liveness-and-stackma
 of [035](035-goroutines-and-stack-growth.md) were built because M3's binary
 needed them to run at all: a frame that the collector cannot scan and a call
 that disagrees about where its arguments live do not survive `TestLinkAndRun`.
-The rest of M4, [032](032-type-descriptors-and-itabs.md),
+
+[032](032-type-descriptors-and-itabs.md) followed for the same reason. A
+variadic call packs its arguments into a slice literal, the literal allocates,
+and `runtime.newarray` takes the element type's descriptor, so the descriptor
+half of that spec had to exist before the first allocating program could run.
+The driver emits those descriptors into the object it writes. Itabs, the other
+half of the spec, are not built.
+
 [033](033-closures-defer-panic.md), [034](034-write-barriers.md) and the
-`newproc` half of [035](035-goroutines-and-stack-growth.md), is untouched.
+`newproc` half of [035](035-goroutines-and-stack-growth.md) are untouched.
 
 M4's own gate is unchanged and unmet. `fmt.Println` does not compile, because
-`fmt` is a package and no package compiles.
+`fmt` is a package and no standard library package compiles. What the gate did
+gain is its first evidence: a nanogo-compiled frame holds a pointer live
+across `runtime.GC()` and the collector reads the mask nanogo wrote. One
+object in one frame is not the `GOGC=1` stress loop the gate asks for.
 
 Measured coverage. The figures are rounded down, and the gate is 90% per
 package:
@@ -237,6 +292,23 @@ package:
 Each entry records a departure from the plan above with the reason, so that the
 plan stays honest instead of staying accurate.
 
+**The distribution was built before any package of it could be nanogo's.**
+[054](054-distribution.md) was not in any milestone. It was built because
+`go install` gives a binary with no standard library beside it, and because the
+moment a tarball exists it can be cited, mirrored, and believed. nanogo compiles
+0 of the 27 packages in the bootstrap closure, so every archive in the first
+tarball is `gc`'s work, and the point of building the packaging now rather than
+later is that the counter which says so is built into the format from the start.
+A tally added after the first release is a tally nobody has reason to trust.
+
+The reason it needed a record at all is worth carrying here, because it is not
+obvious from either spec alone: `driver.writeOutput` writes `gc`'s object header
+verbatim, since [051](051-build-integration.md)'s build is part nanogo and part
+`gc` and the linker checks that header. So a nanogo object and a `gc` object are
+indistinguishable by their bytes, and the producer has to be recorded by the
+producer. [054](054-distribution.md) has the format and the three properties
+that make it hard to fake.
+
 **M2 was recorded as done and one third of its gate was never built. Half of
 that third is built now.** M2's scope names [015](015-export-data.md) and its
 gate says "round-trips export data for every standard library package". The
@@ -251,12 +323,18 @@ is the language nanogo accepts. What the missing writer blocks is the other
 direction: a package nanogo compiled cannot be imported, so the allowlist can
 only hold packages nothing else in the build imports.
 
-**M3 was recorded as done and its gate was never met.** An earlier version of
+**M3 was recorded as done and its gate was not met.** The first version of
 this section marked M3 done in the table and said in the same paragraph that
 its gate was not met. Both sentences were written honestly and they contradict
 each other, which is how a status table rots: the table records enthusiasm and
-the prose records the truth. M3 is `in progress` until a leaf package compiles
-under `-toolexec`. The two numbers below say what changed.
+the prose records the truth.
+
+The rule that came out of it is that the table cell states the gate, so that a
+cell and a paragraph cannot disagree without one of them being visibly wrong.
+The cell above is written that way and it is why M3 is still `in progress`
+after `internal/e2e` compiled, linked and ran a leaf package: the gate says
+"with its tests passing" and no test has been run under `-toolexec`. The
+milestone is one clause short, and one clause short is not done.
 
 **The lowering measurement was stale by a factor of two, in the good
 direction.** This section said 8,238 functions reached SSA and 4,755 lowered
@@ -274,13 +352,14 @@ small is gone: what is left undecomposed is 87 functions holding a wide
 lower.
 
 **The end-to-end test could not have caught the miscompile, and the reason
-generalises.** `ssagen`'s `TestLinkAndRun` says in its own comment that its
-programs hold no assignment statement, because construction refused one. A
+generalises.** `ssagen`'s `TestLinkAndRun` recorded in its own comment that its
+programs held no assignment statement, because construction refused one. A
 program with no assignment has no counted loop, so nothing in the repository
 ever ran one, and the dropped post list was invisible. A compiler's end-to-end
 tests are written in the language the compiler accepts, so a construct it
 refuses is a construct its gates cannot exercise. Widening what is accepted has
-to be followed by widening what is run.
+to be followed by widening what is run. `internal/e2e`'s first program is a
+counted loop for that reason.
 
 **The reach of the compiler was reported without its denominator.** "Every
 function of the distribution's buildable packages compiles" was true of the
@@ -288,8 +367,8 @@ functions SSA construction accepts and read as a claim about the distribution.
 It was one function in five and is two in five. The denominator was found
 during the August 2026 documentation audit by counting `ssa.Build`'s refusals
 across the same corpus, which nothing had measured because the corpus tests
-skip a function they cannot build rather than counting it. The counts are in
-the README and the largest is now a composite literal, at 5,379 functions.
+skip a function they cannot build rather than counting it. The largest cause is
+a composite literal, at 4,841 functions, and the table above carries the rest.
 
 The lesson is about the measurement and not about the compiler. A corpus test
 that reports what worked, and drops what did not, produces a number that only
@@ -301,6 +380,26 @@ counts the refusals by cause, and `ssa/decompose_test.go` and
 of the prose and compares them against a checked-in record of what the tests
 measured. Every stale number above was correct when it was written, which is
 the whole difficulty: nothing about a stale number looks wrong.
+
+**Four passes were built and none of them was wired into the driver.** The
+driver's pass list started at `ssa.Build`, so [020](020-ir.md)'s lowering pass
+never ran on a real compile; `rtype` produced type descriptors that no object
+file carried; `export/` read `gc`'s export data and the importer did not call
+it; and `ssagen` named a data symbol at the wrong ABI, so the linker resolved
+a descriptor reference to nothing. Each pass had its own tests and each one
+passed. The gap was between the passes, which is the place a per-package test
+cannot look.
+
+The four were found by one program: a variadic call, which needs all of them.
+The builder packs the arguments into a slice literal, the literal is a
+Go-specific node that only the lowering pass removes, the allocation takes a
+descriptor, and the descriptor has to link. `internal/e2e` now runs that
+program, and runs it a second time under `runtime.GC()`.
+
+The lesson is about the shape of the test suite and not about the four bugs.
+Every stage had a test that drove it directly, so every stage was green while
+the compiler could not compile the program. A pipeline needs one test that
+starts at the command line, and `internal/e2e` exists because of this.
 
 **M0's gate was wrong and was replaced.** It said "`nanogo -V` prints a
 version". The real protocol is `-V=full`, it is parsed by
@@ -330,9 +429,10 @@ The count in this paragraph said eleven and was itself wrong, because the `for`
 post statement is a field on the `for` node and not a node. The audit of
 [020](020-ir.md) against `ir/node.go` found the real figure. The node set of
 [020](020-ir.md) had no assignment, no case, no composite literal, no slice
-expression, no `close`, `print` or `println`, and no `unsafe` intrinsics. Each gap was found by a consumer reaching for a workaround:
-an assignment encoded as a binary operation with no operator, a literal as
-`new`, an intrinsic as a call to an invented symbol. The nodes exist now, and
+expression, no `close`, `print` or `println`, and no `unsafe` intrinsics. Each
+gap was found by a consumer reaching for a workaround: an assignment encoded as
+a binary operation with no operator, a literal as `new`, an intrinsic as a call
+to an invented symbol. The nodes exist now, and
 [020](020-ir.md) records that its own claim, that a construct absent from its
 table does not exist, was false when written.
 

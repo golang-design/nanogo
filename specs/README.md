@@ -23,19 +23,29 @@ reader knows before opening a spec whether it describes code or a plan:
 | `in progress` | part of it is built, and the spec says which part |
 | `draft` | nothing in it is built |
 
-41 specs. Well over a third of them are `draft`, which is to say that much of
-this deck is still a plan, and now says so.
+42 specs: 7 `complete`, 21 `in progress`, 14 `draft`. A third of the deck is
+still a plan, and now says so.
 
 Where the code disproved a spec, the spec keeps the record: what it claimed,
-what the code does, and how the difference was found. Those paragraphs are the
-most useful thing in the deck and none of them is deleted when it is superseded.
-An audit in August 2026 went through all 41 against the tree and found stale
-claims in most of them; [003](003-sequencing.md)'s Deviations section carries
-the ones that matter across specs.
+what the code does, and how the difference was found. None of it is deleted
+when it is superseded.
+
+The convention is that a spec with several such records gathers them in a
+closing section, so that the design reads top to bottom and the corrections
+read as one list. A single correction stays where it matters, marked as one.
+[003](003-sequencing.md) calls its closing section **Deviations** because it
+records departures from a plan rather than from a design; the component specs
+call theirs **What was wrong**.
+
+Two audits in August 2026 went through all 41 against the tree. The first found
+stale claims in most of them. The second, after the driver was wired end to
+end, found the reverse fault: specs describing as unbuilt work that had landed.
+[003](003-sequencing.md)'s Deviations section carries the corrections that
+cross spec boundaries.
 
 The numbers in [003](003-sequencing.md) are gated by `internal/hygiene`, which
 reads them out of the prose and fails when they disagree with what the tests
-measure.
+measure. A reworded sentence fails the gate rather than switching it off.
 
 ## Reading order
 
@@ -77,14 +87,14 @@ believed.
 | [012](012-type-checking.md) | Type checking | `complete` | forking `types2` |
 | [013](013-generics.md) | Generics | `draft` | full stenciling; the stenciler is not written |
 | [014](014-package-loader.md) | Package loader | `in progress` | `go list` at G1, direct resolution at G2 |
-| [015](015-export-data.md) | Export data | `in progress` | `gc`-compatible; the reader is built, the writer is not |
+| [015](015-export-data.md) | Export data | `in progress` | `gc`-compatible; the reader is built and imports work, the writer is not |
 | [016](016-directives-and-pragmas.md) | Directives and pragmas | `draft` | the complete `//go:` table; nothing reads one yet |
 
 ### Middle end
 
 | | | | |
 | --- | --- | --- | --- |
-| [020](020-ir.md) | Typed IR | `in progress` | the node set and the lowering table |
+| [020](020-ir.md) | Typed IR | `in progress` | the node set, and the lowering table with a state per row |
 | [021](021-ssa-construction.md) | SSA construction | `in progress` | memory as a value, on-the-fly phis |
 | [022](022-optimization-passes.md) | Optimization passes | `draft` | the pass list; no pass is written |
 | [023](023-escape-analysis.md) | Escape analysis | `draft` | not written |
@@ -99,8 +109,8 @@ believed.
 | --- | --- | --- | --- |
 | [030](030-abi.md) | ABI | `in progress` | layout and calling convention |
 | [031](031-runtime-lowering.md) | Runtime lowering | `in progress` | the calls the compiler generates |
-| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `in progress` | and the symbol namespace; descriptors are named, encoded and referenced, itabs are not |
-| [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | `draft` | not written |
+| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `in progress` | and the symbol namespace; descriptors reach the object file, itabs are not built |
+| [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | `in progress` | the captureless half of each is built; every capture is refused |
 | [034](034-write-barriers.md) | Write barriers | `draft` | not written |
 | [035](035-goroutines-and-stack-growth.md) | Goroutines and stack growth | `in progress` | prologue built; `newproc` not |
 
@@ -120,10 +130,11 @@ believed.
 
 | | | | |
 | --- | --- | --- | --- |
-| [050](050-driver.md) | Driver | `in progress` | `gc`-compatible flags |
-| [051](051-build-integration.md) | Build integration | `in progress` | `-toolexec`, the allowlist |
+| [050](050-driver.md) | Driver | `in progress` | `gc`-compatible flags, and the pass list a compile runs |
+| [051](051-build-integration.md) | Build integration | `in progress` | `-toolexec`, the allowlist, and the two modes |
 | [052](052-diagnostics.md) | Diagnostics | `in progress` |  |
 | [053](053-determinism.md) | Determinism | `in progress` | what the fixed point depends on |
+| [054](054-distribution.md) | Distribution | `in progress` | the tarball, and what every archive in it records |
 
 ### Gates
 
@@ -143,10 +154,10 @@ believed.
 
 | | |
 | --- | --- |
-| Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the typed IR, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, type descriptors, the object writer, the arm64 encoder, and the driver |
-| Proved | `go tool link` links a nanogo object against the real Go runtime into a binary that runs, and a real collector honours nanogo's stack maps |
-| The largest gap | SSA construction accepts two functions in five of the distribution. Nobody performs [020](020-ir.md)'s lowering table, so a composite literal alone blocks 5,379 functions. [021](021-ssa-construction.md) |
-| Not started | Export data, escape analysis, inlining, generics instantiation, itabs, closures, `defer`, `panic`, write barriers, goroutines, the linker, the assembler, DWARF, and the amd64 backend |
+| Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the export data reader, the typed IR and part of its lowering table, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, type descriptors, the object writer, the arm64 encoder, and the driver |
+| Proved | A leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs. A nanogo-compiled frame keeps an allocation alive across `runtime.GC()`, so a real collector reads the stack map and the pointer mask nanogo wrote |
+| The largest gap | The lowering pass gets 24,095 of the distribution's 39,947 functions past SSA construction. The rows of [020](020-ir.md)'s table that no pass performs block the rest, and a closure alone blocks 1,805. [020](020-ir.md) owns the table, [021](021-ssa-construction.md) owns the pass |
+| Not started | The export data writer, escape analysis, inlining, generics instantiation, itabs, closures, `defer`, `panic`, write barriers, goroutines, the linker, the assembler, DWARF, and the amd64 backend |
 | Decided against | Assembly text as a build path, a from-scratch type checker, GC-shape stenciling with dictionaries |
 
 ## The spikes
