@@ -105,7 +105,7 @@ func Compile(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return writeOutput(cfg, out)
+	return writeOutput(cfg, out, pkg)
 }
 
 // checkSupported refuses the inputs nanogo has no answer for, before it reads
@@ -349,7 +349,6 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 		out.AddImport(im.Path, im.Fingerprint)
 	}
 	target := ssa.NewArm64Target()
-	compiled := 0
 	// The type descriptors the lowered code names, unioned over the package.
 	//
 	// specs/032-type-descriptors-and-itabs.md makes the set a package emits
@@ -359,11 +358,15 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// written in the order symbols were added (specs/053-determinism.md).
 	var needed []*ir.Type
 	for _, fn := range p.Funcs {
-		if len(fn.Body) == 0 {
+		if fn.Bodyless {
 			// A bodyless declaration is satisfied by assembly, and
 			// checkAssembly has already refused a package that has any.
 			// With -complete the go command promises there is none, so the
 			// declaration is an error rather than an external definition.
+			//
+			// The test is ir.Func.Bodyless and not len(fn.Body), because
+			// "func f() {}" leaves Body empty too and is a complete Go
+			// function that this compiler must compile.
 			if cfg.Complete {
 				return nil, fmt.Errorf("%s: missing function body", position(fset, fn.Pos, fn.Name))
 			}
@@ -377,15 +380,13 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 			return nil, &UnsupportedError{Package: cfg.Package, What: "function " + fn.Name, Detail: err.Error()}
 		}
 		needed = append(needed, types...)
-		compiled++
 	}
-	if compiled == 0 {
-		return nil, &UnsupportedError{
-			Package: cfg.Package,
-			What:    "a package with no function bodies",
-			Detail:  "nanogo writes text symbols and nothing else, so such an object holds nothing",
-		}
-	}
+	// A package with no function body is not refused. internal/goarch and
+	// internal/goos are constants and type aliases only, so what gc produces
+	// for them is an archive whose whole content is the export data.
+	// Refusing them said the writer of specs/015-export-data.md was missing,
+	// not that code generation could not reach them, and the writer exists
+	// now.
 	// The descriptors go in after the text symbols because the list is not
 	// complete until the last function is lowered. Nothing here adds a
 	// non-package definition, which is what makes that safe: the index space
@@ -638,16 +639,39 @@ func TrimPath(rewrites []TrimRewrite, path string) string {
 var verifyToolchain = obj.VerifyToolchain
 
 // writeOutput writes the object to -o, as an archive when -pack asked for one.
-func writeOutput(cfg *Config, p *obj.Package) error {
+//
+// The archive carries the export data as well, so that a package nanogo
+// compiled can be imported (specs/015-export-data.md). The export data is
+// written whether or not -pack asked for an archive, because its fingerprint
+// goes into the object's header: an importing object records the same value
+// in its Autolib entry and the linker refuses a build whose two copies
+// disagree. A bare object has nowhere to put the __.PKGDEF member, so it
+// carries the fingerprint and not the data.
+func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package) error {
 	tc, err := verifyToolchain()
 	if err != nil {
 		return fmt.Errorf("%s: %v", cfg.Package, err)
 	}
+	payload, fingerprint, err := export.Write(pkg)
+	if err != nil {
+		return err
+	}
+	p.Fingerprint = fingerprint
 	f, err := os.Create(cfg.Output)
 	if err != nil {
 		return err
 	}
-	if err := writeTo(f, p, tc.Header, cfg.Pack); err != nil {
+	write := func() error {
+		if !cfg.Pack {
+			return p.WriteObject(f, tc.Header)
+		}
+		definition, err := export.Definition(tc.Header, p.Main, payload)
+		if err != nil {
+			return err
+		}
+		return writeArchive(f, p, tc.Header, definition)
+	}
+	if err := write(); err != nil {
 		f.Close()
 		return fmt.Errorf("%s: %v", cfg.Package, err)
 	}

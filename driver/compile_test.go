@@ -16,6 +16,7 @@ import (
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
 	"golang.design/x/nanogo/syntax"
+	"golang.design/x/nanogo/types2"
 )
 
 // arm64Only guards the tests that reach the backend.
@@ -83,12 +84,20 @@ func TestCompileWritesAnArchive(t *testing.T) {
 	if !strings.HasPrefix(string(b), archiveMagic) {
 		t.Fatalf("the output does not start with the archive magic: %q", b[:min(16, len(b))])
 	}
+	// __.PKGDEF first, because internal/exportdata.FindPackageDefinition
+	// reads member zero and does not search for it.
 	header := string(b[len(archiveMagic) : len(archiveMagic)+archiveHeader])
-	if !strings.HasPrefix(header, objectMember) {
-		t.Errorf("the first member is %q, want %q", header[:16], objectMember)
+	if !strings.HasPrefix(header, definitionMember) {
+		t.Errorf("the first member is %q, want %q", header[:16], definitionMember)
 	}
 	if !strings.HasSuffix(header, "`\n") {
 		t.Errorf("the member header does not end with the archive terminator: %q", header)
+	}
+	if !strings.Contains(string(b), "\n$$B\nu") {
+		t.Error("the archive carries no unified export data section")
+	}
+	if !strings.Contains(string(b), objectMember) {
+		t.Errorf("the archive holds no %s member", objectMember)
 	}
 	// The linker refuses an object whose header line is not its own, so the
 	// member has to carry the installed toolchain's.
@@ -244,11 +253,6 @@ func TestCompileRefusals(t *testing.T) {
 			src:  "package main\n\nfunc f(a int) int\n\nfunc g() int { return 1 }\n",
 			edit: func(c *Config) { c.Complete = true },
 			want: []string{"a.go:3:6", "missing function body"},
-		},
-		{
-			name: "a package with no bodies is refused",
-			src:  "package main\n\nfunc f(a int) int\n",
-			want: []string{"no function bodies"},
 		},
 		{
 			name: "the runtime is refused",
@@ -687,7 +691,8 @@ func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
 	defer func() { verifyToolchain = saved }()
 
 	verifyToolchain = func() (*obj.Toolchain, error) { return nil, errors.New("no go command") }
-	err := writeOutput(&Config{Package: "strconv", Output: filepath.Join(t.TempDir(), "o.a")}, obj.NewPackage("strconv"))
+	err := writeOutput(&Config{Package: "strconv", Output: filepath.Join(t.TempDir(), "o.a")},
+		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"))
 	if err == nil || !strings.Contains(err.Error(), "strconv") || !strings.Contains(err.Error(), "no go command") {
 		t.Errorf("writeOutput = %v, want the probe failure with the package named", err)
 	}
@@ -697,7 +702,8 @@ func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
 	// packages runs out of descriptors before it runs out of packages.
 	verifyToolchain = func() (*obj.Toolchain, error) { return &obj.Toolchain{Header: "not a header\n"}, nil }
 	out := filepath.Join(t.TempDir(), "o.a")
-	err = writeOutput(&Config{Package: "strconv", Output: out}, obj.NewPackage("strconv"))
+	err = writeOutput(&Config{Package: "strconv", Output: out, Pack: true},
+		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"))
 	if err == nil || !strings.Contains(err.Error(), "strconv") {
 		t.Errorf("writeOutput = %v, want the writer's refusal with the package named", err)
 	}
