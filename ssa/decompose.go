@@ -914,6 +914,15 @@ func (d *decomposer) zeroPart(b *Block, pos syntax.Pos, t *ir.Type) *Value {
 	return d.mk(b, pos, OpConstNil, t)
 }
 
+// NewStringSym returns the symbol that holds the bytes of a string constant.
+//
+// It is exported for the caller that has a constant and no value to decompose:
+// a package-level variable initialised to a string literal is two words in a
+// data symbol, and the first of them points at bytes that need the same symbol
+// a constant in a function body needs. One constructor, so that both name the
+// symbol the same way.
+func NewStringSym(s string) *StringSym { return newStringSym(s) }
+
 // newStringSym returns the symbol that holds the bytes of s.
 //
 // The name is the hash of the content, so it does not depend on the order the
