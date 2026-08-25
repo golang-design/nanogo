@@ -202,6 +202,17 @@ language, and each one is there for a claim:
 | `internal/goarch` and `internal/goos` on the allowlist | nanogo compiles two packages the closure of every Go program contains, and `gc` compiles the other 27 against them |
 | a variadic call | the slice literal allocates, and the descriptor `rtype` emitted is one `mallocgc` accepts |
 | the same call under `runtime.GC()` | the collector follows the pointer mask nanogo wrote |
+| a read of `os.Stdout` | the standard library's `init` ran, so the initialisation record reaches it ([040](040-object-format.md)) |
+| a package's own `init` | the record runs the function `ir.Build` synthesised for it |
+| two packages whose `init` order is fixed by an import | the ordering edges are the import graph's and not `cmd/link`'s lexicographic tie-break |
+| a blank import | an import that nothing else links to still gets its edge |
+
+Those last four are new in kind. Every program above them computes its answer
+from its own instructions, so it runs the same whether or not any package was
+initialised, and that is exactly why nanogo wrote no initialisation record for
+as long as it did: no test in the repository could tell the difference. The
+first program to touch something an `init` sets would have died with no nanogo
+frame in the traceback.
 
 The gate's last clause is unmet. It says "with its tests passing", and nothing
 runs `go test -toolexec`, so no package's own tests have been compiled by

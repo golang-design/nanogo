@@ -180,6 +180,78 @@ The pc-value rows are a correction. An earlier version of this spec said
 symbol, and a writer that packs them into `AuxFuncInfo` produces an object the
 linker reads as having none.
 
+## The initialisation record
+
+Every package nanogo compiles gets a symbol named `<path>..inittask`. It is
+the only thing that makes the package's initialisation run, and its absence is
+silent: the program starts, runs, and dies where it reads something an init
+should have set.
+
+The layout is `runtime.initTask` in `runtime/proc.go`, and `doInit1` beside it
+is what reads the bytes:
+
+| Offset | Field | Value |
+| --- | --- | --- |
+| 0 | `state` | 0, meaning not initialised. The runtime writes 1 and then 2 |
+| 4 | `nfns` | how many functions follow |
+| 8 + 8*i | function pointer | `R_ADDR`, 8 bytes, to an `ABIInternal` text symbol |
+
+Three properties of that decide whether a program starts and is right:
+
+1. The record is **writable**, so `SNOPTRDATA` and not `SRODATA`. `state` is
+   assigned twice per record. A read-only record faults inside the runtime,
+   before any Go frame.
+2. A record with no functions is **exactly eight bytes**. `cmd/link` leaves a
+   record of eight bytes or fewer out of the schedule and keeps it only to
+   order the rest, so padding one up is what makes the runtime reach
+   `doInit1`'s `throw("inittask with no functions")`.
+3. The functions are text symbols and so **`ABIInternal`**. A reference under
+   `ABI0` names a symbol nothing defines.
+
+nanogo lists one function: the one `ir.Build` synthesises, which assigns the
+package's variables in the order [012](012-type-checking.md) computed and then
+calls the declared `init` functions in source order.
+
+### Ordering, and who writes the list
+
+A record carries one `R_INITORDER` relocation per direct import, pointing at
+that package's record. The relocation changes no bytes: offset zero, width
+zero, addend zero. `cmd/link` reads the edges in `ld/inittask.go` to schedule
+the records, and reads nothing else from them.
+
+The compiler does **not** write `go:main.inittasks`, which is the list
+`runtime.main` walks. `cmd/link` builds it: it starts at `main..inittask`,
+follows the edges, and emits the packages in an order that respects them,
+breaking ties lexicographically. A compiler that wrote that symbol would
+collide with the linker's own builder.
+
+Two consequences follow from that, and a program depends on both:
+
+- A main package always gets a record, even an empty one, because it is the
+  only root the walk starts from. Without it the walk starts nowhere and no
+  package in the program is initialised.
+- An import with no edge takes its whole subtree out of the schedule. The
+  program still links.
+
+nanogo writes an edge for **every** direct import, without asking which
+imports have a record. `gc` asks, because its importer reads the answer out of
+the export data. Asking is not needed: `relocsym` returns on a zero-width
+relocation before it looks at the target, so an edge to a package that has no
+record resolves to nothing, and `inittasks()` finds a symbol nothing defines
+to be of size zero and leaves it out of the schedule. The cost is a record
+nanogo writes where `gc` writes none, for a package that has no init work and
+no import with any; it holds no functions, so the linker keeps it for ordering
+and the runtime never sees it. Guessing the other way would drop an edge and
+run an init late, which no test can see.
+
+Whether a record was written travels into the export data, so that an importer
+orders its own record after this one ([015](015-export-data.md)).
+
+`R_INITORDER` is relocation 102. The number is stated rather than counted:
+more than fifty architecture relocations nanogo never emits sit between it and
+the last entry `obj` declares, and `cmd/internal/objabi`'s generated stringer
+asserts the value with `_ = x[R_INITORDER-102]`.
+
 ## PC-value tables
 
 A `PCDATA` stream is a mapping from program counter to a small integer, encoded
@@ -345,6 +417,11 @@ Every check below is written and gated, in `obj/write_test.go`:
   [000](000-decisions.md) decision 3's open question.
 - `TestPCDataMatchesCompiler` gates the pc-value encoder against `gc`'s own
   bytes.
+- `driver/inittask_test.go` states the record's bytes field by field, and
+  `internal/e2e/inittask_test.go` runs programs whose exit status depends on an
+  init having run: `os.Stdout` reporting file descriptor 1, a package's own
+  init, two packages whose inits must run in import order and not in the
+  lexicographic order `cmd/link` falls back to, and a blank import.
 - `TestDeterminismAcrossProcesses` is determinism
   ([053](053-determinism.md)): the same source produces the same object bytes,
   from two processes with different environments and working directories. This
