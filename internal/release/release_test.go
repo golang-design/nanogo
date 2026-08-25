@@ -13,6 +13,7 @@ package release
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,6 +112,25 @@ func (b *builder) build(t *testing.T, out, tarball string) {
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 
+// unpack opens the tarball into dir and returns the tree it unpacked to.
+//
+// The system tar rather than archive/tar, because what is being checked is
+// that the file a user downloads opens with the tool a user has.
+func unpack(t *testing.T, tarball, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tarCmd, err := exec.LookPath("tar")
+	skipUnless(t, err == nil, "there is no tar command: %v", err)
+	run(t, "", tarCmd, "-xzf", tarball, "-C", dir)
+	root := filepath.Join(dir, dist.TreeName)
+	if !exists(root) {
+		t.Fatalf("the tarball did not unpack to a directory called %s", dist.TreeName)
+	}
+	return root
+}
+
 // The whole claim, in the order a user meets it: download, unpack, run.
 func TestTheTarballUnpacksIntoAWorkingDistribution(t *testing.T) {
 	b := setup(t)
@@ -118,21 +138,7 @@ func TestTheTarballUnpacksIntoAWorkingDistribution(t *testing.T) {
 	tarball := filepath.Join(work, "nanogo.tar.gz")
 	b.build(t, filepath.Join(work, "tree"), tarball)
 
-	// Unpacked with the system tar rather than with archive/tar, because what
-	// is being checked is that the file a user downloads opens with the tool a
-	// user has.
-	unpacked := filepath.Join(work, "unpacked")
-	if err := os.MkdirAll(unpacked, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	tarCmd, err := exec.LookPath("tar")
-	skipUnless(t, err == nil, "there is no tar command: %v", err)
-	run(t, "", tarCmd, "-xzf", tarball, "-C", unpacked)
-
-	root := filepath.Join(unpacked, dist.TreeName)
-	if !exists(root) {
-		t.Fatalf("the tarball did not unpack to a directory called %s", dist.TreeName)
-	}
+	root := unpack(t, tarball, filepath.Join(work, "unpacked"))
 
 	// The seam with driver, tested against the consumer's own predicate. The
 	// tree is what driver.FindRoot resolves, and it resolves it from the
@@ -220,6 +226,139 @@ func TestTheTarballUnpacksIntoAWorkingDistribution(t *testing.T) {
 	if out := run(t, work, hello); strings.TrimSpace(out) != output {
 		t.Fatalf("the program printed %q, want %q", strings.TrimSpace(out), output)
 	}
+}
+
+// buildProgram is what a person compiles first. It has a package level
+// variable, a slice, a range loop and a call, so a distribution that linked but
+// compiled nothing real would not print 21.
+const buildProgram = `package main
+
+var greeting = "hello from nanogo"
+
+func sum(xs []int) int {
+	n := 0
+	for _, x := range xs {
+		n += x
+	}
+	return n
+}
+
+func main() {
+	println(greeting)
+	println(sum([]int{1, 2, 3, 4, 5, 6}))
+}
+`
+
+// TestTheUnpackedNanogoBuildsAndRunsAProgram is the thing a person does with a
+// downloaded compiler: unpack it, point it at a program, run what comes out.
+//
+// It is separate from the -toolexec test above because the two prove different
+// claims. That one drives the compiler the way the go command drives it. This
+// one drives "nanogo build", which resolves the package graph itself and takes
+// every standard library archive out of the tree, and it is the path a
+// download is useless without.
+//
+// The go command is still required, and the test does not hide it: go list
+// resolves the program's own package and go tool link writes the executable
+// (specs/045-linker.md). What must not come from it is a standard library
+// archive, and the -work directory is read to prove that none did.
+func TestTheUnpackedNanogoBuildsAndRunsAProgram(t *testing.T) {
+	b := setup(t)
+	work := t.TempDir()
+	tarball := filepath.Join(work, "nanogo.tar.gz")
+	b.build(t, filepath.Join(work, "tree"), tarball)
+	root := unpack(t, tarball, filepath.Join(work, "unpacked"))
+
+	// Outside the repository, in a module of its own, because a build that
+	// resolved anything through nanogo's own module would not be the build a
+	// user runs.
+	prog := filepath.Join(work, "prog")
+	if err := os.MkdirAll(prog, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []struct{ name, body string }{
+		{"go.mod", "module nanogo.example/hello\n\ngo 1.27\n"},
+		{"main.go", buildProgram},
+	} {
+		if err := os.WriteFile(filepath.Join(prog, f.name), []byte(f.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// NANOGOROOT unset, so the tree is found from the binary's own path, and
+	// GOROOT unset, so nothing points the build at the installed toolchain's
+	// standard library. PATH stays: go list and go tool link are the go
+	// command's and nothing in this release replaces them.
+	nanogo := filepath.Join(root, "bin", "nanogo")
+	cmd := exec.Command(nanogo, "build", "-work", "-o", "hello", ".")
+	cmd.Dir = prog
+	cmd.Env = environWithout(os.Environ(), "GOROOT", driver.RootEnv)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s build in %s: %v\n%s", nanogo, prog, err, out)
+	}
+
+	// The closure is measured rather than written down, for the reason the
+	// tally test measures it: it moves between Go releases.
+	closure, err := dist.Closure(b.goCmd, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("nanogo: 1 of %d packages compiled by nanogo; %d by gc %s (everything not named on the command line)",
+		len(closure)+1, len(closure), driver.PinnedGoVersion)
+	if !strings.Contains(string(out), want) {
+		t.Errorf("the build did not print\n\t%s\nit printed\n%s", want, out)
+	}
+	if !strings.Contains(string(out), "the standard library and the runtime come from "+root) {
+		t.Errorf("the build did not say the tree it used:\n%s", out)
+	}
+	if !strings.Contains(string(out), "go tool link") {
+		t.Errorf("the build did not say who wrote the executable:\n%s", out)
+	}
+
+	// Every archive the compile read, checked against the tree. A build that
+	// took one from the go command's cache would print the same summary.
+	scratch := scratchDir(t, string(out))
+	defer os.RemoveAll(scratch)
+	cfg, err := os.ReadFile(filepath.Join(scratch, "importcfg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg := filepath.Join(root, "pkg", driver.TargetDir()) + string(filepath.Separator)
+	lines := strings.Split(strings.TrimSuffix(string(cfg), "\n"), "\n")
+	if len(lines) != len(closure) {
+		t.Errorf("the import configuration names %d packages and the closure is %d", len(lines), len(closure))
+	}
+	for _, line := range lines {
+		_, file, ok := strings.Cut(line, "=")
+		if !ok || !strings.HasPrefix(file, pkg) {
+			t.Errorf("the import configuration reads %q, which is not an archive from %s", line, pkg)
+		}
+	}
+
+	// println writes to stderr, which is where the runtime's own printing
+	// goes, so the two lines are read together with the exit status.
+	hello := filepath.Join(prog, "hello")
+	ran, err := exec.Command(hello).CombinedOutput()
+	if err != nil {
+		t.Fatalf("the program the distribution built did not run: %v\n%s", err, ran)
+	}
+	if got, want := strings.TrimSpace(string(ran)), "hello from nanogo\n21"; got != want {
+		t.Fatalf("the program printed %q, want %q", got, want)
+	}
+}
+
+// scratchDir is the directory -work reported, which is the first line of the
+// build's output.
+func scratchDir(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if dir, ok := strings.CutPrefix(line, "WORK="); ok {
+			return dir
+		}
+	}
+	t.Fatalf("-work printed no scratch directory:\n%s", out)
+	return ""
 }
 
 // importcfg writes an -importcfg naming every archive in the tree and nothing
