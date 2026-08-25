@@ -239,7 +239,7 @@ find . -name '*.go' -not -name '*_test.go' \
     -not -path './types2/*' -not -path './spikes/*' | xargs wc -l
 ```
 
-The compiler is **31,257** lines of compiler source today.
+The compiler is **34,396** lines of compiler source today.
 
 | Component | Spec | Reference | Estimate | Measured |
 | --- | --- | --- | --- | --- |
@@ -249,15 +249,15 @@ The compiler is **31,257** lines of compiler source today.
 | Export data | [015](015-export-data.md) | 1,568 + 8,097 + 1,259 | 7,000 | **0, not written** |
 | Typed IR | [020](020-ir.md) | 10,216 (`ir`) | 6,000 with escape and inlining | 3,659 |
 | Escape analysis, inlining | [023](023-escape-analysis.md), [024](024-inlining-and-devirtualization.md) | 3,601 (`escape`) | same row | **0, not written** |
-| SSA and its passes | [021](021-ssa-construction.md), [022](022-optimization-passes.md) | 11,609 hand-written | 8,000 | 2,996 |
-| Lowering rules, one target | [025](025-lowering-and-rules.md) | 18,704 (`_gen`, all targets) | 3,000 | 5,231 |
+| SSA and its passes | [021](021-ssa-construction.md), [022](022-optimization-passes.md) | 11,609 hand-written | 8,000 | 11,824 |
+| Lowering rules, one target | [025](025-lowering-and-rules.md) | 18,704 (`_gen`, all targets) | 3,000 | 1,387 |
 | Register allocation, liveness | [026](026-register-allocation.md), [027](027-liveness-and-stackmaps.md) | | 3,000 | 3,478 |
 | ABI, runtime symbols, descriptors | [030](030-abi.md) to [032](032-type-descriptors-and-itabs.md) | 2,938 (`reflectdata`) | 2,500 | 1,538 |
-| SSA to machine code | no spec owns it | | **no row existed** | 2,634 |
+| SSA to machine code | no spec owns it | | **no row existed** | 2,638 |
 | Object writer | [040](040-object-format.md) | 1,559 (`goobj`) | 1,500 | 1,364 |
 | `arm64` encoder | [041](041-instruction-encoding.md) | 36,224 (`obj/arm64`, whole ISA) | 2,000 | 2,040 |
-| Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | | 1,000 | 893 |
-| | | | **≈41,800** | **31,257** |
+| Driver, diagnostics | [050](050-driver.md), [052](052-diagnostics.md) | | 1,000 | 1,698 |
+| | | | **≈41,800** | **34,396** |
 
 The measured column is not a smaller version of the estimate column, and the
 difference between them is the interesting part.
@@ -272,7 +272,7 @@ budget is safe.
 
 **Four rows are zero because the work is not done.** Export data, escape
 analysis, inlining and generics instantiation are not written. Their estimates
-total 16,600 lines. A tree that is 31,257 lines with 16,600 lines of estimate
+total 16,600 lines. A tree that is 34,396 lines with 16,600 lines of estimate
 still ahead of it is not under a 40,000 line budget, it is untested against one.
 The two recovery points below are still the two recovery points.
 

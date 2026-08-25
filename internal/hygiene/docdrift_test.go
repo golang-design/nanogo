@@ -568,15 +568,34 @@ func TestTheFactsAreCurrent(t *testing.T) {
 	// They are still checked, in the direction that means something: the
 	// documented number must be reachable, so the measurement may not exceed
 	// it, and it may not collapse to nothing.
+	// Every count derived from a corpus is elastic, because the corpus is
+	// whatever this machine and this platform hold.
+	//
+	// Two things move it, and both are legitimate. The source trees present
+	// differ: a developer with a checkout of the Go repository beside GOROOT
+	// compares far more files than a runner with GOROOT alone. And the
+	// packages that build differ by platform: 536 build on darwin and 477 on
+	// linux, because a build constraint excludes the rest, so every number
+	// downstream of "which packages built" moves with the operating system.
+	//
+	// Pinning any of them makes the gate fail for everyone whose machine is
+	// not the one that refreshed it last, which is not drift. They are checked
+	// in the direction that means something instead: below, see the switch.
 	elastic := map[string]bool{
 		"syntax.scanner.files":    true,
 		"syntax.parser.files":     true,
 		"loader.constraint.files": true,
-		// The IR corpus is every function in every Go source tree on the
-		// machine, so it moves with the trees for the same reason the three
-		// above do.
-		"ir.corpus.functions": true,
-		"ir.corpus.nodes":     true,
+		"loader.golist.packages":  true,
+		"ir.corpus.functions":     true,
+		"ir.corpus.nodes":         true,
+		"ir.corpus.packages":      true,
+		"ssa.corpus.reached":      true,
+		"ssa.corpus.lowered":      true,
+		"ssa.corpus.mapped":       true,
+		"ssa.corpus.functions":    true,
+		// The link tests run only where nanogo's output can run, which is an
+		// arm64 host, so this is zero on the amd64 runner by design.
+		"ssagen.linkandrun.cases": true,
 	}
 
 	// Coverage is elastic downward for a different reason. nanogo emits arm64,
@@ -586,6 +605,14 @@ func TestTheFactsAreCurrent(t *testing.T) {
 	// below it is a host that ran less, and one above it means the documents
 	// undersell the work.
 	coverage := func(k string) bool { return strings.HasPrefix(k, "cover.") }
+
+	// A measurement of zero is normally the corpus having gone missing, which
+	// is the failure worth catching. For the counts that a whole platform
+	// skips by design, zero is the correct answer there and says nothing about
+	// this machine.
+	zeroIsLegitimate := map[string]bool{
+		"ssagen.linkandrun.cases": true,
+	}
 	var keys []string
 	for k := range got {
 		keys = append(keys, k)
@@ -608,8 +635,8 @@ func TestTheFactsAreCurrent(t *testing.T) {
 			// of zero means the corpus went missing and the test measured
 			// nothing, which is the failure worth catching.
 			switch {
-			case got[k] == 0:
-				t.Errorf("%s measured no files; the corpus is missing and the test proved nothing", k)
+			case got[k] == 0 && !zeroIsLegitimate[k]:
+				t.Errorf("%s measured nothing; the corpus is missing and the test proved nothing", k)
 			case got[k] > old:
 				t.Errorf("%s says %s is %s and the tests compare %s, which is more.\n"+
 					"Refresh it with NANOGO_REFRESH_FACTS=1 so the documents do not undersell it.",

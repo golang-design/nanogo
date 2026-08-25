@@ -114,10 +114,21 @@ func mk() *int {
 
 //go:noinline
 func gcNow() {
-	// Several collections, because a finaliser is queued by one and run by
-	// the goroutine that follows it. The wait is bounded: a case that must
-	// report zero would otherwise wait for as long as it is given.
-	for i := 0; i < 8 && atomic.LoadInt32(&finalized) == 0; i++ {
+	// Several collections, because a finaliser is queued by one collection
+	// and run by the finaliser goroutine afterwards.
+	//
+	// The loop runs many more rounds than it used to, because Gosched only
+	// yields: it returns as soon as this goroutine is runnable again, which on
+	// an idle machine is usually after the finaliser goroutine has run and on
+	// a loaded one is often before it. Eight rounds passed on a developer's
+	// machine and failed on a busy CI runner, which is a flaky test rather
+	// than a compiler bug.
+	//
+	// The import set is fixed by the importcfg this caller is compiled
+	// against, so this cannot sleep; it yields more times instead. The loop is
+	// still bounded, because a case that must report zero finalisers would
+	// otherwise spend its whole budget on every run.
+	for i := 0; i < 2000 && atomic.LoadInt32(&finalized) == 0; i++ {
 		runtime.GC()
 		runtime.Gosched()
 	}
