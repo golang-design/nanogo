@@ -116,6 +116,9 @@ func LowerAndCollect(fn *Func) ([]*Type, error) {
 		descs: make(map[string]*Object),
 	}
 	fn.Body = l.stmts(fn.Body)
+	if l.ndefer > 0 {
+		l.deferExit()
+	}
 	if len(l.errs) > 0 {
 		return l.needed, l.errs[0]
 	}
@@ -158,6 +161,11 @@ type lowerer struct {
 	// caller emitting the descriptors reads.
 	descs  map[string]*Object
 	needed []*Type
+
+	// ndefer counts the defer statements this function lowered. One is enough
+	// to owe the function the single exit deferExit builds, so the count is
+	// read as a flag; it is a count so that a report can say how many.
+	ndefer int
 }
 
 func (l *lowerer) refuse(n *Node, what string) {
@@ -208,6 +216,8 @@ var (
 	lowerBool      = mustLayoutNamed(Bool, "bool")
 	lowerByte      = mustLayoutNamed(Uint8, "byte")
 	lowerUintptr   = mustLayoutNamed(Uintptr, "uintptr")
+	lowerInt64     = mustLayoutNamed(Int64, "int64")
+	lowerUint64    = mustLayoutNamed(Uint64, "uint64")
 	lowerUnsafePtr = mustLayoutNamed(UnsafePtr, "unsafe.Pointer")
 )
 
@@ -658,6 +668,22 @@ func (l *lowerer) stmt(s Stmt) {
 		l.flush(s)
 		l.emit(s)
 
+	case ORecover:
+		// recover() whose value nobody reads, which is the shape of the
+		// idiom: defer func() { recover() }(). It is handled here and not in
+		// expr because the position is what makes it buildable. The result is
+		// an interface, and a statement discards it, so nothing below the IR
+		// has to decompose one. A recover whose value is read reaches expr and
+		// is refused there.
+		//
+		// The call has to be in the deferred function itself.
+		// runtime.gorecover counts the frames between itself and
+		// runtime.gopanic and recovers only when there is exactly one, so a
+		// pass that wrapped this call in anything would turn a recover into a
+		// no-op.
+		l.flush(s)
+		l.emit(runtimeCall(s.Pos, "runtime.gorecover"))
+
 	case ORange:
 		// Init is not flushed here. It holds the range expression's
 		// temporaries, and rangeStmt puts them in the loop's own init list for
@@ -753,6 +779,16 @@ func (l *lowerer) expr(n Expr) Expr {
 			n.Y = l.expr(n.Y)
 		}
 		return n
+
+	case ODefer:
+		// Before the descent below, and that is the whole reason these two
+		// are here. The descent lowers the deferred call, and lowering a
+		// builtin emits its runtime calls into the current list: "defer
+		// println(x)" would print where the statement is and defer only
+		// runtime.printunlock. What a defer holds is read, not rewritten.
+		return l.deferStmt(n, "runtime.deferproc")
+	case OGo:
+		return l.deferStmt(n, "runtime.newproc")
 	}
 
 	n.X = l.expr(n.X)
@@ -787,6 +823,10 @@ func (l *lowerer) expr(n Expr) Expr {
 		return l.newExpr(n)
 	case OMake:
 		return l.makeExpr(n)
+	case OPrint, OPrintln:
+		return l.printExpr(n)
+	case OClosure:
+		return l.closureExpr(n)
 	case OUnsafeAdd:
 		// Pointer arithmetic. The offset was written with an integer type of
 		// its own, which the specification leaves free, so it is widened to a
@@ -1637,4 +1677,370 @@ func (l *lowerer) minMax(n Expr) Expr {
 		})
 	}
 	return ref(o, pos)
+}
+
+// Closures, defer and go.
+//
+// specs/033-closures-defer-panic.md is the design. Three of its rows are built
+// here and the rest are refused, and the line between them is one machine
+// fact: a closure that captures reads its captured variables through the
+// context register, R26 on arm64 (specs/030-abi.md), and no operation of
+// specs/021-ssa-construction.md's set reads that register in the callee.
+// ssagen writes it at every indirect call site, so the caller half is there
+// and the callee half is not.
+//
+// What that leaves reachable is exact rather than approximate:
+//
+//   - A function literal that captures nothing. Its body never reads the
+//     context register, so the value is a funcval and nothing else.
+//   - defer and go of a call with no arguments, through a function symbol or
+//     through a value of function type. Neither needs a capture, and the value
+//     may be a closure gc compiled, because the runtime calls it and the
+//     runtime sets the register.
+//
+// Everything else is refused with the count of what would have to be captured,
+// so the corpus report says how much of the row the register is holding back
+// rather than only that the row is unbuilt.
+//
+// # Why the funcval is on the heap
+//
+// gc emits a read-only one-word symbol for a literal that captures nothing, so
+// the value is a link-time constant. This pass allocates one per evaluation
+// instead, because LowerAndCollect's only channel to the object writer carries
+// type descriptors and there is no channel for a one-word data symbol. That is
+// the cost: a heap allocation and a store where gc has neither. It is correct,
+// and the fix is a channel for data symbols rather than anything here.
+
+// deferExitLabel is the label of the epilogue a function with a defer leaves
+// through.
+//
+// It is not a Go identifier, so no source label collides with it.
+const deferExitLabel = ".deferexit"
+
+// closureExpr lowers a function literal.
+func (l *lowerer) closureExpr(n Expr) Expr {
+	if n.Index != closureLiteral {
+		l.refuse(n, "a method value captures its receiver, which is read through the context register, which no SSA operation reads")
+		return n
+	}
+	if len(n.Args) > 0 {
+		l.refuse(n, fmt.Sprintf("a capture list of %d: a capture is read through the context register, which no SSA operation reads", len(n.Args)))
+		return n
+	}
+	if n.Obj == nil || n.Obj.Class != ClassFunc {
+		l.refuse(n, "a function literal with no symbol")
+		return n
+	}
+	return l.funcValue(n, n.Obj, n.Type)
+}
+
+// funcValue builds the func value of a function that captures nothing.
+//
+// A funcval is a code pointer followed by the captured variables, so with no
+// captures it is one word. The word is uintptr and not a pointer: it holds a
+// text address, which the collector must not trace and must not be asked to,
+// and uintptr is the only spelling that says so to the descriptor
+// (specs/032-type-descriptors-and-itabs.md derives GCData from the type).
+func (l *lowerer) funcValue(n Expr, o *Object, t *Type) Expr {
+	pos := n.Pos
+	cell := l.allocate(n, lowerUintptr, pos)
+	if cell == nil {
+		return n
+	}
+	p := l.spill(cell)
+	entry := &Node{
+		Op: OAddr, Pos: pos, Type: l.ptrTo(o.Type),
+		X: &Node{Op: OGlobal, Pos: pos, Type: o.Type, Obj: o},
+	}
+	l.emit(Assign(pos,
+		&Node{Op: ODeref, Pos: pos, Type: lowerUintptr, X: ref(p, pos)},
+		&Node{Op: OConvert, Pos: pos, Type: lowerUintptr, X: entry}))
+	return &Node{Op: OConvert, Pos: pos, Type: t, X: ref(p, pos)}
+}
+
+// deferStmt lowers defer and go into the runtime call that takes a funcval.
+//
+// runtime.deferproc and runtime.newproc take the same one word, which is why
+// the two statements share this function: deferproc's parameter is a func()
+// and newproc's is a *funcval, and both are the address of the code pointer.
+// The difference is what the function owes afterwards, and only defer owes the
+// exit deferExit builds.
+func (l *lowerer) deferStmt(n Expr, name string) Expr {
+	fv := l.deferredValue(n)
+	if fv == nil {
+		return n
+	}
+	if name == "runtime.deferproc" {
+		l.ndefer++
+	}
+	return runtimeCall(n.Pos, name, fv)
+}
+
+// deferredValue returns the func value a defer or a go statement calls.
+//
+// The builder has already evaluated the callee and the arguments into
+// temporaries, because the specification evaluates both when the statement
+// runs and not when the call runs. What is left here is turning the callee
+// into one word.
+func (l *lowerer) deferredValue(n Expr) Expr {
+	call := n.X
+	if call == nil {
+		l.refuse(n, "the statement holds nothing to call")
+		return nil
+	}
+	// The call's own scaffolding runs at the statement, which is where the
+	// specification evaluates the operands.
+	l.flush(call)
+	if call.Op != OCall {
+		// A builtin. "defer close(c)" is an OClose and not a call to a
+		// function value, so there is no funcval to hand the runtime, and gc
+		// wraps it in a literal that captures the operand.
+		l.refuse(n, "the statement holds a "+call.Op.String()+" and not a call, so there is no function value to give the runtime")
+		return nil
+	}
+	if len(call.Args) > 0 {
+		l.refuse(n, fmt.Sprintf("an argument list of %d: an argument becomes a capture, and a capture is read through the context register, which no SSA operation reads", len(call.Args)))
+		return nil
+	}
+	fun := call.X
+	if fun == nil || fun.Type == nil {
+		l.refuse(n, "a call with no function")
+		return nil
+	}
+	if fun.Op == OGlobal && fun.Obj != nil && fun.Obj.Class == ClassFunc {
+		return l.funcValue(n, fun.Obj, fun.Type)
+	}
+	if fun.Type.Kind != FuncKind {
+		l.refuse(n, "a call through "+fun.Type.Kind.String())
+		return nil
+	}
+	switch fun.Op {
+	case OLocal:
+		// A temporary the builder wrote at the statement, which is the value
+		// the specification says the call uses.
+		return fun
+	case OGlobal:
+		// A package-level variable of function type. The builder does not
+		// snapshot it, and the value it holds when the call runs is not the
+		// value the statement saw, so it is copied here.
+		return ref(l.spill(fun), fun.Pos)
+	case OField:
+		if fun.X != nil && fun.X.Type != nil && fun.X.Type.Kind == Interface {
+			l.refuse(n, "a method of an interface keeps its receiver inside the selection, and the receiver becomes a capture, which is read through the context register, which no SSA operation reads")
+			return nil
+		}
+		// ir.Build snapshots the struct and not the field, so a value read
+		// out of the field here would be the value at the call and not the
+		// value at the statement. That is a gap in the builder, and refusing
+		// is what keeps it from becoming a wrong program.
+		l.refuse(n, "the function is a field of a value the builder snapshotted whole, so the field would be read when the call runs and not when the statement runs")
+		return nil
+	}
+	l.refuse(n, "a call through a "+fun.Op.String())
+	return nil
+}
+
+// deferExit gives a function that defers one exit, and puts the call to
+// runtime.deferreturn in it.
+//
+// One exit and not one call before each return, which is not a tidiness
+// choice. cmd/link records the offset of a call to runtime.deferreturn in the
+// function's funcInfo, and it records the **first** one it finds
+// (cmd/link/internal/ld/pcln.go, computeDeferReturn). runtime.recovery jumps
+// to that offset when a deferred function recovers, so a function with two
+// deferreturn call sites resumes at the wrong one: it would run the epilogue
+// of a return the program did not take. That failure appears only on the
+// panic path, which is the one ordinary tests do not take.
+//
+// So every return writes the result objects and jumps to the epilogue, and the
+// epilogue calls deferreturn once and returns what the result objects hold.
+// The bare return is what ssa.Build already builds for a named result.
+//
+// # Why the results move to the frame
+//
+// runtime.recovery restores the stack pointer and jumps to that offset. It
+// restores no register, because it has none to restore: the registers of the
+// frame it resumes were the panicking call's and are gone. A result that lived
+// in a register at the epilogue would therefore be whatever the runtime left
+// behind. Marking the results address-taken puts them in the frame, which
+// specs/021-ssa-construction.md's classify reads, so the epilogue loads them
+// from storage that survives the unwind. It is also what makes a deferred
+// function able to assign a named result, which is the other half of the rule
+// gc applies here.
+func (l *lowerer) deferExit() {
+	pos := l.fn.Pos
+	for _, r := range l.fn.Results {
+		r.Addrtaken = true
+	}
+	l.fn.Body = l.exitReturns(l.fn.Body)
+	l.fn.Body = append(l.fn.Body,
+		&Node{Op: OLabel, Pos: pos, Type: voidType, Label: deferExitLabel},
+		runtimeCall(pos, "runtime.deferreturn"),
+		&Node{Op: OReturn, Pos: pos, Type: voidType})
+}
+
+// exitReturns rewrites every return of a statement list into a jump to the
+// epilogue, recursing into the lists a statement holds.
+//
+// A return is only ever in one of those lists: the lowering pass has already
+// flushed the scaffolding out of every Init that could hold a statement, and
+// the language puts no return in a for statement's post list.
+func (l *lowerer) exitReturns(list []Stmt) []Stmt {
+	if len(list) == 0 {
+		return list
+	}
+	out := make([]Stmt, 0, len(list))
+	for _, s := range list {
+		if s == nil {
+			continue
+		}
+		if s.Op == OReturn {
+			out = append(out, l.exitReturn(s)...)
+			continue
+		}
+		s.Init = l.exitReturns(s.Init)
+		s.Body = l.exitReturns(s.Body)
+		s.Else = l.exitReturns(s.Else)
+		s.Post = l.exitReturns(s.Post)
+		out = append(out, s)
+	}
+	return out
+}
+
+// exitReturn is one return, rewritten.
+func (l *lowerer) exitReturn(s Stmt) []Stmt {
+	pos := s.Pos
+	res := l.fn.Results
+	var out []Stmt
+	switch {
+	case len(s.Args) == 0:
+		// A bare return, which leaves the result objects as they are.
+
+	case len(s.Args) == len(res):
+		if len(res) == 1 {
+			out = append(out, Assign(pos, ref(res[0], pos), s.Args[0]))
+			break
+		}
+		// Every operand is evaluated before any result is written, because an
+		// operand may read a result object: "return y, x" of named results is
+		// a swap, and a store per operand in order would make it a copy.
+		tmps := make([]*Object, 0, len(res))
+		for _, a := range s.Args {
+			o := l.tempObj(a.Type, pos)
+			out = append(out, define(pos, ref(o, pos), a))
+			tmps = append(tmps, o)
+		}
+		for i, o := range tmps {
+			out = append(out, Assign(pos, ref(res[i], pos), ref(o, pos)))
+		}
+
+	default:
+		// return f(), where f returns everything this function returns. It is
+		// the only shape left: ir.Build gives a return one operand per result
+		// or the one call that produces all of them. The call produces every
+		// result before any of them is stored, so the destinations are the
+		// result objects themselves.
+		dst := make([]Expr, 0, len(res))
+		for _, r := range res {
+			dst = append(dst, ref(r, pos))
+		}
+		out = append(out, &Node{Op: OAssign, Pos: pos, Type: voidType, Args: dst, Y: s.Args[0]})
+	}
+	return append(out, &Node{Op: OGoto, Pos: pos, Type: voidType, Label: deferExitLabel})
+}
+
+// print and println.
+//
+// specs/020-ir.md gives the two builtins one row each, and both are the same
+// bracketed sequence: runtime.printlock, one call per operand, the newline
+// that only println writes, and runtime.printunlock.
+//
+// The lock is not decoration. The runtime writes to file descriptor 2 with no
+// buffering, so two goroutines printing at once interleave inside a line, and
+// the bracket is what the language's one guarantee about print rests on.
+//
+// # What this row cannot print yet
+//
+// A string operand reaches runtime.printstring and stops below this pass: a
+// string constant is decomposed into the address of a data symbol, and nothing
+// writes that symbol into the object. So println of a number prints and
+// println of a literal does not, and the missing piece is a channel from the
+// compiler to the object writer for data symbols, which is the same thing the
+// funcval of a closure that captures nothing wants.
+//
+// An interface, a slice and a complex number are refused. Each needs a symbol
+// chosen by the operand's own type, which gc instantiates per type, and this
+// pass has no instantiation.
+
+// printSym returns the runtime symbol that prints a value of t, and the type
+// the operand is converted to first.
+//
+// One symbol per width class rather than one per type, which is what gc does:
+// every signed kind widens to int64 and every unsigned kind to uint64, so a
+// program that prints an int8 and one that prints an int64 call one function.
+func printSym(t *Type) (string, *Type) {
+	switch t.Kind {
+	case Bool:
+		return "runtime.printbool", t
+	case Int8, Int16, Int32, Int64:
+		return "runtime.printint", lowerInt64
+	case Uint8, Uint16, Uint32, Uint64, Uintptr:
+		// A uintptr goes to printuint and not to a symbol of its own, because
+		// it is a number. gc prints it the same way.
+		return "runtime.printuint", lowerUint64
+	case Float32:
+		return "runtime.printfloat32", t
+	case Float64:
+		return "runtime.printfloat64", t
+	case String:
+		return "runtime.printstring", t
+	case Ptr, UnsafePtr, Map, Chan, FuncKind:
+		// All one word, and the runtime prints the word.
+		return "runtime.printpointer", lowerUnsafePtr
+	}
+	return "", nil
+}
+
+func (l *lowerer) printExpr(n Expr) Expr {
+	pos := n.Pos
+	// Every operand is evaluated before the lock is taken. An operand that
+	// calls a function which prints would otherwise deadlock on printlock,
+	// and gc hoists them for the same reason.
+	args := make([]Expr, 0, len(n.Args))
+	syms := make([]string, 0, len(n.Args))
+	for _, a := range n.Args {
+		if a == nil || a.Type == nil {
+			l.refuse(n, "an operand with no type")
+			return n
+		}
+		name, want := printSym(a.Type)
+		if name == "" {
+			l.refuse(n, "an operand of "+a.Type.Kind.String()+" needs a symbol chosen by its own type, which gc instantiates per type")
+			return n
+		}
+		switch a.Op {
+		case OConst, OLocal, OGlobal:
+		default:
+			a = ref(l.spill(a), a.Pos)
+		}
+		if want != a.Type {
+			a = &Node{Op: OConvert, Pos: a.Pos, Type: want, X: a}
+		}
+		args = append(args, a)
+		syms = append(syms, name)
+	}
+	l.emit(runtimeCall(pos, "runtime.printlock"))
+	for i, a := range args {
+		if n.Op == OPrintln && i > 0 {
+			// The separator. gc writes the string constant " " here and then
+			// recognises it again to reach this symbol; the symbol is what the
+			// detour arrives at.
+			l.emit(runtimeCall(pos, "runtime.printsp"))
+		}
+		l.emit(runtimeCall(pos, syms[i], a))
+	}
+	if n.Op == OPrintln {
+		l.emit(runtimeCall(pos, "runtime.printnl"))
+	}
+	return runtimeCall(pos, "runtime.printunlock")
 }

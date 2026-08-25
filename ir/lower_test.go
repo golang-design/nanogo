@@ -32,6 +32,8 @@ type T struct {
 	A, B int
 }
 
+func (t T) M() int { return t.A }
+
 type P struct {
 	A int
 	S []int
@@ -44,14 +46,17 @@ type Arr struct {
 var g int
 var gp *int
 var gs []int
+var gfn func()
 
 func arr2() [2][4]int { return [2][4]int{} }
 
 func mkslice() []int { return gs }
 
+func none()        {}
 func use(int)      {}
 func useAny(any)   {}
-func two() (int, int) { return 1, 2 }
+func one() int         { return 1 }
+func two() (int, int)  { return 1, 2 }
 `
 
 // lowerFunc builds one function from source and lowers it.
@@ -371,7 +376,7 @@ func lowerNames(fn *Func, name string) bool {
 // specs/032-type-descriptors-and-itabs.md unblocked.
 //
 // Each row is checked twice: the runtime symbol it calls, and the descriptor
-// symbol it passes. The second is the half that specs/032 makes load bearing,
+// symbol it passes. The second is the half that specs/032 relies on,
 // because the linker deduplicates a descriptor by name and a name that differs
 // from gc's is a second descriptor for a type that already has one.
 func TestLowerAllocationRows(t *testing.T) {
@@ -894,12 +899,23 @@ func TestLowerRefusals(t *testing.T) {
 		{"range over a map", `func f(m map[int]int) { for k := range m { use(k) } }`, ORange, "mapiterinit"},
 		{"range over a string", `func f(s string) { for i := range s { use(i) } }`, ORange, "UTF-8"},
 		{"range over a channel", `func f(c chan int) { for v := range c { use(v) } }`, ORange, "channel"},
-		{"a closure", `func f() func() { return func() {} }`, OClosure, "no row"},
-		{"defer", `func f() { defer use(1) }`, ODefer, "no row"},
+		{"a closure that captures", `func f(a int) func() int { return func() int { return a } }`, OClosure, "a capture list of 1"},
+		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
+		{"defer of a call with arguments", `func f() { defer use(1) }`, ODefer, "an argument list of 1"},
+		{"go of a method call", `func f(t T) { go t.M() }`, OGo, "an argument list of 1"},
+		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
+		{"defer of a field of function type", `func f(s struct{ H func() }) { defer s.H() }`, ODefer, "a field of a value the builder snapshotted whole"},
+		{"defer of a builtin", `func f(c chan int) { defer close(c) }`, ODefer, "holds a close and not a call"},
+		{"defer of println", `func f(n int) { defer println(n) }`, ODefer, "holds a println and not a call"},
+		{"defer of recover", `func f() { defer recover() }`, ODefer, "holds a recover and not a call"},
 		{"a type assertion", `func f(v any) int { return v.(int) }`, OTypeAssert, "no row"},
+		{"recover whose value is read", `func f() { useAny(recover()) }`, ORecover, "no row"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},
 		{"clear of a map", `func f(m map[int]int) { clear(m) }`, OClear, "mapclear"},
 		{"range over a function", `func f(it func(func(int) bool)) { for v := range it { use(v) } }`, ORange, "range over func"},
+		{"println of an interface", `func f(v any) { println(v) }`, OPrintln, "an operand of interface"},
+		{"print of a slice", `func f(s []int) { print(s) }`, OPrint, "an operand of slice"},
+		{"println of a complex number", `func f(c complex128) { println(c) }`, OPrintln, "an operand of complex128"},
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			fn, err := lowerFunc(t, tc.body, "f")
@@ -1391,5 +1407,490 @@ L:
 			t.Fatalf("the label names %d statements, want the loop alone:\n%s",
 				len(list), buildDump(fn))
 		}
+	}
+}
+
+// Closures, defer and go: specs/033-closures-defer-panic.md's three rows that
+// a callee which never reads the context register can reach.
+
+// lowerCount is how many times a lowered body calls a runtime function.
+func lowerCount(fn *Func, name string) int {
+	n := 0
+	for _, c := range lowerCalls(fn) {
+		if c == name {
+			n++
+		}
+	}
+	return n
+}
+
+// lowerOps counts the nodes of one operation in a lowered body.
+func lowerOps(fn *Func, op Op) int {
+	n := 0
+	for _, s := range fn.Body {
+		Walk(s, func(m *Node) bool {
+			if m.Op == op {
+				n++
+			}
+			return true
+		})
+	}
+	return n
+}
+
+// TestLowerClosureWithNoCaptures checks the funcval a function literal becomes.
+//
+// One word on the heap holding the entry point, and the value is that word's
+// address read as the function type. The word is uintptr, which is what keeps
+// the collector from tracing a text address.
+func TestLowerClosureWithNoCaptures(t *testing.T) {
+	fn := lowerOK(t, `func f() func() int { return func() int { return 3 } }`)
+	if !lowerCalled(fn, "runtime.newobject") {
+		t.Errorf("the funcval is not allocated: %v", lowerCalls(fn))
+	}
+	// The store of the entry point: the address of a function symbol, written
+	// through the pointer the allocation returned.
+	found := false
+	for _, s := range fn.Body {
+		Walk(s, func(m *Node) bool {
+			if !IsAssign(m) || m.X == nil || m.X.Op != ODeref || m.Y == nil {
+				return true
+			}
+			if m.X.Type == nil || m.X.Type.Kind != Uintptr {
+				t.Errorf("the funcval word is %v, want uintptr", m.X.Type)
+			}
+			y := m.Y
+			if y.Op == OConvert {
+				y = y.X
+			}
+			if y != nil && y.Op == OAddr && y.X != nil && y.X.Op == OGlobal &&
+				y.X.Obj != nil && y.X.Obj.Class == ClassFunc {
+				found = true
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Errorf("the entry point is not stored into the funcval:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerClosureIsCallable checks that the value the row produces has the
+// function's type, which is what makes the call an indirect call rather than a
+// load of a pointer.
+func TestLowerClosureIsCallable(t *testing.T) {
+	fn := lowerOK(t, `func f() int { g := func() int { return 3 }; return g() }`)
+	found := false
+	for _, s := range fn.Body {
+		Walk(s, func(m *Node) bool {
+			if m.Op == OCall && m.X != nil && m.X.Type != nil && m.X.Type.Kind == FuncKind &&
+				m.X.Op == OLocal {
+				found = true
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Errorf("the call through the value is not an indirect call:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerDeferThroughASymbol checks the defer of a call to a known function.
+func TestLowerDeferThroughASymbol(t *testing.T) {
+	fn := lowerOK(t, `func f() { defer none() }`)
+	if !lowerCalled(fn, "runtime.deferproc") {
+		t.Errorf("the defer did not reach deferproc: %v", lowerCalls(fn))
+	}
+	if !lowerCalled(fn, "runtime.newobject") {
+		t.Errorf("the funcval of the deferred symbol is not allocated: %v", lowerCalls(fn))
+	}
+	if n := lowerCount(fn, "runtime.deferreturn"); n != 1 {
+		t.Errorf("the function calls deferreturn %d times, want 1:\n%s", n, buildDump(fn))
+	}
+}
+
+// TestLowerDeferThroughAValue checks that a value of function type is deferred
+// as it is.
+//
+// No funcval is built, because the value already is one. That is also what
+// lets a closure gc compiled be deferred: the runtime calls it, and the
+// runtime sets the context register.
+func TestLowerDeferThroughAValue(t *testing.T) {
+	fn := lowerOK(t, `func f(h func()) { defer h() }`)
+	if !lowerCalled(fn, "runtime.deferproc") {
+		t.Errorf("the defer did not reach deferproc: %v", lowerCalls(fn))
+	}
+	if lowerCalled(fn, "runtime.newobject") {
+		t.Errorf("a funcval was built for a value that is one:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerDeferGivesTheFunctionOneExit is the correctness rule of the row.
+//
+// cmd/link records the offset of the first call to runtime.deferreturn it
+// finds, and runtime.recovery jumps to it. Two call sites would make a recover
+// resume in the epilogue of a return the program did not take.
+func TestLowerDeferGivesTheFunctionOneExit(t *testing.T) {
+	fn := lowerOK(t, `func f(n int) int {
+		defer none()
+		if n > 0 {
+			return n
+		}
+		if n < -1 {
+			return -n
+		}
+		return 0
+	}`)
+	if n := lowerCount(fn, "runtime.deferreturn"); n != 1 {
+		t.Errorf("the function calls deferreturn %d times, want 1:\n%s", n, buildDump(fn))
+	}
+	if n := lowerOps(fn, OLabel); n != 1 {
+		t.Errorf("the function has %d labels, want 1:\n%s", n, buildDump(fn))
+	}
+	// Three returns became three jumps, and the epilogue holds the only one
+	// left.
+	if n := lowerOps(fn, OGoto); n != 3 {
+		t.Errorf("the function has %d jumps to the exit, want 3:\n%s", n, buildDump(fn))
+	}
+	if n := lowerOps(fn, OReturn); n != 1 {
+		t.Errorf("the function has %d returns, want 1:\n%s", n, buildDump(fn))
+	}
+	if len(fn.Results) != 1 || !fn.Results[0].Addrtaken {
+		t.Errorf("the result is not in the frame, so a recover would resume with it in a register")
+	}
+}
+
+// TestLowerDeferKeepsTheOrderOfResults checks the swap.
+//
+// "return y, x" of named results reads both before it writes either. A store
+// per operand in source order would make the swap a copy, and the function
+// would return x twice.
+func TestLowerDeferKeepsTheOrderOfResults(t *testing.T) {
+	fn := lowerOK(t, `func f() (x, y int) { defer none(); x = 1; y = 2; return y, x }`)
+	// Two temporaries hold the operands, and the results are written from
+	// them. The count of assignments whose source is a result object is what
+	// says the operands were read first.
+	temps := 0
+	for _, s := range fn.Body {
+		Walk(s, func(m *Node) bool {
+			if IsAssign(m) && m.X != nil && m.X.Op == OLocal && m.X.Obj != nil &&
+				m.X.Obj.Class == ClassLocal && m.Y != nil && m.Y.Op == OLocal &&
+				m.Y.Obj != nil && m.Y.Obj.Class == ClassResult {
+				temps++
+			}
+			return true
+		})
+	}
+	if temps != 2 {
+		t.Errorf("%d operands were read into temporaries, want 2:\n%s", temps, buildDump(fn))
+	}
+}
+
+// TestLowerDeferInALoop checks that a defer in a loop needs no special form.
+//
+// runtime.deferproc allocates the record, so the number of records is not
+// something this pass has to know. specs/033's stack-allocated and open-coded
+// forms are the ones a loop excludes, and neither is built.
+func TestLowerDeferInALoop(t *testing.T) {
+	fn := lowerOK(t, `func f(n int) { for i := 0; i < n; i++ { defer none() } }`)
+	if !lowerCalled(fn, "runtime.deferproc") {
+		t.Errorf("the defer did not reach deferproc: %v", lowerCalls(fn))
+	}
+	if n := lowerCount(fn, "runtime.deferreturn"); n != 1 {
+		t.Errorf("the function calls deferreturn %d times, want 1:\n%s", n, buildDump(fn))
+	}
+}
+
+// TestLowerGo checks that a go statement becomes runtime.newproc and owes the
+// function no exit.
+func TestLowerGo(t *testing.T) {
+	fn := lowerOK(t, `func f() { go none() }`)
+	if !lowerCalled(fn, "runtime.newproc") {
+		t.Errorf("the go statement did not reach newproc: %v", lowerCalls(fn))
+	}
+	if lowerCalled(fn, "runtime.deferreturn") {
+		t.Errorf("a go statement asked for a deferreturn:\n%s", buildDump(fn))
+	}
+	if n := lowerOps(fn, OLabel); n != 0 {
+		t.Errorf("a go statement gave the function an exit label:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerGoOfALiteral checks the shape a go statement of a function literal
+// takes: the literal is a funcval and the statement passes it.
+func TestLowerGoOfALiteral(t *testing.T) {
+	fn := lowerOK(t, `func f() { go func() { none() }() }`)
+	if !lowerCalled(fn, "runtime.newproc") {
+		t.Errorf("the go statement did not reach newproc: %v", lowerCalls(fn))
+	}
+	if !lowerCalled(fn, "runtime.newobject") {
+		t.Errorf("the literal's funcval is not allocated: %v", lowerCalls(fn))
+	}
+}
+
+// TestLowerDeferNamesTheDescriptorItAllocates checks that the funcval's type
+// reaches the caller that emits descriptors.
+//
+// specs/032-type-descriptors-and-itabs.md makes the set a package emits
+// exactly the set its code names, so a row that allocates and reports nothing
+// links against a symbol nothing defines.
+func TestLowerDeferNamesTheDescriptorItAllocates(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, lowerPrelude+"\nfunc f() { defer none() }")
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	types, err := LowerAndCollect(buildFuncOf(t, out, "f"))
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	found := false
+	for _, ty := range types {
+		if ty.Kind == Uintptr {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the funcval's type is not in the descriptors the pass named: %v", types)
+	}
+}
+
+// TestLowerRecover checks the shape of the idiom.
+//
+// recover() as a statement of a deferred function, with its value discarded.
+// The call must be the deferred function's own: runtime.gorecover counts the
+// frames between itself and runtime.gopanic and recovers only when there is
+// exactly one.
+func TestLowerRecover(t *testing.T) {
+	fn := lowerOK(t, `func f() { recover() }`)
+	if !lowerCalled(fn, "runtime.gorecover") {
+		t.Errorf("recover did not reach gorecover: %v", lowerCalls(fn))
+	}
+	if n := len(fn.Body); n != 1 {
+		t.Errorf("the body holds %d statements, want the call and nothing else:\n%s", n, buildDump(fn))
+	}
+}
+
+// TestLowerPrintln checks specs/020-ir.md's println row.
+//
+// The bracket is the row: the lock, one call per operand, a separator between
+// them, the newline, and the unlock. The lock is what the language's one
+// guarantee about print rests on, so its absence is a correctness failure and
+// not a missing optimisation.
+func TestLowerPrintln(t *testing.T) {
+	fn := lowerOK(t, `func f(a int, b bool) { println(a, b) }`)
+	want := []string{
+		"runtime.printlock",
+		"runtime.printint",
+		"runtime.printsp",
+		"runtime.printbool",
+		"runtime.printnl",
+		"runtime.printunlock",
+	}
+	got := lowerCalls(fn)
+	if len(got) != len(want) {
+		t.Fatalf("the row called %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("call %d is %s, want %s", i, got[i], want[i])
+		}
+	}
+}
+
+// TestLowerPrint checks that print writes no separator and no newline, which
+// is the whole difference between the two rows.
+func TestLowerPrint(t *testing.T) {
+	fn := lowerOK(t, `func f(a, b int) { print(a, b) }`)
+	for _, unwanted := range []string{"runtime.printsp", "runtime.printnl"} {
+		if lowerCalled(fn, unwanted) {
+			t.Errorf("print called %s:\n%s", unwanted, buildDump(fn))
+		}
+	}
+	if !lowerCalled(fn, "runtime.printlock") || !lowerCalled(fn, "runtime.printunlock") {
+		t.Errorf("print is not bracketed by the lock: %v", lowerCalls(fn))
+	}
+}
+
+// TestLowerPrintWidensItsOperands checks the width classes.
+//
+// One symbol per class rather than one per type: every signed kind reaches
+// printint and every unsigned kind printuint, and a uintptr is a number and
+// reaches printuint too rather than being handed to the collector as a
+// pointer.
+func TestLowerPrintWidensItsOperands(t *testing.T) {
+	for _, tc := range []struct{ decl, want string }{
+		{"a int8", "runtime.printint"},
+		{"a uint16", "runtime.printuint"},
+		{"a uintptr", "runtime.printuint"},
+		{"a float32", "runtime.printfloat32"},
+		{"a float64", "runtime.printfloat64"},
+		{"a string", "runtime.printstring"},
+		{"a *int", "runtime.printpointer"},
+		{"a map[int]int", "runtime.printpointer"},
+		{"a func()", "runtime.printpointer"},
+	} {
+		fn := lowerOK(t, "func f("+tc.decl+") { print(a) }")
+		if !lowerCalled(fn, tc.want) {
+			t.Errorf("print of %s called %v, want %s", tc.decl, lowerCalls(fn), tc.want)
+		}
+	}
+}
+
+// TestLowerPrintEvaluatesBeforeTheLock is the deadlock this row would have.
+//
+// printlock is held across the whole statement, so an operand that calls a
+// function which prints must be evaluated before the lock is taken.
+func TestLowerPrintEvaluatesBeforeTheLock(t *testing.T) {
+	fn := lowerOK(t, `func f() { println(one()) }`)
+	// The first statement is the call that produces the operand, and the lock
+	// is after it.
+	if len(fn.Body) == 0 || !IsAssign(fn.Body[0]) {
+		t.Fatalf("the operand is not evaluated first:\n%s", buildDump(fn))
+	}
+	if c := lowerCalls(fn); len(c) == 0 || c[0] != "runtime.printlock" {
+		t.Errorf("the runtime calls are %v, and the lock is not the first", c)
+	}
+}
+
+// TestLowerPrintOfNothing checks the empty statement, which is legal Go.
+func TestLowerPrintOfNothing(t *testing.T) {
+	fn := lowerOK(t, `func f() { println() }`)
+	want := []string{"runtime.printlock", "runtime.printnl", "runtime.printunlock"}
+	got := lowerCalls(fn)
+	if len(got) != len(want) {
+		t.Fatalf("the row called %v, want %v", got, want)
+	}
+}
+
+// TestLowerDeferOfAPackageLevelFunctionValue checks that the value is copied
+// at the statement.
+//
+// ir.Build snapshots every callee but a global, so a package-level variable of
+// function type reaches this pass as the variable itself. The specification
+// evaluates the function value when the defer statement runs, so the value is
+// copied here rather than read again when the call runs.
+func TestLowerDeferOfAPackageLevelFunctionValue(t *testing.T) {
+	fn := lowerOK(t, `func f() { defer gfn() }`)
+	if !lowerCalled(fn, "runtime.deferproc") {
+		t.Errorf("the defer did not reach deferproc: %v", lowerCalls(fn))
+	}
+	copied := false
+	for _, s := range fn.Body {
+		Walk(s, func(m *Node) bool {
+			if IsAssign(m) && m.Y != nil && m.Y.Op == OGlobal && m.Y.Type != nil &&
+				m.Y.Type.Kind == FuncKind {
+				copied = true
+			}
+			return true
+		})
+	}
+	if !copied {
+		t.Errorf("the value was not copied at the statement:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerDeferOfATupleReturn checks the return whose one operand is the call
+// that produces every result.
+func TestLowerDeferOfATupleReturn(t *testing.T) {
+	fn := lowerOK(t, `func f() (int, int) { defer none(); return two() }`)
+	found := false
+	for _, s := range fn.Body {
+		Walk(s, func(m *Node) bool {
+			if IsAssign(m) && m.X == nil && len(m.Args) == 2 && m.Y != nil && m.Y.Op == OCall {
+				found = true
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Errorf("the call does not write both results:\n%s", buildDump(fn))
+	}
+	if n := lowerCount(fn, "runtime.deferreturn"); n != 1 {
+		t.Errorf("the function calls deferreturn %d times, want 1:\n%s", n, buildDump(fn))
+	}
+}
+
+// TestBuildTellsAnEmptyBodyFromNoBody is the distinction ir.Func.Bodyless
+// carries.
+//
+// "func f() {}" is a complete Go function that does nothing and must be
+// compiled. "func f()" with no block is satisfied elsewhere. Both leave Body
+// empty, so a consumer that read only len(Body) refused the first for the
+// reason that belongs to the second, which is a legal program rejected.
+func TestBuildTellsAnEmptyBodyFromNoBody(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, `package p
+
+func empty() {}
+
+func external()
+`)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{{"empty", false}, {"external", true}} {
+		fn := buildFuncOf(t, out, tc.name)
+		if len(fn.Body) != 0 {
+			t.Errorf("%s has a body of %d statements", tc.name, len(fn.Body))
+		}
+		if fn.Bodyless != tc.want {
+			t.Errorf("%s.Bodyless is %v, want %v", tc.name, fn.Bodyless, tc.want)
+		}
+	}
+}
+
+// TestLowerDeferDoesNotRunItsBuiltin is the miscompile this ordering prevents.
+//
+// A deferred builtin is a row this pass refuses, and it has to be refused
+// before the deferred call is lowered rather than after. Lowering a builtin
+// emits its runtime calls into the list being built, so "defer println(x)"
+// would print where the statement is and defer only runtime.printunlock: a
+// wrong program rather than a refused one.
+func TestLowerDeferDoesNotRunItsBuiltin(t *testing.T) {
+	fn, err := lowerFunc(t, `func f(n int) { defer println(n) }`, "f")
+	if err == nil {
+		t.Fatalf("the row was lowered:\n%s", buildDump(fn))
+	}
+	if c := lowerCalls(fn); len(c) != 0 {
+		t.Errorf("the refused defer left %v in the body:\n%s", c, buildDump(fn))
+	}
+}
+
+// TestLowerDeferRewritesEveryReturn checks the lists exitReturns has to reach.
+//
+// A return is in a block, in a loop body, in a switch clause or in the body of
+// a labelled statement, and one it did not reach would leave the frame with
+// its _defer record still on the goroutine's chain.
+func TestLowerDeferRewritesEveryReturn(t *testing.T) {
+	fn := lowerOK(t, `func f(n int) int {
+		defer none()
+		switch n {
+		case 0:
+			return 1
+		case 1:
+			for i := 0; i < n; i++ {
+				return 2
+			}
+		}
+		{
+			if n > 9 {
+				return 3
+			}
+		}
+	loop:
+		for {
+			break loop
+		}
+		return 4
+	}`)
+	if n := lowerOps(fn, OReturn); n != 1 {
+		t.Errorf("the function has %d returns, want the epilogue's only:\n%s", n, buildDump(fn))
+	}
+	if n := lowerCount(fn, "runtime.deferreturn"); n != 1 {
+		t.Errorf("the function calls deferreturn %d times, want 1:\n%s", n, buildDump(fn))
 	}
 }
