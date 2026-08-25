@@ -30,10 +30,10 @@ compiles today is zero, and no arithmetic over the language subset changes that.
 
 The second-order measure is the language, and it says the same thing more
 slowly. The IR builder produces 39,947 functions for 536 packages of the
-distribution. SSA construction accepts 17,367 of them, two in five. 17,285 of
-those lower completely to arm64 machine operations and 17,239 carry a stack
+distribution. SSA construction accepts 17,905 of them, two in five. 17,809 of
+those lower completely to arm64 machine operations and 17,758 carry a stack
 map, so the back half of the pipeline is in better shape than the front of it.
-The largest single refusal is now the composite literal, at 5,379 functions,
+The largest single refusal is now the composite literal, at 5,893 functions,
 and every large refusal after it is a row of [020](020-ir.md)'s lowering table
 that no pass performs. `ssagen`'s link-and-run tests still say in a comment
 that their sources contain no assignment statement because `ssa.Build` refuses

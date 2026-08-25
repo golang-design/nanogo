@@ -99,7 +99,7 @@ believed.
 | --- | --- | --- | --- |
 | [030](030-abi.md) | ABI | `in progress` | layout and calling convention |
 | [031](031-runtime-lowering.md) | Runtime lowering | `in progress` | the calls the compiler generates |
-| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `draft` | and the symbol namespace; not written |
+| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `in progress` | and the symbol namespace; descriptors are named, encoded and referenced, itabs are not |
 | [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | `draft` | not written |
 | [034](034-write-barriers.md) | Write barriers | `draft` | not written |
 | [035](035-goroutines-and-stack-growth.md) | Goroutines and stack growth | `in progress` | prologue built; `newproc` not |
@@ -143,10 +143,10 @@ believed.
 
 | | |
 | --- | --- |
-| Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the typed IR, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, the object writer, the arm64 encoder, and the driver |
+| Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the typed IR, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, type descriptors, the object writer, the arm64 encoder, and the driver |
 | Proved | `go tool link` links a nanogo object against the real Go runtime into a binary that runs, and a real collector honours nanogo's stack maps |
 | The largest gap | SSA construction accepts two functions in five of the distribution. Nobody performs [020](020-ir.md)'s lowering table, so a composite literal alone blocks 5,379 functions. [021](021-ssa-construction.md) |
-| Not started | Export data, escape analysis, inlining, generics instantiation, type descriptors, itabs, closures, `defer`, `panic`, write barriers, goroutines, the linker, the assembler, DWARF, and the amd64 backend |
+| Not started | Export data, escape analysis, inlining, generics instantiation, itabs, closures, `defer`, `panic`, write barriers, goroutines, the linker, the assembler, DWARF, and the amd64 backend |
 | Decided against | Assembly text as a build path, a from-scratch type checker, GC-shape stenciling with dictionaries |
 
 ## The spikes

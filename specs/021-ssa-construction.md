@@ -160,36 +160,35 @@ expression walk, and a node in that set ends the function with the error
 The two together are the shape of the middle end today, and the number is the
 one fact this spec most needs to carry:
 
-**SSA construction accepts 17,367 of the 39,947 functions the IR builder
-produces for the Go distribution, which is 43.5%.** 17,285 of those lower
+**SSA construction accepts 17,905 of the 39,947 functions the IR builder
+produces for the Go distribution, which is 44.8%.** 17,809 of those lower
 completely to arm64 machine operations, so the older claim that *what
 construction accepts, the back end finishes* is now 99.5% true rather than
-100% true. The 82 exceptions are named below.
+100% true. The 96 exceptions are named below.
 
 The refusals, by reason, over 536 packages:
 
 | Functions refused | Reason |
 | --- | --- |
-| 4,458 | `compositelit reached SSA construction` |
-| 2,680 | `len reached SSA construction` |
-| 2,191 | `assign: a multi-value assignment with a result wider than a register` |
-| 2,009 | `convert: a conversion from <T> to <interface>` |
-| 1,527 | `range reached SSA construction` |
-| 1,115 | `field <n> of <interface>` |
-| 1,074 | `closure reached SSA construction` |
-| 921 | `compositelit: an address is not built yet` |
-| 911 | `panic reached SSA construction` |
-| 832 | `slice reached SSA construction` |
-| 804 | `make reached SSA construction` |
-| 588 | `defer reached SSA construction` |
-| 493 | `append reached SSA construction` |
-| 429 | `assign: a multi-value assignment from typeassert` |
-| 331 | `index: an index of map is not built yet` |
-| 320 | `new reached SSA construction` |
-| 292 | `the address of <name> is taken but it lives in a value` |
-| 287 | `assign: a multi-value assignment from index` |
-| 272, 257 | `typeassert`, `typeswitch` |
-| 133 to 9 each | `print`, `recover`, `copy`, `min`, `select`, `println`, `send`, `recv`, `cap`, `max`, `clear`, `real`, `close`, `delete`, `complex`, `imag`, `go`, and the five `unsafe` intrinsics |
+| 4,841 | `compositelit reached SSA construction` |
+| 2,800 | `len reached SSA construction` |
+| 2,253 | `convert: a conversion from <T> to <interface>` |
+| 1,605 | `range reached SSA construction` |
+| 1,371 | `field <n> of <interface>` |
+| 1,132 | `closure reached SSA construction` |
+| 1,052 | `compositelit: an address is not built yet` |
+| 934 | `panic reached SSA construction` |
+| 903 | `slice reached SSA construction` |
+| 843 | `make reached SSA construction` |
+| 672 | `defer reached SSA construction` |
+| 529 | `append reached SSA construction` |
+| 450 | `assign: a multi-value assignment from typeassert` |
+| 346 | `index: an index of map is not built yet` |
+| 334 | `new reached SSA construction` |
+| 318 | `the address of <name> is taken but it lives in a value` |
+| 290 | `assign: a multi-value assignment from index` |
+| 279, 276 | `typeassert`, `typeswitch` |
+| 135 to 11 each | `print`, `recover`, `copy`, `min`, `select`, `println`, `send`, `recv`, `cap`, `max`, `clear`, `real`, `close`, `delete`, `complex`, `imag`, `go`, and the five `unsafe` intrinsics |
 | the rest | addresses of a call result and of a constant |
 
 Every row of that table except the two multi-value assignment rows and the
@@ -197,16 +196,20 @@ Every row of that table except the two multi-value assignment rows and the
 unpaid. No pass performs it, so every construct in it arrives here intact and
 is refused.
 
-The two multi-value rows are not a lowering gap and not a construction gap
-either. They are a limit in `ssa/decompose.go`: `SelectN`'s index means the
-result before decomposition and the machine word of the result area after it,
-and the renumbering between the two states that a part of result $i$ is word
-$i+j$, which holds only when every result before $i$ is one word wide. A wide
-result at index zero expands into the words the later indices already claim,
-and a wide one above zero is not split at all. Construction therefore refuses a
-multi-value assignment with any result wider than a register rather than
-building two reads that name one word. Fixing the renumbering is worth 2,620
-functions and it is that pass's to fix.
+The two multi-value rows left are a two-value type assertion and a two-value
+map read, and both are the corresponding single-value form's refusal: neither
+form is built.
+
+A third such row is gone. Construction refused a multi-value assignment with
+any result wider than a register, 2,191 functions, because `SelectN`'s index
+means the result before decomposition and the machine word of the result area
+after it, and `ssa/decompose.go` renumbered a part of result $i$ as word $i+j$,
+which holds only when every result before $i$ is one word wide. The pass now
+sums the widths of the earlier results, so the form is built:
+[025](025-lowering-and-rules.md) carries the numbering. Lifting the refusal
+moved 538 functions past construction and left the other 1,653 refused for a
+reason they held as well, most of them a composite literal or a conversion to
+an interface.
 
 ### What the assignment case cost and bought
 
@@ -351,7 +354,7 @@ Go-specific operation remains by the end. Construction refuses one instead:
 that is not is an error naming InvGoSpecific". Nothing makes them gone. This
 was found by reading the two `IsGoSpecific` guards and the twelve
 `b.unsupported` call sites in `ssa/build.go`, then counting the errors over the
-IR corpus, which is where 8,238 of 39,947 came from. It is 17,367 of 39,947
+IR corpus, which is where 8,238 of 39,947 came from. It is 17,905 of 39,947
 now, and construction still refuses rather than lowers.
 
 **Three of the refusals were stale conventions in this pass, not gaps in the
@@ -374,18 +377,22 @@ tests cannot use.
 
 **The claim that what construction accepts the back end finishes is now 99.5%
 rather than 100%.** `reached == lowered == 8,238` held because the accepted set
-was small enough to be uniform. It is 17,285 of 17,367 now. Seventy of the 82
+was small enough to be uniform. It is 17,809 of 17,905 now. Most of the 96
 exceptions hold an array or a struct that decomposition leaves whole and the
-other twelve name no operation the corpus test can resolve. They were always
+rest name no operation the corpus test can resolve. They were always
 going to appear as the accepted set widened.
 
-**A multi-value assignment is bounded by a pass below this one.** Construction
-refuses one whose call has any result wider than a register, which is 2,620
-functions across two rows of the table. `ssa/decompose.go` renumbers a part of
+**A multi-value assignment was bounded by a pass below this one, and is not
+any more.** Construction refused one whose call has any result wider than a
+register, 2,191 functions, because `ssa/decompose.go` renumbered a part of
 result $i$ as word $i+j$, which holds only when every result before $i$ is one
-word. Building the reads anyway would produce two of them naming one word, and
-the code generator would then place one result over another. This is recorded
-here rather than fixed here because the renumbering is that pass's.
+word. Building the reads anyway would have produced two of them naming one
+word, and the code generator would then have placed one result over another.
+The pass now sums the widths of the earlier results and the refusal is gone.
+What this pass owes the numbering is the property the refusal hid: **every
+result of a call is read, including one assigned to the blank identifier**,
+because a width that is not there cannot be summed. `multiAssign` emits one
+`SelectN` per result for that reason and for the code generator's.
 
 **Map assignment and the two-value map read are refused for a reason outside
 both specs.** `ir.Build` emits a plain `ir.OIndex` over a map-typed operand,

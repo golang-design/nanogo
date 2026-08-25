@@ -195,6 +195,7 @@ var gatedPackages = []struct{ name, importPath string }{
 	{"obj", "golang.design/x/nanogo/obj"},
 	{"obj/arm64", "golang.design/x/nanogo/obj/arm64"},
 	{"rtsym", "golang.design/x/nanogo/rtsym"},
+	{"rtype", "golang.design/x/nanogo/rtype"},
 	{"driver", "golang.design/x/nanogo/driver"},
 }
 

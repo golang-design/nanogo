@@ -168,7 +168,7 @@ and M4 are partly built and neither gate is met.**
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
 | M2 types | done, less the export data writer | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads gc's export data |
 | M3 first binary | **in progress** | the pipeline is built end to end and a compiled function links against the real runtime and runs; a leaf package under `-toolexec` does not compile |
-| M4 runtime interface | **in progress** | liveness, stack maps, the ABI and the stack growth check are built; type descriptors, itabs, closures, `defer`, `panic`, write barriers and goroutines are not |
+| M4 runtime interface | **in progress** | liveness, stack maps, the ABI, the stack growth check and type descriptors are built, and a descriptor reaches no object file yet; itabs, closures, `defer`, `panic`, write barriers and goroutines are not |
 | M5 to M10 | not started | |
 
 ### What M3 reached, and what it did not
@@ -187,15 +187,14 @@ met, because the language nanogo accepts is narrower than any real package.
 The corpus says how much narrower, and it is one measurement with two halves.
 The IR builder produces a typed tree for 536 packages of the Go distribution,
 39,947 functions and 4,188,075 nodes.
-**17,367 of those functions reach SSA construction**, and 17,285 of them
-lower completely to arm64 machine operations. 17,239 of the 17,367 carry a
-stack map, over 117,228 safepoints, and 10,242 of them have a pointer bit set.
+**17,905 of those functions reach SSA construction**, and 17,809 of them
+lower completely to arm64 machine operations. 17,758 of the 17,905 carry a
+stack map, over 120,493 safepoints, and 10,727 of them have a pointer bit set.
 
-The remaining 22,580 functions never reach SSA. Construction refuses them by
-name. A composite literal accounts for 4,458 of them, then `len` for 2,680, a
-multi-value assignment with a result wider than a register for 2,191, a
-conversion to an interface for 2,009 and `range` for 1,527. The README carries
-the full table. [021](021-ssa-construction.md) owns the pass and the gap.
+The remaining 22,042 functions never reach SSA. Construction refuses them by
+name. A composite literal accounts for 4,841 of them, then `len` for 2,800, a
+conversion to an interface for 2,253, `range` for 1,605 and a method selected
+out of an interface for 1,371. The README carries the full table. [021](021-ssa-construction.md) owns the pass and the gap.
 
 ### Why part of M4 was built before M3 was finished
 
@@ -219,13 +218,14 @@ package:
 | `syntax` | 99% | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) |
 | `types2` | excluded | [012](012-type-checking.md); gated by upstream's suite |
 | `loader` | 98% | [014](014-package-loader.md), G1 half |
-| `ir` | 95% | [020](020-ir.md); builds 536 packages of the distribution |
+| `ir` | 94% | [020](020-ir.md); builds 536 packages of the distribution |
 | `ssa` | 96% | [021](021-ssa-construction.md), with the verifier of that spec |
 | `ssa/rules` | 97% | [025](025-lowering-and-rules.md), [042](042-arm64-backend.md) |
 | `ssagen` | 92% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |
 | `obj` | 98% | [040](040-object-format.md) |
 | `obj/arm64` | 99% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
 | `rtsym` | 100% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |
+| `rtype` | 96% | [032](032-type-descriptors-and-itabs.md) |
 | `export` | 96% | [015](015-export-data.md) |
 | `export/pkgbits` | 92% | [015](015-export-data.md) |
 | `driver` | 97% | [050](050-driver.md), [051](051-build-integration.md) |
@@ -267,10 +267,10 @@ the remainder is values wider than a machine register, went with it.
 **Then construction learned the assignment statement and both numbers moved
 again.** `ssa/build.go` had no case for `ir.OAssign`, none for `ir.OCase`, and
 read a `for` statement's post list out of `Else` rather than `Post`. The three
-were 25,036 refusals and one miscompile. The corpus now reports 17,367 reaching
-SSA and 17,285 lowering, so the identity that held while the accepted set was
-small is gone: what is left undecomposed is 70 functions holding a wide
-`SelectN`, 9 holding an array and 77 holding a struct, and 82 of them do not
+were 25,036 refusals and one miscompile. The corpus now reports 17,905 reaching
+SSA and 17,809 lowering, so the identity that held while the accepted set was
+small is gone: what is left undecomposed is 87 functions holding a wide
+`SelectN`, 12 holding an array and 93 holding a struct, and 96 of them do not
 lower.
 
 **The end-to-end test could not have caught the miscompile, and the reason

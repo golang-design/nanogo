@@ -135,16 +135,17 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | --- | --- | --- |
 | [`syntax`](syntax/) | 99% | 19,674 files agree with `go/scanner` on tokens and positions; 16,293 agree with `go/parser` on accept, reject and first error |
 | [`types2`](types2/) | see below | a fork of the Go type checker, re-pointed at nanogo's tree: 613 subtests, a 375-entry errorcheck corpus, and it type-checks nanogo's own source |
-| [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 523 packages agree with `go list` |
+| [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 524 packages agree with `go list` |
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
 | [`obj/arm64`](obj/arm64/) | 99% | 981,124 encodings agree with `go tool asm`, with none disagreeing |
-| [`ir`](ir/) | 95% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 39,947 functions and 4,188,075 nodes |
+| [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 39,947 functions and 4,188,075 nodes |
 | [`ssa`](ssa/) | 96% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant |
 | [`ssa/rules`](ssa/rules/) | 97% | the arm64 rule set, checked by lowering the corpus and by a verifier after every rule |
 | [`export`](export/) | 96% | reads gc's export data for all 375 packages of the standard library, 13,518 declarations, and for a fixture carrying every encoding the format has, checked declaration by declaration |
 | [`export/pkgbits`](export/pkgbits/) | 92% | the container, ported from `internal/pkgbits` and exercised by every archive the reader above reads |
 | [`ssagen`](ssagen/) | 92% | emits machine code that **links and runs**, and stack maps a real collector honours |
-| [`rtsym`](rtsym/) | 100% | 45 runtime signatures checked against the runtime's own source |
+| [`rtsym`](rtsym/) | 100% | 59 runtime signatures checked against the runtime's own source |
+| [`rtype`](rtype/) | 96% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
 | [`driver`](driver/) | 97% | a real `go build -toolexec` completes |
 
 `types2` is excluded from the coverage gate, with the reason recorded in
@@ -164,38 +165,40 @@ with the slot killed is freed, and 200,000 frames are grown, copied and unwound.
 
 The honest measure of reach is the corpus, and it is one number with two halves.
 
-**17,367 of those functions reach SSA construction**, and 17,285 of them lower
-completely to arm64 machine operations. 17,239 of the 17,367 carry a stack map.
-What is left undecomposed is 70 functions holding a wide `SelectN`, 9 holding
-an array and 77 holding a struct.
+**17,905 of those functions reach SSA construction**, and 17,809 of them lower
+completely to arm64 machine operations. 17,758 of the 17,905 carry a stack map.
+What is left undecomposed is 87 functions holding a wide `SelectN`, 12 holding
+an array and 93 holding a struct.
 
-The remaining 22,580 functions never reach SSA at all. Construction refuses
+The remaining 22,042 functions never reach SSA at all. Construction refuses
 them by name, and the counts say what is missing:
 
 | Functions refused | Because construction does not build |
 | --- | --- |
-| 4,458 | a composite literal |
-| 2,680 | `len` |
-| 2,191 | a multi-value assignment whose results are wider than a register |
-| 2,009 | a conversion to an interface, which needs a type descriptor |
-| 1,527 | `range` |
-| 1,115 | a method selected out of an interface |
-| 1,074 | a closure |
-| 921 | the address of a composite literal |
-| 911 | `panic` |
-| 832 | a slice expression |
-| 804 | `make` |
-| 588 | `defer` |
-| 493 | `append` |
-| 429 | a multi-value assignment from a type assertion |
-| 331 | an index of a map |
-| the rest | `new`, a two-value map read, type switches, type assertions, `print`, `recover`, `copy`, `min` and `max`, `select`, `send`, `recv`, `cap`, `clear`, and the `unsafe` intrinsics |
+| 4,841 | a composite literal |
+| 2,800 | `len` |
+| 2,253 | a conversion to an interface, which needs a type descriptor |
+| 1,605 | `range` |
+| 1,371 | a method selected out of an interface |
+| 1,132 | a closure |
+| 1,052 | the address of a composite literal |
+| 934 | `panic` |
+| 903 | a slice expression |
+| 843 | `make` |
+| 672 | `defer` |
+| 529 | `append` |
+| 450 | a multi-value assignment from a type assertion |
+| 346 | an index of a map |
+| 334 | `new` |
+| the rest | the address of a value, a two-value map read, type switches, type assertions, `print`, `recover`, `copy`, `min` and `max`, `select`, `send`, `recv`, `cap`, `clear`, and the `unsafe` intrinsics |
 
-Every row of that table except the two multi-value ones is a row of
-[`specs/020`](specs/020-ir.md)'s lowering table that no pass performs. The two
-multi-value rows are a limit one pass below construction: `SelectN` names a
-result before decomposition and a machine word of the result area after it, and
-the renumbering between the two is only correct for the first result.
+Every row of that table is a row of [`specs/020`](specs/020-ir.md)'s lowering
+table that no pass performs, or the type descriptor those rows need. A row that
+was not, a multi-value assignment whose results are wider than a register at
+2,191 functions, is gone: it was a limit in the pass below construction, where
+`SelectN` names a result before decomposition and a machine word of the result
+area after it, and the renumbering between the two was only correct for the
+first result.
 
 So the back half of the compiler is real and the front of the middle end is not
 finished. What stands between here and

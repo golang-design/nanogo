@@ -316,6 +316,67 @@ func TestToolexecProgramPrints(t *testing.T) {
 	}
 }
 
+// The program that assigns from a call with a result wider than a register.
+//
+// split returns a string and an integer. The string owns two words of the
+// result area, so the integer is the third word, and ssa/decompose.go numbered
+// a part of result i as word i+j: the integer was read from word 1, which
+// holds the length of the string. Construction refused the whole form rather
+// than emit that, so no program in this repository could have this shape until
+// the numbering was fixed.
+//
+// The exit status is the assertion. The length of the string is zero and the
+// integer is 42, so a read of the wrong word divides by zero and the process
+// dies. use takes both results, so neither is dropped before the call is
+// placed.
+//
+// The string is the zero string rather than a literal, because a string
+// literal needs a data symbol that ssagen does not emit yet: it fails with "an
+// address of no symbol". The comparison against the zero string is what keeps
+// the words of the string read rather than only passed on.
+const wideResultProgram = `package main
+
+func split(s string, n int) (string, int) {
+	return s, n
+}
+
+func use(s string, n int) int {
+	return n
+}
+
+func main() {
+	var zero string
+	s, n := split(zero, 42)
+	d := use(s, n) - 42
+	if s != zero {
+		d = d + 1
+	}
+	if d != 0 {
+		d = d / (d - d)
+	}
+}
+`
+
+// TestToolexecWideMultiValueResult compiles and runs a multi-value assignment
+// whose first result is wider than a register.
+func TestToolexecWideMultiValueResult(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/wide\n\ngo 1.27\n",
+		"main.go": wideResultProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "wide", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	if b, err := exec.Command(filepath.Join(h.mod, "wide")).CombinedOutput(); err != nil {
+		t.Fatalf("the program read the wrong word of the result area: %v\n%s", err, b)
+	}
+}
+
 // TestToolexecDelegatesWhatItDoesNotOwn is the other half of the substitution.
 //
 // With an allowlist that names no package in this module, the build must still

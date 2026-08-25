@@ -22,12 +22,12 @@ operation has neither a rule nor a stated reason to be deferred; one operation
 is deferred and none is missing.
 
 What lowering sees is narrower than the language, and the narrowing happens
-above it. SSA construction accepts 17,367 of the 39,947 functions the IR
+above it. SSA construction accepts 17,905 of the 39,947 functions the IR
 builder produces for the Go distribution, and [021](021-ssa-construction.md)
-counts the refusals. **17,285 of the 17,367 lower completely.** Read the two
-numbers together: this pass finishes all but 82 of what reaches it, which is
-two fifths of the distribution. Seventy of the 82 hold an array or a struct
-that decomposition leaves whole.
+counts the refusals. **17,809 of the 17,905 lower completely.** Read the two
+numbers together: this pass finishes all but 96 of what reaches it, which is
+two fifths of the distribution. Most of the 96 hold an array or a struct that
+decomposition leaves whole.
 
 ## Rewrite rules
 
@@ -114,13 +114,12 @@ When it was written, splitting was the largest single reason a function failed
 to lower, at 3,164 of 3,483 refusals over the distribution corpus.
 
 That is discharged. `ssa/decompose.go` exists, and the corpus of
-`ssa/decompose_test.go` now reports 17,367 functions reaching SSA and 17,285
+`ssa/decompose_test.go` now reports 17,905 functions reaching SSA and 17,809
 lowering completely, against 4,755 of 8,238 before the pass. What is left is
 residue rather than the old refusal: after decomposition and the ABI
-assignment, 70 functions still hold a `SelectN` of multi-word type, 9 hold a
-value of array type, and 77 hold a value of struct type. All but 82 of those
-functions lower anyway, and no composite call result is read at an index above
-zero, which is the part-numbering error the test exists to catch.
+assignment, 87 functions still hold a `SelectN` of multi-word type, 12 hold a
+value of array type, and 93 hold a value of struct type. All but 96 of those
+functions lower anyway.
 
 Anything in the deck that still names undecomposed wide values as the largest
 cause of unlowered functions is out of date by one pass. The cause of a function
@@ -152,6 +151,62 @@ convention". That is false for Go's internal ABI, which passes a five-field
 struct in five registers. The ABI pass of [030](030-abi.md) therefore finishes
 the split for whatever the convention says travels in registers, and a test
 pins that its walk and this one produce identical offsets and widths.
+
+### A call result is named by the word it starts at
+
+`SelectN` has an index and the index means two different things on the two
+sides of this pass. Before it, the index is the **result**: `SelectN [1]` of a
+call that returns `(string, int)` is the integer. After it, the index is the
+**machine word of the result area**, because the values that reach the code
+generator are one word each and [030](030-abi.md) places them by walking that
+list of words.
+
+So the pass renumbers. The word result $i$ starts at is
+
+$$
+w_i = \sum_{k<i} n_k
+$$
+
+where $n_k$ is the number of values the pass leaves in place of result $k$:
+one per part for a result it splits, one for a result it leaves whole, and
+none for a result of no width. Part $j$ of result $i$ is then word $w_i + j$.
+
+The pass numbered part $j$ of result $i$ as word $i+j$ until August 2026, which
+is $w_i$ only while every result before $i$ is one word wide. For
+`(string, int)` it made the integer word 1, which holds the length of the
+string, so the caller read the length in place of the integer. Nothing caught
+it, because construction refused the form that produces it rather than emit two
+reads of one word, and the refusal was 2,191 functions of the distribution
+corpus. Both are gone: the sum above is what the pass computes, and
+`CheckDecomposed` reports a call whose results do not name the words of its
+result area from zero, once each.
+
+Two properties this rests on, and neither is local to this pass.
+[021](021-ssa-construction.md) reads every result of a call, including one
+assigned to the blank identifier, so the widths of the earlier results are
+there to be summed; a call whose result list is incomplete is left alone rather
+than renumbered on a guess. And the caller's list of words and the callee's are
+the same walk over the same types, which is why `ABIResults` places them in the
+same registers on both sides.
+
+### A result nothing reads is still a word, and the dead-value sweep forgets it
+
+One shape of the form this unblocked does not reach machine code yet, and the
+reason is in this pass rather than in the numbering.
+
+`_, n := f()` where the first result is wider than a register builds, splits
+and numbers correctly: the parts of the discarded result are words 0 and 1 and
+`n` is word 2. Nothing reads the parts, so `deadValues` removes them, because
+`removable` excludes `Arg` from the sweep and not `SelectN`. The code generator
+then places the results of the call by index, finds no value on word 0, and
+refuses the function with `result 0 of the call is never named` and
+`a call result that follows no call`.
+
+Both operations are pseudo-operations that name an ABI location whether or not
+the body reads them, which is the reason `Arg` is excluded already. This is
+recorded rather than fixed here because it was found from outside this pass,
+with `go build -toolexec=nanogo` over the program above. The failure is loud
+and it is not a miscompile.
 
 ## Operations that lower to calls
 
@@ -246,7 +301,7 @@ for the ones a test happens to try.
 
 The spec said splitting wide values is the largest single reason a function
 fails to lower, at 3,164 of 3,483. The pass was then written and the number
-went to zero. It is 82 of 17,367 today, because SSA construction learned the
+went to zero. It is 96 of 17,905 today, because SSA construction learned the
 assignment statement and the shapes that arrived with it include an array and a
 struct that decomposition leaves whole. The note is kept rather than deleted
 because the claim it makes
