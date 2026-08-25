@@ -308,7 +308,7 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | --- | --- | --- |
 | [`syntax`](syntax/) | 99% | 19,674 files agree with `go/scanner` on tokens and positions; 16,293 agree with `go/parser` on accept, reject and first error |
 | [`types2`](types2/) | see below | a fork of the Go type checker, re-pointed at nanogo's tree: 613 subtests, a 375-entry errorcheck corpus, and it type-checks nanogo's own source |
-| [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 524 packages agree with `go list` |
+| [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 536 packages agree with `go list` |
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
 | [`obj/arm64`](obj/arm64/) | 99% | 981,124 encodings agree with `go tool asm`, with none disagreeing |
 | [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 39,947 functions and 4,188,075 nodes |
@@ -317,7 +317,7 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | [`export`](export/) | 96% | reads gc's export data for all 375 packages of the standard library, 13,518 declarations, and for a fixture carrying every encoding the format has, checked declaration by declaration |
 | [`export/pkgbits`](export/pkgbits/) | 93% | the container, ported from `internal/pkgbits` and exercised by every archive the reader above reads |
 | [`ssagen`](ssagen/) | 92% | emits machine code that **links and runs**, and stack maps a real collector honours |
-| [`rtsym`](rtsym/) | 100% | 59 runtime signatures checked against the runtime's own source |
+| [`rtsym`](rtsym/) | 100% | 70 runtime signatures checked against the runtime's own source |
 | [`rtype`](rtype/) | 96% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
 | [`driver`](driver/) | 96% | a real `go build -toolexec` completes |
 
@@ -347,7 +347,7 @@ operations. 17,758 of the 17,905 carry a stack map.
 
 The lowering pass builds part of [`specs/020`](specs/020-ir.md)'s table, and
 the driver runs it before construction, so a real compile reaches further:
-**24,095 of them get past construction once the lowering pass has run**. A
+**24,508 of them get past construction once the lowering pass has run**. A
 composite literal, `len`, a slice expression, `new`, and `make` of a slice are
 lowered and no longer refused.
 
