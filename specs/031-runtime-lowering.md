@@ -23,6 +23,16 @@ fixed contract.
 of them is defined in assembly, and a second test checks that the symbol exists,
 because no Go source states its signature.
 
+**The 70 symbols and the contract below are not the same set, in either
+direction.** The sections below name calls `rtsym` does not hold: every map
+symbol, `runtime.gcWriteBarrier`, `convT`, `convT16`, `convT32`, `assertE2I`
+and `decoderune`. `rtsym` holds calls those sections do not enumerate at all:
+the whole `print*` family, `deferproc` and `deferreturn`, and `newproc` and
+`morestack_noctxt`, which [033](033-closures-defer-panic.md) and
+[035](035-goroutines-and-stack-growth.md) own. The table is what the compiler
+can name today; the sections are the contract it is growing into, and a group
+in one and not the other is a section this spec still owes.
+
 **Not every symbol has a caller.** The rows below are generated today. Every
 other row of the tables further down names a call nothing produces yet:
 
@@ -32,48 +42,62 @@ other row of the tables further down names a call nothing produces yet:
 | `memequal` | equality over a type wider than a register | decomposition |
 | `cmpstring` | a string ordering | decomposition |
 | `ifaceeq`, `efaceeq` | interface equality, chosen by whether the interface has methods | decomposition |
-| `memmove` | every `OpMove` | lowering |
-| `memclrNoHeapPointers`, `memclrHasPointers` | every `OpZero`, chosen by whether the region can hold a pointer | lowering |
-| `panicdivide` | the failure edge of a division guard | lowering |
-| `goPanicIndex`, `goPanicSliceAlen` | the failure edges of the two bounds checks | lowering |
+| `memmove` | a copy of a composite, and every `OpMove` | IR lowering and SSA lowering |
+| `memclrNoHeapPointers`, `memclrHasPointers` | a clear of a composite, and every `OpZero`, chosen by whether the region can hold a pointer | IR lowering and SSA lowering |
+| `panicdivide` | the failure edge of a division guard | SSA lowering |
+| `goPanicIndex` | the failure edge of an index bounds check | SSA lowering |
+| `goPanicSliceAlen` | a slice bound above the capacity | IR lowering and SSA lowering |
+| `goPanicSliceB` | a slice expression's low and high guards | IR lowering |
 | `morestack_noctxt` | the stack-growth tail ([035](035-goroutines-and-stack-growth.md)) | code generation |
-| `newobject` | `new`, `&T{...}` | lowering |
-| `newarray` | a slice literal, which is also every variadic call | lowering |
-| `makeslice` | `make([]T, n)` and `make([]T, n, m)` | lowering |
-| `gopanic` | `panic` | lowering |
-| `gorecover` | `recover()` whose value nobody reads | lowering |
-| `deferproc`, `deferreturn` | `defer` ([033](033-closures-defer-panic.md)) | lowering |
-| `newproc` | `go` ([035](035-goroutines-and-stack-growth.md)) | lowering |
-| `closechan` | `close` | lowering |
-| `printlock`, `printunlock`, `printsp`, `printnl` and the `print*` family | `print` and `println` | lowering |
-| the twelve equality algorithms | a type descriptor's `Equal` field | descriptor encoding |
+| `newobject` | `new`, `&T{...}` | IR lowering |
+| `newarray` | a slice literal, which is also every variadic call | IR lowering |
+| `makeslice` | `make([]T, n)` and `make([]T, n, m)` | IR lowering |
+| `gopanic` | `panic` whose operand is already an interface value | IR lowering |
+| `gorecover` | `recover()` whose value nobody reads | IR lowering |
+| `closechan` | `close` | IR lowering |
+| `deferproc`, `deferreturn` | `defer` ([033](033-closures-defer-panic.md)) | IR lowering |
+| `newproc` | `go` ([035](035-goroutines-and-stack-growth.md)) | IR lowering |
+| `printlock`, `printunlock`, `printsp`, `printnl` and the `print*` family | `print` and `println` | IR lowering |
+| the fourteen equality algorithms | a type descriptor's `Equal` field | descriptor encoding |
 
-The "where" column is the part this spec did not anticipate. It reads as though
-one pass introduces every runtime call. Four passes do, and the earliest is SSA
+The **Where** column is four passes and not one. The earliest is SSA
 construction itself, because a five-operand concatenation has to become one
-call before anything decomposes the strings into words.
+call before anything decomposes the strings into words. `ir.Lower` and
+`ssa.Lower` are both spelled "lowering" and are different decks: the first
+rewrites [020](020-ir.md)'s tree, the second selects machine operations. Two
+symbols reach a caller from each side, `memmove` and `memclr*`, and so does
+`goPanicSliceAlen`, so the column names both.
 
-The gap is not in this pass either. It is in which rows of
+`gopanic` has a caller and almost no reachable one. `panic` lowers to it, and
+`ssa.Build` refuses a conversion to an interface, so the only operand that
+compiles is a value that is already an interface: a parameter of interface
+type, or `nil`. `panic("boom")` and `panic(1)` are both refused at
+construction, which is where every `panic` in ordinary Go stops today.
+
+The gap is not in this pass. It is in which rows of
 [020](020-ir.md)'s table are built, and its **State** column is the answer per
 row. What is left without a caller is `append`, `select`, `send`, `recv`, and
-every row holding a map or a channel: no `m[k]` reaches this far, so no row of
-the map table has a caller.
+every row holding a map: no `m[k]` reaches this far, so no row of the map table
+has a caller.
 
 Two groups of the table are therefore empty of symbols as well as of callers.
 `rtsym` has a **map** group with no members and a **write barrier** group with
 no members: `runtime.gcWriteBarrier` is not in the table at all
 ([034](034-write-barriers.md) is the spec with no code).
 
-The allocation group has callers now, because
+The allocation group has callers, because
 [032](032-type-descriptors-and-itabs.md) produces the `*_type` each of them
-takes. `makemap` and `makechan` are still absent, and the reason has moved: the
-symbols are known and the *descriptors* are not. A map descriptor's tail names
-the runtime's own group type and a channel descriptor carries a direction that
-[020](020-ir.md)'s type boundary does not keep.
+takes. `makechan` and `makechan64` are in the table and have none, and
+`makemap`, `makemap64` and `makemap_small` are not in the table at all. Both
+cases are blocked on the same thing, and it is the descriptor rather than the
+symbol:
+a map descriptor's tail names the runtime's own group type and a channel
+descriptor carries a direction that [020](020-ir.md)'s type boundary does not
+keep.
 
 **The equality algorithms are not called by generated code.** A type
 descriptor's `Equal` field points at a one-word closure, and the closure points
-at one of these twelve. They are in the table because the name reaches the
+at one of these fourteen. They are in the table because the name reaches the
 linker and [032](032-type-descriptors-and-itabs.md) may not spell a runtime
 symbol by hand any more than this pass may. `runtime.memequal_varlen` is the
 one that makes a generated function unnecessary for a region of memory of any
@@ -86,34 +110,23 @@ against the runtime's source** rather than typed in and trusted. A signature
 that drifts from the runtime is a crash with no diagnostic, and a checked table
 turns that into a build failure.
 
-Two things the first draft of this spec did not say, both found by building it:
-
 **The oracle can only be the runtime's source.** Every symbol here is
 unexported, so none appears in export data and `go/importer` finds none of them:
 a probe against the installed toolchain returned nothing for any of them. The
 test parses `GOROOT/src/runtime` directly.
 
-**And the runtime's source is not one directory.** Two of the 45 are not
+**And the runtime's source is not one directory.** Two of the 70 are not
 declared in package `runtime`. `runtime.morestack_noctxt` is written in
 `runtime/asm_arm64.s` and has no Go declaration anywhere, so the table records
 what the compiler calls it with and a separate test asserts only that the
 assembly defines the symbol. `runtime.cmpstring` is written in
 `internal/bytealg` and reaches the runtime's namespace through a
-`//go:linkname`, so the checker resolves it there. Both were found by the check
-failing on a symbol the runtime plainly has.
+`//go:linkname`, so the checker resolves it there.
 
 **Signatures are recorded in the runtime's own vocabulary**, as `*tmpBuf` and
 `*itab` rather than as what those resolve to. Writing `*[32]byte` for `tmpBuf`
 compares equal today and stops comparing the day the runtime changes the
 buffer's size, which is exactly the silent drift the table exists to catch.
-
-The check earns its place. The first draft of the table was written from this
-spec by hand, and **thirteen of its thirty-nine entries were wrong**: `tmpBuf`
-written as `[32]byte`, `gorecover` given a parameter it does not take,
-`deferproc` given `*funcval` where it takes `func()`, `typeAssert` returning
-`*abi.ITab` where it returns `*itab`, and one symbol, `goPanicSliceLen`, that
-does not exist at all. Every one would have compiled and produced a call that
-corrupts the stack.
 
 ### Allocation
 
@@ -152,24 +165,22 @@ description, is the part that is easy to get wrong.
 ### Interfaces and types
 
 `runtime.convT16`, `convT32`, `convT64`, `convTstring`, `convTslice`, `convT`,
-`assertE2I`, `assertI2I`, `interfaceSwitch`, `typeAssert`.
+`assertE2I`, `interfaceSwitch`, `typeAssert`, and the two equality routines
+below.
 
 Covered by [032](032-type-descriptors-and-itabs.md).
 
-The list leaves out the two that are emitted. Interface **equality** is
-`runtime.ifaceeq` or `runtime.efaceeq`, and which one is not a choice the
-compiler may guess: the first word of the value is an `*itab` for an interface
-with methods and a `*_type` for one without, and the two functions read that
-word differently. Calling the wrong one jumps through a function pointer read
-at the wrong offset. This spec's table did not name either symbol, and the
-omission was found when equality had to be expanded and there was no row to
-expand it to.
+Interface **equality** is `runtime.ifaceeq` or `runtime.efaceeq`, and which one
+is not a choice the compiler may guess: the first word of the value is an
+`*itab` for an interface with methods and a `*_type` for one without, and the
+two functions read that word differently. Calling the wrong one jumps through a
+function pointer read at the wrong offset.
 
 ### Strings
 
 `runtime.concatstring2` through `concatstring5`, `slicebytetostring`,
 `stringtoslicebyte`, `stringtoslicerune`, `slicerunetostring`,
-`intstring`, `decoderune`.
+`intstring`, `cmpstring`, `decoderune`.
 
 ### Memory
 
@@ -178,36 +189,40 @@ expand it to.
 `f64equal`, `c64equal`, `c128equal`, and `interequal` and `nilinterequal` in
 the interface group.
 
-The last eight are the type descriptor's equality algorithms. This spec's first
-draft named none of them, because the field they fill was described in
-[032](032-type-descriptors-and-itabs.md) as always a generated function. It is
-not: a generated function is needed only for a struct or an array whose parts
-do not compare as one region of memory. `memequal0` is also absent from the
-first draft's list and is what a zero-size type reaches.
+Fourteen of those are the type descriptor's equality algorithms: the twelve
+from `memequal0` to `c128equal`, plus `interequal` and `nilinterequal`. A
+generated function is needed only for a struct or an array whose parts do not
+compare as one region of memory. `memequal0` is what a zero-size type reaches.
 
 `memclr` is split by whether the region contains pointers, and choosing the wrong
 one leaves stale pointers visible to the collector.
 
 ### Panics
 
-`runtime.panicIndex`, `panicSlice`, `panicdivide`, `panicnildereference`,
-`goPanicIndex` and the rest of the bounds-check family.
+`runtime.gopanic`, `gorecover`, `panicdivide`, and the bounds-check family:
+`goPanicIndex`, `goPanicSliceAlen`, `goPanicSliceB`, and the `goPanicSlice3*`,
+`goPanicSliceAcap` and unsigned `*U` forms the runtime declares beside them.
 
-These are called from the failure edge of a check and never return. Marking them
-`no-return` matters: a block after a call to one is unreachable, and liveness
-that thinks otherwise keeps values alive across every bounds check in the
-program.
+A nil dereference is `runtime.panicmem`, and the compiler does not call it. A
+nil load faults and `sigpanic` raises the panic from the signal handler, so
+there is no generated call to get wrong.
 
-Three of this family are emitted: `panicdivide` from a division guard, and
-`goPanicIndex` and `goPanicSliceAlen` from the two bounds checks. The list
-above names `panicIndex` and `panicSlice`, which are not the symbols the
-runtime has. The `goPanic*` spelling is the one that exists, and the first
-draft of the table also invented `goPanicSliceLen`, which does not.
+Every symbol in the bounds-check family is called from the failure edge of a
+check and never returns. Marking them `no-return` matters: a block after a call
+to one is unreachable, and liveness that thinks otherwise keeps values alive
+across every bounds check in the program.
 
-Both are emitted now. [020](020-ir.md)'s `panic` row lowers to `gopanic`, and
-its `recover` row lowers to `gorecover` where the value is discarded, which is
-the idiom. [033](033-closures-defer-panic.md) records why `gorecover` takes no
-argument.
+Four panic symbols are emitted. `panicdivide` and `goPanicIndex` come from
+`ssa/rules/arm64.go`, off the division guard and the index bounds check it
+builds. `goPanicSliceB` comes from `ir/lower.go`'s guards on a slice
+expression's low and high bounds. `goPanicSliceAlen` comes from both: the IR
+guard on a three-index slice's `max`, and the SSA bounds check on a slice
+bound, where the valid condition is lower-or-same rather than lower.
+
+`gopanic` and `gorecover` are emitted as well. [020](020-ir.md)'s `panic` row
+lowers to `gopanic`, under the operand restriction above, and its `recover` row
+lowers to `gorecover` where the value is discarded, which is the idiom.
+[033](033-closures-defer-panic.md) records why `gorecover` takes no argument.
 
 ### Write barriers
 
@@ -239,12 +254,14 @@ argument.
    call is introduced.
 
 Rule 4 holds and is not enforced. Every failure block the `arm64` rules build
-ends in the call and is an `Exit` block, so a no-return symbol does end the
-block for the three that are emitted. What decides that is the rule that wrote
-the block, not the flag: `rtsym.Sym.NoReturn` is set on six symbols and its own
-test proves the runtime really does not return from them, but nothing outside
-`rtsym` reads the field. A rule that emits a no-return call and forgets the
-`Exit` is not caught.
+ends in the call and is an `Exit` block, so `panicdivide`, `goPanicIndex` and
+`goPanicSliceAlen` do end their blocks. What decides that is the rule that
+wrote the block, not the flag: `rtsym.Sym.NoReturn` is set on five symbols and
+its own test proves the runtime really does not return from them, but nothing
+outside `rtsym` reads the field. The two no-return calls `ir/lower.go`
+introduces, `goPanicSliceB` and `gopanic`, get their blocks from `ssa.Build`
+and are covered by no such rule. A pass that emits a no-return call and forgets
+the `Exit` is not caught.
 
 Rule 5 has no code at all. There is no `//go:nowritebarrier` check, because
 there is no write barrier to reject ([034](034-write-barriers.md)), and there
@@ -268,12 +285,12 @@ Everything else calls.
 
 None of the three fast paths is built, and one of them is worse than not
 built. `copy` and a clear of a constant size are **calls today**: `lowerMove`
-and `lowerZero` emit `memmove` and `memclr*` whatever the size, and the inline
-forms [042](042-arm64-backend.md) lists are not written. `len` and `cap` of a
-slice or a string are a field load already, but the load is
-[020](020-ir.md)'s lowering pass reading the header, so it never reaches this
-pass either. `append` does not reach it at all, because its row of that table
-is not built.
+and `lowerZero` in `ssa/rules/arm64.go` emit `memmove` and `memclr*` whatever
+the size, and the inline forms [042](042-arm64-backend.md) lists are not
+written. `len` and `cap` of a slice or a string are a field load already, but
+the load is [020](020-ir.md)'s lowering pass reading the header, so it never
+reaches this pass either. `append` does not reach it at all, because its row of
+that table is not built.
 
 ## Testing
 
@@ -286,10 +303,79 @@ is not built.
 - Hosted mode ([000](000-decisions.md) decision 11) means these calls reach the
   real runtime from M3 onward, so the tests are end-to-end from the start.
 
-The second bullet reaches one row today. `ssagen`'s link-and-run corpus has a
-division case, so `runtime.panicdivide` is a relocation the linker resolves in
-a binary that runs, which proves the symbol name and the ABI. It does not prove
-the call, because the guard is not taken. The rest of the emitted symbols are
-exercised by unit tests and by the distribution corpus rather than by a running
-program, and that stays true until the constructs that need the other symbols
-are built.
+The second bullet is reached in two halves, and only one of them is
+differential. `internal/e2e` builds and runs a program per emitted group,
+against fixed expected output rather than against a `gc` build: a closure, a
+`defer`, a `go`, a `defer` that runs while panicking, a `recover`, and a
+`print`. The differential half is [004](004-conformance.md)'s corpus, whose
+`matched` files run under `gc`'s own exit status and output;
+`ssagen`'s link-and-run corpus adds a division case, so `runtime.panicdivide`
+is a relocation the linker resolves in a binary that runs, which proves the
+symbol name and the ABI without proving the call, because the guard is not
+taken. The symbols with no program at all are exercised by unit tests and by
+the distribution corpus, and that stays true until the constructs that need
+them are built.
+
+## What was wrong
+
+### The pass column read as one pass
+
+The **Where** column above was written as though one pass introduces every
+runtime call. Four do, and the earliest is SSA construction. The column also
+spelled `ir.Lower` and `ssa.Lower` both as "lowering", which hides that
+`memmove` and `memclr*` have a caller on each side.
+
+### The table was written by hand, and the check earns its place
+
+The first draft of the table was written from this spec by hand, and
+**thirteen of its thirty-nine entries were wrong**: `tmpBuf` written as
+`[32]byte`, `gorecover` given a parameter it does not take, `deferproc` given
+`*funcval` where it takes `func()`, `typeAssert` returning `*abi.ITab` where it
+returns `*itab`, and one symbol, `goPanicSliceLen`, that does not exist at all.
+Every one would have compiled and produced a call that corrupts the stack.
+
+The two source-shape rules in **The symbol table** were both found by the check
+failing rather than by reading: `go/importer` returning nothing for every
+symbol, and the check failing on `morestack_noctxt` and `cmpstring`, two
+symbols the runtime plainly has.
+
+### Four names in the design lists were not runtime symbols
+
+The **Panics** section named `panicIndex`, `panicSlice` and
+`panicnildereference`, and the **Interfaces** section named `assertI2I`. A
+search of `GOROOT/src` finds none of the four in any form. The `goPanic*`
+spelling is the one that exists, `panicmem` is the nil-dereference symbol and
+the compiler does not call it, and `assertE2I` is the assertion helper the
+runtime declares. The sections above carry the corrected names.
+
+### The panic rows undercounted and overclaimed
+
+The generated-today table named two bounds-check symbols and there are three:
+`goPanicSliceB` had no row, and `goPanicSliceAlen` has a caller on each side of
+the two lowering passes. `rtsym.Sym.NoReturn` was said to be set on six symbols
+and it is set on five. And the `gopanic` row said `panic`, without the operand
+restriction that leaves every `panic` of a concrete value refused at
+construction; [033](033-closures-defer-panic.md)'s table carries the same
+correction from the other side.
+
+### The equality algorithms were missing, and then miscounted
+
+This spec's first draft named none of them in the **Memory** list, because the
+field they fill was described in [032](032-type-descriptors-and-itabs.md) as
+always a generated function. It is not. `memequal0` was absent from that list
+as well. The count was then written as twelve, which is the `memequal0` to
+`c128equal` run and leaves out `interequal` and `nilinterequal`: a descriptor's
+`Equal` field reaches one of fourteen.
+
+### The interface equality routines had no row
+
+This spec's **Interfaces** list did not name `ifaceeq` or `efaceeq`, and the
+omission was found when equality had to be expanded and there was no row to
+expand it to. Both are emitted today.
+
+### `makemap` and `makechan` were one sentence
+
+They are two cases. `makechan` and `makechan64` are in `rtsym` with no caller;
+no `makemap` symbol is in `rtsym` at all, which is what the empty **map** group
+means. The blocker is the same for both and it is the descriptor, not the
+symbol.

@@ -29,18 +29,18 @@ text-assembly seam in [000](000-decisions.md) decision 3.
 | The descriptor bytes | `rtype/` | built for the types below, checked field by field against `reflect` |
 | The reference from generated code | `ir/lower.go` | built for `new`, `&T{...}`, a slice literal and `make([]T, n)`, and the pass runs in a real compile |
 | The descriptor as a data symbol in the object | `driver/compile.go` | built; a named `dupok` definition, and the data it points at is hashed |
-| Itabs | nowhere | **not built**, and blocked on the IR rather than on this spec |
+| Itabs | nowhere | **not built**; the concrete side's method set is in the IR now and the interface side's is not |
 
 The `gclocals·` and `go:string.` rows of the namespace table are produced
 elsewhere. `ssagen/stackmap.go` builds the stack maps, `ssa/decompose.go` names
 a string constant the way `gc` names it, and `ssagen/reloc.go` defines its
 bytes in the object ([040](040-object-format.md)).
 
-A type descriptor is no longer the only data symbol nanogo writes.
+A type descriptor is not the only data symbol nanogo writes.
 `ssagen/data.go` writes one per package-level variable, and it reads this
 spec's writer for the pointer map: a variable whose type holds a pointer
-carries its descriptor through an `AuxGotype` entry, so the method set gap
-below refuses such a variable by name and position.
+carries its descriptor through an `AuxGotype` entry, so the writer gap below
+refuses such a variable by name and position.
 
 What reaches a running program today: a variadic call, a slice literal, `make`
 of a slice, and `new` of a type whose descriptor can be filled in. Those
@@ -48,12 +48,12 @@ compile, link against the real runtime and run, and `internal/e2e` runs a
 collection over what one of them allocated. A defined type is refused, and the
 refusal arrives from `rtype` after the function it came from has compiled,
 because lowering can name `main.point` without trouble and only the encoder
-knows that its method set is not in the IR. That is the same gap that stops
-itabs, met from the driver.
+decides whether it can fill the `UncommonType` tail in. That is the same gap
+that stops itabs, met from the driver.
 
-Four wiring changes closed the seam between the lowering pass and the object
-file. Two of them were not what this spec predicted, and **What was wrong** at
-the end of this file records all four.
+Four wiring changes join the lowering pass to the object file. **What was
+wrong** at the end of this file sets out all four, because two of them are not
+what a reader following this design would predict.
 
 ### The two spellings
 
@@ -79,19 +79,24 @@ that package's to emit, and this package only needs to name it. So the
 lowering pass refuses a row when the type cannot be *named*, and `rtype`
 refuses separately when the contents cannot be *filled in*.
 
-The name is a function of the `ir.Type`, and four Go distinctions do not
-survive [020](020-ir.md)'s type boundary:
+The name is a function of the `ir.Type`, and four Go distinctions decide
+whether it can be built. Three of them do not survive [020](020-ir.md)'s type
+boundary and the fourth crosses it and is not read:
 
-| Distinction | Two types that would share one name |
-| --- | --- |
-| a channel's direction | `chan int` and `chan<- int` |
-| a function's signature | `func(int)` and `func(string)` |
-| an interface's method set | `interface{ M() }` and `interface{ N() }` |
-| a struct field's tag and embedding | `struct{ A int }` and `struct{ A int "x" }` |
+| Distinction | Two types that would share one name | Where it stands |
+| --- | --- | --- |
+| a channel's direction | `chan int` and `chan<- int` | `ir.Type` has no direction field |
+| a function's signature | `func(int)` and `func(string)` | `ir.Type` has no parameter or result list |
+| a literal interface's method set | `interface{ M() }` and `interface{ N() }` | `ir.Type.Methods` is a defined type's set only, so a literal interface has none |
+| a struct field's tag and embedding | `struct{ A int }` and `struct{ A int "x" }` | `ir.Field` carries `Tag` and `Embedded`, and `ir/rtype.go`'s namer does not read them |
 
-Each is refused, and the refusal names the missing field. A **defined** type is
-exempt from all four, because its name is its identity: `type S func(int)` is
-`type:p.S` and no signature is needed to say so.
+Each is refused today. The first three refusals name a field the boundary does
+not carry. The fourth names one it does: `ir/rtype.go` still returns "a
+struct's field tags are not in the IR type", and the tag is in the IR type, so
+what is left is a namer that spells a literal struct out of the fields it
+already has. A **defined** type is exempt from all four, because its name is
+its identity: `type S func(int)` is `type:p.S` and no signature is needed to
+say so.
 
 One case is refused by neither and is wrong: a **generic instantiation**.
 `ir/convert.go` names `atomic.Pointer[os.dirInfo]` as `sync/atomic.Pointer`,
@@ -101,23 +106,33 @@ one name. Nothing in an `ir.Type` can detect it. The fix is in `convert.go`'s
 
 ### What `rtype` can fill in
 
-Only a type whose method set is *knowably empty*. A descriptor carries an
-`UncommonType` tail whenever the type has methods, and an `ir.Type` carries no
-method set, so a descriptor for a type that might have methods would claim it
-has none, `reflect` would report an empty method set, and an itab built against
-it would find no functions.
+Only a type with no `UncommonType` tail. A descriptor carries that tail
+whenever the type has methods, and `rtype` writes no tail, so it refuses every
+type that could need one: a defined type and a pointer to one. Emitting one
+anyway is the failure the refusal exists to stop: the descriptor would claim
+the type has no methods, `reflect` would report an empty method set, and an
+itab built against it would find no functions. `rtype` fills in a predeclared
+basic type and a slice, an array, a map, a channel, a function, a literal
+struct and a literal interface, because the language gives none of those a
+method.
 
-A method set is knowably empty for a predeclared basic type and for a slice, an
-array, a map, a channel, a function, a literal struct and a literal interface,
-because the language gives none of those a method. It is not knowable for a
-defined type or for a pointer to one, and both are refused.
+**The reason for that refusal is no longer the type boundary.**
+`ir.Type.Methods` carries a defined type's method set, sorted by name, set for
+every defined type with the empty set included, which is exactly what makes an
+empty set knowable; `ir.Type` also carries `PkgPath` and `Basic`, and
+`ir.Field` carries `Tag`, `Embedded` and `Pkg`. `rtype/rtype.go` does not read
+`Methods` and still refuses with a message saying the set is absent. What is
+left is an `UncommonType` writer and a `Method` encoder, and both are this
+spec's work rather than [020](020-ir.md)'s.
 
-**This is the same gap that stops itabs.** An interface's `ir.Type` carries
-only `EmptyIface`. There is no method set to build a `Fun` array from and no
-method set on the concrete side to fill it with. Itabs are not the harder half
-of this spec: they are blocked on a different thing, the type boundary itself,
-and so is every defined type's descriptor. Extending [020](020-ir.md) to carry
-a method set is the work that unblocks both.
+**Itabs are half unblocked.** The concrete side of an itab is the method set
+`ir.Type.Methods` now carries. The interface side is still missing: an
+interface's `ir.Type` carries only `EmptyIface`, so there is no method list to
+build a `Fun` array from and no way to name a non-empty interface. `ir.Method`
+also carries no signature, and a descriptor's `Method` needs an `Mtyp` offset
+to the method's type with the receiver removed, which needs the function
+signature the boundary does not carry. Those two are what is left for
+[020](020-ir.md); the writer is what is left for this spec.
 
 ## The type descriptor
 
@@ -164,12 +179,14 @@ Four fields are worth calling out because each has a way of being subtly wrong:
   at the code: pointing it at the function makes the runtime call whatever the
   first instruction encodes.
 
-`PtrToThis` is left zero, which the field permits. The alternative is a weak
-offset relocation, and `obj` declares no weak type. The cost is that
+`PtrToThis` is left zero, which the field permits. The cost is that
 `reflect.PointerTo` builds a descriptor at run time instead of finding the
-linked one.
+linked one. Emitting it is open work rather than a blocked one: `obj` declares
+`R_WEAKADDROFF`, the weak offset relocation `gc` uses for this field, so what
+is missing is a writer that names the descriptor of `*T` and a decision about
+which package owes it.
 
-**A divergence found while building this.** `ir.scalarPtrBits` marks both words
+**Where `GCData` diverges from `gc`.** `ir.scalarPtrBits` marks both words
 of an interface as pointers and `cmd/compile/internal/typebits` marks only the
 second: an itab is in `persistentalloc` space and a compile-time `_type` is in
 the read-only section, so the first word keeps nothing alive. `rtype` emits the
@@ -276,9 +293,9 @@ which names neither the package that owes the symbol nor the fix. This is not a
 compiler owes only the descriptor.
 
 nanogo cannot write one. `rtype` refuses every defined type, because a
-descriptor carries an `UncommonType` tail whenever the type has methods and an
-`ir.Type` carries no method set. That is this spec's own gap, stated from the
-other side, and it is the same one that stops itabs. Until it closes,
+descriptor carries an `UncommonType` tail whenever the type has methods and
+`rtype` has no writer for that tail. That is this spec's own gap, stated from
+the other side, and it is the same one that stops itabs. Until it closes,
 `driver/types.go` refuses a package that declares a type, naming the type and
 the symbol. Nothing about the declaring package tells the two cases apart: the
 same library links against one importer and not against another, depending on
@@ -378,6 +395,28 @@ the runtime already has, and a region whose size is not a fixed width reaches
 spec named construction, and construction is the wrong pass: every reference is
 introduced by lowering, and construction refuses every node that would
 introduce one.
+
+### The method set gap was the IR's and is now the writer's
+
+Every refusal of a defined type in this spec was explained by
+[020](020-ir.md)'s type boundary dropping the method set. The boundary carries
+it: `ir.Type` gained `Methods`, `PkgPath` and `Basic`, and `ir.Field` gained
+`Tag`, `Embedded` and `Pkg`, and `ir/convert.go` fills all of them. Nothing
+below reads them yet, so `ir/rtype.go` and `rtype/rtype.go` refuse exactly what
+they refused before, with messages that name a gap the IR closed. The refusals
+in this spec are real and their stated cause was not; the sections above carry
+the corrected one. The half of the gap that is still the boundary's is a
+literal interface's method set, a channel's direction and a function's
+signature.
+
+### `PtrToThis` was blamed on a relocation that exists
+
+This spec said the field is left zero because "the alternative is a weak offset
+relocation, and `obj` declares no weak type". `obj/obj.go` declares `R_WEAK`,
+`R_WEAKADDR` and `R_WEAKADDROFF`. Zero is still what the field carries and the
+cost is unchanged, but the reason above is a writer that does not exist, not a
+relocation type that does not exist. `rtype/rtype.go`'s comment on the same
+line repeats the old reason and has not been corrected.
 
 ### One spelling was two
 
