@@ -23,7 +23,7 @@ reader knows before opening a spec whether it describes code or a plan:
 | `in progress` | part of it is built, and the spec says which part |
 | `draft` | nothing in it is built |
 
-42 specs, and the index below is the only place their statuses are counted, so
+43 specs, and the index below is the only place their statuses are counted, so
 that no second copy can drift from it. A third of the deck is still `draft`,
 which is to say still a plan, and now says so.
 
@@ -78,6 +78,7 @@ believed.
 | [002](002-architecture.md) | Architecture | `in progress` | pipeline, two IRs, package layout |
 | [003](003-sequencing.md) | Sequencing | `in progress` | milestones M0 to M10, risks, deviations |
 | [004](004-conformance.md) | Conformance | `in progress` | four levels of proof; L1 built for the front end, L2 for the single-file recipes, L3 partial, L4 blocked |
+| [005](005-remaining-work.md) | Remaining work | `in progress` | the dependency graph of everything still refused, and the file that constrains it |
 
 ### Front end
 
