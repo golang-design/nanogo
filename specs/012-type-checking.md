@@ -26,7 +26,8 @@ tree that is worth stating precisely.
 **`go/types` is generated from `types2` by a mechanical rewriter.**
 `src/go/types/generate_test.go` parses each `types2` source file, applies AST
 rewrites that swap one syntax tree for another, and writes the `go/types` file.
-The two checkers are 23,222 and 24,953 lines and are kept in sync this way.
+At the revision `types2/upstream/README.md` records, the two checkers are
+23,222 and 24,953 non-test lines, and they are kept in sync this way.
 
 The Go team already solved the exact problem nanogo has (take this checker and
 run it on a different syntax tree), and solved it with a source rewriter rather
@@ -91,10 +92,14 @@ No node type is missing. That is the result worth stating: the node set of
 [011](011-parser-and-ast.md) is complete for the checker, and the port's real
 work is a handful of helpers plus one model difference.
 
-Every number in this section was re-measured against the vendored sources after
-the port landed and every one still holds: 69 non-test files, 38 of them naming
-the syntax tree, 117 distinct `syntax.X` names. The helpers listed as provided
-are provided, in `syntax/walk.go` and `syntax/printer.go`.
+The counts are over the vendored sources, at the revision
+`types2/upstream/README.md` records: 69 non-test files, 38 of them naming the
+syntax tree, and 117 distinct `syntax.X` names across the package including its
+own tests, which is where `Parse`, `ParseFile` and `Inspect` are reached from.
+The helpers listed as provided are provided: `Unparen`, `UnpackListExpr`,
+`StartPos`, `EndPos`, `NewName`, `Parse` and `ParseFile` in `syntax/syntax.go`,
+`Inspect` in `syntax/walk.go`, and `Fprint`, `String` and `ShortForm` in
+`syntax/printer.go`.
 
 ### The one model difference
 
@@ -121,7 +126,7 @@ built, and it writes nanogo's `types2` package. It runs as a test, so CI fails
 when the vendored source and the generated output drift, and `-write`
 regenerates.
 
-**The mechanism has two rewrite kinds, not the three classes this spec listed.**
+The mechanism has two rewrite kinds.
 
 1. A **rule** is a literal replacement applied to every generated file. There
    are three and all three are import paths: the syntax tree, the checker
@@ -131,16 +136,36 @@ regenerates.
    not a silent no-op, so an upstream change that touches a ported line is
    reported instead of dropped. 24 upstream files need one.
 
-The class this spec called **node renames does not exist, and its absence is the
-result worth recording.** No rewrite renames a node, because
-[011](011-parser-and-ast.md) held the vocabulary and the node set matched. The
-class it called **deletions does not exist either**: `dropped` is an empty map.
-Both were found by reading `gen.go` for this audit.
+There is no third kind, and the absence is the result worth recording. No
+rewrite renames a node, because [011](011-parser-and-ast.md) held the
+vocabulary and the node set matched, and no rewrite deletes a file: `dropped`
+is an empty map.
 
 What the generator cannot do is ported by hand and listed in `handPorted`,
 exactly as upstream marks its own unportable files. There is one entry,
 `compiler_internal.go`, because `RenameResult` writes a type back into the
 syntax tree and nanogo's tree has no place to put one.
+
+Every upstream file is therefore in exactly one of four states, and
+`TestEveryUpstreamTestIsAccountedFor` fails when a test file is in none:
+
+| State | Count | Where |
+| --- | --- | --- |
+| generated | 68 of the 69 non-test files, 23 test files, and the 2 error-code files | the three `rules` on all of them, and `patches` on 24 |
+| skipped test | 5 | `skippedTests`, each with its reason |
+| hand-ported | 1 | `handPorted`: `compiler_internal.go` |
+
+nanogo adds six files of its own that answer to no upstream file, listed in
+`handWritten` so that the drift test does not read them as stale generated
+output. What nanogo adds, below, says what each one is for.
+
+The five skipped tests are skipped for infrastructure nanogo does not have, not
+for a judgement the checker disagrees with. `check_test.go` reads its `/* ERROR
+*/` annotations through `syntax.CommentsDo` and nanogo's tree carries no
+comments. `importer_test.go` and `self_test.go` need an importer over gc export
+data, which is [015](015-export-data.md) and is not built. `stdlib_test.go`
+walks `GOROOT`, which is [004](004-conformance.md)'s gate rather than a unit
+test. `main_test.go` only sets up the environment for the four above.
 
 ### What gets carried and what does not
 
@@ -148,15 +173,11 @@ Carried whole: constants and their arithmetic, conversions, assignability,
 method sets, embedding and promotion, interface satisfaction, type inference,
 instantiation, initialisation order, the `unsafe` package, and the error set.
 
-**Nothing is dropped, and this spec said three things were.** It listed the
-`Info` maps nanogo does not read, the `gccgo` size rules, and the deprecated API
-surface. All three are carried. `Info` is generated whole and `driver/compile.go`
-fills seven of its maps. `gccgosizes.go` is a generated file in `types2`. No
-rule and no patch removes deprecated surface. This was found during this audit
-by reading `gen.go`'s `dropped` map, which is empty, and by listing `types2`.
+Nothing is dropped. `Info` is generated whole and `driver/compile.go` fills
+seven of its maps; `gccgosizes.go` is a generated file in `types2`; no rule and
+no patch removes deprecated surface.
 
-Carrying them is the cheaper choice and the spec's reasoning did not survive
-contact with the generator. A deletion is not free. It is a patch that has to
+Carrying them is the cheaper choice. A deletion is not free. It is a patch that has to
 keep matching across upstream revisions, and what it buys is lines in a package
 nobody reads as nanogo's: the fork is upstream's source, carried so that a
 re-port is a copy ([000](000-decisions.md) decision 1). Dead code in it costs
@@ -176,28 +197,33 @@ than a copy:
    `errorcheck_test.go` scans `/* ERROR */` annotations out of the source text,
    because upstream reads them with `syntax.CommentMap` and nanogo's tree
    carries no comments. `srcimporter_test.go` type-checks an imported package
-   from source, because it is the harness that replaces upstream's importer
-   test, which names upstream's importer and not nanogo's.
+   from source, because upstream imports through `cmd/compile/internal/importer`
+   over gc export data and nanogo has none yet ([015](015-export-data.md)). It
+   is the heavier importer, and it is also the better test: importing `fmt`
+   this way type-checks `fmt`.
 3. **A drift test over the whole port.** Every rewrite must state its reason,
    every upstream test file must be either ported or listed as skipped with a
    reason, and regeneration must be idempotent.
 
-**This spec listed three different extensions and none of them was built.** It
-claimed pragma attachment during declaration checking, layout facts computed on
-the type, and extra position fidelity for the backend. What exists instead: the
-only pragma the checker reads is upstream's own `Nointerface` test in `decl.go`,
-and it never fires, because the driver's pragma handler discards every directive
-([016](016-directives-and-pragmas.md)); layout is computed below the checker, by
-`Layout` in `ir/type.go`, on the side of the boundary
-[002](002-architecture.md) draws; and the backend reads the same `Pos` the
-checker does, with nothing added. This was
-found by grepping `types2` for `Pragma` and for `Sizeof` during this audit.
+Three things the checker does **not** do, each of which an earlier draft gave
+it:
 
-The correction is worth more than the three items. The spec assumed the checker
-was the place to hang compiler-specific facts. The IR boundary turned out to be
-the better place, and `ir/type.go` states why: below the IR a type is a size, an
-alignment and a pointer map, and nothing below the IR needs to agree about
-anything else.
+- **It does not read directives.** The one `Pragma` the checker touches is
+  upstream's own `Nointerface` test in `decl.go`, and it never fires. The
+  driver records every directive it recognises, with its position, and attaches
+  the set to the declaration ([016](016-directives-and-pragmas.md)), but the
+  record it attaches has no `Nointerface` method for that assertion to find,
+  and `//go:nointerface` is not a verb the driver recognises. The directive
+  travels past the checker on the syntax declaration into `ir.Func.Pragma`.
+- **It does not compute layout.** `Layout` in `ir/type.go` does, below the
+  boundary [002](002-architecture.md) draws.
+- **It adds no position fidelity.** The backend reads the same `Pos` the
+  checker does.
+
+The reason is one reason three times. The checker is not the place to hang
+compiler-specific facts; the IR boundary is, and `ir/type.go` states why: below
+the IR a type is a size, an alignment and a pointer map, and nothing below the
+IR needs to agree about anything else.
 
 ## The escape hatch, and its price
 
@@ -237,13 +263,49 @@ tests and a nanogo-shaped threshold would measure the wrong thing.
 - An `errorcheck` corpus of 375 entries, of which 370 are checked and 5 are
   named as known gaps and skipped.
 - Agreement with `go/types` on accept and reject over 14 standard library
-  packages, parsed by nanogo's parser and checked by this checker, plus
-  nanogo's own `syntax` package.
+  packages, parsed by nanogo's parser and checked by this checker
+  (`TestAgreesWithGoTypesOnStdlib`), and `TestChecksOwnSource` over nanogo's
+  own `syntax` and `types2` packages.
 - The generator's own drift test: regenerate and compare, plus the checks that
   every rewrite states a reason and that every upstream test file is either
   ported or skipped with a reason.
 
-The first bullet used to say "every package in the distribution". 14 named
-packages is what runs, and the reduction is deliberate rather than a shortfall:
-walking `GOROOT` is [004](004-conformance.md)'s gate and belongs there, not in a
-unit test that every commit runs.
+The 14 packages are named rather than walked, and the reduction is deliberate
+rather than a shortfall: walking `GOROOT` is [004](004-conformance.md)'s gate
+and belongs there, not in a unit test that every commit runs.
+
+## What was wrong
+
+**The spec listed three rewrite classes and the generator has two.** It named
+node renames and deletions beside rules and patches. Neither exists: no rewrite
+renames a node, because [011](011-parser-and-ast.md) held the vocabulary, and
+`dropped` is an empty map. Found by reading `gen.go`.
+
+**The spec said three things were dropped from the fork: the `Info` maps nanogo
+does not read, the `gccgo` size rules, and the deprecated API surface.** All
+three are carried. The reasoning did not survive contact with the generator: a
+deletion is a patch that has to keep matching across upstream revisions, and
+dead code in a package nobody reads as nanogo's costs less than that.
+
+**The spec listed three extensions to the checker and none of them was built:**
+pragma attachment during declaration checking, layout facts computed on the
+type, and extra position fidelity for the backend. The section above says what
+exists instead. Found by grepping `types2` for `Pragma` and for `Sizeof`.
+
+**The reason the `Nointerface` test never fires was stated as "the driver's
+pragma handler discards every directive".** That was true when the handler
+returned nil. It records them now, with the position of each
+([016](016-directives-and-pragmas.md)), and the test still never fires, for two
+different reasons: the record carries no `Nointerface` method, and
+`//go:nointerface` is behind an experiment nanogo does not enable, so the
+driver gives it no flag.
+
+**The spec said the port's helpers live in `syntax/walk.go` and
+`syntax/printer.go`.** Most of them are in `syntax/syntax.go`. Only `Inspect`
+is in `walk.go`.
+
+**The stdlib bullet used to say "every package in the distribution",** and the
+correction that replaced it called it "the first bullet" when it is the third.
+
+**`TestChecksOwnSource` was described as checking nanogo's `syntax` package.**
+It checks `syntax` and `types2`.
