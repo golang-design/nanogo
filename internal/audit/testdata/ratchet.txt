@@ -1,0 +1,150 @@
+# What the probe corpus proved about nanogo, on the day this was written.
+#
+# Written by internal/audit. Refresh it with
+#
+#	NANOGO_REQUIRE_CORPUS=1 NANOGO_REQUIRE_LINK=1 NANOGO_REFRESH_RATCHET=1 \
+#		go test -timeout 20m ./internal/audit/
+#
+# and read the diff before committing. This gate cannot see a refresh made in
+# the same commit as the change that moved a probe, so the diff is the review.
+#
+# Two kinds of line:
+#
+#	probes N           how many probes the corpus holds
+#	probe CLASS NAME   what nanogo did with that probe
+#
+# The probe lines must add up to N, or the file is unreadable.
+#
+# Every probe is compiled twice, once by nanogo and once by the Go toolchain,
+# and both programs are run and compared. gc is the oracle, so no probe carries
+# an expected value that can go stale. The classes are totally ordered:
+#
+#	ok        nanogo compiled it and the program agreed with gc
+#	refused   nanogo would not build it, or the compiler crashed
+#	wrong     nanogo compiled it and the program disagreed with gc
+#	broken    gc could not build it, so the run had no oracle
+#
+# ok is best and broken is worst. A probe whose class falls fails the build,
+# whatever the two classes are. CONTRIBUTING.md settles the pair that is not
+# obvious: "WRONG is the row that matters: a program nanogo compiled into
+# something that behaves differently is worse than one it refused." So a
+# refusal that starts producing a wrong answer is a regression, not progress.
+#
+# A probe whose class rises does not fail the build, and is reported loudly.
+# That is the point of this file. When a refusal becomes an OK, a sentence in
+# README.md, doc.go or driver/help.go has just become false, and it has to be
+# corrected in the same change that lifted the refusal.
+#
+# The three wrong rows are recorded, not hidden. They are real bugs with no fix
+# yet, and all three are documented:
+#
+#	buildinfo-named   nanogo writes no modinfo line, so
+#	                  runtime/debug.ReadBuildInfo finds nothing
+#	embed-directive   go:embed compiles and the variable is empty at run time
+#	panic-fires       panic on an operand that is already an interface dies
+#	                  with "runtime: name offset out of range"
+#
+# The last two, and the compiler crash that keeps struct-return-wide refused,
+# are pinned as exact strings in driver/help_test.go: "go:embed", "name offset
+# out of range" and "wider than four machine registers". That coupling is
+# deliberate. Fixing one of these bugs fails that test, which forces the
+# documentation to be corrected in the same change rather than months later.
+#
+# Sorted, so a refresh produces a diff and not a reshuffle
+# (specs/053-determinism.md).
+
+probes 93
+
+probe refused append-int
+probe refused append-slice
+probe refused array-local
+probe refused asm-package
+probe refused buildinfo
+probe wrong buildinfo-named
+probe ok call-recursive
+probe ok call-variadic
+probe refused cgo-import
+probe refused chan-buffered
+probe refused chan-close-range
+probe refused chan-select
+probe refused chan-unbuffered
+probe refused closure-capture
+probe refused closure-capture-mutate
+probe ok closure-nocapture
+probe refused closure-returned
+probe ok const-decl
+probe ok control-flow
+probe refused defer-arg-eval
+probe refused defer-builtin
+probe refused defer-closure
+probe ok defer-func
+probe ok defer-in-loop
+probe refused defer-method-value
+probe ok defer-order
+probe refused defer-recover-panic
+probe wrong embed-directive
+probe ok empty-body
+probe refused float-arith
+probe refused float-param
+probe refused generic-func
+probe refused go-arg
+probe refused go-stmt-closure
+probe ok go-stmt-nochan
+probe refused goroutine-sync
+probe refused iface-convert
+probe refused iface-method
+probe ok import-call
+probe ok init-func
+probe ok int-arith
+probe refused make-byte-slice
+probe refused make-struct-slice
+probe refused map-comma-ok
+probe refused map-delete-len
+probe refused map-literal
+probe refused map-make-assign
+probe refused map-range
+probe ok method-call
+probe ok multi-assign
+probe ok multivalue-regs
+probe ok multivalue-wide
+probe ok new-int
+probe wrong panic-fires
+probe ok panic-iface
+probe refused panic-int
+probe refused panic-uncaught
+probe ok pkg-var
+probe ok pkg-var-computed
+probe ok pkg-var-slice
+probe ok pkg-var-string
+probe ok pkgvar-read
+probe refused pkgvar-write
+probe ok print-int
+probe ok println-bool
+probe refused println-float
+probe ok println-int
+probe ok println-mixed
+probe ok println-none
+probe ok println-ptr
+probe ok println-string
+probe ok range-int
+probe ok recover-alone
+probe refused recover-novalue
+probe refused recover-valueread
+probe ok slice-ops
+probe refused stdlib-fmt
+probe refused string-convert
+probe ok string-literal
+probe ok string-ops
+probe ok string-param
+probe refused string-range
+probe ok struct-arg-5
+probe ok struct-local
+probe refused struct-ptr-field
+probe ok struct-return-2
+probe ok struct-return-4
+probe refused struct-return-5
+probe refused struct-return-wide
+probe ok switch-expr
+probe refused type-assert
+probe refused type-assert-commaok
+probe refused type-switch
