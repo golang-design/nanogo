@@ -22,44 +22,64 @@ what `driver.Compile` refuses, and nanogo's own packages trip it:
 | a package with assembly | an assembly definition is ABI0 and needs a wrapper | [030](030-abi.md) |
 | a declared type an importer would need a descriptor for | an `ir.Type` carries no method set | [032](032-type-descriptors-and-itabs.md) |
 | a package-level variable whose type holds a pointer and whose descriptor `rtype` cannot build | the collector reads a data symbol's pointer map through its type descriptor | [032](032-type-descriptors-and-itabs.md) |
+| a function whose allocated values need a move `ssagen` cannot emit | there is no case for an edge move between two spill slots | `ssagen`, which [000](000-decisions.md) decision 5 records has no spec of its own |
 
-Three earlier refusals are gone. `export/` reads `gc`'s export data and writes
-it, so a package that imports is no longer refused. `driver/` writes the
-initialisation record, so a package with an `init` is no longer refused. And
-`ssagen/data.go` writes the data symbol of a package-level variable, so a
-package that declares one is no longer refused for that reason alone.
+The second row is the one nanogo's own packages hit first. `driver/types.go`
+walks a package's scope in sorted order and refuses on the first declared type
+whose descriptor `rtype` cannot write, so the message names one type per package
+and says nothing about how many are behind it: `syntax` names `ArrayType`, `ir`
+names `Class`, `obj` names `Aux`, `rtsym` names `Group`, and `driver` names
+`Allowlist`. The count of nanogo packages that nanogo compiles is zero, and no
+arithmetic over the language subset changes that.
 
-What is left is [032](032-type-descriptors-and-itabs.md)'s method set gap,
-which the two remaining data rows above both name, and [030](030-abi.md)'s
-wrapper. Measured over the 28 packages a `func main() {}` needs, nanogo
-compiles 5 and refuses 23: 10 for a declared type's descriptor, 8 for assembly,
-1 for a package-level variable of type `error`, and 4 for constructs in a
-function body. The count of nanogo packages that nanogo compiles today is still
-zero, and no arithmetic over the language subset changes that.
+What is left is [032](032-type-descriptors-and-itabs.md)'s method set gap, which
+rows two and three above both name, [030](030-abi.md)'s wrapper, and the fourth
+row, which belongs to no spec. Measured over the 28 packages a `func main() {}`
+needs, nanogo compiles 6 and refuses 22:
 
-One export-data limit is still in the way of this gate specifically. The writer
-refuses a generic declaration, and nanogo's own source uses generics, so stage
-1 needs [013](013-generics.md) as well as the language rows below.
+| Packages | Refused for |
+| --- | --- |
+| 11 | a declared type's descriptor |
+| 8 | assembly |
+| 1 | a package-level variable of type `error`, `math/bits` |
+| 1 | a row of [020](020-ir.md)'s lowering table, `append` in `internal/byteorder` |
+| 1 | the slot-to-slot edge move, in `internal/stringslite` |
+
+The 6 that compile are the `main` package itself, `internal/goos`,
+`internal/asan`, `internal/msan`, `internal/race` and `internal/runtime/math`.
+None of these counts is in `internal/hygiene/testdata/facts.json`, so nothing
+gates them and each Go release moves them. They are a reading of one toolchain,
+`go1.27.0` on `darwin/arm64`, which is `driver.PinnedGoVersion` and
+`driver.TargetArch`, the only pair nanogo emits code for.
+
+One export-data limit is in the way of this gate specifically.
+`export/writer.go` refuses a generic declaration on purpose, and nanogo's own
+source has them. They are few and concentrated in the `types2` fork,
+`types2/subst.go` and `types2/trie.go` among them, and the instantiations of
+`slices` and `cmp` are many and spread across the tree. Declaration and
+instantiation are both [013](013-generics.md)'s, so stage 1 needs that spec as
+well as the language rows below.
 
 The second-order measure is the language, and it says the same thing more
 slowly. The IR builder produces 39,947 functions for 536 packages of the
 distribution. SSA construction accepts 17,905 of them, two in five. 17,809 of
 those lower completely to arm64 machine operations and 17,758 carry a stack
 map, so the back half of the pipeline is in better shape than the front of it.
-The largest single refusal is the composite literal, at 4,841 functions, and
-every large refusal after it is a row of [020](020-ir.md)'s lowering table.
-About half those rows are performed now, and with the lowering pass run first,
-which is what the driver does, three functions in five get past construction.
+The largest single refusal is the composite literal, at 4,841 functions. Most
+of the large refusals after it are rows of [020](020-ir.md)'s lowering table,
+and two are not: a conversion to an interface and a field of an interface are
+refused by `ssa.Build` itself, above any lowering row, and
+[032](032-type-descriptors-and-itabs.md) records why. About half the lowering
+rows are performed now, and with the lowering pass run first, which is what the
+driver does, 24,508 functions get past construction, three in five.
 [020](020-ir.md)'s **State** column names the rows this gate still waits on and
 its corpus counts them.
 
 The end-to-end gate grows only as the language does, because its programs are
 written in the language the compiler accepts. `internal/e2e`'s first program is
-a counted loop, which was impossible while construction refused an assignment
-statement.
+a counted loop.
 
-The sections below are the procedure for the day the language is wide enough,
-and they are unchanged because the procedure is not what was wrong.
+The sections below are the procedure for the day the language is wide enough.
 
 ## The build
 
@@ -75,6 +95,11 @@ Stage 0 runs under `go build`. Stages 1 and 2 run under
 ([000](000-decisions.md) decision 11), with the allowlist of
 [051](051-build-integration.md) covering every package nanogo's source needs.
 
+At G2 the same three stages run in a container with no `go` command
+([061](061-toolchain-independence.md)), so they run under `nanogo build`, which
+takes no allowlist and refuses a package it cannot compile rather than
+delegating it to `gc`.
+
 The gate compares the linked executables. `go tool link` produces both, from the
 same objects in the same order, so any difference is in the objects.
 
@@ -88,8 +113,15 @@ and it is worth listing because it sizes M5 in [003](003-sequencing.md):
 | structs, methods, interfaces | goroutines and channels, in the concurrent compile | reflection beyond `unsafe` |
 | slices, maps, strings | `defer`, `panic`, `recover` | `select`, except incidentally |
 | closures | `unsafe`, in the object writer | complex numbers |
-| generics ([013](013-generics.md)) | `sort`, `strconv`, `fmt`, `os`, `io` from the standard library | `cgo` |
+| generics ([013](013-generics.md)), mostly by instantiation | `sort`, `strconv`, `fmt`, `os`, `io` from the standard library | `cgo` |
 | type switches and assertions | `//go:` directives, only as input | assembly of its own |
+
+Read the first column against what the compiler accepts today and the distance
+is the gate. Structs, slices and strings compile. A method compiles with a value
+receiver and is refused with a pointer receiver, because the receiver's type
+needs a method set. Interfaces, maps, a closure with a capture, a type switch and
+a type assertion are each refused outright, and a generic declaration is refused
+by the export writer, as above.
 
 The standard library entries are the decisive ones. nanogo's dependency set
 reaches a large part of `fmt`, `go/types`' fork, and the `internal` packages
@@ -135,3 +167,25 @@ nanogo builds nanogo from then on, and stage 0 becomes a periodic check rather
 than the build. The `gc`-built binary is still produced in CI, because a
 divergence between $N_1$ and $N_2$ that appears later is a miscompile that the
 fixed point alone cannot see.
+
+## What was wrong
+
+**Three package-level refusals this spec listed are gone.** `export/` reads
+`gc`'s export data and writes it, so a package that imports is no longer
+refused. `driver/` writes the initialisation record, so a package with an `init`
+is no longer refused. And `ssagen/data.go` writes the data symbol of a
+package-level variable, so a package that declares one is no longer refused for
+that reason alone.
+
+**The package census was stale in two directions at once and the totals hid
+it.** It read 5 of 28 compiling and 23 refused, split 10 for a descriptor, 8 for
+assembly, 1 for data and 4 in a function body. Re-measured on `go1.27.0`
+`darwin/arm64` it is 6 and 22, and the two moved rows moved opposite ways: the
+descriptor row is 11 and the function-body row is 2. A sum alone would have read
+as one package's worth of progress.
+
+**The refusal taxonomy had four categories and needs five.** One of the two
+remaining function-body refusals is not a language gap. `internal/stringslite`
+is refused by `ssagen` for an edge move between two spill slots, which is the
+register allocator's output and not a construct in the source, so it has a row
+of its own in both tables above.
