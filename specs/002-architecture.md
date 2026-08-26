@@ -103,13 +103,19 @@ golang.design/x/nanogo
 ├── ssagen/                SSA to machine code, prologues       027 035 041
 ├── dist/                  distribution tree, manifest, tally   054
 └── internal/              the gates
-    ├── audit/             the probe corpus                     004
     ├── gotest/            Go's own test corpus                 004
+    ├── covercheck/        the per-package coverage floor       004
     ├── e2e/               install, go build -toolexec, run     051
     ├── release/           a tarball is the release it claims   054
-    ├── covercheck/        the per-package coverage floor
-    └── hygiene/           checks over this repository's source
+    ├── audit/             the probe corpus                     none
+    └── hygiene/           checks over this repository's source none
 ```
+
+The two rows reading `none` are gaps, not omissions. No spec names
+`internal/audit`, and `internal/hygiene` is cited as a gate by
+[051](051-build-integration.md) and [054](054-distribution.md) without either
+owning it. Both are the shape [000](000-decisions.md) decision 5 names for
+`ssagen`: a part of the tree that works and that nothing specifies.
 
 Planned and not written. Each is named here so that a reader who looks for the
 package and does not find it knows which spec owns the absence:
@@ -216,6 +222,9 @@ builds and audits a distribution tree and owns its manifest and tally,
 `gotest` and `release` since the line that named only `covercheck`, `hygiene`
 and `e2e`. A reader looking for one of them found no entry and no spec named as
 owning the absence, which is the failure the "planned and not written" block
-exists to prevent. All are listed with their specs, and `cmd/` is drawn as a
-directory with two commands under it rather than as one path, and `internal/`
-as one with its six.
+exists to prevent. All are listed, `cmd/` is drawn as a directory with two
+commands under it rather than as one path, and `internal/` as one with its six.
+Four carry the spec that names them. `internal/audit` and `internal/hygiene`
+carry `none`, because reading each spec that mentions them found no owner, and
+guessing one would have been worse than the blank: the block exists so that a
+reader can go from a package to the spec that answers for it.
