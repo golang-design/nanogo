@@ -53,7 +53,7 @@
 # Sorted, so a refresh produces a diff and not a reshuffle
 # (specs/053-determinism.md).
 
-probes 93
+probes 95
 
 probe refused append-int
 probe refused append-slice
@@ -93,10 +93,12 @@ probe ok go-stmt-nochan
 probe refused goroutine-sync
 probe refused iface-convert
 probe refused iface-method
+probe refused iface-slice
 probe ok import-call
 probe ok init-func
 probe ok int-arith
-probe refused make-byte-slice
+probe ok make-byte-slice
+probe refused make-method-slice
 probe ok make-struct-slice
 probe refused map-comma-ok
 probe refused map-delete-len
