@@ -18,16 +18,24 @@ fixed contract.
 
 ## What is built, and what is not
 
-**The table is built and gated.** `rtsym` holds 70 symbols, checked against
-2,435 functions parsed out of the runtime's source: 0 missing, 0 differing. One
-of them is defined in assembly, and a second test checks that the symbol exists,
-because no Go source states its signature.
+**The table is built and gated.** `rtsym` holds 106 symbols, checked against
+2,435 functions parsed out of the runtime's source: 0 missing, 0 differing.
+Nine of them are defined in assembly, and a second test checks that each symbol
+exists, because no Go source states their signatures.
 
-**The 70 symbols and the contract below are not the same set, in either
-direction.** The sections below name calls `rtsym` does not hold: every map
-symbol, `runtime.gcWriteBarrier`, `convT`, `convT16`, `convT32`, `assertE2I`
-and `decoderune`. `rtsym` holds calls those sections do not enumerate at all:
-the whole `print*` family, `deferproc` and `deferreturn`, and `newproc` and
+**One runtime variable is checked the same way and is a table of its own.**
+`runtime.writeBarrier` is the flag the compiler branches on before every
+barrier, and it is a variable, not a function. It is in `rtsym.vars` rather
+than in `rtsym.syms`, because `Sym.Sig` is a function signature and a field
+that means a signature for one row and a type for another stops being
+checkable. The check is the same: the type's spelling is compared against the
+runtime's source, so a field inserted ahead of `enabled`, or padding that stops
+the four-byte load from being valid, is a build failure.
+
+**The 106 symbols and the contract below are not the same set, in either
+direction.** The sections below still name one call `rtsym` does not hold:
+`decoderune`. `rtsym` holds calls those sections do not enumerate at all: the
+whole `print*` family, `deferproc` and `deferreturn`, and `newproc` and
 `morestack_noctxt`, which [033](033-closures-defer-panic.md) and
 [035](035-goroutines-and-stack-growth.md) own. The table is what the compiler
 can name today; the sections are the contract it is growing into, and a group
@@ -80,20 +88,23 @@ row. What is left without a caller is `append`, `select`, `send`, `recv`, and
 every row holding a map: no `m[k]` reaches this far, so no row of the map table
 has a caller.
 
-Two groups of the table are therefore empty of symbols as well as of callers.
-`rtsym` has a **map** group with no members and a **write barrier** group with
-no members: `runtime.gcWriteBarrier` is not in the table at all
-([034](034-write-barriers.md) is the spec with no code).
+**Every group of the table now has members, and two of them have no caller.**
+The **map** and **write barrier** groups were declared and empty, which is a
+table claiming the compiler can call a family and naming none of it. The map
+group holds the seven entry points below and the write barrier group holds the
+eight `gcWriteBarrier` entry points, the four copies that carry a barrier of
+their own, and `runtime.writeBarrier` from the variable table
+([034](034-write-barriers.md) is still the spec with no code). A test asserts
+that no group is empty, so the next group added cannot be a name with nothing
+behind it.
 
 The allocation group has callers, because
 [032](032-type-descriptors-and-itabs.md) produces the `*_type` each of them
-takes. `makechan` and `makechan64` are in the table and have none, and
-`makemap`, `makemap64` and `makemap_small` are not in the table at all. Both
-cases are blocked on the same thing, and it is the descriptor rather than the
-symbol:
-a map descriptor's tail names the runtime's own group type and a channel
-descriptor carries a direction that [020](020-ir.md)'s type boundary does not
-keep.
+takes. `makechan`, `makechan64`, `makemap`, `makemap64` and `makemap_small` are
+in the table and have none. They are blocked on the descriptor rather than on
+the symbol: a map descriptor's tail names the runtime's own group type and a
+channel descriptor carries a direction that [020](020-ir.md)'s type boundary
+does not keep.
 
 **The equality algorithms are not called by generated code.** A type
 descriptor's `Equal` field points at a one-word closure, and the closure points
@@ -115,13 +126,24 @@ unexported, so none appears in export data and `go/importer` finds none of them:
 a probe against the installed toolchain returned nothing for any of them. The
 test parses `GOROOT/src/runtime` directly.
 
-**And the runtime's source is not one directory.** Two of the 70 are not
-declared in package `runtime`. `runtime.morestack_noctxt` is written in
-`runtime/asm_arm64.s` and has no Go declaration anywhere, so the table records
-what the compiler calls it with and a separate test asserts only that the
-assembly defines the symbol. `runtime.cmpstring` is written in
-`internal/bytealg` and reaches the runtime's namespace through a
-`//go:linkname`, so the checker resolves it there.
+**And the runtime's source is not one directory.** Ten of the 106 are not
+declared in package `runtime`. `runtime.morestack_noctxt` and
+`runtime.gcWriteBarrier1` through `gcWriteBarrier8` are written in
+`runtime/asm_arm64.s` and have no Go declaration anywhere, so the table records
+what the compiler calls each one with and a separate test asserts only that the
+assembly defines the symbol. That test reads two spellings of a `TEXT`
+directive, `·name(SB)` and `·name<ABI>(SB)`, because `morestack_noctxt` carries
+no ABI tag and every `gcWriteBarrier` carries `<ABIInternal>`.
+`runtime.cmpstring` is written in `internal/bytealg` and reaches the runtime's
+namespace through a `//go:linkname`, so the checker resolves it there.
+
+**A `//go:linkname` fills a gap and never overrides.** A symbol may be both
+declared in package `runtime` and defined elsewhere under a linkname, and the
+two spell the same type differently: `internal/runtime/maps` defines
+`mapassign` as taking a `*Map` and package `runtime` declares it as taking a
+`*maps.Map`, because one writes the type from inside the package that owns it
+and the other from outside. The oracle prefers package `runtime`'s declaration
+where there is one, so every row of the table is in one vocabulary.
 
 **Signatures are recorded in the runtime's own vocabulary**, as `*tmpBuf` and
 `*itab` rather than as what those resolve to. Writing `*[32]byte` for `tmpBuf`
@@ -146,17 +168,50 @@ buffer's size, which is exactly the silent drift the table exists to catch.
 | `runtime.mapaccess1`, `mapaccess2` | `m[k]` in one- and two-value form |
 | `runtime.mapassign` | `m[k] = v` |
 | `runtime.mapdelete` | `delete(m, k)` |
-| `runtime.mapiterinit`, `mapiternext` | `range` over a map |
+| `runtime.mapclear` | `clear(m)` |
+| `runtime.mapIterStart`, `mapIterNext` | `range` over a map |
 | type-specialised variants (`mapaccess1_fast64`, …) | fast paths for common key types |
 
 The specialised variants are an optimisation and are skipped until the general
 ones work. Skipping them is a performance decision; using the wrong one is
 corruption.
 
+**The iteration row is `mapIterStart` and `mapIterNext`, and an earlier draft
+of this spec named `mapiterinit` and `mapiternext`.** Following the earlier
+draft corrupts memory. Go's map is a swiss table from 1.24 on, and the compiler
+now calls
+
+```go
+func mapIterStart(t *abi.MapType, m *maps.Map, it *maps.Iter)  // runtime/map.go
+func mapIterNext(it *maps.Iter)                                // runtime/map.go
+```
+
+`runtime.mapiterinit` and `runtime.mapiternext` still exist, in
+`runtime/linkname_shim.go`, and they are not these. They take a
+`*runtime.linknameIter`, a different struct with a different layout, and they
+are there for packages that reach into the runtime through `//go:linkname`
+rather than for the compiler. A call to one of them with a `maps.Iter` frame
+slot writes through the wrong offsets into the caller's frame.
+`cmd/compile/internal/walk/range.go` names the two above.
+
+**`runtime.makemap` takes three parameters, and an earlier draft assumed two.**
+
+```go
+func makemap(t *abi.MapType, hint int, m *maps.Map) *maps.Map
+```
+
+The third is a stack buffer the compiler supplies for a map that does not
+escape, and it is the *last* parameter rather than the first. A call built for
+the two-parameter form passes the hint where the buffer belongs.
+
 ### Channels and select
 
 `runtime.chansend1`, `chanrecv1`, `chanrecv2`, `closechan`, `selectgo`,
-`selectnbsend`, `selectnbrecv`.
+`selectnbsend`, `selectnbrecv`, `chanlen`, `chancap`.
+
+`len` and `cap` of a channel are calls and not loads. A nil channel has length
+and capacity zero and no `hchan` to read them from, so the nil check is the
+runtime's.
 
 `selectgo` takes arrays of cases and returns the chosen index, which the compiler
 turns into a jump table. Building those arrays in the frame, with correct GC
@@ -165,8 +220,24 @@ description, is the part that is easy to get wrong.
 ### Interfaces and types
 
 `runtime.convT16`, `convT32`, `convT64`, `convTstring`, `convTslice`, `convT`,
-`assertE2I`, `interfaceSwitch`, `typeAssert`, and the two equality routines
-below.
+`convTnoptr`, `getitab`, `assertE2I`, `assertE2I2`, `interfaceSwitch`,
+`typeAssert`, and the two equality routines below.
+
+`assertI2I` and `assertI2I2` are **not** on that list, and their absence is a
+fact about the runtime rather than an omission: go1.27 does not declare them.
+`runtime.typeAssert` is what an assertion between two interfaces with methods
+reaches.
+
+`convT` and `convTnoptr` have one signature and two bodies. The first allocates
+in a span the collector scans and the second in one it does not, so a type
+holding a pointer converted through `convTnoptr` has its pointee freed
+underneath it. The choice follows the type's pointer map and is never a guess,
+which is the same rule as the `memclr` split below.
+
+A failed assertion raises `runtime.panicdottypeE`, `panicdottypeI` or
+`panicnildottype`. Which one is decided by what the value holds:
+`panicdottypeI` takes the `*itab` the value carried and `panicdottypeE` takes
+the `*_type`, so calling the wrong one reads the wrong word as a descriptor.
 
 Covered by [032](032-type-descriptors-and-itabs.md).
 
@@ -226,8 +297,14 @@ lowers to `gorecover` where the value is discarded, which is the idiom.
 
 ### Write barriers
 
-`runtime.gcWriteBarrier` and its register-argument variants. Owned by
-[034](034-write-barriers.md).
+`runtime.gcWriteBarrier1` through `gcWriteBarrier8`, the flag
+`runtime.writeBarrier`, and the four copies that carry a barrier of their own:
+`typedmemmove`, `typedmemclr`, `typedslicecopy`, `wbZero` and `wbMove`. Owned
+by [034](034-write-barriers.md).
+
+There is no symbol named `runtime.gcWriteBarrier`. The eight numbered entry
+points are the whole family, each reserving that many slots in the P's write
+barrier buffer, and each is assembly with no Go declaration and no Go ABI.
 
 ## Calling rules
 
@@ -375,7 +452,25 @@ expand it to. Both are emitted today.
 
 ### `makemap` and `makechan` were one sentence
 
-They are two cases. `makechan` and `makechan64` are in `rtsym` with no caller;
-no `makemap` symbol is in `rtsym` at all, which is what the empty **map** group
-means. The blocker is the same for both and it is the descriptor, not the
-symbol.
+They are two cases. `makechan` and `makechan64` were in `rtsym` with no caller
+and no `makemap` symbol was in `rtsym` at all, which is what the empty **map**
+group meant. All five are in the table now and none has a caller. The blocker
+is the same for both and it is the descriptor, not the symbol.
+
+### The map rows named symbols that would corrupt memory
+
+The **Maps** section named `runtime.mapiterinit` and `runtime.mapiternext` and
+gave `runtime.makemap` two parameters. Both were true before Go 1.24 and are
+false now. The two named functions still exist, so following the spec would
+have produced a program that linked and then wrote through the wrong offsets in
+the caller's frame: the surviving symbols are `//go:linkname` shims taking a
+different iterator struct. The section carries the correction and the reason,
+because a stale name that still resolves is worse than one that does not.
+
+### `assertI2I` and `assertI2I2` were named and do not exist
+
+The **Interfaces and types** section listed `assertE2I`, and the work that
+added it looked for `assertI2I` and `assertI2I2` beside it. go1.27 declares
+neither. `runtime.typeAssert`, already in the table, is what an assertion
+between two interfaces with methods reaches, and the section now says so, so
+the next reader does not go looking a second time.

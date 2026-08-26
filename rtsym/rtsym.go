@@ -111,6 +111,36 @@ var syms = []Sym{
 	{Name: "runtime.growslice", Sig: "func(unsafe.Pointer, int, int, int, *_type) slice", Group: GroupAlloc},
 	{Name: "runtime.makechan", Sig: "func(*chantype, int) *hchan", Group: GroupAlloc},
 	{Name: "runtime.makechan64", Sig: "func(*chantype, int64) *hchan", Group: GroupAlloc},
+	// The three map constructors. makemap takes a third parameter that the
+	// older signature did not: a stack buffer the compiler supplies, which the
+	// runtime uses instead of allocating when the map does not escape. A call
+	// built for the two-parameter form passes the hint where the buffer
+	// belongs.
+	{Name: "runtime.makemap", Sig: "func(*abi.MapType, int, *maps.Map) *maps.Map", Group: GroupAlloc},
+	{Name: "runtime.makemap64", Sig: "func(*abi.MapType, int64, *maps.Map) *maps.Map", Group: GroupAlloc},
+	{Name: "runtime.makemap_small", Sig: "func() *maps.Map", Group: GroupAlloc},
+
+	// Maps.
+	//
+	// Every one of these takes an *abi.MapType and a *maps.Map. The map is a
+	// swiss table, not the pre-Go-1.24 bucket map, and the two are different
+	// structures with different field offsets.
+	//
+	// Iteration is mapIterStart and mapIterNext, and this is the row that must
+	// not be spelled from memory. runtime.mapiterinit and runtime.mapiternext
+	// still exist, in runtime/linkname_shim.go, but they take a
+	// *runtime.linknameIter rather than a *maps.Iter and the two layouts
+	// differ. They are compatibility shims for packages that reach in through
+	// //go:linkname, not the compiler's entry points, and calling one with a
+	// maps.Iter frame slot writes past the end of it.
+	// cmd/compile/internal/walk/range.go names the two below.
+	{Name: "runtime.mapaccess1", Sig: "func(*abi.MapType, *maps.Map, unsafe.Pointer) unsafe.Pointer", Group: GroupMap},
+	{Name: "runtime.mapaccess2", Sig: "func(*abi.MapType, *maps.Map, unsafe.Pointer) (unsafe.Pointer, bool)", Group: GroupMap},
+	{Name: "runtime.mapassign", Sig: "func(*abi.MapType, *maps.Map, unsafe.Pointer) unsafe.Pointer", Group: GroupMap},
+	{Name: "runtime.mapdelete", Sig: "func(*abi.MapType, *maps.Map, unsafe.Pointer)", Group: GroupMap},
+	{Name: "runtime.mapclear", Sig: "func(*abi.MapType, *maps.Map)", Group: GroupMap},
+	{Name: "runtime.mapIterStart", Sig: "func(*abi.MapType, *maps.Map, *maps.Iter)", Group: GroupMap},
+	{Name: "runtime.mapIterNext", Sig: "func(*maps.Iter)", Group: GroupMap},
 
 	// Channels.
 	{Name: "runtime.chansend1", Sig: "func(*hchan, unsafe.Pointer)", Group: GroupChan},
@@ -120,6 +150,11 @@ var syms = []Sym{
 	{Name: "runtime.selectnbsend", Sig: "func(*hchan, unsafe.Pointer) bool", Group: GroupChan},
 	{Name: "runtime.selectnbrecv", Sig: "func(unsafe.Pointer, *hchan) (bool, bool)", Group: GroupChan},
 	{Name: "runtime.selectgo", Sig: "func(*scase, *uint16, *uintptr, int, int, bool) (int, bool)", Group: GroupChan},
+	// len and cap of a channel read a field of the hchan, and the read is not
+	// a plain load: a nil channel has length and capacity zero and no hchan to
+	// read them from, so the runtime does the nil check.
+	{Name: "runtime.chanlen", Sig: "func(*hchan) int", Group: GroupChan},
+	{Name: "runtime.chancap", Sig: "func(*hchan) int", Group: GroupChan},
 
 	// Strings.
 	{Name: "runtime.concatstring2", Sig: "func(*tmpBuf, string, string) string", Group: GroupString},
@@ -180,6 +215,14 @@ var syms = []Sym{
 	{Name: "runtime.goPanicSliceAlen", Sig: "func(int, int)", NoReturn: true, Group: GroupPanic},
 	{Name: "runtime.goPanicSliceB", Sig: "func(int, int)", NoReturn: true, Group: GroupPanic},
 	{Name: "runtime.panicdivide", Sig: "func()", NoReturn: true, Group: GroupPanic},
+	// The three panics a failed type assertion raises. Which one is called is
+	// decided by what the value holds, not by convenience: panicdottypeI takes
+	// the itab the value carried and panicdottypeE takes the *_type, so
+	// calling the wrong one reads the wrong word as a descriptor. The third is
+	// for a nil interface, which carries neither.
+	{Name: "runtime.panicdottypeE", Sig: "func(*_type, *_type, *_type)", NoReturn: true, Group: GroupPanic},
+	{Name: "runtime.panicdottypeI", Sig: "func(*itab, *_type, *_type)", NoReturn: true, Group: GroupPanic},
+	{Name: "runtime.panicnildottype", Sig: "func(*_type)", NoReturn: true, Group: GroupPanic},
 
 	// Goroutines and defer.
 	{Name: "runtime.newproc", Sig: "func(*funcval)", Group: GroupGoroutine},
@@ -187,6 +230,15 @@ var syms = []Sym{
 	// the table records the signature it is called with rather than one the
 	// checker can read. TestAssemblySymbolsExist is what keeps it honest.
 	{Name: "runtime.morestack_noctxt", Sig: "func()", Assembly: true, Group: GroupGoroutine},
+	// runtime.morestack is the same tail for a function that reads the
+	// context register. The two differ in one instruction and the difference
+	// is a correctness one: morestack_noctxt writes zero into the register
+	// before it grows the stack, and morestack saves the register into
+	// g.sched.ctxt so that the resumed function still finds its closure. A
+	// function with no closure must call the first, because the register then
+	// holds whatever the caller left and g.sched.ctxt is scanned by the
+	// collector.
+	{Name: "runtime.morestack", Sig: "func()", Assembly: true, Group: GroupGoroutine},
 	{Name: "runtime.deferproc", Sig: "func(func())", Group: GroupDefer},
 	{Name: "runtime.deferreturn", Sig: "func()", Group: GroupDefer},
 
@@ -236,6 +288,90 @@ var syms = []Sym{
 	{Name: "runtime.convTslice", Sig: "func([]byte) unsafe.Pointer", Group: GroupInterface},
 	{Name: "runtime.typeAssert", Sig: "func(*abi.TypeAssert, *_type) *itab", Group: GroupInterface},
 	{Name: "runtime.interfaceSwitch", Sig: "func(*abi.InterfaceSwitch, *_type) (int, *itab)", Group: GroupInterface},
+	// convT16 and convT32 return a pointer into the runtime's table of small
+	// integers rather than an allocation, which is why they are separate
+	// symbols and not calls to convT with a size.
+	{Name: "runtime.convT16", Sig: "func(uint16) unsafe.Pointer", Group: GroupInterface},
+	{Name: "runtime.convT32", Sig: "func(uint32) unsafe.Pointer", Group: GroupInterface},
+	// convT and convTnoptr have one signature and two bodies. The first
+	// allocates in a span the collector scans and the second in one it does
+	// not, so a type holding a pointer converted through convTnoptr has its
+	// pointee freed underneath it. The choice follows the type's pointer map
+	// and is never a guess.
+	{Name: "runtime.convT", Sig: "func(*_type, unsafe.Pointer) unsafe.Pointer", Group: GroupInterface},
+	{Name: "runtime.convTnoptr", Sig: "func(*_type, unsafe.Pointer) unsafe.Pointer", Group: GroupInterface},
+	// The itab lookups. getitab is the general one and takes a bool saying
+	// whether a missing method is a panic or a nil result; assertE2I and
+	// assertE2I2 are the one- and two-value forms of an assertion from an
+	// empty interface to one with methods.
+	//
+	// assertI2I and assertI2I2 are not here, and their absence is a fact about
+	// go1.27 rather than an omission: the runtime no longer declares them.
+	// runtime.typeAssert, already above, is what the compiler emits for an
+	// assertion between two interfaces with methods.
+	{Name: "runtime.getitab", Sig: "func(*interfacetype, *_type, bool) *itab", Group: GroupInterface},
+	{Name: "runtime.assertE2I", Sig: "func(*interfacetype, *_type) *itab", Group: GroupInterface},
+	{Name: "runtime.assertE2I2", Sig: "func(*interfacetype, *_type) *itab", Group: GroupInterface},
+
+	// Write barriers.
+	//
+	// A pointer write into the heap while the collector is marking has to be
+	// recorded, and the eight numbered entry points are how: each one reserves
+	// that many slots in the P's write barrier buffer and returns a pointer to
+	// them. They are written in assembly, do not follow the Go ABI, and have
+	// no Go declaration to read a signature from.
+	//
+	// runtime.writeBarrier is the flag that guards them and is a variable, not
+	// a function. It is in vars below.
+	{Name: "runtime.gcWriteBarrier1", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier2", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier3", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier4", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier5", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier6", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier7", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier8", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
+	// The copies that carry a barrier of their own. A copy of a value holding
+	// a pointer cannot be a memmove while the collector is marking, so the
+	// runtime does the copy and the barrier together. wbZero and wbMove are
+	// the halves the compiler calls when it has already emitted the copy.
+	{Name: "runtime.typedmemmove", Sig: "func(*abi.Type, unsafe.Pointer, unsafe.Pointer)", Group: GroupBarrier},
+	{Name: "runtime.typedmemclr", Sig: "func(*_type, unsafe.Pointer)", Group: GroupBarrier},
+	{Name: "runtime.typedslicecopy", Sig: "func(*_type, unsafe.Pointer, int, unsafe.Pointer, int) int", Group: GroupBarrier},
+	{Name: "runtime.wbZero", Sig: "func(*_type, unsafe.Pointer)", Group: GroupBarrier},
+	{Name: "runtime.wbMove", Sig: "func(*_type, unsafe.Pointer, unsafe.Pointer)", Group: GroupBarrier},
+}
+
+// A Var is one runtime variable the compiler reads.
+//
+// It is a table of its own and not a Sym with a flag, because Sym.Sig is a
+// function signature and a variable has a type. One field meaning two things
+// is what makes a table like this stop being checkable.
+type Var struct {
+	// Name is the linker symbol, always with the "runtime." prefix.
+	Name string
+
+	// Type is the variable's type as written in the runtime's source, with the
+	// field comments removed and the whitespace collapsed. It is compared
+	// textually against the runtime for the reason Sym.Sig is.
+	Type string
+
+	// Group is what the variable is for.
+	Group Group
+}
+
+// vars is the variable table. It is separate from syms for the reason Var
+// documents.
+var vars = []Var{
+	// The flag that guards every write barrier. The compiler loads the first
+	// four bytes and branches on them, which is why the runtime's comment
+	// forbids changing them and why the padding is part of the type rather
+	// than an accident: enabled is one byte and the load is 32 bit.
+	{
+		Name:  "runtime.writeBarrier",
+		Type:  "struct { enabled bool; pad [3]byte; alignme uint64 }",
+		Group: GroupBarrier,
+	},
 }
 
 // index is built once from syms, for lookup only. It never reaches an output
@@ -264,3 +400,27 @@ func All() []Sym {
 
 // Base returns the name without the "runtime." prefix.
 func (s Sym) Base() string { return s.Name[len("runtime."):] }
+
+// varIndex is built once from vars, for lookup only.
+var varIndex = func() map[string]*Var {
+	m := make(map[string]*Var, len(vars))
+	for i := range vars {
+		m[vars[i].Name] = &vars[i]
+	}
+	return m
+}()
+
+// LookupVar returns the variable with the given linker name, or nil.
+func LookupVar(name string) *Var { return varIndex[name] }
+
+// AllVars returns every variable, sorted by name, for the reason All is
+// sorted.
+func AllVars() []Var {
+	out := make([]Var, len(vars))
+	copy(out, vars)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Base returns the name without the "runtime." prefix.
+func (v Var) Base() string { return v.Name[len("runtime."):] }

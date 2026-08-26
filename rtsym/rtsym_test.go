@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -41,14 +42,6 @@ func runtimeSigs(t *testing.T) map[string]string {
 	fset := token.NewFileSet()
 	sigs := make(map[string]string)
 
-	// A symbol whose linker name is runtime.X need not be declared in package
-	// runtime. cmpstring is written in internal/bytealg and reaches the
-	// runtime's namespace through //go:linkname. Resolving those keeps the
-	// table checked against real source rather than against an assertion.
-	for name, sig := range linknamedIntoRuntime(fset) {
-		sigs[name] = sig
-	}
-
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -71,6 +64,23 @@ func runtimeSigs(t *testing.T) map[string]string {
 			if _, seen := sigs[fn.Name.Name]; !seen {
 				sigs[fn.Name.Name] = normalizeSig(fset, fn.Type)
 			}
+		}
+	}
+
+	// A symbol whose linker name is runtime.X need not be declared in package
+	// runtime. cmpstring is written in internal/bytealg and reaches the
+	// runtime's namespace through //go:linkname. Resolving those keeps the
+	// table checked against real source rather than against an assertion.
+	//
+	// They fill gaps and never overwrite. A symbol declared in both places is
+	// spelled differently in each: internal/runtime/maps defines mapassign as
+	// taking a *Map and package runtime declares it as taking a *maps.Map,
+	// because the two write the same type from inside and outside the package
+	// that owns it. The table records one vocabulary, and package runtime's is
+	// the one every other row is already in.
+	for name, sig := range linknamedIntoRuntime(fset) {
+		if _, seen := sigs[name]; !seen {
+			sigs[name] = sig
 		}
 	}
 	return sigs
@@ -275,8 +285,11 @@ func TestAssemblySymbolsExist(t *testing.T) {
 		}
 		n++
 		// A TEXT directive names the symbol with the middle dot that Plan 9
-		// assembly uses for the package separator.
-		if !strings.Contains(text, "·"+s.Base()+"(SB)") {
+		// assembly uses for the package separator, and may put an ABI tag
+		// between the name and the (SB). morestack_noctxt carries none and
+		// every gcWriteBarrier carries <ABIInternal>, so a plain substring
+		// test finds one family and not the other.
+		if !asmDefines(text, s.Base()) {
 			t.Errorf("%s is not defined in the runtime's assembly", s.Name)
 		}
 	}
@@ -284,6 +297,16 @@ func TestAssemblySymbolsExist(t *testing.T) {
 		t.Error("no assembly symbol was checked; the table lost its Assembly entries")
 	}
 	t.Logf("checked %d assembly symbols", n)
+}
+
+// asmDefines reports whether the assembly text defines the symbol.
+//
+// The two spellings are "·name(SB)" and "·name<ABI>(SB)". The ABI is part of
+// the symbol's identity to the linker, and it is not checked here: this test
+// asserts the symbol exists, and ssagen decides which ABI a reference carries.
+func asmDefines(text, base string) bool {
+	re := regexp.MustCompile("·" + regexp.QuoteMeta(base) + `(<[A-Za-z0-9]+>)?\(SB\)`)
+	return re.MatchString(text)
 }
 
 // linknamedIntoRuntime finds every //go:linkname that pushes a declaration
@@ -351,4 +374,167 @@ func linknamedIntoRuntime(fset *token.FileSet) map[string]string {
 		return nil
 	})
 	return out
+}
+
+// runtimeVarTypes reads the Go runtime's source and returns the type of every
+// package-level variable that has one written down, keyed by name.
+//
+// A variable declared with a value and no type is absent, which is what the
+// table wants: a variable whose type is inferred is not one the compiler reads
+// by layout.
+func runtimeVarTypes(t *testing.T) map[string]string {
+	t.Helper()
+
+	dir := filepath.Join(runtime.GOROOT(), "src", "runtime")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	fset := token.NewFileSet()
+	out := make(map[string]string)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			continue
+		}
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || vs.Type == nil {
+					continue
+				}
+				for _, id := range vs.Names {
+					if _, seen := out[id.Name]; !seen {
+						out[id.Name] = normalizeType(fset, vs.Type)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// normalizeType prints a type with its whitespace collapsed onto one line.
+//
+// A struct's fields are separated by a newline in the source and by "; " here,
+// which is the separator the language accepts for the same declaration written
+// on one line. So the recorded spelling is still Go the reader can paste back.
+func normalizeType(fset *token.FileSet, e ast.Expr) string {
+	var b strings.Builder
+	if err := printer.Fprint(&b, fset, e); err != nil {
+		return ""
+	}
+	var parts []string
+	for _, line := range strings.Split(b.String(), "\n") {
+		if line = strings.Join(strings.Fields(line), " "); line != "" {
+			parts = append(parts, line)
+		}
+	}
+	var out strings.Builder
+	for i, p := range parts {
+		if i > 0 {
+			// A separator between two fields, and a plain space around the
+			// braces that open and close the struct.
+			if strings.HasSuffix(parts[i-1], "{") || p == "}" {
+				out.WriteString(" ")
+			} else {
+				out.WriteString("; ")
+			}
+		}
+		out.WriteString(p)
+	}
+	return out.String()
+}
+
+// TestVarTableMatchesTheRuntime is TestTableMatchesTheRuntime for the
+// variables.
+//
+// The compiler reads runtime.writeBarrier by offset: it loads the first four
+// bytes and branches on them. A field added in front of enabled, or a change
+// of the padding that lets the load be 32 bit, is a branch on the wrong bytes
+// and a write barrier that is skipped while the collector is marking.
+func TestVarTableMatchesTheRuntime(t *testing.T) {
+	types := runtimeVarTypes(t)
+	if len(types) == 0 {
+		if os.Getenv("NANOGO_REQUIRE_CORPUS") == "1" {
+			t.Fatal("NANOGO_REQUIRE_CORPUS=1 and the runtime source under GOROOT could not be read")
+		}
+		t.Skip("no runtime source under GOROOT")
+	}
+	if len(AllVars()) == 0 {
+		t.Fatal("the variable table is empty")
+	}
+	for _, v := range AllVars() {
+		got, ok := types[v.Base()]
+		if !ok {
+			t.Errorf("%s is not declared in the runtime's Go source", v.Name)
+			continue
+		}
+		if got != v.Type {
+			t.Errorf("%s\n  table:   %s\n  runtime: %s", v.Name, v.Type, got)
+		}
+	}
+	t.Logf("checked %d variables against %d runtime variables", len(AllVars()), len(types))
+}
+
+func TestLookupAndAllVars(t *testing.T) {
+	if got := LookupVar("runtime.writeBarrier"); got == nil || got.Group != GroupBarrier {
+		t.Fatalf("LookupVar(runtime.writeBarrier) = %#v", got)
+	}
+	if LookupVar("runtime.nosuchvariable") != nil {
+		t.Error("LookupVar found a variable that is not in the table")
+	}
+	// A variable is not a function. Nothing that emits a call may find one
+	// through the symbol table, because a call to it jumps into data.
+	if Lookup("runtime.writeBarrier") != nil {
+		t.Error("a variable is reachable through Lookup, which names functions")
+	}
+	all := AllVars()
+	if len(all) != len(vars) {
+		t.Errorf("AllVars returned %d variables, the table holds %d", len(all), len(vars))
+	}
+	if !sort.SliceIsSorted(all, func(i, j int) bool { return all[i].Name < all[j].Name }) {
+		t.Error("AllVars is not sorted")
+	}
+	all[0].Name = "mutated"
+	if AllVars()[0].Name == "mutated" {
+		t.Error("AllVars returned a view of the table rather than a copy")
+	}
+	for _, v := range AllVars() {
+		if !strings.HasPrefix(v.Name, "runtime.") {
+			t.Errorf("%s does not carry the runtime prefix", v.Name)
+		}
+		if v.Group == GroupInvalid {
+			t.Errorf("%s has no group", v.Name)
+		}
+	}
+}
+
+// TestEveryGroupHasASymbol is the gate on a group that names a family the
+// table does not carry.
+//
+// GroupMap and GroupBarrier were both declared and both empty, so the table
+// said the compiler could call a map function and named none of them. A group
+// with no members is a claim with nothing behind it.
+func TestEveryGroupHasASymbol(t *testing.T) {
+	seen := make(map[Group]int)
+	for _, s := range All() {
+		seen[s.Group]++
+	}
+	for _, v := range AllVars() {
+		seen[v.Group]++
+	}
+	for g := GroupAlloc; g <= GroupPrint; g++ {
+		if seen[g] == 0 {
+			t.Errorf("the %s group is declared and empty", g)
+		}
+	}
 }
