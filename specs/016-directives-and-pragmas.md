@@ -202,8 +202,10 @@ folds them to constants.
 What is built is the placement rule and the proof that nothing is honoured:
 
 - `driver.TestMisplacedDirectiveIsRejected` pins each misplaced case at the
-  line `gc` reports it on, and `driver/pragma_test.go` covers the recorded flag
-  set including the three verbs that imply another.
+  line `gc` reports it on, and `driver.TestPragmaVerbMapsTheTable` pins the
+  recorded flag set, including the four verbs that imply another: `nosplit` and
+  `cgo_unsafe_args` imply `nocheckptr`, `nowritebarrierrec` implies
+  `nowritebarrier`, and `uintptrescapes` implies `uintptrkeepalive`.
 - `test/directive.go` and `test/directive2.go` are `rejected` in
   [004](004-conformance.md)'s corpus, on the first error's line.
 - `driver.TestNosplitIsStillDropped` asserts that two packages differing only

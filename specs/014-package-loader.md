@@ -34,14 +34,13 @@ it is the piece a differential corpus can exercise with no compiler present. It
 was built in M0 for that reason, ahead of the milestone
 [003](003-sequencing.md) placed it in.
 
-**The G1 half has two consumers and neither is the compile path.**
+**The G1 half has two consumers, and neither of them is the `-toolexec` path.**
 `driver/build.go` calls `loader.GoList` to resolve the graph `nanogo build` was
 given a pattern for, and `internal/gotest` takes its build constraints from
-`loader.Context`. Nothing else imports the package. Hosted mode does not: under
-`-toolexec` the `go` command has already resolved the graph and hands the
-driver one package's file list on the command line, so the loader is not in
-that path at all. Whole-world mode is the consumer that will put it there, and
-that is G2 work.
+`loader.Context`. Nothing else imports the package. Under `-toolexec` the `go`
+command has already resolved the graph and hands the driver one package's file
+list on the command line, so the loader is not in that path at all. Whole-world
+mode is what puts it there, and that is G2 work.
 
 ## G1: ask the toolchain
 
