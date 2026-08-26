@@ -81,25 +81,26 @@ that package's to emit, and this package only needs to name it. So the
 lowering pass refuses a row when the type cannot be *named*, and `rtype`
 refuses separately when the contents cannot be *filled in*.
 
-The name is a function of the `ir.Type`, and four Go distinctions do not
-survive [020](020-ir.md)'s type boundary. `ir/rtype.go` refuses each one by
-name:
+The name is a function of the `ir.Type`, and **one** Go distinction does not
+survive [020](020-ir.md)'s type boundary. `ir/rtype.go` refuses it by name:
 
 | Distinction | Two types that would share one name |
 | --- | --- |
-| a channel's direction | `chan int` and `chan<- int` |
-| a function's signature | `func(int)` and `func(string)` |
-| a literal interface's method signatures | `interface{ M() }` and `interface{ M(int) }` |
 | an embedded field renamed through a type alias | `struct{ int }` and `struct{ Int = int }` |
 
-The last two reduce to the second: a literal interface's spelling holds each
-method's type and a literal struct's spelling holds each field's type, so both
-need the signature the boundary drops. The alias case is separate and is not a
-boundary gap in the same sense: `ir.Field` carries `Tag`, `Embedded` and `Pkg`,
-and what `Converter` loses is the alias itself, because it unaliases before the
-name is asked for. A **defined** type is exempt from all four, because its name
-is its identity: `type S func(int)` is `type:p.S` and no signature is needed to
-say so.
+Three rows left this table. A channel's direction, a function's signature and a
+literal interface's method list are all in `ir.Type` now, so each has a
+spelling, and what each refuses is the zero value of the field it reads: a
+channel whose `ChanDir` is `InvalidDir`, a function whose `Params` or `Results`
+is nil, an interface with no method list. Those are types built below the type
+boundary and never converted, and a zero read as a fact is what
+[020](020-ir.md)'s second rule forbids.
+
+The row that is left is not a boundary gap in the same sense: `ir.Field` carries
+`Tag`, `Embedded` and `Pkg`, and what `Converter` loses is the alias itself,
+because it unaliases before the name is asked for. A **defined** type is exempt,
+because its name is its identity: `type S func(int)` is `type:p.S` and no
+signature is needed to say so.
 
 One case is refused by neither and is wrong: a **generic instantiation**.
 `ir/convert.go` names `atomic.Pointer[os.dirInfo]` as `sync/atomic.Pointer`,
@@ -125,7 +126,7 @@ Four things stop a descriptor, and each names itself in the refusal:
 | --- | --- |
 | a method | the two ABI wrappers `Ifn` and `Tfn` that `gc` generates beside every method |
 | a struct or an array whose parts do not compare as one region of memory | the generated equality function this spec owes |
-| a map | a *name* for the slot group, which `gc` spells `noalg.map.group[K]V` |
+| a map | a *descriptor* for the slot group, whose slots are a literal struct |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
 Writing a tail that claims a type has no methods is the failure the first row
@@ -477,15 +478,12 @@ rule at the top of `ir/type.go` forbids. What it would cost is the failure this
 spec already names: `<-chan int` written under `chan int`'s name, one symbol
 for two types, merged by the linker without a diagnostic.
 
-**A channel *literal* is still refused, and the refusal moved.** It is now
-`ir/rtype.go`'s and not `rtype`'s. `typeName` spells no direction, so
-`chan int` and `chan<- int` would still share one name, and `Descriptor` asks
-for the name before it asks whether the bytes can be filled in. What the naming
-function needs is three lines: the direction's spelling before the element's,
-which `ir.ChanDir.String` already returns in the form that precedes an element
-(`chan`, `chan<-`, `<-chan`). A **defined** channel type is exempt, as every
-defined type is, because its name is its identity, so `type Signal chan int`
-compiles to a descriptor today.
+**A channel literal is named now.** `ir.ChanDir.String` returns the whole
+prefix (`chan`, `chan<-`, `<-chan`), so `typeName` writes it before the
+element's and the three directions are three symbols. One case needs a
+parenthesis: `chan (<-chan T)`, because `chan <-chan T` reads back as
+`chan<- chan T`, which is a different type. A slice literal of channels is
+lowered as a consequence, and `InvalidDir` is still refused.
 
 ### A function's signature crossed the boundary
 
@@ -505,11 +503,15 @@ what follows is an array of `*Type` addressed from the end of the header, so a
 four-byte header would put every pointer in it at an offset that is not
 pointer-aligned.
 
-A function *literal* is still refused, by `ir/rtype.go` and not here, for the
-reason a channel literal is: the naming function spells no signature, so
-`func(int)` and `func(string)` would share one symbol. What that file needs is
-the spelling `func(` plus each parameter, `, ...` for a variadic last one, and
-the results, which is a walk over the two lists it can now see.
+**A function literal is named now.** `ir/rtype.go`'s `signatureName` writes the
+parameter list and the result list, with one result bare and several
+parenthesised and a variadic last parameter written from the slice's *element*,
+because `func(...int)` and `func([]int)` have the same `Params`. No parameter
+name is in it: two functions differing only in a parameter's name are one type.
+The leading `func` is the caller's, because `gc` writes it for a function type
+and leaves it out for an interface method, and the part after the name is the
+same string. `new` of a function type and a closure capturing one are lowered as
+a consequence.
 
 ### An interface's method list crossed the boundary, and the block moved
 
@@ -533,18 +535,27 @@ owns, and false of a **named** empty interface: `gc` writes the declaring
 package's path and `reflect.Type.PkgPath` reads it. `type E interface{}`
 reported no package for a type that has one.
 
-**What is still refused, and it is not this.** An `Imethod`'s `Typ` is an
-offset to the descriptor of the method's signature, and that signature is a
-function *literal*. `ir/rtype.go`'s `typeName` spells no signature, so
-`ir.TypeSymbol` refuses it and no interface with methods reaches a descriptor,
-defined or not. The interface's own name is fine when it is defined. So the
-three literal spellings the naming function owes are one piece of work, and
-the interface case needs the function case finished first.
+**The block is gone.** An `Imethod`'s `Typ` is an offset to the descriptor of
+the method's signature, that signature is a function literal, and the naming
+function spells one now. An interface with methods reaches a descriptor,
+defined or literal, and `internal/e2e` links and runs a gc-compiled importer
+against a nanogo-compiled library declaring one.
 
-That file's refusal also carries a sentence that is now false. It says "a
-function's signature is not in the IR type". It is. What is missing is the
-*spelling*, and the message should say so, for the reason the method refusal's
-did.
+A literal interface's own spelling is `interface {` and one `Name(sig)` per
+method. An unexported method name is qualified by the package that declares it,
+by import path in the link string and by package name in the name string,
+because two packages may declare an unexported method of one name and they are
+different methods.
+
+**The order is one definition, not two.** The spelling and the `Imethod` array
+are the same list read twice, so `ir.InterfaceMethodOrder` holds `gc`'s order
+and `rtype/iface.go` calls it. `ir.ExportedName` holds the one exportedness
+rule, which decides the qualifier, the sort and the flag byte of an
+`internal/abi.Name`. A method named `Ärger` is exported and its first byte is
+`0xC3`, so plain byte order puts it after every unexported name and `gc` puts it
+before them. `gc`'s own spelling of that interface,
+`interface { Read() int; Ärger() int; example.com/outer.flush() int }`, was read
+out of a compiled object rather than reasoned about.
 
 ### The map's group type is synthesised, and only its name is missing
 
@@ -592,14 +603,59 @@ option a nil `Equal` is. The runtime calls it on every operation, so a key with
 no hash is a map this compiler cannot describe rather than one that fails when
 used.
 
-**What is left is one spelling.** `gc` names the group
-`noalg.map.group[K]V` in the link string and `map.group[K]V` in the name
-string. Both are `ir/rtype.go`'s to produce and it produces neither: the group
-is a struct with no name, so it reaches that file's literal-struct case and is
-refused. The `noalg.` prefix is not decoration either. It says the type has no
-equality or hash function of its own, and the group has none: `gc` gives its
-descriptor a `TFlag` of `TFlagExtraStar` alone, with no `TFlagNamed`, no
-`TFlagUncommon` and no `TFlagRegularMemory`.
+**The group is named now, and the two spellings are not the two this spec
+said.** `gc`'s link string is `map.group[K]V` and the *symbol* is
+`type:noalg.map.group[K]V`, because `types.TypeSymName` is `LinkString` plus the
+prefix and `typehash` is over `LinkString` alone. A link string carrying the
+prefix would produce a hash `gc` never computed, and a type switch compares
+hashes before it compares types.
+
+Two facts on `ir.Type` carry it. `MapGroup` is the map the group belongs to, and
+the spelling reads the *map's* key and element rather than the slot's: a key
+past `abi.MapMaxKeyBytes` is a pointer in the slot and is itself in the name, so
+`map[[200]byte]int` is `map.group[[200]uint8]int`. `NoAlg` marks a type the
+compiler synthesised and gave no algorithms, and `TypeSymbol` adds the prefix
+for it. The mark reaches a type built out of a marked one the way `gc`'s does,
+through a struct's fields, an array's element and a pointer's element, and not
+through a slice, which `gc` gives no equality algorithm to begin with. The
+prefix is not decoration: without it the group's descriptor would merge with the
+descriptor of a struct a program declared with the same two fields, and that
+struct would be left with a nil `Equal`.
+
+**What is left is one spelling below the group.** The group's slots are a
+literal struct, which is the row still in the naming table above, so
+`mapEmittable` asks the group for its descriptor and reports the group's own
+reason. The map moves when the literal struct is spelled and needs nothing else.
+
+### The naming function was the last block, and it is not one now
+
+Three of the four spellings this spec asked for are written, and each was
+checked against `gc` rather than against reasoning. The oracle is the running
+binary: `rtype`'s corpus hashes the link string with `gc`'s own algorithm and
+compares the result with the hash `gc` put in the descriptor `reflect` is
+reading in the same process, so a spelling that differs from `gc`'s by one
+character fails as a hash mismatch. Every channel, signature, literal interface
+and slot group added here is a corpus row.
+
+The fourth spelling, a literal struct, is the whole of what is left. It is the
+one row of the naming table and it is the one thing a map is waiting on.
+
+**Two refusals moved out of the tables and became linked programs.** An
+interface with methods is compiled, linked and run against a gc-compiled
+importer. A channel literal, `new` of a function type and a closure capturing
+one are lowered.
+
+**Four refusals in `ir/lower.go` named symbols that exist.** `rtsym` grew from
+70 rows to 120 and the messages were not read again. `runtime.chanlen`,
+`runtime.chancap`, `runtime.makemap` and `runtime.mapclear` are all in `rtsym`,
+so what is missing for each is the lowering row that calls it. One of the four
+named the wrong symbol: a range over a map said `runtime.mapiterinit`, which a
+swiss map does not use. `mapiterinit` survives only as a `//go:linkname` shim
+taking a `*runtime.linknameIter` rather than a `*maps.Iter`, and the two layouts
+differ, so a row built for that name would write past the end of the frame slot.
+[031](031-runtime-lowering.md) already recorded the correction and the refusal
+contradicted it. [020](020-ir.md)'s row table still names `mapiterinit` and
+`mapiternext` and is not corrected here.
 
 ### `PtrToThis` was blamed on a relocation that exists
 

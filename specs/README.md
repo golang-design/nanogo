@@ -111,7 +111,7 @@ believed.
 | --- | --- | --- | --- |
 | [030](030-abi.md) | ABI | `in progress` | layout and calling convention |
 | [031](031-runtime-lowering.md) | Runtime lowering | `in progress` | the calls the compiler generates |
-| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `in progress` | and the symbol namespace; a defined type's descriptor reaches the object file with its `UncommonType` tail, four stops still refuse one by name, and itabs are not built |
+| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `in progress` | and the symbol namespace; a defined type's descriptor reaches the object file with its `UncommonType` tail, a channel, a signature, a literal interface and a map's slot group are all named now, one spelling and four stops still refuse a descriptor by name, and itabs are not built |
 | [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | `in progress` | `defer` and `go` of a function value run, a captureless closure runs, and a deferred call runs while the goroutine panics; a `panic` whose operand is not already an interface value, a read of `recover`'s value, and every capture are refused; a `panic` of a non-nil interface value and a declared function used as a func value are miscompiles |
 | [034](034-write-barriers.md) | Write barriers | `draft` | not written |
 | [035](035-goroutines-and-stack-growth.md) | Goroutines and stack growth | `in progress` | stack growth built; `go f()` with no arguments reaches `newproc`, an argument is a capture and is refused |
