@@ -876,9 +876,12 @@ func (l *lowerer) expr(n Expr) Expr {
 //
 // specs/020-ir.md gives them four rows. Three are built here: the length or
 // capacity word read out of a slice or string header, and a constant for an
-// array or a pointer to one. The fourth, a map and a channel, is refused:
-// specs/031's chanlen and chancap are named in its prose and are not in rtsym,
-// and a map's count field is a runtime layout this pass may not assume.
+// array or a pointer to one. The fourth, a map and a channel, is refused, and
+// the two are refused for different reasons. rtsym holds runtime.chanlen and
+// runtime.chancap, so a channel is waiting on the row that calls them and on
+// nothing else. A map's length is a field of the runtime's maps.Map, which gc
+// reads inline and rtsym holds no symbol for, so a map is waiting on a runtime
+// layout this pass may not assume.
 func (l *lowerer) lenCap(n Expr) Expr {
 	x := n.X
 	if x == nil || x.Type == nil {
@@ -962,7 +965,7 @@ func (l *lowerer) compositeLit(n Expr) Expr {
 	case Slice:
 		return l.sliceLit(n)
 	case Map:
-		l.refuse(n, "a map literal needs runtime.makemap, which rtsym does not have")
+		l.refuse(n, "a map literal needs runtime.makemap, and the row that calls it is not built")
 	default:
 		l.refuse(n, "a literal of "+t.Kind.String())
 	}
@@ -1354,7 +1357,7 @@ func (l *lowerer) rangeStmt(n *Node) {
 		bail("a range over a string needs the UTF-8 decode of specs/020's row")
 		return
 	case x.Type.Kind == Map:
-		bail("a range over a map needs runtime.mapiterinit, which rtsym does not have")
+		bail("a range over a map needs runtime.mapIterStart and runtime.mapIterNext, and the row that calls them is not built")
 		return
 	case x.Type.Kind == Chan:
 		bail("a range over a channel")
@@ -1654,7 +1657,7 @@ func (l *lowerer) clearExpr(n Expr) Expr {
 		return n
 	}
 	if x.Type.Kind != Slice {
-		l.refuse(n, "a clear of "+x.Type.Kind.String()+" needs runtime.mapclear, which rtsym does not have")
+		l.refuse(n, "a clear of "+x.Type.Kind.String()+" needs runtime.mapclear, and the row that calls it is not built")
 		return n
 	}
 	pos := n.Pos

@@ -20,9 +20,9 @@ func TestBuildFailureIsClassifiedByWhatItSays(t *testing.T) {
 		reason string
 	}{{
 		name:   "a construct nanogo cannot compile is a refusal",
-		out:    "nanogo: main: nanogo cannot compile function main at /tmp/x/map.go:3:6: ir.Lower: ir: lowering main: compositelit: a map literal needs runtime.makemap, which rtsym does not have\n",
+		out:    "nanogo: main: nanogo cannot compile function main at /tmp/x/map.go:3:6: ir.Lower: ir: lowering main: compositelit: a map literal needs runtime.makemap, and the row that calls it is not built\n",
 		want:   ClassRefused,
-		reason: "function NAME: ir.Lower: ir: lowering NAME: compositelit: a map literal needs runtime.makemap, which rtsym does not have",
+		reason: "function NAME: ir.Lower: ir: lowering NAME: compositelit: a map literal needs runtime.makemap, and the row that calls it is not built",
 	}, {
 		name:   "a panic is a crash and never a refusal",
 		out:    "panic: arm64: ZR used where the encoding means a floating-point register\n\ngoroutine 1 [running]:\n",

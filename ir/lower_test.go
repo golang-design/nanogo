@@ -1126,7 +1126,11 @@ func TestLowerRefusals(t *testing.T) {
 		{"new of a literal struct", `func f() *struct{ A int } { return new(struct{ A int }) }`, ONew, "embedded field renamed through an alias"},
 		{"len of a map", `func f(m map[int]int) int { return len(m) }`, OLen, "the length of map"},
 		{"len of a channel", `func f(c chan int) int { return len(c) }`, OLen, "the length of chan"},
-		{"range over a map", `func f(m map[int]int) { for k := range m { use(k) } }`, ORange, "mapiterinit"},
+		// mapIterStart and not mapiterinit. runtime.mapiterinit still exists,
+		// as a //go:linkname shim taking a different struct layout, so a row
+		// built for the name in the older prose would write past the end of a
+		// maps.Iter frame slot.
+		{"range over a map", `func f(m map[int]int) { for k := range m { use(k) } }`, ORange, "runtime.mapIterStart"},
 		{"range over a string", `func f(s string) { for i := range s { use(i) } }`, ORange, "UTF-8"},
 		{"range over a channel", `func f(c chan int) { for v := range c { use(v) } }`, ORange, "channel"},
 		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
