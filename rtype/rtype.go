@@ -41,34 +41,30 @@
 // (ir.Type.Methods), so the UncommonType can carry the package path that
 // reflect.Type.PkgPath reads and a method count that was established rather
 // than assumed. A struct is emitted, with the field array that carries each
-// name, tag, embedded bit, type and offset.
+// name, tag, embedded bit, type and offset. A channel, a function and an
+// interface with methods are emitted, because the direction, the signature and
+// the method list all cross the boundary now.
 //
-// Four things are refused, and each names what is missing:
+// Three things are refused, and each names what is missing:
 //
-//   - A type that has a method. The entry needs an Mtyp, which is the
-//     descriptor of the method's type with the receiver removed, and a
-//     function's signature is not in the IR type; and it needs Ifn and Tfn,
-//     the two ABI wrappers, one of which gc generates in the declaring package
-//     and nanogo does not generate at all. Zero is a legal Mtyp meaning
-//     "unexported, reflect may not call it", so a zero written for a gap would
-//     be read as a fact. This is the same gap that stops itabs.
+//   - A type that has a method. The entry needs Ifn and Tfn, the two ABI
+//     wrappers, which gc generates in the declaring package as code and nanogo
+//     does not generate at all. Mtyp is writable: ir.Method.Sig carries the
+//     method's type with the receiver removed. This is the same gap that stops
+//     itabs, whose Fun array holds the same wrappers.
 //   - A struct whose fields do not compare as one region of memory. Its Equal
 //     needs a generated function, which specs/032 has no writer for, and a nil
 //     Equal on a comparable type makes the runtime panic when a value of it is
 //     used as a map key.
 //   - A map, whose descriptor names the runtime's group type.
-//   - An interface with methods, whose descriptor names the type of each
-//     method. It is refused by the naming function in ir/rtype.go before it
-//     reaches this package, and emittable answers for it anyway, because a
-//     refusal that depends on which check runs first is a refusal nobody has
-//     checked.
 //
-// A channel and a function are written. The direction and the signature are in
-// the IR type now, so a defined channel or function type gets a descriptor. A
-// channel or function *literal* is still refused, and the refusal is
-// ir/rtype.go's rather than this package's: the naming function spells neither
-// a direction nor a signature, so chan int and chan<- int would share one
-// symbol, and so would func(int) and func(string).
+// A channel, a function or a non-empty interface written as a *literal* is
+// still refused, and the refusal is ir/rtype.go's rather than this package's:
+// the naming function spells neither a direction nor a signature, so chan int
+// and chan<- int would share one symbol, so would func(int) and func(string),
+// and an interface's spelling holds the signature of every method. emittable
+// answers for all three anyway, because a refusal that depends on which check
+// runs first is a refusal nobody has checked.
 //
 // # One known divergence from gc, in the pointer bitmask of an interface
 //
@@ -352,6 +348,18 @@ func Referenced(t *ir.Type) ([]*ir.Type, error) {
 		out = append(out, t.Params...)
 		out = append(out, t.Results...)
 		return out, nil
+	case ir.Interface:
+		// An Imethod's Typ is an offset to the descriptor of the method's
+		// signature, so an interface owes one descriptor per method.
+		ms, err := imethods(t)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]*ir.Type, 0, len(ms))
+		for _, m := range ms {
+			out = append(out, m.Sig)
+		}
+		return out, nil
 	}
 	return nil, nil
 }
@@ -431,12 +439,8 @@ func emittable(t *ir.Type) error {
 	case ir.Map:
 		return fmt.Errorf("rtype: a map descriptor names the runtime's group type, which specs/032 does not carry")
 	case ir.Interface:
-		if !t.EmptyIface {
-			// The method set is in the IR type now. What is not is the type of
-			// each method: an InterfaceType's Imethod carries a TypeOff to the
-			// descriptor of the method's signature, and a function's signature
-			// does not cross the type boundary.
-			return fmt.Errorf("rtype: an interface descriptor names the type of each method and a function's signature is not in the IR type")
+		if err := ifaceEmittable(t); err != nil {
+			return err
 		}
 	}
 	if words := t.PtrBytes() / ir.PtrSize; words > maxPtrmaskBytes*8 {
@@ -633,7 +637,7 @@ func kindTailSize(t *ir.Type) int {
 	case ir.FuncKind:
 		return funcTailSize
 	case ir.Interface:
-		return 32
+		return ifaceTailSize
 	case ir.Struct:
 		return structTailSize
 	}
@@ -680,10 +684,7 @@ func kindTail(t *ir.Type, self string, dataOff int) ([]byte, []Reloc, []Symbol, 
 		return tail, []Reloc{e, sl}, nil, nil
 
 	case ir.Interface:
-		// An empty interface: a nil package path and an empty method slice.
-		// The three words of the slice are its pointer, length and capacity,
-		// and all three are zero.
-		return make([]byte, 32), nil, nil, nil
+		return ifaceTail(t, self, dataOff)
 
 	case ir.Chan:
 		return chanTail(t)
@@ -706,15 +707,17 @@ func kindTail(t *ir.Type, self string, dataOff int) ([]byte, []Reloc, []Symbol, 
 // kindData returns the variable-length section the kind-specific header points
 // at, which starts at base within the descriptor.
 //
-// A struct's field array and a function's parameter array are here. An
-// interface's method array belongs here too and is refused before it gets this
-// far.
+// A struct's field array, a function's parameter array and an interface's
+// method array are here. Each is pointed at from the kind-specific header,
+// which has to be placed before them, so the two are written in two passes.
 func kindData(t *ir.Type, base int) ([]byte, []Reloc, []Symbol, error) {
 	switch t.Kind {
 	case ir.Struct:
 		return structFields(t, base)
 	case ir.FuncKind:
 		return funcParams(t, base)
+	case ir.Interface:
+		return ifaceMethods(t, base)
 	}
 	return nil, nil, nil, nil
 }

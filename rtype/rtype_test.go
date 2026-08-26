@@ -411,7 +411,7 @@ func descriptorSize(rt reflect.Type) int {
 	case reflect.Func:
 		n += 8 + 8*(rt.NumIn()+rt.NumOut())
 	case reflect.Interface:
-		n += 32
+		n += 32 + 8*rt.NumMethod()
 	case reflect.Struct:
 		n += 32 + 24*rt.NumField()
 	}

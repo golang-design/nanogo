@@ -108,6 +108,12 @@ type Nullary func()
 
 type Variadic func(head Flags, rest ...*Ident) (int, error)
 
+// NamedEmpty is an interface with a name and no methods. gc writes the
+// declaring package's path into its InterfaceType header, and the encoder used
+// to write thirty-two zero bytes for every interface, so reflect reported no
+// package for a type that has one.
+type NamedEmpty interface{}
+
 var namedCorpus = []struct {
 	src string
 	rt  reflect.Type
@@ -125,6 +131,7 @@ var namedCorpus = []struct {
 	{"Handler", reflect.TypeOf(Handler(nil))},
 	{"Nullary", reflect.TypeOf(Nullary(nil))},
 	{"Variadic", reflect.TypeOf(Variadic(nil))},
+	{"NamedEmpty", reflect.TypeOf((*NamedEmpty)(nil)).Elem()},
 }
 
 // namedRefusals are the rows that must be refused, with the words the refusal
@@ -187,6 +194,16 @@ type Handler func(n int, s string) error
 type Nullary func()
 
 type Variadic func(head Flags, rest ...*Ident) (int, error)
+
+type NamedEmpty interface{}
+
+// Reader is not in the corpus. Its descriptor is refused, and the refusal is
+// not this package's: an Imethod's Typ is an offset to the descriptor of the
+// method's signature, and ir/rtype.go spells no signature.
+type Reader interface {
+	Read(p []byte) (int, error)
+	flush() error
+}
 
 // Counter is not in the corpus. It is the type whose descriptor must be
 // refused, because a method needs two things this compiler does not have.
@@ -306,9 +323,21 @@ func TestUncommonTypeCarriesThePackagePath(t *testing.T) {
 				b += 16
 			case reflect.Func:
 				b += 8
+			case reflect.Interface:
+				b += 32
 			}
-			if got := binary.LittleEndian.Uint16(d.Data[b+4:]); got != uint16(c.rt.NumMethod()) {
-				t.Errorf("Mcount %d, want %d", got, c.rt.NumMethod())
+			// An interface declares no method on itself. Its methods are the
+			// InterfaceType header's Imethods, a different section with a
+			// different encoding, so its UncommonType holds none of them.
+			// reflect.Type.NumMethod reads the Imethods for an interface and
+			// the UncommonType for everything else, which is why the two are
+			// not one expression.
+			wantM := c.rt.NumMethod()
+			if c.rt.Kind() == reflect.Interface {
+				wantM = 0
+			}
+			if got := binary.LittleEndian.Uint16(d.Data[b+4:]); got != uint16(wantM) {
+				t.Errorf("Mcount %d, want %d", got, wantM)
 			}
 			if got := binary.LittleEndian.Uint16(d.Data[b+6:]); got != 0 {
 				t.Errorf("Xcount %d, want 0", got)
@@ -969,6 +998,164 @@ func TestReferencedFollowsAFunction(t *testing.T) {
 		}
 		if len(got) != c.rt.NumIn()+c.rt.NumOut() {
 			t.Errorf("%s reaches %d types, want %d", c.src, len(got), c.rt.NumIn()+c.rt.NumOut())
+		}
+	}
+}
+
+// TestNamedEmptyInterfaceCarriesItsPackage is the bug the InterfaceType
+// encoder replaced.
+//
+// Every interface got thirty-two zero bytes, on the reasoning that an empty
+// interface has a nil package path and an empty method slice. That is true of
+// `any` and of `error`, whose descriptors the runtime owns, and false of a
+// named empty interface: gc writes the declaring package's path, and
+// reflect.Type.PkgPath reads it.
+func TestNamedEmptyInterfaceCarriesItsPackage(t *testing.T) {
+	types, _ := namedTypes(t)
+	for i, c := range namedCorpus {
+		if c.rt.Kind() != reflect.Interface {
+			continue
+		}
+		t.Run(c.src, func(t *testing.T) {
+			syms, err := rtype.Descriptor(types[i])
+			if err != nil {
+				t.Fatalf("descriptor: %v", err)
+			}
+			d := syms[0]
+			r, ok := reloc(d, rtype.TypeSize)
+			if !ok {
+				t.Fatal("no package path reference; reflect reports a package for this type")
+			}
+			want := "type:.importpath." + namedPkgPath() + "."
+			if r.Target != want {
+				t.Errorf("package path is %s, want %s", r.Target, want)
+			}
+			if r.Size != 8 {
+				t.Errorf("package path is %d bytes, want a pointer", r.Size)
+			}
+			sym, ok := find(syms, want)
+			if !ok {
+				t.Fatalf("%s is not defined", want)
+			}
+			if got := decodeName(t, sym.Data); got != c.rt.PkgPath() {
+				t.Errorf("package path is %q, want %q", got, c.rt.PkgPath())
+			}
+			// An empty interface's method slice is three zero words.
+			for off := rtype.TypeSize + 8; off < rtype.TypeSize+32; off += 8 {
+				if got := binary.LittleEndian.Uint64(d.Data[off:]); got != 0 {
+					t.Errorf("the method slice word at %d is %#x, want 0", off, got)
+				}
+			}
+			if _, ok := reloc(d, int32(rtype.TypeSize+8)); ok {
+				t.Error("an empty interface's method slice is relocated")
+			}
+		})
+	}
+}
+
+// TestAnyKeepsANilPackagePath is the other half of the rule above.
+//
+// `any` is a type literal with no package, and `error` is predeclared and the
+// runtime owns its descriptor. A path written for either is a second symbol
+// for a string that already has one, and for `error` a second descriptor for a
+// type the runtime already defines.
+func TestAnyKeepsANilPackagePath(t *testing.T) {
+	types := corpusTypes(t)
+	for i, c := range corpus {
+		if c.rt.Kind() != reflect.Interface {
+			continue
+		}
+		syms, err := rtype.Descriptor(types[i])
+		if err != nil {
+			t.Fatalf("%s: %v", c.src, err)
+		}
+		if _, ok := reloc(syms[0], rtype.TypeSize); ok {
+			t.Errorf("%s: the package path is relocated and gc leaves it zero", c.src)
+		}
+	}
+}
+
+// TestInterfaceWithMethodsIsBlockedOnTheNamingFunction records exactly where
+// the last interface refusal lives, so that the day it moves is visible.
+//
+// rtype's own refusal is gone: the method list and each method's signature are
+// in the IR type, and this package writes the InterfaceType header and the
+// Imethod array from them. What stops a descriptor is one line above this
+// package. An Imethod's Typ is an offset to the descriptor of the method's
+// signature, that signature is a function *literal*, and ir/rtype.go's
+// typeName spells no signature. A defined interface is nameable and its
+// methods' types are not.
+func TestInterfaceWithMethodsIsBlockedOnTheNamingFunction(t *testing.T) {
+	_, pkg := namedTypes(t)
+	c := ir.NewConverter()
+	reader, err := c.Convert(pkg.Scope().Lookup("Reader").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The facts this package needs are all present.
+	if len(reader.Methods) != 2 {
+		t.Fatalf("Reader carries %d methods, want 2", len(reader.Methods))
+	}
+	for _, m := range reader.Methods {
+		if m.Sig == nil {
+			t.Fatalf("Reader.%s carries no signature", m.Name)
+		}
+	}
+	// So is the interface's own name, because it is a defined type.
+	if _, err := ir.TypeSymbol(reader); err != nil {
+		t.Fatalf("a defined interface has no name: %v", err)
+	}
+	// What is missing is the name of a method's signature.
+	if _, err := ir.TypeSymbol(reader.Methods[0].Sig); err == nil {
+		t.Error("a function literal is nameable; this test and the refusal below are stale")
+	}
+	_, err = rtype.Descriptor(reader)
+	if err == nil {
+		t.Fatal("an interface with methods was described; lift the refusal in this test")
+	}
+	if !strings.HasPrefix(err.Error(), "ir:") {
+		t.Errorf("the refusal is %q, want it to come from the naming function in package ir", err)
+	}
+}
+
+// TestReferencedFollowsAnInterface checks the edges cmd/link walks.
+//
+// An Imethod's Typ is an offset to the descriptor of the method's signature,
+// so a package that emits an interface's descriptor owes one descriptor per
+// method.
+func TestReferencedFollowsAnInterface(t *testing.T) {
+	_, pkg := namedTypes(t)
+	c := ir.NewConverter()
+	reader, err := c.Convert(pkg.Scope().Lookup("Reader").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := rtype.Referenced(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Reader reaches %d types, want one per method", len(got))
+	}
+	// Exported first, then by name, which is gc's order for an Imethod array
+	// and not the IR's.
+	for i, want := range []string{"Read", "flush"} {
+		if got[i] != reader.Methods[0].Sig && got[i].Kind != ir.FuncKind {
+			t.Errorf("entry %d is %s, want the signature of %s", i, got[i].Kind, want)
+		}
+	}
+	// An empty interface reaches nothing.
+	types, _ := namedTypes(t)
+	for i, c := range namedCorpus {
+		if c.src != "NamedEmpty" {
+			continue
+		}
+		got, err := rtype.Referenced(types[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Errorf("an empty interface reaches %v", got)
 		}
 	}
 }

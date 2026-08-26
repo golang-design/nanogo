@@ -183,9 +183,11 @@ func TestKindTailRefusesWhatItCannotDescribe(t *testing.T) {
 }
 
 func TestEmittableRefusalsSurviveWithoutTheName(t *testing.T) {
-	// These four are unreachable through Descriptor today, because a type with
-	// contents the IR does not carry has no canonical name either. They are
-	// the answer for the day a name exists and the contents still do not.
+	// Each row is a type built below the boundary and missing a fact the
+	// checker supplies, so each is unreachable through Descriptor today. They
+	// are the answer for the day a name exists and the contents still do not,
+	// and emittable answers for them anyway, because a refusal that depends on
+	// which check runs first is a refusal nobody has checked.
 	for _, tc := range []struct {
 		what string
 		typ  *ir.Type
@@ -193,7 +195,17 @@ func TestEmittableRefusalsSurviveWithoutTheName(t *testing.T) {
 	}{
 		{"a channel", &ir.Type{Kind: ir.Chan}, "direction"},
 		{"a function", &ir.Type{Kind: ir.FuncKind}, "signature"},
-		{"an interface with methods", &ir.Type{Kind: ir.Interface}, "type of each method"},
+		{"an interface whose method set nobody computed", &ir.Type{Kind: ir.Interface}, "method set of the interface"},
+		{
+			"an interface whose EmptyIface and method set disagree",
+			&ir.Type{Kind: ir.Interface, EmptyIface: true, Methods: []ir.Method{{Name: "M"}}},
+			"EmptyIface",
+		},
+		{
+			"an interface method with no signature",
+			&ir.Type{Kind: ir.Interface, Methods: []ir.Method{{Name: "M"}}},
+			"has no signature",
+		},
 		{"nothing", nil, "nil type"},
 		{
 			"a defined type whose method set nobody computed",
@@ -391,5 +403,79 @@ func TestMethodRefusalQualifiesAnUnexportedName(t *testing.T) {
 func TestSliceOfRefusesAnElementThatDoesNotLayOut(t *testing.T) {
 	if _, err := SliceOf(&ir.Type{Kind: ir.Invalid}); err == nil {
 		t.Error("a slice of an element that does not lay out was built")
+	}
+}
+
+// TestImethodOrderIsGcs pins the order of an InterfaceType's method array.
+//
+// The runtime and reflect both binary-search this array, so an array in a
+// different order from gc's is an array a lookup misses. gc's order is
+// types.CompareSyms: every exported name ahead of every unexported one, then
+// by name, then by package path. The IR sorts by name alone, which is enough
+// for determinism and is a different rule, so the encoder sorts.
+func TestImethodOrderIsGcs(t *testing.T) {
+	sig := &ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}}
+	if err := ir.Layout(sig); err != nil {
+		t.Fatal(err)
+	}
+	iface := &ir.Type{
+		Kind: ir.Interface, Name: "p.I", PkgPath: "p",
+		Methods: []ir.Method{
+			{Name: "zeta", Pkg: "p", Sig: sig},
+			{Name: "Zed", Sig: sig},
+			{Name: "alpha", Pkg: "p", Sig: sig},
+			{Name: "Ann", Sig: sig},
+		},
+	}
+	if err := ir.Layout(iface); err != nil {
+		t.Fatal(err)
+	}
+	got, err := imethods(iface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Ann", "Zed", "alpha", "zeta"}
+	for i, w := range want {
+		if got[i].Name != w {
+			t.Errorf("entry %d is %s, want %s", i, got[i].Name, w)
+		}
+	}
+	// The input is not reordered. ir.Type is shared through the converter's
+	// cache, so an encoder that sorted in place would change what every other
+	// reader sees.
+	if iface.Methods[0].Name != "zeta" {
+		t.Error("imethods sorted the IR type's own slice")
+	}
+}
+
+// TestImethodOrderSeparatesTwoPackages checks the third key.
+//
+// Two packages may declare an unexported method of one name and they are
+// different methods, so the package path breaks the tie rather than the order
+// the boundary happened to produce.
+func TestImethodOrderSeparatesTwoPackages(t *testing.T) {
+	sig := &ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}}
+	if err := ir.Layout(sig); err != nil {
+		t.Fatal(err)
+	}
+	iface := &ir.Type{
+		Kind: ir.Interface, Name: "p.I", PkgPath: "p",
+		Methods: []ir.Method{
+			{Name: "m", Pkg: "z/pkg", Sig: sig},
+			{Name: "m", Pkg: "a/pkg", Sig: sig},
+		},
+	}
+	if err := ir.Layout(iface); err != nil {
+		t.Fatal(err)
+	}
+	// Both are refused for a different reason, so the order is checked on the
+	// sort alone. Neither package is the interface's own, and gc encodes such
+	// a name with a package-path offset the name encoder does not write.
+	if err := ifaceEmittable(iface); err == nil {
+		t.Fatal("a method from another package was accepted")
+	}
+	iface.PkgPath = "z/pkg"
+	if err := ifaceEmittable(iface); err == nil {
+		t.Fatal("a method from another package was accepted")
 	}
 }

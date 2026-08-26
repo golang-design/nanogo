@@ -110,9 +110,9 @@ one name. Nothing in an `ir.Type` can detect it. The fix is in `convert.go`'s
 ### What `rtype` can fill in
 
 A predeclared basic type, a slice, an array, a pointer, a struct, a **channel**,
-a **function** and a defined type over any of those, with the `UncommonType`
-tail and the `StructType`, `ChanType` or `FuncType` header and array that each
-needs.
+a **function**, an **interface** and a defined type over any of those, with the
+`UncommonType` tail and the `StructType`, `ChanType`, `FuncType` or
+`InterfaceType` header and array that each needs.
 `ir.Type.Methods` is what makes the tail writable: a defined type's method set,
 set for every defined type with the empty set included, so an empty set is a
 fact rather than an absence. `TFlagUncommon` and the tail are one decision, because `gc` gives a
@@ -125,7 +125,7 @@ Four things stop a descriptor, and each names itself in the refusal:
 | --- | --- |
 | a method | the two ABI wrappers `Ifn` and `Tfn` that `gc` generates beside every method |
 | a struct or an array whose parts do not compare as one region of memory | the generated equality function this spec owes |
-| a map, or a literal interface with methods | the group type and the type of each method, which [020](020-ir.md)'s type boundary drops |
+| a map | the runtime's group type, which this spec does not carry |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
 Writing a tail that claims a type has no methods is the failure the first row
@@ -510,6 +510,41 @@ reason a channel literal is: the naming function spells no signature, so
 `func(int)` and `func(string)` would share one symbol. What that file needs is
 the spelling `func(` plus each parameter, `, ...` for a variadic last one, and
 the results, which is a walk over the two lists it can now see.
+
+### An interface's method list crossed the boundary, and the block moved
+
+`ir.Type.Methods` is set on a **literal** interface now as well as on a defined
+one, and each entry carries its signature, so `rtype/iface.go` writes the
+`InterfaceType` header and the `Imethod` array: a package path, a method slice
+pointing inside the descriptor's own symbol, and one eight-byte entry per
+method holding a `NameOff` and a `TypeOff`.
+
+The array's order is `gc`'s and not the IR's. `gc` sorts with
+`types.CompareSyms`, which puts every exported name ahead of every unexported
+one and then orders by name and package path; the IR sorts by name alone. The
+runtime and `reflect` binary-search the array, so an array in a different order
+is one a lookup misses. The two rules agree for every ASCII identifier and are
+not the same rule, so the encoder sorts.
+
+**A bug this replaced.** Every interface got thirty-two zero bytes, on the
+reasoning that an empty interface has a nil package path and an empty method
+slice. That is true of `any` and of `error`, whose descriptors the runtime
+owns, and false of a **named** empty interface: `gc` writes the declaring
+package's path and `reflect.Type.PkgPath` reads it. `type E interface{}`
+reported no package for a type that has one.
+
+**What is still refused, and it is not this.** An `Imethod`'s `Typ` is an
+offset to the descriptor of the method's signature, and that signature is a
+function *literal*. `ir/rtype.go`'s `typeName` spells no signature, so
+`ir.TypeSymbol` refuses it and no interface with methods reaches a descriptor,
+defined or not. The interface's own name is fine when it is defined. So the
+three literal spellings the naming function owes are one piece of work, and
+the interface case needs the function case finished first.
+
+That file's refusal also carries a sentence that is now false. It says "a
+function's signature is not in the IR type". It is. What is missing is the
+*spelling*, and the message should say so, for the reason the method refusal's
+did.
 
 ### `PtrToThis` was blamed on a relocation that exists
 
