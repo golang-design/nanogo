@@ -248,3 +248,52 @@ func TestLowerCaptureCellOutsideALoopItsConditionNames(t *testing.T) {
 			inLoop, buildDump(fn))
 	}
 }
+
+// TestLowerCaptureCellForSplitMentions checks where the cell of a variable
+// whose mentions are in two branches of one statement is allocated.
+//
+// Neither branch holds every mention, so neither is where the cell belongs:
+// one path would allocate and the other would read a nil pointer. The rule is
+// the innermost statement list that holds *every* mention, which here is the
+// list the branch statement itself is in.
+func TestLowerCaptureCellForSplitMentions(t *testing.T) {
+	fn := lowerOK(t, `func f(c bool) {
+		for i := 0; i < 3; i++ {
+			x := 0
+			if c {
+				x = 1
+			} else {
+				sink(func() int { return x })
+			}
+			use(x)
+		}
+	}`)
+	loops := buildFind(fn, OFor)
+	if len(loops) != 1 {
+		t.Fatalf("%d loops, want one", len(loops))
+	}
+	// The cell is allocated in the loop body, which is where the variable is
+	// declared, and not inside either branch.
+	top := 0
+	for _, s := range loops[0].Body {
+		if s.Op == OAssign && s.X != nil && s.X.Op == OLocal &&
+			s.X.Obj != nil && strings.HasPrefix(s.X.Obj.Name, ".cell_") {
+			top++
+		}
+	}
+	if top != 1 {
+		t.Errorf("%d cell allocations at the top of the loop body, want one:\n%s", top, buildDump(fn))
+	}
+	ifs := buildFind(fn, OIf)
+	if len(ifs) == 0 {
+		t.Fatal("the if statement is gone")
+	}
+	for _, list := range [][]Stmt{ifs[0].Body, ifs[0].Else} {
+		for _, s := range list {
+			if s.Op == OAssign && s.X != nil && s.X.Op == OLocal &&
+				s.X.Obj != nil && strings.HasPrefix(s.X.Obj.Name, ".cell_") {
+				t.Errorf("a cell is allocated inside a branch:\n%s", buildDump(fn))
+			}
+		}
+	}
+}

@@ -171,6 +171,11 @@ type lowerer struct {
 	capIndex map[*Object]int
 	cells    map[*Object]*Object
 
+	// uncelled holds the captures this function refused a cell for. The
+	// literal that names one is left in place, so that construction reports
+	// it too rather than building a closure object with a hole in it.
+	uncelled map[*Object]bool
+
 	// ndefer counts the defer statements this function lowered. One is enough
 	// to owe the function the single exit deferExit builds, so the count is
 	// read as a flag; it is a count so that a report can say how many.
@@ -1761,6 +1766,12 @@ func (l *lowerer) closureExpr(n Expr) Expr {
 	if len(n.Args) == 0 {
 		return l.funcValue(n, n.Obj, n.Type)
 	}
+	if l.hasUncelledCapture(n.Args) {
+		// The refusal was reported where the cell was refused. The node stays
+		// where it is, so that construction reports it too rather than
+		// building a closure object with a hole in it.
+		return n
+	}
 	return l.closureValue(n, n.Obj, n.Args, n.Type)
 }
 
@@ -1839,7 +1850,9 @@ func (l *lowerer) deferredValue(n Expr) Expr {
 		return nil
 	}
 	if len(call.Args) > 0 {
-		l.refuse(n, fmt.Sprintf("an argument list of %d: an argument becomes a capture, and a capture is read through the context register, which no SSA operation reads", len(call.Args)))
+		// ir.Build puts the operands of a defer or a go inside a literal, so
+		// a call reaching here with operands was built by hand.
+		l.refuse(n, fmt.Sprintf("an argument list of %d, which ir.Build wraps in a literal", len(call.Args)))
 		return nil
 	}
 	fun := call.X
@@ -1855,6 +1868,11 @@ func (l *lowerer) deferredValue(n Expr) Expr {
 		return nil
 	}
 	switch fun.Op {
+	case OClosure:
+		// The literal ir.Build wrapped the statement's operands in, or one
+		// the program wrote. Either way it is a func value, and the runtime
+		// calls it with nothing.
+		return l.expr(fun)
 	case OLocal:
 		// A temporary the builder wrote at the statement, which is the value
 		// the specification says the call uses.
@@ -1866,14 +1884,14 @@ func (l *lowerer) deferredValue(n Expr) Expr {
 		return ref(l.spill(fun), fun.Pos)
 	case OField:
 		if fun.X != nil && fun.X.Type != nil && fun.X.Type.Kind == Interface {
-			l.refuse(n, "a method of an interface keeps its receiver inside the selection, and the receiver becomes a capture, which is read through the context register, which no SSA operation reads")
+			// A method of an interface keeps its receiver inside the
+			// selection, so the value the runtime would be given is a method
+			// value: the receiver bound to the function the itab names.
+			// closureExpr refuses a method value for the same reason.
+			l.refuse(n, "a method of an interface is a method value, which binds its receiver by value, and only a capture through a heap cell is built")
 			return nil
 		}
-		// ir.Build snapshots the struct and not the field, so a value read
-		// out of the field here would be the value at the call and not the
-		// value at the statement. That is a gap in the builder, and refusing
-		// is what keeps it from becoming a wrong program.
-		l.refuse(n, "the function is a field of a value the builder snapshotted whole, so the field would be read when the call runs and not when the statement runs")
+		l.refuse(n, "a call through a field of a "+fun.X.Type.Kind.String()+", which the builder does not snapshot")
 		return nil
 	}
 	l.refuse(n, "a call through a "+fun.Op.String())

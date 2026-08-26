@@ -160,19 +160,31 @@ func (l *lowerer) readContext() {
 // moveCapturedToHeap gives every variable this function owns and a literal in
 // it captures a heap cell, and points every reference at the cell.
 func (l *lowerer) moveCapturedToHeap() {
-	owned := l.capturedHere()
+	owned, at := l.capturedHere()
 	if len(owned) == 0 && len(l.capIndex) == 0 {
 		return
 	}
 	l.cells = make(map[*Object]*Object, len(owned))
-	for _, o := range owned {
+	l.uncelled = make(map[*Object]bool)
+	for i, o := range owned {
 		if o.Class == ClassResult {
 			// A named result is read by the epilogue of a function that
 			// defers, which deferExit builds after this pass has run and out
 			// of the result object itself. Moving the result to a cell would
 			// leave that epilogue reading the frame slot the cell replaced.
-			l.refuse(ref(o, o.Pos), "the closure captures the result "+o.Name+
+			l.refuse(at[i], "the closure captures the result "+o.Name+
 				", whose storage the single exit of a function that defers owns")
+			l.uncelled[o] = true
+			continue
+		}
+		if _, err := TypeSymbol(o.Type); err != nil {
+			// The cell is allocated through runtime.newobject, which takes a
+			// *_type, so a capture whose type specs/032 cannot name refuses
+			// the closure. The refusal names the capture and the field the
+			// type boundary drops, rather than reporting an allocation of a
+			// type nothing in the source wrote.
+			l.refuse(at[i], "the closure captures "+o.Name+", whose cell needs a type descriptor: "+err.Error())
+			l.uncelled[o] = true
 			continue
 		}
 		cell := &Object{
@@ -195,13 +207,14 @@ func (l *lowerer) moveCapturedToHeap() {
 }
 
 // capturedHere returns the objects this function owns that a literal in it
-// captures, in the order the literals name them.
+// captures, in the order the literals name them, and the literal that names
+// each one first.
 //
 // The order is the tree's and never a map's, which specs/053-determinism.md
 // requires of anything that reaches output: the cells become locals and the
-// locals become frame slots.
-func (l *lowerer) capturedHere() []*Object {
-	var out []*Object
+// locals become frame slots. The literal is carried so that a refusal names a
+// node the tree still holds, which is what lets construction report it too.
+func (l *lowerer) capturedHere() (objs []*Object, at []*Node) {
 	seen := make(map[*Object]bool)
 	for _, s := range l.fn.Body {
 		Walk(s, func(n *Node) bool {
@@ -219,12 +232,13 @@ func (l *lowerer) capturedHere() []*Object {
 					continue
 				}
 				seen[a.Obj] = true
-				out = append(out, a.Obj)
+				objs = append(objs, a.Obj)
+				at = append(at, n)
 			}
 			return true
 		})
 	}
-	return out
+	return objs, at
 }
 
 // cellOf returns the expression that yields the address of the cell holding o,
@@ -455,6 +469,17 @@ func (l *lowerer) closureValue(n Expr, o *Object, caps []Expr, t *Type) Expr {
 			&Node{Op: OConvert, Pos: c.Pos, Type: lowerUnsafePtr, X: c}))
 	}
 	return &Node{Op: OConvert, Pos: pos, Type: t, X: ref(p, pos)}
+}
+
+// hasUncelledCapture reports whether a literal names a capture this function
+// refused a cell for.
+func (l *lowerer) hasUncelledCapture(caps []Expr) bool {
+	for _, c := range caps {
+		if c != nil && c.Op == OLocal && l.uncelled[c.Obj] {
+			return true
+		}
+	}
+	return false
 }
 
 // ctxField returns one field of a closure object reached through a pointer.

@@ -168,3 +168,62 @@ func TestToolexecKeepsCapturesThroughACollection(t *testing.T) {
 		t.Fatalf("the collector or the program rejected what the closure held: %v\n%s", err, b)
 	}
 }
+
+// The program that defers a call with an operand and recovers inside it.
+//
+// runtime.deferproc takes one word and calls it with nothing, so an operand
+// travels inside a func value: ir.Build puts the call in a literal that
+// captures the operands. That literal is a frame the program did not write,
+// and runtime.gorecover counts frames. It recovers only when exactly one
+// non-wrapper frame stands between it and runtime.gopanic, and it decides
+// which frames are wrappers by the funcID in each function's FuncInfo.
+//
+// So the literal is marked FuncIDWrapper, and this program is what says the
+// mark reached the object. Without it the recover returns nil, the panic is
+// not caught, and the process dies: a silent change of meaning that no
+// refusal and no unit test would report.
+//
+// The operand is what the deferred call writes, so the exit status also says
+// the capture carried the value the statement saw.
+const deferRecoverProgram = `package main
+
+import "os"
+
+var code = 1
+
+func handle(n int) {
+	recover()
+	code = n
+}
+
+func boom(v error) {
+	defer handle(7)
+	panic(v)
+}
+
+func main() {
+	boom(nil)
+	os.Exit(code)
+}
+`
+
+// TestToolexecRecoversFromAWrappedDefer runs a defer whose call has an
+// operand and whose callee recovers.
+func TestToolexecRecoversFromAWrappedDefer(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/deferrecover\n\ngo 1.27\n",
+		"main.go": deferRecoverProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "deferrecover", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	// The exit status is the operand the deferred call was given, and the
+	// program reaches os.Exit only if the recover caught the panic.
+	if got := exitCode(t, filepath.Join(h.mod, "deferrecover")); got != 7 {
+		t.Fatalf("the program exited %d, want 7: the recover did not catch the panic", got)
+	}
+}

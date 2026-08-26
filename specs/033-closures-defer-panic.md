@@ -16,8 +16,8 @@ interactions are where the bugs are.
 
 ## What is built
 
-Closures are built, captures and all. `defer` and `go` are built in their
-captureless form and refuse an argument, which is the row below that is left.
+Closures are built, captures and all, and so are `defer` and `go` with
+arguments: an argument is a capture and the capture mechanism is the same one.
 `panic` and `recover` are built and are gated by a different thing: an
 interface. `ir/lower.go` performs the rows and `internal/e2e` runs each one as
 a program.
@@ -30,8 +30,10 @@ a program.
 | a method value | **refused**; its receiver is bound by value and only a capture through a heap cell is built |
 | a named result a literal captures | **refused**; the single exit of a function that defers already owns that storage |
 | `defer f()` with no arguments and no captures | built; `runtime.deferproc`, plus the single exit below |
-| `defer` with arguments | **refused**; an argument becomes a capture |
-| `go f()` on the same terms | built; `runtime.newproc` takes the same one word |
+| `defer f(x)`, with arguments | built; `ir.Build` puts the call in a literal that captures the operands, marked `FuncIDWrapper` |
+| `defer x.M()`, a method of a concrete type | built; the receiver is the call's first operand and travels the same way |
+| `defer i.M()`, a method of an interface | **refused**; the value the runtime is given would be a method value |
+| `go f()` and `go f(x)` | built; `runtime.newproc` takes the same one word, on the same terms |
 | `panic` of a value that is already an interface | reaches `runtime.gopanic` and runs the deferred chain; the runtime then prints the value, and for a non-nil operand that print is a fatal error, so this row is a miscompile and not a feature |
 | `panic` of anything else | **refused**; the operand converts to an interface and `ssa.Build` builds no such conversion |
 | `recover()` whose value nobody reads | built; `runtime.gorecover`, which is the shape of the idiom |
@@ -101,6 +103,47 @@ for `AuxFuncdata`. `internal/abi` puts `FUNCDATA_OpenCodedDeferInfo` at index
 writing indices 2 and 3 first: the stack-object table
 [027](027-liveness-and-stackmaps.md) owns, and the inline tree
 [024](024-inlining-and-devirtualization.md) owns. Neither is written.
+
+### An operand of `defer` or `go` is a capture, and the literal is a wrapper
+
+`runtime.deferproc` and `runtime.newproc` take one word and call it with
+nothing, so an operand has to travel inside that word. `ir.Build` puts the call
+in a function literal and the operands become its captures:
+
+```
+defer f(x)   becomes   t := x
+                       defer func() { f(t) }()
+```
+
+The operands are already in temporaries, because the specification evaluates
+them when the statement runs and not when the call runs. Each temporary is
+written once, so capturing it by reference and capturing it by value are the
+same value, and one capture mechanism covers the row: `defer end(n)` followed
+by an assignment to `n` still calls `end` with the value `n` held at the
+statement. The callee travels the same way unless it is a declared function,
+which nothing can reassign.
+
+**The literal is marked `FuncIDWrapper`, and the mark is a correctness
+requirement.** `runtime.gorecover` recovers only when exactly one non-wrapper
+frame stands between it and `runtime.gopanic`, and it decides which frames are
+wrappers by the funcID in each function's `FuncInfo`. Without the mark, `defer
+f(x)` where `f` recovers stops recovering, and nothing says so at compile time.
+`ssagen` writes the funcID and `internal/e2e`'s
+`TestToolexecRecoversFromAWrappedDefer` is the program that proves it.
+
+A call with no operands is not wrapped. Wrapping it would add the very frame
+`recover` counts, for nothing.
+
+**A method of an interface is the row that is left.** Its receiver stays inside
+the selection, so the value the runtime would be given is a method value: the
+receiver bound to the function the itab names. `closureExpr` refuses a method
+value for the same reason, and both wait on the same work.
+
+**A capture whose type has no canonical name refuses the closure.** The cell is
+allocated through `runtime.newobject`, which takes a `*_type`, so a capture of
+a literal func type or a literal struct type is refused and the refusal names
+the capture. `defer h(x)` through a parameter `h func(int)` is the shape that
+meets it, and a defined func type does not.
 
 ### The single exit, which the linker requires
 

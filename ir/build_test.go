@@ -2383,6 +2383,12 @@ var p8 *int
 // to it changed what the call would see. It is invisible in a program that
 // does not assign afterwards, which is most of them, and it is a wrong answer
 // in the one that does.
+//
+// The temporaries then become the captures of the literal the call is wrapped
+// in, because runtime.deferproc takes one word and calls it with nothing
+// (specs/033-closures-defer-panic.md). Each temporary is written once, so the
+// capture by reference the closure builds and a capture by value are the same
+// value, and the rule above survives the wrapping.
 func TestBuildDeferAndGoSaveTheirOperands(t *testing.T) {
 	p := buildSource(t, `
 func f(x int, g func(int)) {
@@ -2397,10 +2403,10 @@ func f(x int, g func(int)) {
 	want := []string{
 		".autotmp_0 = g",
 		".autotmp_1 = x",
-		"defer(.autotmp_0(.autotmp_1))",
+		"defer(closure(.autotmp_0, .autotmp_1)())",
 		".autotmp_2 = g",
 		".autotmp_3 = x",
-		"go(.autotmp_2(.autotmp_3))",
+		"go(closure(.autotmp_2, .autotmp_3)())",
 		"x = 2",
 		"g = nil",
 	}
@@ -2409,13 +2415,50 @@ func f(x int, g func(int)) {
 			strings.Join(got, "\n"), strings.Join(want, "\n"), buildDump(fn))
 	}
 
+	// The literals the two statements were wrapped in are compiled, marked as
+	// wrappers, and capture what the statement saved. The mark is not
+	// cosmetic: runtime.gorecover counts the frames between itself and
+	// runtime.gopanic and skips the ones marked, so an unmarked wrapper turns
+	// "defer f(x)" where f recovers into a program that does not recover.
+	wrappers := 0
+	for _, w := range p.Funcs {
+		if !w.Wrapper {
+			continue
+		}
+		wrappers++
+		if len(w.Captures) != 2 {
+			t.Errorf("%s captures %d objects, want the callee and the operand", w.Name, len(w.Captures))
+		}
+		if w.Closure == nil {
+			t.Errorf("%s captures and has no context parameter", w.Name)
+		}
+	}
+	if wrappers != 2 {
+		t.Errorf("%d wrapper literals, want one for the defer and one for the go", wrappers)
+	}
+
 	// A known function symbol cannot be reassigned, so it needs no temporary,
-	// and a constant is already a value.
+	// and a constant is already a value. The call still has an operand, so it
+	// is still wrapped.
 	p = buildSource(t, `func f() { defer sink(1) }`)
 	fn = buildFuncOf(t, p, "f")
 	d := buildFirst(t, fn, ODefer)
-	if d.X.X.Op != OGlobal || d.X.X.Obj.Name != "p.sink" {
-		t.Errorf("the deferred callee is %s", buildStr(d.X.X))
+	if d.X.X.Op != OClosure {
+		t.Fatalf("the deferred call is not wrapped: %s", buildStr(d.X.X))
+	}
+	inner := buildFuncOf(t, p, "f.func0")
+	if len(inner.Body) != 1 || inner.Body[0].X == nil ||
+		inner.Body[0].X.Op != OGlobal || inner.Body[0].X.Obj.Name != "p.sink" {
+		t.Errorf("the wrapped callee is not p.sink:\n%s", buildDump(inner))
+	}
+
+	// A call with no operand needs no literal and gets none. Wrapping it
+	// would put a frame between the deferred call and runtime.gopanic.
+	p = buildSource(t, `func f() { defer one() }`)
+	fn = buildFuncOf(t, p, "f")
+	d = buildFirst(t, fn, ODefer)
+	if d.X.X.Op != OGlobal || d.X.X.Obj.Name != "p.one" {
+		t.Errorf("a deferred call with no operand was wrapped: %s", buildStr(d.X.X))
 	}
 
 	// The receiver of a deferred method call is saved too, both for a
@@ -2426,9 +2469,13 @@ func f(x int, g func(int)) {
 	if len(defers) != 2 {
 		t.Fatalf("%d defers", len(defers))
 	}
-	if recv := defers[0].X.Args[0]; recv.Op != OLocal || !strings.HasPrefix(recv.Obj.Name, ".autotmp_") {
+	// A concrete receiver is the call's first operand, so the call is wrapped
+	// and the temporary is the literal's capture.
+	if recv := defers[0].X.X.Args[0]; recv.Op != OLocal || !strings.HasPrefix(recv.Obj.Name, ".autotmp_") {
 		t.Errorf("the concrete receiver is %s, want a temporary:\n%s", buildStr(recv), buildDump(fn))
 	}
+	// An interface receiver stays inside the selection, so the call takes no
+	// operand and is not wrapped.
 	if recv := defers[1].X.X.X; recv.Op != OLocal || !strings.HasPrefix(recv.Obj.Name, ".autotmp_") {
 		t.Errorf("the interface receiver is %s, want a temporary:\n%s", buildStr(recv), buildDump(fn))
 	}

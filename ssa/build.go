@@ -57,6 +57,7 @@ func Build(fn *ir.Func) (*Func, error) {
 	b.f.Type = fn.Type
 	b.f.Pos = fn.Pos
 	b.f.NeedCtxt = fn.Closure != nil
+	b.f.Wrapper = fn.Wrapper
 
 	b.classify()
 	b.entry()

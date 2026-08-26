@@ -57,6 +57,10 @@ func use(int)      {}
 func useAny(any)   {}
 func useFn(func()) {}
 func sink(func() int) {}
+
+type H func(int)
+
+var gfn2 H
 func one() int         { return 1 }
 func two() (int, int)  { return 1, 2 }
 `
@@ -870,6 +874,94 @@ func TestLowerUnsafeAddRow(t *testing.T) {
 	}
 }
 
+// TestLowerDeferWithArguments is specs/033-closures-defer-panic.md's row for
+// a defer or a go whose call has operands.
+//
+// runtime.deferproc and runtime.newproc take one word and call it with
+// nothing, so an operand travels inside that word as a capture. ir.Build puts
+// the call in a literal and the operands become its captures, so what reaches
+// this pass is a call to a closure and nothing else.
+func TestLowerDeferWithArguments(t *testing.T) {
+	for _, tc := range []struct{ row, body, sym string }{
+		{"defer with an argument", `func f() { defer use(1) }`, "runtime.deferproc"},
+		{"go with an argument", `func f(a int) { go use(a) }`, "runtime.newproc"},
+		{"go of a method call", `func f(t T) { go t.M() }`, "runtime.newproc"},
+		{"defer through a field of function type", `func f(s struct{ H func() }) { defer s.H() }`, "runtime.deferproc"},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if !lowerCalled(fn, tc.sym) {
+				t.Errorf("the statement did not reach %s: %v\n%s",
+					tc.sym, lowerCalls(fn), buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerDeferReadsTheFieldAtTheStatement is the operand rule for a callee
+// that is a field.
+//
+// The specification evaluates the function value when the statement runs. The
+// builder used to snapshot the struct and leave the selection, so the field
+// would be read when the call ran, and lowering refused rather than build a
+// wrong program. The selection itself is snapshotted now, so the value is the
+// one the statement saw and there is nothing to refuse.
+func TestLowerDeferReadsTheFieldAtTheStatement(t *testing.T) {
+	fn := lowerOK(t, `func f(s struct{ H func() }) { defer s.H(); s.H = nil }`)
+	// The word handed to the runtime is a temporary and not a field read.
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op != OCall || n.X == nil || n.X.Obj == nil || n.X.Obj.Name != "runtime.deferproc" {
+				return true
+			}
+			if len(n.Args) != 1 || n.Args[0].Op != OLocal {
+				t.Errorf("runtime.deferproc is given %s, want a temporary:\n%s",
+					buildStr(n.Args[0]), buildDump(fn))
+			}
+			return true
+		})
+	}
+}
+
+// TestLowerDeferSnapshotsAGlobalCallee is the operand rule for a callee that
+// is a package-level variable of function type.
+//
+// The specification evaluates the function value when the statement runs. A
+// package-level variable can be reassigned between the statement and the call,
+// so the statement has to copy it. A declared function cannot, so it needs no
+// copy and gets none.
+func TestLowerDeferSnapshotsAGlobalCallee(t *testing.T) {
+	fn := lowerOK(t, `func f(a int) { defer gfn2(a); gfn2 = nil }`)
+	// The literal the call was wrapped in captures a temporary and not the
+	// global, so a later assignment to the global cannot change the call.
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OGlobal && n.Obj != nil && n.Obj.Name == "p.gfn2" {
+				// The only reads left are the snapshot and the assignment.
+				return true
+			}
+			return true
+		})
+	}
+	if !lowerCalled(fn, "runtime.deferproc") {
+		t.Errorf("the statement did not reach runtime.deferproc: %v", lowerCalls(fn))
+	}
+	pkg, files, info := buildTypecheck(t, lowerPrelude+"\n"+`func f(a int) { defer gfn2(a); gfn2 = nil }`)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	w := buildFuncOf(t, out, "f.func0")
+	for _, o := range w.Captures {
+		if o.Class == ClassGlobal {
+			t.Errorf("the wrapper captures the global %s, so the call would read it when it runs", o.Name)
+		}
+	}
+	if len(w.Captures) != 2 {
+		t.Errorf("the wrapper captures %d objects, want the callee and the operand", len(w.Captures))
+	}
+}
+
 // TestLowerFuncSymbolInAValuePosition is the row specs/033-closures-defer-panic.md
 // records as a miscompile: a declared function used as a func value.
 //
@@ -971,10 +1063,11 @@ func TestLowerRefusals(t *testing.T) {
 		{"range over a string", `func f(s string) { for i := range s { use(i) } }`, ORange, "UTF-8"},
 		{"range over a channel", `func f(c chan int) { for v := range c { use(v) } }`, ORange, "channel"},
 		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
-		{"defer of a call with arguments", `func f() { defer use(1) }`, ODefer, "an argument list of 1"},
-		{"go of a method call", `func f(t T) { go t.M() }`, OGo, "an argument list of 1"},
 		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
-		{"defer of a field of function type", `func f(s struct{ H func() }) { defer s.H() }`, ODefer, "a field of a value the builder snapshotted whole"},
+		// The cell of a capture is allocated through runtime.newobject, which
+		// takes a *_type, so a capture whose type specs/032 cannot name
+		// refuses the closure and the refusal names the capture.
+		{"a capture of a literal function type", `func f(h func(int), a int) { defer h(a) }`, OClosure, "whose cell needs a type descriptor"},
 		{"defer of a builtin", `func f(c chan int) { defer close(c) }`, ODefer, "holds a close and not a call"},
 		{"defer of println", `func f(n int) { defer println(n) }`, ODefer, "holds a println and not a call"},
 		{"defer of recover", `func f() { defer recover() }`, ODefer, "holds a recover and not a call"},

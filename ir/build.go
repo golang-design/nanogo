@@ -1051,10 +1051,21 @@ func (b *builder) callStmt(s *syntax.CallStmt) {
 	// assigned between the statement and the call, and the call has to use
 	// the value the statement saw, so everything but a constant and a known
 	// function symbol goes into a temporary.
-	if call.X != nil && call.X.Op == OField {
-		// An interface method call keeps the receiver inside the selection.
+	switch {
+	case call.X == nil:
+	case isInterfaceMethod(call.X):
+		// An interface method call keeps the receiver inside the selection,
+		// so the receiver is what is snapshotted.
 		call.X.X = b.snapshot(call.X.X)
-	} else if call.X != nil && call.X.Op != OGlobal {
+	case !isFuncSymbol(call.X):
+		// Everything else, a field of function type and a package-level
+		// variable of function type included. The value the call uses is what
+		// the statement reads, so the whole selection is snapshotted:
+		// snapshotting only the struct would read the field when the call
+		// runs, and leaving a global alone would read the variable then.
+		//
+		// A declared function is the one case that needs no temporary,
+		// because nothing can reassign it.
 		call.X = b.snapshot(call.X)
 	}
 	for i, a := range call.Args {
@@ -1064,7 +1075,115 @@ func (b *builder) callStmt(s *syntax.CallStmt) {
 	if s.Tok == syntax.Go {
 		op = OGo
 	}
-	b.emit(&Node{Op: op, Pos: s.Pos(), Type: voidType, X: call})
+	b.emit(&Node{Op: op, Pos: s.Pos(), Type: voidType, X: b.wrapCallStmt(s.Pos(), call)})
+}
+
+// isInterfaceMethod reports whether n is a method selected on an interface
+// value, which is the one selection that keeps its receiver inside it.
+func isInterfaceMethod(n Expr) bool {
+	return n != nil && n.Op == OField && n.X != nil && n.X.Type != nil &&
+		n.X.Type.Kind == Interface
+}
+
+// wrapCallStmt turns the call of a defer or a go statement into a call that
+// takes nothing, by putting it in a function literal.
+//
+// runtime.deferproc and runtime.newproc take one word, a func value, and call
+// it with no arguments. An operand therefore has to travel inside that value,
+// which is what a capture is: the literal reads the operand off the closure
+// object (specs/033-closures-defer-panic.md).
+//
+// The operands are already in temporaries, written where the statement is,
+// because the specification evaluates them when the statement runs and not
+// when the call runs. Each temporary is written once, so capturing it by
+// reference and capturing it by value are the same value, and the one capture
+// mechanism covers both: "defer end(n)" followed by an assignment to n still
+// calls end with the value n held at the statement.
+//
+// A call with no operands needs no literal and gets none. Wrapping it would
+// add a frame between the deferred call and runtime.gopanic, which is the one
+// thing recover counts.
+func (b *builder) wrapCallStmt(pos syntax.Pos, call Expr) Expr {
+	if call == nil || call.Op != OCall || len(call.Args) == 0 {
+		return call
+	}
+	fn := b.newLiteral(pos)
+	fn.Body = []Stmt{call}
+	// The runtime must not count this frame. runtime.gorecover recovers only
+	// when exactly one non-wrapper frame stands between it and
+	// runtime.gopanic, so "defer f(x)" where f recovers keeps recovering only
+	// because this literal is marked.
+	fn.Wrapper = true
+	node := b.closureNode(fn, pos, b.freeIn(call))
+	return &Node{Op: OCall, Pos: pos, Type: voidType, X: node}
+}
+
+// newLiteral returns an empty func() literal of the function being built.
+func (b *builder) newLiteral(pos syntax.Pos) *Func {
+	outerName, outerSym := "func", b.out.Path+".func"
+	if b.fn != nil {
+		outerName, outerSym = b.fn.Name, b.fn.Sym
+	}
+	fn := &Func{
+		Name: fmt.Sprintf("%s.func%d", outerName, b.nfunc),
+		Sym:  fmt.Sprintf("%s.func%d", outerSym, b.nfunc),
+		Type: funcType,
+		Pos:  pos,
+	}
+	b.nfunc++
+	return fn
+}
+
+// closureNode builds the OClosure of a literal and its capture list, and adds
+// the literal to the package.
+//
+// The node's Args and the function's Captures are one list in one order, which
+// is what makes a capture's position in the closure object a fact both halves
+// read.
+func (b *builder) closureNode(fn *Func, pos syntax.Pos, caps []*Object) Expr {
+	node := &Node{
+		Op:    OClosure,
+		Pos:   pos,
+		Index: closureLiteral,
+		Type:  fn.Type,
+		Obj:   &Object{Name: fn.Sym, Class: ClassFunc, Type: fn.Type, Pos: pos},
+	}
+	for _, o := range caps {
+		o.Addrtaken = true
+		// A variable this literal captures and does not own is also captured
+		// by the function that holds it, which is what makes a capture
+		// through two levels of literal work.
+		b.noteUse(o)
+		node.Args = append(node.Args, &Node{Op: OLocal, Pos: o.Pos, Type: o.Type, Obj: o})
+	}
+	fn.Captures = caps
+	fn.Closure = closureContext(caps, pos)
+	b.out.Funcs = append(b.out.Funcs, fn)
+	return node
+}
+
+// freeIn returns the local objects a subtree names, in the order the tree
+// names them.
+//
+// The order is the tree's and never a map's (specs/053-determinism.md): it
+// becomes the order of the words in a closure object.
+func (b *builder) freeIn(n *Node) []*Object {
+	var out []*Object
+	seen := make(map[*Object]bool)
+	Walk(n, func(m *Node) bool {
+		if m.Op != OLocal || m.Obj == nil || seen[m.Obj] {
+			return true
+		}
+		switch m.Obj.Class {
+		case ClassLocal, ClassParam, ClassResult:
+		default:
+			return true
+		}
+		seen[m.Obj] = true
+		out = append(out, m.Obj)
+		return true
+	})
+	return out
 }
 
 func (b *builder) returnStmt(s *syntax.ReturnStmt) {
@@ -2143,34 +2262,11 @@ func (b *builder) closure(x *syntax.FuncLit) Expr {
 		return caps[i].Name < caps[j].Name
 	})
 
-	node := &Node{
-		Op:  OClosure,
-		Pos: x.Pos(),
-		// Index is -1 rather than a method index. A method value and a
-		// literal with one capture are otherwise the same node, and a
-		// consumer that could not tell them apart would treat a receiver
-		// passed by value as a captured object shared by reference.
-		Index: closureLiteral,
-		Type:  fn.Type,
-		Obj:   &Object{Name: fn.Sym, Class: ClassFunc, Type: fn.Type, Pos: x.Pos()},
-	}
-
-	for _, o := range caps {
-		o.Addrtaken = true
-		// A variable this closure captures and does not own is also captured
-		// by the function that holds the closure, which is what makes a
-		// capture through two levels of literal work.
-		b.noteUse(o)
-		node.Args = append(node.Args, &Node{Op: OLocal, Pos: o.Pos, Type: o.Type, Obj: o})
-	}
-	// The literal reads each of these through the closure object the caller
-	// leaves in the context register (specs/033-closures-defer-panic.md). The
-	// list and the node's Args are the same list in the same order, which is
-	// what makes a capture's position in the object a fact both halves read.
-	fn.Captures = caps
-	fn.Closure = closureContext(caps, x.Pos())
-	b.out.Funcs = append(b.out.Funcs, fn)
-	return node
+	// Index is -1 rather than a method index. A method value and a literal
+	// with one capture are otherwise the same node, and a consumer that could
+	// not tell them apart would treat a receiver passed by value as a
+	// captured object shared by reference.
+	return b.closureNode(fn, x.Pos(), caps)
 }
 
 // call builds a call, a conversion and a call to a builtin. The parser cannot

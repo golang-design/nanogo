@@ -398,6 +398,17 @@ type Func struct {
 	// OClosure node that names this function.
 	Captures []*Object
 
+	// Wrapper records that this function is compiler-generated code the
+	// runtime must not count as a frame of the program.
+	//
+	// runtime.gorecover decides whether recover was called directly from a
+	// deferred function by counting the frames between itself and
+	// runtime.gopanic, and it skips every frame whose funcID is
+	// FuncIDWrapper. The literal ir.Build wraps the operands of a defer in is
+	// exactly such a frame: without the mark, "defer f(x)" where f recovers
+	// stops recovering, and nothing says so at compile time.
+	Wrapper bool
+
 	// Bodyless records that the declaration had no body block at all.
 	//
 	// An empty body and an absent body both leave Body empty, and the two mean

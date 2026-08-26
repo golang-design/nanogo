@@ -316,6 +316,11 @@ type Func struct {
 	// wrongly for a function whose context value became dead.
 	NeedCtxt bool
 
+	// Wrapper records that the function is compiler-generated code the
+	// runtime must not count as a frame of the program, which the object's
+	// FuncInfo carries as a funcID (ir.Func.Wrapper).
+	Wrapper bool
+
 	// ABI is where specs/030-abi.md puts this function's parameters and
 	// results. AssignABI fills it and it is nil until then.
 	//

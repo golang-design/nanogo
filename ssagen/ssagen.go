@@ -1591,6 +1591,16 @@ func (e *emitter) dwarfInfo() *obj.Symbol {
 // (cmd/internal/dwarf, InfoPrefix).
 const dwarfInfoPrefix = "go:info."
 
+// FuncIDWrapper marks compiler-generated code the runtime must not count as a
+// frame of the program.
+//
+// The value is the runtime's, not nanogo's: it is the position of
+// abi.FuncIDWrapper in $GOROOT/src/internal/abi/symtab.go's FuncID block, the
+// way the FUNCDATA indices of specs/027-liveness-and-stackmaps.md are.
+// TestFuncIDWrapperMatchesTheRuntime reads that file and checks it, because a
+// wrong value here is a recover that silently stops recovering.
+const FuncIDWrapper = 23
+
 // funcInfoBytes encodes the FuncInfo auxiliary symbol.
 //
 // The layout is cmd/internal/goobj's: the argument size, the frame size
@@ -1599,11 +1609,11 @@ const dwarfInfoPrefix = "go:info."
 // tree. nanogo writes no inline tree yet, so the last count is zero and not
 // absent: the reader computes the offset of everything after the file table
 // from that count.
-func funcInfoBytes(args, locals uint32, startLine int32, files []uint32) []byte {
+func funcInfoBytes(args, locals uint32, funcID byte, startLine int32, files []uint32) []byte {
 	b := make([]byte, 0, 24+4*len(files))
 	b = binary.LittleEndian.AppendUint32(b, args)
 	b = binary.LittleEndian.AppendUint32(b, locals)
-	b = append(b, 0 /* FuncID */, 0 /* FuncFlag */, 0, 0 /* padding to a word */)
+	b = append(b, funcID, 0 /* FuncFlag */, 0, 0 /* padding to a word */)
 	b = binary.LittleEndian.AppendUint32(b, uint32(startLine))
 	b = binary.LittleEndian.AppendUint32(b, uint32(len(files)))
 	for _, f := range files {
@@ -1664,7 +1674,11 @@ func (e *emitter) result() (*Result, error) {
 		return nil, fmt.Errorf("ssagen: %s: %w", e.opt.Sym, err)
 	}
 	r.Funcdata, r.Pcdata, r.maps = t.funcdata, t.pcdata, t.maps
-	info := funcInfoBytes(uint32(r.Args), uint32(r.Locals), e.opt.Line, files)
+	funcID := byte(0)
+	if e.f != nil && e.f.Wrapper {
+		funcID = FuncIDWrapper
+	}
+	info := funcInfoBytes(uint32(r.Args), uint32(r.Locals), funcID, e.opt.Line, files)
 	r.FuncInfo = &obj.Symbol{
 		// Unnamed, for the reason the pc-value tables are: a named auxiliary
 		// symbol takes part in the data layout and the linker then writes over
