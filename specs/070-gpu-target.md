@@ -5,6 +5,7 @@ layer: extension
 gate: post-v1
 depends_on:
   - 002-architecture.md
+  - 022-optimization-passes.md
   - 025-lowering-and-rules.md
 ---
 
