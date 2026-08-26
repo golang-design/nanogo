@@ -97,7 +97,7 @@ probe ok import-call
 probe ok init-func
 probe ok int-arith
 probe refused make-byte-slice
-probe refused make-struct-slice
+probe ok make-struct-slice
 probe refused map-comma-ok
 probe refused map-delete-len
 probe refused map-literal
@@ -139,7 +139,7 @@ probe ok string-param
 probe refused string-range
 probe ok struct-arg-5
 probe ok struct-local
-probe refused struct-ptr-field
+probe ok struct-ptr-field
 probe ok struct-return-2
 probe ok struct-return-4
 probe refused struct-return-5
