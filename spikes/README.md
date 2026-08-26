@@ -4,12 +4,13 @@ Small experiments that answer a question a spec depends on. Each one is kept
 because a normative decision cites it. They are separate modules and are not
 part of `golang.design/x/nanogo`.
 
-CI runs all three on `macos-latest`, because a decision that rests on a
+CI runs all three spikes on `macos-latest`, because a decision that rests on a
 measurement is only as good as the measurement, and a spike that nobody runs
 stops reproducing without saying so. Two of them are `darwin/arm64` assembly,
 so that is the runner they need.
 
-Run a spike from its own directory with the `go` tool of the day.
+Run a spike from its own directory. Each is its own module and declares
+`go 1.27`, which is the release line CI installs.
 
 | Spike | Question | Answer |
 | --- | --- | --- |
@@ -19,7 +20,7 @@ Run a spike from its own directory with the `go` tool of the day.
 
 ## stackmap
 
-Three assembly functions share one frame shape and differ only in the stack map
+Four assembly functions share one frame shape and differ only in the stack map
 they declare.
 
 ```
@@ -27,6 +28,7 @@ cd stackmap
 go run . live    # local slot declared as a pointer:  0 finalizers, object survives
 go run . dead    # NO_LOCAL_POINTERS:                 1 finalizer,  object collected
 go run . multi   # two bitmaps chosen by PCDATA $1:   live at index 0, dead at index 1
+go run . bogus   # a map that calls an integer slot a pointer
 ```
 
 `multi` is the decisive one. One function, one frame, two stack map bitmaps in a
@@ -34,6 +36,11 @@ go run . multi   # two bitmaps chosen by PCDATA $1:   live at index 0, dead at i
 `PCDATA $PCDATA_StackMapIndex`. The object survives the collection at index 0
 and is collected at index 1, so the runtime reads the map that the text
 assembly declared.
+
+`bogus` is the fourth function and CI runs the other three. It declares a map
+that claims an outgoing-argument slot holding the integer 1234 is a pointer,
+and it prints `bogus: survived (runtime did not read our map)`. Nothing asserts
+that outcome, so it is a probe to run by hand and not evidence a spec can cite.
 
 ## symbolnames
 
