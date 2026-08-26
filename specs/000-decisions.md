@@ -307,8 +307,10 @@ a spec and a target interface for it.
 **Two of decision 5's three pieces of evidence had gone out of date.**
 [002](002-architecture.md)'s package layout lists `ssagen` now and records the
 gap, so "never listed it" was false; and the third clause pointed at an
-accounting of the tree that no longer exists. The clause that still holds, that
-no spec owns the stage, is stated as present fact and the other two as history.
+accounting of the tree that no longer exists. All three are kept, as the record
+of how the gap was found, and a sentence after them says what is true today:
+[002](002-architecture.md) lists the package, and the stage still has no spec
+of its own.
 
 **Decision 3 compared two line counts measured different ways.** 36,224 for
 `cmd/internal/obj/arm64` counts the package's tests and 2,183 for nanogo's
