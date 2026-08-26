@@ -25,6 +25,7 @@ a different thing: an interface. `ir/lower.go` performs the rows and
 | Feature | State |
 | --- | --- |
 | a function literal that captures nothing | built; a heap-allocated one-word `funcval` holding the code pointer |
+| a **declared** function used as a func value | split three ways, and one of them is a miscompile: see below |
 | a method value, or a literal with a capture list | **refused**; a capture is read through the context register and no SSA operation reads one |
 | `defer f()` with no arguments and no captures | built; `runtime.deferproc`, plus the single exit below |
 | `defer` with arguments | **refused**; an argument becomes a capture |
@@ -44,7 +45,9 @@ work that unblocks them.
 
 **The `panic` and `recover` refusals are not that gap.** Both are the interface
 one. `panic("boom")` and `panic(1)` are refused at `ssa.Build`, on the
-conversion of the operand, and so is every `recover` whose result is read.
+conversion of the operand, and so is every `recover` whose result is read. A
+conversion to an interface in `ssa.Build`, and the descriptor and itab writers
+[032](032-type-descriptors-and-itabs.md) owes it, are what unblock that half.
 
 **What `panic` of an interface value does is worse than a refusal, and this is
 the one row in the table that names a miscompile.** `panic(v)` compiles when
@@ -64,10 +67,9 @@ fatal error: runtime: name offset out of range
 word, so the eface nanogo built carries a type word the runtime cannot follow.
 Nothing is said at compile time, which makes this the worse failure of the two:
 a refusal names a gap and this prints a runtime crash naming none. It belongs
-to the same interface gap as the refusals, and it is not fixed by the
-conversion alone, because this operand needed no conversion. A conversion to an
-interface in `ssa.Build`, and the descriptor and itab writers
-[032](032-type-descriptors-and-itabs.md) owes it, are what unblock that half.
+to the same interface gap as the refusals and it is a separate piece of work,
+because this operand needed no conversion: what fails is the eface nanogo
+already builds, not one it declines to build.
 
 The two funcdata indices nanogo writes are `FUNCDATA_ArgsPointerMaps` and
 `FUNCDATA_LocalsPointerMaps`, indices 0 and 1, both built by
@@ -137,6 +139,30 @@ than an oversight. Deciding that a closure does not outlive its frame is
 [023](023-escape-analysis.md)'s judgement, and there is no escape analysis. So
 every func value `ir/lower.go` builds is a heap allocation and a store, where
 `gc` has neither. That is the cost and it is correct.
+
+**A declared function used as a func value is the case this spec never
+separated from a literal, and it does not behave like one.** Measured on
+`go1.27.0` `darwin/arm64` at the commit this paragraph was written:
+
+| What is written | What happens |
+| --- | --- |
+| `f := func(n int) int { ... }`, then `f(1)` | compiles and runs |
+| `f := inc`, a declared `inc`, then `f(1)` | refused: `ssagen: main.main: v5: the entry point is in R0, which is also an argument register` |
+| `apply(inc)`, or `return inc` from a `func() func(int) int` | compiles, links, and faults at run time |
+
+The fault is `unexpected fault address 0xd65f03c091000400`, and the address is
+the evidence: `0x91000400` is `ADD X0, X0, #1` and `0xd65f03c0` is `RET`, which
+are the two instructions of `inc`. So the value handed across the call boundary
+is `inc`'s entry address where a `funcval` was expected, and the indirect call
+loads a code pointer from it and jumps into the instruction stream read as
+data. `ssagen`'s indirect call has a guard for the register collision above and
+none for this, because the collision is visible in the allocation and this is
+not.
+
+It is the third failure of this spec's kind that says nothing at compile time,
+beside `panic` of a non-nil interface value above. The refusal in the middle row
+is the behaviour the other two rows should have until a `funcval` is built for a
+declared function, which is the missing lowering rule below.
 
 A captureless `funcval` is the separable half of it. It is one word of
 read-only data and needs no escape judgement at all, because it captures
@@ -269,6 +295,15 @@ obligation is the opposite one, and the section above states it.
 `FUNCDATA_ArgsPointerMaps` and `FUNCDATA_LocalsPointerMaps`. The count of
 three also made an open-coded defer table look like one more entry, and
 `internal/abi` numbers it 4, with two unwritten tables below it.
+
+### A declared function was assumed to reach a `funcval` like a literal
+
+The table had one row for a function literal that captures nothing and no row
+for `inc` itself, so a reader would take `apply(inc)` to be the same case. It
+is not, and the difference is not a refusal: passing or returning a declared
+function compiles and faults. The row and the table above separate the three
+outcomes, because a spec that lists only the working one is what let this reach
+a binary.
 
 ### `panic` was called built without saying what it is built for
 

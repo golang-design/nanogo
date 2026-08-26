@@ -16,9 +16,11 @@ lowering pass of [020](020-ir.md) and the descriptor naming of
 [032](032-type-descriptors-and-itabs.md), and no analysis over any of them. What
 exists is one reserved field, `ir.Object.Escapes`, which is assigned nowhere.
 
-The safe answer is being taken by default, everywhere, which is what makes the
-absence tolerable: the compiler is correct and allocates more than it needs to.
-Four sites act on its absence, and they do not all do the same thing:
+The safe answer is being taken by default at every site that allocates, and
+that is what makes the absence tolerable there: the compiler allocates more
+than it needs to. It is not taken everywhere, and the one place it is not is a
+miscompile, stated below the table. Four sites act on the absence, and they do
+not all do the same thing:
 
 | Site | What it does without this pass |
 | --- | --- |
@@ -31,6 +33,23 @@ The second row is the shape of answer this pass replaces: a rule sound for every
 program, taken where a per-allocation judgement is not available. Two rows of
 [020](020-ir.md)'s lowering table, the closure and the composite literal, name
 this spec as the thing that decides them.
+
+**A local whose address outlives its frame is the site with no safe default,
+and it is a miscompile today.** `func f() *int { n := 1; return &n }` compiles.
+`n` stays in `f`'s frame, the returned pointer is into a frame that is gone,
+and nothing says so at compile time or at run time. It reads correctly for as
+long as nothing overwrites that memory, which is what makes it worse than a
+crash: a short program prints `1` and agrees with `gc`. Put a `runtime.GC()`
+between the call and the read and the program prints a word of whatever the
+collector left there, against `12345` from the same source under `gc`. There is
+no fifth row for this in the table because it is not a site that chooses: it is
+a variable the compiler never considered moving, and moving it is exactly what
+this pass exists to decide.
+
+Until this pass is written, the sound rule for it is the same one the first row
+takes: a local whose address is taken and reaches a result, a global or a call
+goes to the heap. That is more heap than `gc` uses and it is correct, which is
+the trade every other row in this table already makes.
 
 The design below stands. It was reviewed and not disproved, only deferred.
 
@@ -151,6 +170,15 @@ cheap to get right, and it should be set up before the first line of the pass:
 - A corpus for the three directives, checked in generated code.
 
 ## What was wrong
+
+**The spec said the compiler is correct without this pass.** The sentence was
+"the safe answer is being taken by default, everywhere ... the compiler is
+correct and allocates more than it needs to", and it was written from the four
+sites in the table, all of which do take the safe answer. It missed the site
+that takes no answer at all, because it is not an allocation: an address-taken
+local stays in the frame and a pointer to it can leave the function. The
+opening now says where the default holds and where it does not, and the section
+above states what the sound rule would be in the meantime.
 
 The spec said nothing false. It said nothing about being unbuilt either, and a
 reader of the deck had no way to tell this apart from a pass that ships. The
