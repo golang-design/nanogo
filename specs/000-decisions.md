@@ -117,9 +117,9 @@ path.
 
 The cost of this decision is that nanogo needs its own instruction encoder from
 the first milestone ([041](041-instruction-encoding.md)). The cost is bounded:
-`cmd/internal/obj/arm64` is 36,224 lines because it encodes the whole
-instruction set and most of it is generated tables. nanogo encodes the
-instructions its own code generator emits, and that is 2,183 lines.
+`cmd/internal/obj/arm64` is 36,224 lines, tests included, because it encodes
+the whole instruction set and most of it is generated tables. nanogo encodes the
+instructions its own code generator emits, and that is 2,183 non-test lines.
 
 ### 4. External dependencies are explicit, and each has a retirement gate
 
@@ -136,8 +136,8 @@ listed here with the gate that removes it.
 | Go runtime source | the runtime itself | never | it is Go source; nanogo compiles it |
 
 The runtime line is the one most often misread. nanogo does not write a runtime.
-The Go runtime is 112,977 lines of Go and assembly, and it is *input* to nanogo,
-not a component of it. Compiling it is G3.
+The Go runtime is 112,977 lines of Go, with hand-written assembly beside that,
+and it is *input* to nanogo, not a component of it. Compiling it is G3.
 
 ### 5. One typed IR, one SSA form, targets are parameters
 
@@ -154,15 +154,17 @@ does, the middle end is wrong.
 **A counterexample is in the tree, and it is recorded rather than argued away.**
 `ssagen` sits between the last SSA pass and the object writer. It encodes
 instructions, builds the prologue and the stack growth tail, emits relocations
-and attaches stack maps, and it is 2,664 lines of which the prologue is arm64
-code. It is above [025](025-lowering-and-rules.md)'s target boundary and it
+and attaches stack maps, and it is 3,241 non-test lines of which the prologue is
+arm64 code. It is above [025](025-lowering-and-rules.md)'s target boundary and it
 names a target. Adding `amd64` will therefore require an edit there, which is
 what this decision says must not happen.
 
 Three separate audits of the deck found this independently, each from a
 different direction: no spec owns `ssagen`, [002](002-architecture.md)'s package
-layout never listed it, and no accounting of the tree reached it. That is the
-signature of a stage nobody specified. The decision is not weakened by the
+layout did not list it, and no reading of the tree reached it.
+[002](002-architecture.md) now lists the package and records the gap, and the
+stage still has no spec of its own. That is the signature of a stage nobody
+specified. The decision is not weakened by the
 counterexample. The repair is to give the stage a spec and a target interface
 of its own, and [043](043-amd64-backend.md) is the milestone that will force it,
 because that is the first time a second target reads the code.
@@ -245,8 +247,11 @@ with nanogo under a real `go build -toolexec=nanogo`, links it with the real
 linker against `gc`-compiled packages and the real runtime, and runs it; and
 `export/` reads `gc`'s export data and writes it, so a nanogo-compiled package
 can import a `gc`-compiled one and a `gc`-compiled package can import a
-nanogo-compiled one. What is not built is a generic declaration, which the
-writer refuses by name ([013](013-generics.md)), and function bodies, which
+nanogo-compiled one. `gc` reads back what nanogo wrote for 275 of the 375
+standard library packages, and refuses none of the 275
+([015](015-export-data.md)). What is not built is a generic declaration, which
+the writer refuses by name ([013](013-generics.md)) and which accounts for all
+100 packages it will not write, and function bodies, which
 [024](024-inlining-and-devirtualization.md) needs. The fallback in this
 decision is not taken.
 
@@ -289,3 +294,28 @@ point, and the binaries run. The Go distribution does not compile at v1 and the
 linker is still `go tool link`.
 
 Everything past that is real and specified and not v1.
+
+## What was wrong
+
+**Decision 5 gave `ssagen` a size that the package had outgrown.** It read 2,664
+lines. The package is 3,241 non-test lines, which is what
+[002](002-architecture.md) and [042](042-arm64-backend.md) already say. The
+counterexample the number supports is unchanged and is still open: the stage
+names a target, and [043](043-amd64-backend.md) is the milestone that will force
+a spec and a target interface for it.
+
+**Two of decision 5's three pieces of evidence had gone out of date.**
+[002](002-architecture.md)'s package layout lists `ssagen` now and records the
+gap, so "never listed it" was false; and the third clause pointed at an
+accounting of the tree that no longer exists. The clause that still holds, that
+no spec owns the stage, is stated as present fact and the other two as history.
+
+**Decision 3 compared two line counts measured different ways.** 36,224 for
+`cmd/internal/obj/arm64` counts the package's tests and 2,183 for nanogo's
+encoder does not, so the ratio read larger than it is. Both numbers stand and
+each now says which it is.
+
+**The runtime's 112,977 lines were described as "Go and assembly".** The count
+is the package's non-test Go files. The hand-written assembly is beside it and
+is not in the figure. [001](001-bootstrap-gates.md) carried the same wording and
+is corrected with it.
