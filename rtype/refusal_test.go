@@ -83,15 +83,15 @@ func TestDescriptorRefusals(t *testing.T) {
 			"signature",
 		},
 		{
-			// The header's bytes are all computable. What has no target is
-			// the pointer to the slot group, because gc spells that
-			// synthesised struct noalg.map.group[K]V and the naming function
-			// has no spelling for it.
+			// The header's bytes are all computable and the slot group is
+			// named as gc names it. What has no descriptor is the group, whose
+			// slots are a literal struct, so a map is refused with the group's
+			// own reason.
 			"a map",
 			func(t *testing.T) *ir.Type {
 				return lay(t, &ir.Type{Kind: ir.Map, Key: intType(t), Elem: intType(t)})
 			},
-			"slot group",
+			"group type",
 		},
 		{
 			"an interface with methods",

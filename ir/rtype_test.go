@@ -177,6 +177,92 @@ func TestInterfaceMethodOrderIsGcsAndNotByteOrder(t *testing.T) {
 	}
 }
 
+// TestMapGroupIsSpelledFromTheMap checks the one struct with a spelling.
+//
+// A slot group is a struct no Go source declares, so the literal-struct refusal
+// would refuse it and a map's descriptor points at it. gc spells it
+// map.group[K]V, from the *map's* key and element and not from the slot's, and
+// puts the descriptor under a symbol prefixed "noalg." so that it cannot merge
+// with the descriptor of a struct a program declared with the same two fields.
+//
+// rtype checks the same spelling against the hash gc computed for the group of
+// the same map. This is the half that has no running program in it: the
+// prefix belongs to the symbol and not to the link string, because the hash is
+// computed over the link string.
+func TestMapGroupIsSpelledFromTheMap(t *testing.T) {
+	str := mustLayoutNamed(String, "string")
+	num := mustLayoutNamed(Int64, "int")
+	m := layOut(t, &Type{Kind: Map, Key: str, Elem: num})
+	// The slot substitutes a pointer for a large key and the name does not, so
+	// the group carries the map rather than the slot.
+	slot := layOut(t, &Type{Kind: Struct, NoAlg: true, Fields: []Field{
+		{Name: "key", Type: layOut(t, &Type{Kind: Ptr, Elem: str})},
+		{Name: "elem", Type: num},
+	}})
+	group := layOut(t, &Type{Kind: Struct, NoAlg: true, MapGroup: m, Fields: []Field{
+		{Name: "ctrl", Type: mustLayoutNamed(Uint64, "uint64")},
+		{Name: "slots", Type: layOut(t, &Type{Kind: Array, NoAlg: true, Len: 8, Elem: slot})},
+	}})
+
+	link, err := TypeLinkString(group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != "map.group[string]int" {
+		t.Errorf("the link string is %q, want %q", link, "map.group[string]int")
+	}
+	name, err := TypeNameString(group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "map.group[string]int" {
+		t.Errorf("the name string is %q, want %q", name, "map.group[string]int")
+	}
+	sym, err := TypeSymbol(group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sym != "type:noalg.map.group[string]int" {
+		t.Errorf("the symbol is %q, want %q", sym, "type:noalg.map.group[string]int")
+	}
+
+	// The mark reaches a type built out of a marked one, and stops where gc
+	// stops it. A slice is not on the list, because gc gives a slice no
+	// equality algorithm to begin with and so never raises it.
+	for _, tc := range []struct {
+		what string
+		typ  *Type
+		want bool
+	}{
+		{"the group", group, true},
+		{"a pointer to the group", layOut(t, &Type{Kind: Ptr, Elem: group}), true},
+		{"an array of slots", group.Fields[1].Type, true},
+		{"the slot", slot, true},
+		{"the control word", group.Fields[0].Type, false},
+		{"the map itself", m, false},
+		{"a slice of the group", layOut(t, &Type{Kind: Slice, Elem: group}), false},
+	} {
+		if got := noAlg(tc.typ, 0); got != tc.want {
+			t.Errorf("%s: noAlg is %v, want %v", tc.what, got, tc.want)
+		}
+	}
+
+	// A struct carrying the mark on nothing is still refused, so the spelling
+	// is the group's and not every struct's.
+	plain := layOut(t, &Type{Kind: Struct, Fields: []Field{{Name: "A", Type: num}}})
+	if _, err := TypeLinkString(plain); err == nil {
+		t.Error("a literal struct was named")
+	}
+	// A group whose MapGroup is not a map is refused rather than spelled from
+	// whatever the field holds.
+	bad := layOut(t, &Type{Kind: Struct, MapGroup: num, Fields: []Field{{Name: "A", Type: num}}})
+	if _, err := TypeLinkString(bad); err == nil {
+		t.Error("a slot group of a non-map was named")
+	} else if !strings.Contains(err.Error(), "names the map it belongs to") {
+		t.Errorf("the reason is %q", err)
+	}
+}
+
 // nameCorpusTypes type-checks the corpus and returns one IR type per row.
 func nameCorpusTypes(t *testing.T) []*Type {
 	t.Helper()

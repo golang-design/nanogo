@@ -789,8 +789,7 @@ func mapOf(t *testing.T, key, elem *ir.Type) *ir.Type {
 func TestMapGroupAgainstReflect(t *testing.T) {
 	for _, c := range mapCorpus {
 		t.Run(c.what, func(t *testing.T) {
-			key, elem := c.key(t), c.elem(t)
-			group, err := GroupOf(key, elem)
+			group, err := GroupOf(mapOf(t, c.key(t), c.elem(t)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -884,20 +883,51 @@ func TestMapTypeLayoutMatchesInternalAbi(t *testing.T) {
 }
 
 // TestMapHeaderBytes checks that the header the encoder writes holds the plan.
-//
-// mapTail cannot finish, because the pointer to the slot group has no name.
-// The bytes it computes before that are still the ones a descriptor would
-// carry, so they are checked through the plan rather than left untested until
-// the naming function grows a spelling.
 func TestMapHeaderBytes(t *testing.T) {
 	m := mapOf(t, tString(t), tInt(t))
-	if _, _, _, err := mapTail(m); err == nil {
-		t.Fatal("a map header was written; the group type is nameable and this test is stale")
+	data, relocs, _, err := mapTail(m)
+	if err != nil {
+		t.Fatalf("mapTail: %v", err)
 	}
 	p, err := mapPlanOf(m)
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, tc := range []struct {
+		name string
+		off  int
+		want int64
+	}{
+		{"GroupSize", mapOffGroupSize, p.groupSize},
+		{"KeysOff", mapOffKeysOff, p.keysOff},
+		{"KeyStride", mapOffKeyStride, p.keyStride},
+		{"ElemsOff", mapOffElemsOff, p.elemsOff},
+		{"ElemStride", mapOffElemStride, p.elemStride},
+		{"ElemOff", mapOffElemOff, p.elemOff},
+	} {
+		if got := int64(binary.LittleEndian.Uint64(data[tc.off:])); got != tc.want {
+			t.Errorf("%s is %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	if got := binary.LittleEndian.Uint32(data[mapOffFlags:]); got != p.flags {
+		t.Errorf("Flags is %#b, want %#b", got, p.flags)
+	}
+	// The three pointers the header carries, plus the hasher.
+	want := map[string]bool{
+		"type:string": false, "type:int": false,
+		"type:noalg.map.group[string]int": false,
+	}
+	for _, r := range relocs {
+		if _, ok := want[r.Target]; ok {
+			want[r.Target] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("the header does not point at %s", name)
+		}
+	}
+
 	// The three flags a string key sets and does not set.
 	if p.flags&mapNeedKeyUpdate == 0 {
 		t.Error("a string key does not ask for a key update; an equal string may point at a larger backing array")
@@ -910,34 +940,99 @@ func TestMapHeaderBytes(t *testing.T) {
 	}
 }
 
-// TestMapIsRefusedOnTheGroupsName records where the last map refusal lives.
+// TestMapGroupIsNamedAsGcNamesIt checks the two spellings of the slot group.
 //
-// Everything this package computes for a map agrees with gc. What stops the
-// descriptor is one spelling: gc names the slot group noalg.map.group[K]V in
-// the link string and map.group[K]V in the name string, and the naming
-// function in package ir produces neither, so a struct with no name reaches
-// its literal-struct case.
-func TestMapIsRefusedOnTheGroupsName(t *testing.T) {
+// The group is a struct no Go source declares, so gc gives it a spelling of its
+// own: map.group[K]V, read from the *map's* key and element and not from the
+// slot's. A key past internal/abi.MapMaxKeyBytes is a pointer in the slot and
+// is itself in the name, which is why ir.Type.MapGroup carries the map.
+//
+// The symbol takes a "noalg." prefix and the link string does not. The type
+// hash is computed over the link string, so the hash gc put in the group
+// descriptor of the same map is the oracle for the link string this package
+// builds: a spelling that differs from gc's by one character fails here.
+func TestMapGroupIsNamedAsGcNamesIt(t *testing.T) {
+	for _, c := range mapCorpus {
+		t.Run(c.what, func(t *testing.T) {
+			m := mapOf(t, c.key(t), c.elem(t))
+			p, err := mapPlanOf(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A row whose key or element is a type literal this package
+			// cannot name is skipped. The group's own name holds the map's key
+			// and element, so such a row fails for a reason that is not the
+			// group's spelling, and the corpus builds those two without the
+			// defined name gc compiled them under anyway.
+			if _, err := ir.TypeSymbol(m.Key); err != nil {
+				t.Skipf("the key has no canonical name: %v", err)
+			}
+			if _, err := ir.TypeSymbol(m.Elem); err != nil {
+				t.Skipf("the element has no canonical name: %v", err)
+			}
+			link, err := ir.TypeLinkString(p.group)
+			if err != nil {
+				t.Fatalf("the slot group has no link string: %v", err)
+			}
+			sym, err := ir.TypeSymbol(p.group)
+			if err != nil {
+				t.Fatalf("the slot group has no symbol: %v", err)
+			}
+			if want := "type:noalg." + link; sym != want {
+				t.Errorf("the symbol is %s, want %s", sym, want)
+			}
+			name, err := ir.TypeNameString(p.group)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(name, "map.group[") {
+				t.Errorf("the name string is %q, want it to begin with map.group[", name)
+			}
+			got, err := Hash(p.group)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := abiMapOf(c.rt).Group.Hash; got != want {
+				t.Errorf("the hash of %q is %#08x and gc computed %#08x, so the two link strings differ",
+					link, got, want)
+			}
+		})
+	}
+}
+
+// TestMapIsRefusedOnTheGroupsFields records where the last map refusal lives.
+//
+// Everything this package computes for a map agrees with gc, and the group is
+// named as gc names it. What is left is one spelling below the group: its slots
+// are a literal struct, and a literal struct's spelling distinguishes an
+// embedded field renamed through an alias, which ir.Converter unaliases away.
+// The refusal names the group type, so the reason a map is refused is the
+// group's and not restated in the map's own words.
+func TestMapIsRefusedOnTheGroupsFields(t *testing.T) {
 	m := mapOf(t, tString(t), tInt(t))
 	p, err := mapPlanOf(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ir.TypeSymbol(p.group); err == nil {
-		t.Error("the slot group is nameable; lift the refusal below")
-	}
-	// The map itself is nameable, and so are its key and its element, so the
-	// group is the only gap.
-	for _, ty := range []*ir.Type{m, m.Key, m.Elem} {
+	// The map, its key, its element and the group are all nameable, so the
+	// gap is one level further down.
+	for _, ty := range []*ir.Type{m, m.Key, m.Elem, p.group} {
 		if _, err := ir.TypeSymbol(ty); err != nil {
 			t.Errorf("%s has no name: %v", ty, err)
 		}
+	}
+	if _, err := Descriptor(p.group); err == nil {
+		t.Fatal("the group type is describable; lift the refusal below")
 	}
 	err = mapEmittable(m)
 	if err == nil {
 		t.Fatal("a map was emittable")
 	}
-	for _, want := range []string{"slot group", "noalg.map.group"} {
+	for _, want := range []string{
+		"group type",
+		"type:noalg.map.group[string]int",
+		"embedded field renamed through an alias",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal is %q, want it to name %q", err, want)
 		}

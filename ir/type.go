@@ -337,6 +337,38 @@ type Type struct {
 	// now, and this is the field it reads.
 	Instantiated bool
 
+	// MapGroup is the map whose slot group this struct is, for a group and for
+	// nothing else.
+	//
+	// The group is a struct the compiler synthesises, one per map type. The
+	// runtime's map is a swiss table of groups and the collector scans one, so
+	// a type has to exist to carry its pointer map, and no Go source declares
+	// it. rtype.GroupOf builds it and this field is what it was built from.
+	//
+	// It is the map and not the slot because gc's spelling reads the *map's*
+	// key and element: map[[200]byte]int is named map.group[[200]uint8]int
+	// even though the slot holds a pointer to the key, because a key past
+	// internal/abi.MapMaxKeyBytes is stored indirectly. A name built from the
+	// slot would be a second symbol for a type gc has already named.
+	MapGroup *Type
+
+	// NoAlg reports whether the type is one the compiler synthesised and gave
+	// no hash and no equality function.
+	//
+	// gc puts such a type's descriptor under a symbol prefixed "noalg." so
+	// that it cannot merge with the descriptor of a type of the same shape
+	// that a program declares and compares. The prefix is on the *symbol* and
+	// not on the link string: the type hash is computed over the link string,
+	// and a hash that carried the prefix would not be the hash gc computed for
+	// the same type, so a type switch would miss.
+	//
+	// The mark reaches a type built out of a marked one, which is what
+	// TypeSymbol reproduces. It is set here rather than derived, because
+	// "synthesised by the compiler" is not a property of a type's shape: the
+	// slot group of map[string]int and struct{ key string; elem int } have the
+	// same fields and gc names them apart.
+	NoAlg bool
+
 	// Methods is the method set of the *pointer* to this type, sorted by name.
 	//
 	// The pointer's set, because it is the larger of the two: a method with a

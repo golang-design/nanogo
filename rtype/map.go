@@ -110,7 +110,11 @@ type mapPlan struct {
 // is what the collector scans: a group built from the value type with the
 // pointer flag set would have the collector read a 200-byte array as a
 // pointer.
-func GroupOf(key, elem *ir.Type) (*ir.Type, error) {
+func GroupOf(m *ir.Type) (*ir.Type, error) {
+	if m == nil || m.Kind != ir.Map {
+		return nil, fmt.Errorf("rtype: a slot group belongs to a map type")
+	}
+	key, elem := m.Key, m.Elem
 	if key == nil || elem == nil {
 		return nil, fmt.Errorf("rtype: a map group needs a key type and an element type")
 	}
@@ -124,13 +128,20 @@ func GroupOf(key, elem *ir.Type) (*ir.Type, error) {
 	if elem.Size > mapMaxElemBytes {
 		slotElem = &ir.Type{Kind: ir.Ptr, Elem: elem}
 	}
-	slot := &ir.Type{Kind: ir.Struct, Fields: []ir.Field{
+	// NoAlg on the slot, the array and the group, which is where gc sets it.
+	// A map is not comparable, so nothing hashes or compares a group, and the
+	// mark is what keeps the group's descriptor from merging with the
+	// descriptor of a struct a program declared with the same two fields.
+	slot := &ir.Type{Kind: ir.Struct, NoAlg: true, Fields: []ir.Field{
 		{Name: "key", Type: slotKey},
 		{Name: "elem", Type: slotElem},
 	}}
-	group := &ir.Type{Kind: ir.Struct, Fields: []ir.Field{
-		{Name: "ctrl", Type: &ir.Type{Kind: ir.Uint64}},
-		{Name: "slots", Type: &ir.Type{Kind: ir.Array, Len: mapGroupSlots, Elem: slot}},
+	group := &ir.Type{Kind: ir.Struct, NoAlg: true, MapGroup: m, Fields: []ir.Field{
+		// The predeclared uint64, named, because a struct descriptor names the
+		// type of every field and a word with no predeclared name has no
+		// canonical spelling.
+		{Name: "ctrl", Type: &ir.Type{Kind: ir.Uint64, Name: "uint64", Basic: "uint64"}},
+		{Name: "slots", Type: &ir.Type{Kind: ir.Array, NoAlg: true, Len: mapGroupSlots, Elem: slot}},
 	}}
 	if err := ir.Layout(group); err != nil {
 		return nil, err
@@ -150,7 +161,7 @@ func mapPlanOf(t *ir.Type) (mapPlan, error) {
 	if t.Key == nil || t.Elem == nil {
 		return mapPlan{}, fmt.Errorf("rtype: %s has no key type or no element type", t)
 	}
-	group, err := GroupOf(t.Key, t.Elem)
+	group, err := GroupOf(t)
 	if err != nil {
 		return mapPlan{}, err
 	}
@@ -288,13 +299,18 @@ func mapTail(t *ir.Type) ([]byte, []Reloc, []Symbol, error) {
 
 // mapEmittable reports the reason a map's descriptor cannot be filled in.
 //
-// The group type is the one that stops it, and the stop is a spelling rather
-// than a fact the IR is missing. gc names the group noalg.map.group[K]V in the
-// link string and map.group[K]V in the name string, two spellings for one
-// synthesised struct, and ir/rtype.go's naming function produces neither: a
-// struct with no name reaches its literal-struct case and is refused. So the
-// bytes of the header are computable and the pointer to the group has no
-// target to name.
+// The group type is the one that stops it. The header's own bytes are all
+// computable and its Group field is a pointer, so a map is no more emittable
+// than the group it points at: a relocation against a symbol nothing defines is
+// a link failure in whichever package imports this one.
+//
+// The group is nameable. gc names its symbol type:noalg.map.group[K]V and
+// writes map.group[K]V in the name data, and ir/rtype.go spells both. What it
+// has no descriptor for is the group's own fields: the array of slots and the
+// slot are literal structs, and a literal struct's spelling distinguishes an
+// embedded field renamed through an alias, which ir.Converter unaliases away.
+// So the refusal is asked of the group rather than restated here, and it moves
+// on its own when the literal struct is spelled.
 func mapEmittable(t *ir.Type) error {
 	p, err := mapPlanOf(t)
 	if err != nil {
@@ -305,9 +321,12 @@ func mapEmittable(t *ir.Type) error {
 	} else if fn == "" {
 		return fmt.Errorf("rtype: the key type %s of %s has no hash function, so it cannot be a map key", t.Key, t)
 	}
-	if _, err := ir.TypeSymbol(p.group); err != nil {
-		return fmt.Errorf("rtype: %s needs a descriptor for its slot group, which gc names "+
-			"noalg.map.group[K]V and the naming function has no spelling for: %v", t, err)
+	sym, err := ir.TypeSymbol(p.group)
+	if err != nil {
+		return fmt.Errorf("rtype: the group type of %s has no name: %v", t, err)
+	}
+	if _, err := Descriptor(p.group); err != nil {
+		return fmt.Errorf("rtype: %s points at the group type %s, which has no descriptor: %v", t, sym, err)
 	}
 	return nil
 }

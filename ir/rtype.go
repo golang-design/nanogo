@@ -94,13 +94,63 @@ const TypeSymbolPrefix = "type:"
 // TypeSymbol returns the linker symbol of the type descriptor of t.
 //
 // It is TypeSymbolPrefix followed by the link string, which is what gc emits
-// and what cmd/link collects into runtime.typelinks.
+// and what cmd/link collects into runtime.typelinks. A type the compiler
+// synthesised and gave no algorithms takes a "noalg." prefix between the two,
+// which is gc's types.TypeSymName.
+//
+// The prefix is here and not in the link string, because the type hash is
+// computed over the link string. gc hashes map.group[string]int and names the
+// symbol type:noalg.map.group[string]int, so a link string that carried the
+// prefix would produce a hash gc never computed.
 func TypeSymbol(t *Type) (string, error) {
 	s, err := TypeLinkString(t)
 	if err != nil {
 		return "", err
 	}
+	if noAlg(t, 0) {
+		s = noAlgPrefix + s
+	}
 	return TypeSymbolPrefix + s, nil
+}
+
+// noAlgPrefix separates the descriptor of a synthesised type from the
+// descriptor of a declared type of the same shape.
+//
+// The two would otherwise be one symbol, and the linker would merge them. The
+// synthesised one has no hash and no equality function, so the merged symbol
+// would leave a declared comparable type with a nil Equal, and the runtime
+// panics on a map whose key is that type.
+const noAlgPrefix = "noalg."
+
+// noAlg reports whether t or a part of it was synthesised with no algorithms.
+//
+// It reproduces gc's types.TypeHasNoAlg. The mark is set on the synthesised
+// type, and gc's size computation raises a struct and an array to it from
+// their contents, so the slot group and the array of slots both carry it. A
+// pointer copies the *mark* off its element rather than the element's computed
+// answer, which is why the pointer case does not recurse. A slice is on
+// neither list, because gc gives a slice no equality algorithm to begin with
+// and so never raises it.
+func noAlg(t *Type, depth int) bool {
+	if t == nil || depth > maxNameDepth {
+		return false
+	}
+	if t.NoAlg {
+		return true
+	}
+	switch t.Kind {
+	case Ptr:
+		return t.Elem != nil && t.Elem.NoAlg
+	case Array:
+		return noAlg(t.Elem, depth+1)
+	case Struct:
+		for _, f := range t.Fields {
+			if noAlg(f.Type, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TypeLinkString returns the spelling of t that identifies it to the linker.
@@ -349,9 +399,24 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 		return nil
 
 	case Struct:
+		if t.MapGroup != nil {
+			// The slot group of a map, which gc spells from the map's key and
+			// element rather than from the slot's. The slot substitutes a
+			// pointer for a key or an element past the size threshold and the
+			// name does not, so map[[200]byte]int is map.group[[200]uint8]int.
+			m := t.MapGroup
+			if m.Kind != Map {
+				return fmt.Errorf("ir: a slot group names the map it belongs to and carries a %s", m.Kind)
+			}
+			b.WriteString("map.group[")
+			if err := typeName(b, m.Key, link, depth+1); err != nil {
+				return err
+			}
+			b.WriteString("]")
+			return typeName(b, m.Elem, link, depth+1)
+		}
 		// A defined struct was answered above. What is left is a literal
-		// struct type, whose spelling holds the type of every field, so a
-		// field of function type reduces to the signature case. gc also
+		// struct type, whose spelling holds the type of every field. gc
 		// spells an embedded field renamed through a type alias as
 		// "struct{ Int = int }", and Converter unaliases, so the fact that
 		// tells the two apart is gone before the name is asked for.
