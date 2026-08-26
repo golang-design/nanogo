@@ -11,8 +11,23 @@
 //
 // This file holds the type boundary. specs/002-architecture.md forbids anything
 // below the IR from importing the type checker, and this is where that line is
-// drawn: below the IR, a type is a size, an alignment, and a pointer map. Not a
-// name, not a method set, not an underlying type.
+// drawn: below the IR, a type that generates code is a size, an alignment and a
+// pointer map. Not a name, not a method set, not an underlying type.
+//
+// The boundary has a second half, and the rule above used to be stated without
+// it. A type descriptor is data the runtime and reflect read, and it carries
+// facts no instruction depends on: the type's name, its package, its method
+// set, a struct field's tag. Those facts have to cross the boundary or nobody
+// below it can write the descriptor, which is what
+// specs/032-type-descriptors-and-itabs.md found when every defined type in the
+// standard library was refused. So Type carries them in one group, marked as
+// such, and the rule is now two rules:
+//
+//   - Nothing that generates code may branch on a descriptor field. Two types
+//     with the same kind, size and pointer map compile to the same
+//     instructions however their names or method sets differ.
+//   - Nothing that writes a descriptor may guess a descriptor field. A field
+//     the checker did not supply is refused by name, never filled in.
 //
 // See specs/020-ir.md and specs/030-abi.md.
 package ir
@@ -132,6 +147,25 @@ type Field struct {
 	Name   string
 	Type   *Type
 	Offset int64 // byte offset from the start of the struct, set by Layout
+
+	// The descriptor fields, by the rule at the top of this file.
+
+	// Tag is the field's struct tag, without the back quotes, and is empty
+	// when the field has none. Two struct types that differ only in a tag are
+	// different types, so a descriptor that dropped it would name two types
+	// alike.
+	Tag string
+
+	// Embedded reports whether the field was declared without a name. The
+	// descriptor carries the bit because reflect reports it and because a
+	// struct type's spelling is the field's type alone when it is set.
+	Embedded bool
+
+	// Pkg is the import path that qualifies Name when Name is unexported, and
+	// is empty for an exported name. A struct descriptor points at the path of
+	// its first unexported field, which is how reflect reaches a field name
+	// from outside the package that declared it.
+	Pkg string
 }
 
 // Type is a type as everything below the IR sees it.
@@ -177,9 +211,73 @@ type Type struct {
 	// guessing.
 	EmptyIface bool
 
-	// Name is carried for diagnostics only. Nothing below the IR may branch on
-	// it, which is the rule this comment exists to state.
+	// The descriptor fields. Everything from here down is read by the type
+	// descriptor writer of specs/032-type-descriptors-and-itabs.md and by
+	// diagnostics, and by nothing that generates an instruction. The rule at
+	// the top of this file states both halves of that.
+
+	// Name is the type's name, qualified by its import path for a defined
+	// type: "internal/goarch.ArchFamilyType", "int", "unsafe.Pointer". It is
+	// empty for a type literal.
 	Name string
+
+	// PkgPath is the import path of the package that declared the type, and is
+	// empty for a predeclared type and for a type literal.
+	//
+	// It is carried rather than cut out of Name, because a descriptor points
+	// at the path on its own (an UncommonType's PkgPath, a struct's PkgPath)
+	// and because a generic instantiation's name holds the dots of its type
+	// arguments, so the last dot of a name is not reliably the one that
+	// separates the path from the identifier.
+	PkgPath string
+
+	// Basic is the predeclared type that is this type's underlying type, when
+	// it has one: "int" for both int and type ArchFamilyType int, "" for a
+	// struct.
+	//
+	// It exists because internal/abi.Kind distinguishes int from int64 and
+	// uint from uint64, and Kind above does not: both targets are 64 bit, so
+	// the two are one machine type and the IR deliberately gives them one
+	// kind. The descriptor's Kind_ byte still has to say which, and a guess
+	// there makes reflect report Int64 for an int.
+	Basic string
+
+	// Methods is the method set of the *pointer* to this type, sorted by name.
+	//
+	// The pointer's set, because it is the larger of the two: a method with a
+	// value receiver is in both sets and one with a pointer receiver is in
+	// this one only. Method.PtrOnly says which, so the value type's set is
+	// this one with the PtrOnly entries dropped.
+	//
+	// A nil slice on a type that could have methods is not "no methods". It is
+	// only meaningful on a defined type, which is the only kind of type the
+	// language lets a method be declared on, and Converter sets it for every
+	// one of those, empty set included. That is what makes an empty method set
+	// knowable, which is what a descriptor with no UncommonType methods
+	// claims.
+	Methods []Method
+}
+
+// Method is one method of a defined type's method set.
+//
+// The signature is absent. A descriptor's Method carries an Mtyp offset to the
+// descriptor of the method's type with the receiver removed, and that needs a
+// function's signature, which this boundary does not carry either. The writer
+// refuses a method rather than emitting an Mtyp of zero, because zero is a
+// legal Mtyp that means "this method is unexported and reflect may not call
+// it", so a zero here would be read as a fact rather than as a gap.
+type Method struct {
+	// Name is the method's name, unqualified.
+	Name string
+
+	// Pkg is the import path that qualifies Name when Name is unexported, and
+	// is empty for an exported name. Two packages may declare an unexported
+	// method of the same name and they are different methods.
+	Pkg string
+
+	// PtrOnly reports whether the method is in the method set of the pointer
+	// and not in the method set of the type itself.
+	PtrOnly bool
 }
 
 // PtrSize is the size of a pointer on the targets in this deck.

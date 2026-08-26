@@ -584,3 +584,139 @@ var d interface{ M(); N() }
 		}
 	}
 }
+
+// TestConvertCarriesTheDescriptorFields checks the second half of the type
+// boundary: the name, the package, the predeclared spelling, the method set and
+// a struct field's tag, embedding and package.
+//
+// Every one of them is a fact no instruction depends on and no type descriptor
+// can be written without, which is the rule at the top of type.go.
+func TestConvertCarriesTheDescriptorFields(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Family int
+
+type Info struct {
+	Name    string `+"`json:\"name\"`"+`
+	changed int
+}
+
+type Set struct {
+	Info
+	List []Info
+}
+
+type Counter int
+
+func (c Counter) Value() int  { return int(c) }
+func (c *Counter) Add(n int)  { *c += Counter(n) }
+func (c Counter) private() {}
+`)
+	c := NewConverter()
+	conv := func(name string) *Type {
+		t.Helper()
+		obj := pkg.Scope().Lookup(name)
+		if obj == nil {
+			t.Fatalf("%s is not declared", name)
+		}
+		out, err := c.Convert(obj.Type())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	family := conv("Family")
+	if family.Name != "p.Family" || family.PkgPath != "p" || family.Basic != "int" {
+		t.Errorf("Family carries %q/%q/%q, want p.Family/p/int",
+			family.Name, family.PkgPath, family.Basic)
+	}
+	// The empty set is the point of the field. A nil Methods on a defined type
+	// would be indistinguishable from "not computed", and a descriptor writer
+	// reading it would claim an empty method set it never established.
+	if family.Methods == nil || len(family.Methods) != 0 {
+		t.Errorf("Family's method set is %v, want a non-nil empty set", family.Methods)
+	}
+
+	info := conv("Info")
+	if info.Basic != "" {
+		t.Errorf("Info's underlying type is a struct, so Basic is %q, want empty", info.Basic)
+	}
+	if len(info.Fields) != 2 {
+		t.Fatalf("Info has %d fields, want 2", len(info.Fields))
+	}
+	if got := info.Fields[0]; got.Tag != `json:"name"` || got.Embedded || got.Pkg != "" {
+		t.Errorf("Info.Name carries tag %q embedded %v pkg %q, want the tag, false and empty",
+			got.Tag, got.Embedded, got.Pkg)
+	}
+	if got := info.Fields[1]; got.Tag != "" || got.Pkg != "p" {
+		t.Errorf("Info.changed carries tag %q pkg %q, want empty and p", got.Tag, got.Pkg)
+	}
+
+	set := conv("Set")
+	if got := set.Fields[0]; !got.Embedded {
+		t.Error("Set.Info is embedded and the field does not say so")
+	}
+	if got := set.Fields[1]; got.Embedded {
+		t.Error("Set.List is not embedded and the field says it is")
+	}
+
+	counter := conv("Counter")
+	want := []Method{
+		{Name: "Add", PtrOnly: true},
+		{Name: "Value"},
+		{Name: "private", Pkg: "p"},
+	}
+	if !reflect.DeepEqual(counter.Methods, want) {
+		t.Errorf("Counter's method set is %+v, want %+v", counter.Methods, want)
+	}
+}
+
+// TestConvertMethodSetFollowsPromotion checks that the method set is the
+// checker's answer and not the list of methods declared on the type.
+func TestConvertMethodSetFollowsPromotion(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type base struct{}
+
+func (base) Promoted() {}
+func (*base) PtrPromoted() {}
+
+// Shadow embeds base and hides Promoted behind a field of the same name.
+type Shadow struct {
+	base
+	Promoted int
+}
+
+// ByValue embeds base by value, so PtrPromoted needs an address.
+type ByValue struct{ base }
+
+// ByPointer embeds *base, so both are in the value type's own set.
+type ByPointer struct{ *base }
+`)
+	c := NewConverter()
+	names := func(name string) []Method {
+		t.Helper()
+		out, err := c.Convert(pkg.Scope().Lookup(name).Type())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.Methods
+	}
+
+	// Promoted is shadowed by the field of the same name; PtrPromoted is not
+	// shadowed and stays, which is what makes this a shadowing test rather
+	// than a test that embedding promotes nothing.
+	want := []Method{{Name: "PtrPromoted", PtrOnly: true}}
+	if got := names("Shadow"); !reflect.DeepEqual(got, want) {
+		t.Errorf("Shadow's method set is %+v, want %+v", got, want)
+	}
+	want = []Method{{Name: "Promoted"}, {Name: "PtrPromoted", PtrOnly: true}}
+	if got := names("ByValue"); !reflect.DeepEqual(got, want) {
+		t.Errorf("ByValue's method set is %+v, want %+v", got, want)
+	}
+	want = []Method{{Name: "Promoted"}, {Name: "PtrPromoted"}}
+	if got := names("ByPointer"); !reflect.DeepEqual(got, want) {
+		t.Errorf("ByPointer's method set is %+v, want %+v", got, want)
+	}
+}
