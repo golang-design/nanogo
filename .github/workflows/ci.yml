@@ -166,6 +166,115 @@ jobs:
         name: corpus-report
         path: ${{ runner.temp }}/corpus.txt
 
+  # The probe corpus, run as a behaviour gate.
+  #
+  # The corpus job above gates the front end against Go's own tests. This one
+  # gates the capability claims the documentation makes. They were the one
+  # thing nothing checked: internal/hygiene reads every documented number
+  # against testdata/facts.json and fails when a number drifts, but it cannot
+  # see a sentence. In August 2026 README.md, doc.go and nanogo help all said
+  # nanogo refused defer for weeks after defer started working, and the README
+  # warned users about a segfault that had been fixed hours earlier.
+  #
+  # internal/audit/testdata/probes holds one directory per Go construct. Each
+  # is compiled twice, by nanogo and by gc, both programs are run and the two
+  # are compared, so gc is the oracle and no probe carries an expected value
+  # that can itself go stale. testdata/ratchet.txt records the class each probe
+  # held, and the classes are ordered: a probe that falls fails this job, and a
+  # probe that rises does not fail it and is reported, because a lifted refusal
+  # is the moment a sentence in README.md, doc.go or driver/help.go turns into
+  # a lie.
+  #
+  # It runs on macos-latest because that is the arm64 runner and nanogo emits
+  # arm64 machine code. On the amd64 runner nothing it compiled could run, and
+  # a probe job there would be a job that ran nothing.
+  #
+  # The test job already runs this test inside `go test ./...`. This job exists
+  # anyway, for the reason the corpus job gives: a red light here names the
+  # probes rather than "test (macos-latest)", -v puts the per-probe report in
+  # the log, and the progress lines are raised to warnings that the run summary
+  # shows.
+  probes:
+    name: probe corpus
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.27.x'
+        check-latest: true
+
+    - name: Assert the runner can run what nanogo compiles
+      run: |
+        set -eu
+        test "$(uname -m)" = "arm64"
+
+    # The same guard the gofmt job puts on the vendored corpus, for the same
+    # reason: a check over an empty directory passes and proves nothing. The
+    # exact count is the ratchet's job and it fails on any change to it. This
+    # is the cheap pre-flight, so a corpus that did not survive the checkout
+    # fails here rather than after a nanogo build.
+    - name: Assert the corpus is in the checkout
+      run: |
+        set -eu
+        probes='internal/audit/testdata/probes'
+        n=$(find "$probes" -mindepth 2 -name main.go | wc -l | tr -d ' ')
+        if [ "$n" -eq 0 ]; then
+          echo "::error::$probes holds no probes, so this job would gate nothing"
+          exit 1
+        fi
+        echo "$n probes in $probes"
+
+    # Both variables turn a skip into a failure. Without them a run that swept
+    # nothing would read exactly like a run that swept everything.
+    #
+    # TestHarnessAgreesWithRunScript runs here too. run.sh is what
+    # CONTRIBUTING.md tells a contributor to run and this package is what CI
+    # runs, so something has to compare the two.
+    - name: Sweep
+      env:
+        NANOGO_REQUIRE_CORPUS: '1'
+        NANOGO_REQUIRE_LINK: '1'
+      run: |
+        set -eu -o pipefail
+        go test -timeout 30m -v \
+          -run 'TestProbes$|TestHarnessAgreesWithRunScript$' \
+          ./internal/audit/ 2>&1 | tee "$RUNNER_TEMP/probes.txt"
+
+    # The test above cannot skip, because both variables above make a skip a
+    # fatal error. This asserts it anyway: the line that carries the
+    # measurement must be in the log, so a test that passed having compiled
+    # nothing cannot be mistaken for a green gate.
+    #
+    # It also raises the progress lines to warnings. A probe that rises does
+    # not fail the build, and a t.Logf in a passing test is invisible in the
+    # run summary. Reported loudly and seen by nobody is not reported.
+    - name: Assert the sweep measured something, and report progress
+      if: always()
+      run: |
+        set -eu
+        log="$RUNNER_TEMP/probes.txt"
+        test -f "$log" || { echo "::error::the sweep produced no log at all"; exit 1; }
+        grep -q 'swept [0-9]* probes' "$log" || {
+          echo "::error::the probe test produced no measurement; it passed having swept nothing"
+          exit 1
+        }
+        if grep -q -- '--- SKIP' "$log"; then
+          echo "::error::the probe test skipped despite NANOGO_REQUIRE_CORPUS and NANOGO_REQUIRE_LINK"
+          exit 1
+        fi
+        grep -E 'swept [0-9]* probes|^ *PROBES ' "$log"
+        if grep -q 'PROGRESS' "$log"; then
+          echo "::warning::a probe now does more than internal/audit/testdata/ratchet.txt records. A capability claim in README.md, doc.go or driver/help.go describes the old behaviour and is now false. Correct it and refresh the ratchet in the same change."
+          sed -n '/PROGRESS/,/^[^ ]/p' "$log"
+        fi
+
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: probe-report
+        path: ${{ runner.temp }}/probes.txt
+
   # A compiler must build from any host: nanogo targets arm64 and amd64, and
   # neither target may need a host of the same architecture. This job exists
   # because that was broken and the ordinary test matrix did not say so: a file
