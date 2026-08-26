@@ -64,6 +64,45 @@ var nameCorpus = []struct {
 	{"map[T]*T", "map[p.T]*p.T", "map[p.T]*p.T"},
 	{"error", "error", "error"},
 	{"[]error", "[]error", "[]error"},
+	// The three directions are three types and three symbols. The last row is
+	// the one that needs parentheses: chan <-chan int reads back as
+	// chan<- chan int, so gc writes chan (<-chan int) and so does this.
+	{"chan int", "chan int", "chan int"},
+	{"chan<- int", "chan<- int", "chan<- int"},
+	{"<-chan int", "<-chan int", "<-chan int"},
+	{"chan (<-chan int)", "chan (<-chan int)", "chan (<-chan int)"},
+	{"chan chan<- int", "chan chan<- int", "chan chan<- int"},
+	{"chan chan int", "chan chan int", "chan chan int"},
+	// A receive-only channel of one needs no parentheses, because <-chan is
+	// already the whole prefix and nothing reparses.
+	{"<-chan (<-chan int)", "<-chan <-chan int", "<-chan <-chan int"},
+	{"[]chan T", "[]chan p.T", "[]chan p.T"},
+}
+
+// TestChanDirectionsAreThreeNames is the naming half of rtype's
+// TestChanDirectionsDoNotShareASymbol.
+//
+// chan int, chan<- int and <-chan int are three types. The linker deduplicates
+// by symbol name, so a spelling that dropped the direction would merge three
+// descriptors into one and the program would read one channel type's
+// descriptor for another's values.
+func TestChanDirectionsAreThreeNames(t *testing.T) {
+	elem := mustLayoutNamed(Int64, "int")
+	seen := make(map[string]ChanDir)
+	for _, dir := range []ChanDir{SendRecv, SendOnly, RecvOnly} {
+		ty := &Type{Kind: Chan, Elem: elem, ChanDir: dir}
+		if err := Layout(ty); err != nil {
+			t.Fatal(err)
+		}
+		sym, err := TypeSymbol(ty)
+		if err != nil {
+			t.Fatalf("%s int: %v", dir, err)
+		}
+		if other, ok := seen[sym]; ok {
+			t.Errorf("%s int and %s int are both %s", dir, other, sym)
+		}
+		seen[sym] = dir
+	}
 }
 
 // nameCorpusTypes type-checks the corpus and returns one IR type per row.

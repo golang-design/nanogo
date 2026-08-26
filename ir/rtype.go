@@ -44,15 +44,19 @@ import (
 // # What cannot be named, and why it is refused rather than guessed
 //
 // An ir.Type carries what type.go's two rules let it carry, and a spelling
-// needs more. Three kinds of Go type are distinguishable to the language and
+// needs more. Two kinds of Go type are distinguishable to the language and
 // not spellable from an ir.Type:
 //
-//   - a channel's direction, so chan T and chan<- T reduce to one ir.Type;
 //   - a function's signature, so func(int) and func(string) reduce to one;
 //   - a literal interface's and a literal struct's contents, which are spelled
 //     out in full. An interface's spelling holds the signature of every method
 //     and a struct's holds the type of every field, so both reduce to the
 //     first case: a signature is not in the IR type.
+//
+// A channel's direction used to be on this list and is not any more. type.go
+// carries it, so chan T, chan<- T and <-chan T are three ir.Types and three
+// spellings. What is refused is a channel whose ChanDir is the zero value,
+// which is a channel built below the type boundary and never converted.
 //
 // A struct's field tags used to be on this list and are not any more. type.go
 // carries them now, along with each field's package and whether it is
@@ -249,7 +253,29 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 		return fmt.Errorf("ir: a literal struct's spelling distinguishes an embedded field renamed through an alias, which is not in the IR type")
 
 	case Chan:
-		return fmt.Errorf("ir: a channel's direction is not in the IR type")
+		switch t.ChanDir {
+		case RecvOnly, SendOnly, SendRecv:
+		default:
+			return fmt.Errorf("ir: a channel's direction is not in the IR type")
+		}
+		// ChanDir.String is the whole prefix, so the three directions differ
+		// here by the field and by nothing this function decides.
+		b.WriteString(t.ChanDir.String())
+		b.WriteString(" ")
+		if t.ChanDir == SendRecv && t.Elem != nil && t.Elem.Name == "" &&
+			t.Elem.Kind == Chan && t.Elem.ChanDir == RecvOnly {
+			// gc parenthesises the element of chan (<-chan T), and so does the
+			// language. Without the parentheses the spelling reads back as
+			// chan<- chan T, which is a different type, so one symbol would
+			// stand for two.
+			b.WriteString("(")
+			if err := typeName(b, t.Elem, link, depth+1); err != nil {
+				return err
+			}
+			b.WriteString(")")
+			return nil
+		}
+		return typeName(b, t.Elem, link, depth+1)
 
 	case FuncKind:
 		return fmt.Errorf("ir: a function's signature is not in the IR type")

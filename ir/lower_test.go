@@ -573,6 +573,39 @@ func TestLowerCollectsTheDescriptors(t *testing.T) {
 	}
 }
 
+// TestLowerCollectsAChannelDescriptor is the row a slice literal of channels
+// was refused for.
+//
+// The backing array is allocated through a symbol that takes a *_type, and the
+// name of a channel type holds its direction. The direction is in the IR type
+// now, so the row is built and the three directions collect three symbols
+// rather than sharing one.
+func TestLowerCollectsAChannelDescriptor(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"chan int", "type:chan int"},
+		{"chan<- int", "type:chan<- int"},
+		{"<-chan int", "type:<-chan int"},
+	} {
+		_, types, err := lowerCollect(t, "func f() []"+tc.src+" { return []"+tc.src+"{nil} }")
+		if err != nil {
+			t.Errorf("[]%s: %v", tc.src, err)
+			continue
+		}
+		var got []string
+		for _, ty := range types {
+			name, err := TypeSymbol(ty)
+			if err != nil {
+				t.Errorf("[]%s: the collected type %s has no name: %v", tc.src, ty, err)
+				continue
+			}
+			got = append(got, name)
+		}
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("[]%s collected %v, want [%s]", tc.src, got, tc.want)
+		}
+	}
+}
+
 // TestLowerCollectsOnARefusal checks that the list survives a refusal.
 //
 // A function that is refused is still lowered everywhere else, so a descriptor
@@ -1056,7 +1089,6 @@ func TestLowerRefusals(t *testing.T) {
 		{"make of a channel", `func f() chan int { return make(chan int) }`, OMake, "descriptor"},
 		{"new of a literal struct", `func f() *struct{ A int } { return new(struct{ A int }) }`, ONew, "embedded field renamed through an alias"},
 		{"new of a function type", `func f() *func() { return new(func()) }`, ONew, "signature"},
-		{"a slice literal of channels", `func f() []chan int { return []chan int{nil} }`, OCompositeLit, "direction"},
 		{"len of a map", `func f(m map[int]int) int { return len(m) }`, OLen, "the length of map"},
 		{"len of a channel", `func f(c chan int) int { return len(c) }`, OLen, "the length of chan"},
 		{"range over a map", `func f(m map[int]int) { for k := range m { use(k) } }`, ORange, "mapiterinit"},
