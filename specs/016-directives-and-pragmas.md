@@ -152,6 +152,7 @@ need not exist in the type checker's world at all.
 | `//go:noescape` | On a bodyless declaration: no argument escapes. The compiler must believe it. |
 | `//go:wasmimport`, `//go:wasmexport` | Out of scope; no wasm target in this deck. |
 | `//go:build` | Build constraint, handled in [014](014-package-loader.md). |
+| `//go:embed` | Binds a package-level `string`, `[]byte` or `embed.FS` to the files a pattern matches. It is not a pragma: `gc` reads it out of the comment and pairs it with the `-embedcfg` file the `go` command writes, so `pragmaVerb` does not recognise it and nothing here records it. [050](050-driver.md) owns the gap and states what each of the two build paths does with it today. |
 | `//line` | Position rewriting, handled in [010](010-scanner-and-positions.md). |
 
 ### Optimisation hints, safe to ignore
@@ -225,6 +226,17 @@ What is not built, and waits on a consumer:
 - The runtime is the real test and it arrives at M9.
 
 ## What was wrong
+
+**The table called itself complete and had no row for `//go:embed`.** It is the
+one directive outside this table that changes what a package's data section
+holds, and leaving it out let [050](050-driver.md) describe `-embedcfg` as
+refused without anyone noticing that the refusal reads a compile command line
+and `nanogo build` writes its own. The row above names it and points at the
+spec that owns it. `//go:generate` and `//go:fix` are absent for a different
+reason and stay absent: `gc` lists both in `noder`'s `allowedStdPragmas`, the
+set it accepts without giving them a `syntax.Pragma` value, so neither reaches
+code generation. nanogo reaches the same outcome by the rule above, that an
+unrecognised verb stays a comment.
 
 **The spec had [012](012-type-checking.md) copy the directive onto the object
 when the object is created.** The directive never reaches the checker. It

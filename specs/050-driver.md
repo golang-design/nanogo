@@ -255,13 +255,32 @@ because it is small: parse the config, resolve patterns to the listed files, emi
 a string or byte slice or `embed.FS` structure. It is listed here so it is not
 forgotten, since a standard library package uses it and G3 needs it.
 
-None of it is written. `checkSupported` refuses `-embedcfg` outright, which is
-the state to keep until the front end exists. The data symbol an embedded file
-needs is not the missing piece: `ssagen.AddGlobals` binds a data symbol to a
+None of it is written. `checkSupported` refuses `-embedcfg`, which is the state
+to keep until the front end exists. The data symbol an embedded file needs is
+not the missing piece: `ssagen.AddGlobals` binds a data symbol to a
 package-level variable and `ssagen`'s string constants write read-only bytes.
 What is missing is the front end, which reads the config, resolves the patterns
 and builds the `embed.FS` structure. `checkSupported`'s message still says the
 data emitter is what is missing, and that message is the part to correct next.
+
+**The refusal covers one of the two paths, and the other is a miscompile.**
+`checkSupported` reads a compile command line, so it fires when the `go`
+command sends `-embedcfg` under `-toolexec` ([051](051-build-integration.md)):
+
+```
+nanogo: main: nanogo cannot compile a package that uses go:embed:
+-embedcfg needs the data emitter of specs/050-driver.md, which is unbuilt
+```
+
+`nanogo build` builds its own compile command line and never puts `-embedcfg`
+on it, so there is nothing for `checkSupported` to see. The package compiles,
+links and runs, and every embedded variable is its zero value: a program that
+prints `len(data)` for a 14-byte file prints 14 under `gc` and 0 here. That is
+the worse failure of the two and it is the one a user meets first, because
+`nanogo build` is the user's command. The fix is not a second refusal beside
+`checkSupported`. It is in `driver/build.go`, which has to notice a
+`//go:embed` directive on the package it is about to compile, and the directive
+is one [016](016-directives-and-pragmas.md) does not record.
 
 ## Exit status and output
 
