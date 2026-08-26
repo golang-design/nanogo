@@ -1155,7 +1155,7 @@ func (d *decomposer) expandEqual(b *Block, v *Value, out *[]*Value) {
 // the same expression, one CMP against zero on the first word, and it is not
 // the same question as a comparison of all three parts: a slice whose pointer
 // is nil and whose length is not is a value unsafe can build, and the two
-// answers differ on it. specs/000-decisions.md decision 11 makes a difference
+// answers differ on it. specs/000-decisions.md decision 10 makes a difference
 // from gc a nanogo bug, so the pointer is the whole comparison.
 //
 // v keeps its operation and its identity, so nothing that reads the result is

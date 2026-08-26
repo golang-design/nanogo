@@ -55,7 +55,7 @@ const misplacedDirective = "misplaced compiler directive"
 // does not know.
 //
 // Zero is not an error. specs/016-directives-and-pragmas.md rule 2 says a new
-// Go release adds directives and decision 11 pins nanogo to one release, so an
+// Go release adds directives and decision 10 pins nanogo to one release, so an
 // unknown verb outside nanogo's own source is not something to reject. It is
 // also what makes the misplacement rule safe: only a directive nanogo
 // recognises can be reported as misplaced, so an unrecognised comment stays a

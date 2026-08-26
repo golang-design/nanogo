@@ -18,7 +18,7 @@ import (
 // It is cmd/compile/internal/noder.uirVersion, not the newest version the
 // container knows. A reader refuses a stream newer than itself, so the
 // version is a property of the release nanogo is pinned to
-// (specs/000-decisions.md decision 11) and not of this package.
+// (specs/000-decisions.md decision 10) and not of this package.
 const Version = pkgbits.V4
 
 // UnsupportedError reports a declaration the writer cannot encode.

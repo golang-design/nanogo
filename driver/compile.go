@@ -73,7 +73,7 @@ func Compile(cfg *Config) error {
 	if cfg == nil {
 		return errors.New("nanogo: nil configuration")
 	}
-	// specs/000-decisions.md decision 11 pins nanogo to one Go release. The
+	// specs/000-decisions.md decision 10 pins nanogo to one Go release. The
 	// go command states the release it expects with -goversion.
 	if cfg.GoVersion != "" && cfg.GoVersion != PinnedGoVersion {
 		return fmt.Errorf("%s: -goversion %s does not match the pinned %s",

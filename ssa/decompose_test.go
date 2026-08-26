@@ -1955,7 +1955,7 @@ func TestDecomposeMemoryChainInLoop(t *testing.T) {
 // It is not a per-part comparison. A slice whose pointer is nil and whose
 // length is not is a value unsafe can build, and gc answers true for it: one
 // CMP against zero on the first word is the whole comparison. specs/000
-// decision 11 makes a difference from gc a nanogo bug.
+// decision 10 makes a difference from gc a nanogo bug.
 func TestDecomposeSliceNilComparesPointer(t *testing.T) {
 	for _, op := range []ssa.Op{ssa.OpEq, ssa.OpNeq} {
 		p := newDecFn()

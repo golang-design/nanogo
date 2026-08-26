@@ -10,7 +10,7 @@ import (
 )
 
 // PinnedGoVersion is the Go release nanogo is object-compatible with, per
-// specs/000-decisions.md decision 11. The object format, the export data
+// specs/000-decisions.md decision 10. The object format, the export data
 // format and the runtime's internal structures all change between releases,
 // so nanogo tracks one release at a time.
 const PinnedGoVersion = "go1.27.0"

@@ -162,7 +162,7 @@ func TestDirectiveInItsPlaceIsAccepted(t *testing.T) {
 		src:  "//go:build !ignore\n\npackage main\n",
 	}, {
 		name: "an unrecognised verb stays a comment",
-		// specs/016 rule 2: a new Go release adds directives and decision 11
+		// specs/016 rule 2: a new Go release adds directives and decision 10
 		// pins nanogo to one, so an unknown verb is not something to reject.
 		src: "package main\n\n//go:notadirective\nvar x int\n",
 	}, {
