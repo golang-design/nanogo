@@ -961,3 +961,79 @@ func (n *Node) Link(o *Node)     {}
 		t.Errorf("Next returns %s, want a pointer back to the type itself", got)
 	}
 }
+
+// TestConvertCarriesTheChannelDirection pins the other half of the boundary
+// gap specs/032-type-descriptors-and-itabs.md names.
+//
+// chan int and chan<- int are different types. Below the boundary they were
+// one ir.Type, so the naming function computed one symbol for both and the
+// linker would have merged two descriptors into one.
+func TestConvertCarriesTheChannelDirection(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+var Both chan int
+var Send chan<- int
+var Recv <-chan int
+`)
+	c := NewConverter()
+	conv := func(name string) *Type {
+		t.Helper()
+		out, err := c.Convert(pkg.Scope().Lookup(name).Type())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Kind != Chan {
+			t.Fatalf("%s has kind %s, want chan", name, out.Kind)
+		}
+		return out
+	}
+	both, send, recv := conv("Both"), conv("Send"), conv("Recv")
+	if both.ChanDir != SendRecv {
+		t.Errorf("chan int carries %s, want %s", both.ChanDir, SendRecv)
+	}
+	if send.ChanDir != SendOnly {
+		t.Errorf("chan<- int carries %s, want %s", send.ChanDir, SendOnly)
+	}
+	if recv.ChanDir != RecvOnly {
+		t.Errorf("<-chan int carries %s, want %s", recv.ChanDir, RecvOnly)
+	}
+	// The three are distinguishable, which is the whole point. Element type,
+	// size and pointer map are equal for all three.
+	if both.Elem != send.Elem || send.Elem != recv.Elem {
+		t.Error("the three channel types converted to three element types")
+	}
+	if both.Size != send.Size || both.Size != recv.Size {
+		t.Error("a direction changed a channel's size")
+	}
+}
+
+// TestChanDirIsInvalidUntilItIsSet is type.go's second rule applied to the
+// field: a fact the checker did not supply is not filled in.
+func TestChanDirIsInvalidUntilItIsSet(t *testing.T) {
+	byHand := &Type{Kind: Chan, Elem: &Type{Kind: Int64}}
+	if err := Layout(byHand); err != nil {
+		t.Fatal(err)
+	}
+	if byHand.ChanDir != InvalidDir {
+		t.Errorf("a channel built by hand carries %s, want an invalid direction", byHand.ChanDir)
+	}
+	// The numbers are internal/abi.ChanDir's, because a descriptor carries the
+	// value directly and reflect compares against those constants.
+	if RecvOnly != 1 || SendOnly != 2 || SendRecv != 3 {
+		t.Errorf("the directions are %d, %d and %d, want internal/abi's 1, 2 and 3",
+			RecvOnly, SendOnly, SendRecv)
+	}
+	// The spelling precedes the element type, so direction+" "+elem is the
+	// type's own spelling.
+	for _, tc := range []struct {
+		dir  ChanDir
+		want string
+	}{
+		{SendRecv, "chan"}, {SendOnly, "chan<-"}, {RecvOnly, "<-chan"},
+		{InvalidDir, "chandir(invalid)"}, {ChanDir(200), "chandir(?)"},
+	} {
+		if got := tc.dir.String(); got != tc.want {
+			t.Errorf("direction %d prints %q, want %q", tc.dir, got, tc.want)
+		}
+	}
+}

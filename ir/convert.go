@@ -249,6 +249,11 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 
 	case *types2.Chan:
 		out.Kind = Chan
+		dir, ok := chanDirs[t.Dir()]
+		if !ok {
+			return fmt.Errorf("ir: no channel direction for %s", t)
+		}
+		out.ChanDir = dir
 		elem, err := c.convert(t.Elem())
 		if err != nil {
 			return err
@@ -341,6 +346,18 @@ func isExportedName(name string) bool {
 	}
 	c := name[0]
 	return c >= 'A' && c <= 'Z'
+}
+
+// chanDirs maps the type checker's channel directions to the IR's.
+//
+// A table and not a switch, so that a direction with no entry is a missing
+// entry rather than a fallthrough to bidirectional. The two spellings are the
+// same fact and the numbers differ: types2 counts 0, 1, 2 and internal/abi
+// uses one bit per permitted operation, which is what a descriptor carries.
+var chanDirs = map[types2.ChanDir]ChanDir{
+	types2.SendRecv: SendRecv,
+	types2.SendOnly: SendOnly,
+	types2.RecvOnly: RecvOnly,
 }
 
 // signature fills out's parameter and result types from t.

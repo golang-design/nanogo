@@ -142,6 +142,44 @@ func (k Kind) IsComplex() bool { return k == Complex64 || k == Complex128 }
 // IsSigned reports whether k is a signed integer kind.
 func (k Kind) IsSigned() bool { return k >= Int8 && k <= Int64 }
 
+// ChanDir is the direction of a channel type.
+//
+// The values are internal/abi.ChanDir's, and they are its numbers rather than
+// numbers of nanogo's own because a descriptor carries the value directly and
+// reflect compares it against the same constants. A direction is two bits, one
+// per operation the channel permits, so a bidirectional channel is the two
+// together.
+type ChanDir uint8
+
+const (
+	// InvalidDir is the zero value and is not a direction. A channel type that
+	// carries it was built below the type boundary and never converted, and
+	// the name and the descriptor both refuse it rather than guessing.
+	InvalidDir ChanDir = 0
+	// RecvOnly is <-chan T.
+	RecvOnly ChanDir = 1
+	// SendOnly is chan<- T.
+	SendOnly ChanDir = 2
+	// SendRecv is chan T, which permits both operations.
+	SendRecv ChanDir = RecvOnly | SendOnly
+)
+
+var chanDirNames = [...]string{
+	InvalidDir: "chandir(invalid)",
+	RecvOnly:   "<-chan",
+	SendOnly:   "chan<-",
+	SendRecv:   "chan",
+}
+
+// String returns the spelling that precedes the element type, so that
+// ChanDir.String()+" "+elem is the type's own spelling.
+func (d ChanDir) String() string {
+	if int(d) < len(chanDirNames) && chanDirNames[d] != "" {
+		return chanDirNames[d]
+	}
+	return "chandir(?)"
+}
+
 // Field is one field of a struct type.
 type Field struct {
 	Name   string
@@ -268,6 +306,23 @@ type Type struct {
 	// Params and are different types. internal/abi.FuncType puts the bit in
 	// the top bit of OutCount, and reflect reads it.
 	Variadic bool
+
+	// ChanDir is a channel's direction, for Kind == Chan.
+	//
+	// A descriptor field and not a machine one: chan int, chan<- int and
+	// <-chan int are one word each, hold the same hchan, and send and receive
+	// compile to the same calls. What the direction decides is the type's
+	// identity. chan int and chan<- int are different types with different
+	// descriptors, and a name computed without the direction is one symbol for
+	// two types, which is the deduplication failure specs/032 records.
+	//
+	// The zero value is InvalidDir and not chan T, by type.go's second rule: a
+	// field the checker did not supply is refused by name and never filled in.
+	// Defaulting to bidirectional would name <-chan int as chan int, and the
+	// linker deduplicates by name, so the program would read one channel
+	// type's descriptor for the other's values. Converter sets the field on
+	// every channel it converts.
+	ChanDir ChanDir
 
 	// Instantiated reports whether the type is an instantiation of a generic
 	// type.
