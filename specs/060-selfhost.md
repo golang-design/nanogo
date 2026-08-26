@@ -117,11 +117,13 @@ and it is worth listing because it sizes M5 in [003](003-sequencing.md):
 | type switches and assertions | `//go:` directives, only as input | assembly of its own |
 
 Read the first column against what the compiler accepts today and the distance
-is the gate. Structs, slices and strings compile. A method compiles with a value
-receiver and is refused with a pointer receiver, because the receiver's type
-needs a method set. Interfaces, maps, a closure with a capture, a type switch and
-a type assertion are each refused outright, and a generic declaration is refused
-by the export writer, as above.
+is the gate. Structs compile. Slices compile except `append`, and strings
+compile except `range` over one, each of which waits on a row of
+[020](020-ir.md)'s lowering table. A method compiles with a value receiver and is
+refused with a pointer receiver, because the receiver's type needs a method
+set. Interfaces, maps, a closure with a capture, a type switch and a type
+assertion are each refused outright, and a generic declaration is refused by the
+export writer, as above.
 
 The standard library entries are the decisive ones. nanogo's dependency set
 reaches a large part of `fmt`, `go/types`' fork, and the `internal` packages
