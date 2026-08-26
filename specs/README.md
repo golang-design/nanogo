@@ -98,7 +98,7 @@ believed.
 | [020](020-ir.md) | Typed IR | `in progress` | the node set, and the lowering table with a state per row |
 | [021](021-ssa-construction.md) | SSA construction | `in progress` | memory as a value, on-the-fly phis |
 | [022](022-optimization-passes.md) | Optimization passes | `draft` | the pass list; no pass is written |
-| [023](023-escape-analysis.md) | Escape analysis | `draft` | not written |
+| [023](023-escape-analysis.md) | Escape analysis | `draft` | not written; every allocation goes to the heap, and an address-taken local does not, which is a miscompile |
 | [024](024-inlining-and-devirtualization.md) | Inlining and devirtualization | `draft` | not written |
 | [025](025-lowering-and-rules.md) | Lowering | `complete` | rewrite rules, the target boundary |
 | [026](026-register-allocation.md) | Register allocation | `complete` | linear scan; no callee-saved registers |
@@ -111,7 +111,7 @@ believed.
 | [030](030-abi.md) | ABI | `in progress` | layout and calling convention |
 | [031](031-runtime-lowering.md) | Runtime lowering | `in progress` | the calls the compiler generates |
 | [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `in progress` | and the symbol namespace; a defined type's descriptor reaches the object file with its `UncommonType` tail, four stops still refuse one by name, and itabs are not built |
-| [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | `in progress` | `defer` and `go` of a function value run, a captureless closure runs, and a deferred call runs while the goroutine panics; a `panic` whose operand is not already an interface value, a read of `recover`'s value, and every capture are refused, and a `panic` of a non-nil interface value is a miscompile |
+| [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | `in progress` | `defer` and `go` of a function value run, a captureless closure runs, and a deferred call runs while the goroutine panics; a `panic` whose operand is not already an interface value, a read of `recover`'s value, and every capture are refused; a `panic` of a non-nil interface value and a declared function used as a func value are miscompiles |
 | [034](034-write-barriers.md) | Write barriers | `draft` | not written |
 | [035](035-goroutines-and-stack-growth.md) | Goroutines and stack growth | `in progress` | stack growth built; `go f()` with no arguments reaches `newproc`, an argument is a capture and is refused |
 
@@ -159,6 +159,7 @@ believed.
 | Proved | A leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs. A nanogo-compiled frame keeps an allocation alive across `runtime.GC()`, so a real collector reads the stack map and the pointer mask nanogo wrote. A deferred call runs while the goroutine is panicking on a runtime-raised panic, in the frame order `gc` produces |
 | The largest gap | Three functions in five of the Go distribution get past SSA construction, and the unbuilt rows of [020](020-ir.md)'s lowering table block the other two. No SSA operation reads the context register, so every capture is refused. [020](020-ir.md) owns the table with a state per row, [021](021-ssa-construction.md) owns the pass, and [003](003-sequencing.md) carries the counts |
 | Not started | Escape analysis, inlining, generics instantiation, itabs, the conversion to an interface that a `panic` of anything else and a read of `recover`'s value both need, write barriers, the linker, the assembler, DWARF, and the amd64 backend |
+| Silently wrong | Five things compile and behave differently from `gc`'s build, and nothing is said at compile time. A `//go:embed` variable is empty under `nanogo build`, which never sends `-embedcfg` for `checkSupported` to refuse ([050](050-driver.md)). A `panic` of a non-nil interface value dies in the runtime with `name offset out of range` and prints no panic value ([033](033-closures-defer-panic.md)). A declared function passed or returned as a func value faults on the call ([033](033-closures-defer-panic.md)). A pointer to an address-taken local outlives its frame ([023](023-escape-analysis.md)). `runtime/debug.ReadBuildInfo` finds nothing, because the importcfg `nanogo build` writes carries no `modinfo` line ([015](015-export-data.md)) |
 | Decided against | Assembly text as a build path, a from-scratch type checker, GC-shape stenciling with dictionaries |
 
 ## The spikes
