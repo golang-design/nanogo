@@ -28,8 +28,8 @@ attaches them to a function.
 corpus have a stack object, but `ssagen` does not call it. A record names the
 `runtime.gcbits` symbol of its type's descriptor, and what is missing is the
 lookup from an `ir.Type` to that symbol's `goobj.SymRef`.
-[032](032-type-descriptors-and-itabs.md) writes the descriptor itself now, so
-the gap is the lookup and no longer the writer. The table is precision rather
+[032](032-type-descriptors-and-itabs.md) writes the descriptor and its pointer
+mask, so the gap is the lookup and not the writer. The table is precision rather
 than coverage, so its absence is safe: an address-taken local is in the locals
 bitmap for the whole of its marked lifetime, which is the conservative
 answer.
@@ -42,7 +42,7 @@ At a **safepoint**, for the frame of a function $f$, the compiler provides:
   pointers;
 - a **locals** bitmap: which words of the local frame area hold pointers;
 - a **stack objects** table: the address-taken locals whose lifetime the
-  collector must respect.
+  collector must respect. This one is computed and not written, as above.
 
 The collector reads them through `FUNCDATA` symbol references and selects the
 bitmap for the current program counter through `PCDATA` index changes.
@@ -112,17 +112,23 @@ A local whose address is taken **and whose type holds pointers** lives in the
 frame as a stack object. The collector needs to know the object's extent and its
 type, not just that a word is a pointer.
 
-The pointer condition is a correction, and the corpus found the reason. This
-spec first said "an address-taken local is a stack object", which is too broad.
-A zero-sized address-taken local gets offset 0 from `Varp`, and the runtime
-reads a non-negative offset as one into the **incoming argument area**, so the
-record points at an argument. An address-taken local whose type holds no
-pointers is covered by the locals bitmap anyway, which is where it belongs.
+The pointer condition is not a refinement of the record's size. Without it a
+zero-sized address-taken local gets offset 0 from `Varp`, the runtime reads a
+non-negative offset as one into the **incoming argument area**, and the record
+points at an argument. An address-taken local whose type holds no pointers is
+covered by the locals bitmap anyway, which is where it belongs.
 
 `FUNCDATA_StackObjects` carries a table of offset, size, and type descriptor for
 each. `VarDef` and `VarKill` from [025](025-lowering-and-rules.md) mark the
 lifetime bounds, so that a slot reused by two objects with disjoint lifetimes is
 described correctly at each point.
+
+**No pass emits a marker yet.** `ssa/liveness.go` reads them and hand-built
+functions carry them, and neither construction nor lowering produces one:
+`ssa/build.go` says so at `assignStmt` and gives the reason, that the decision
+belongs to the pass that owns the markers. The analysis is seeded for exactly
+this, so every stack object is live from the entry, which is the conservative
+answer and costs precision rather than correctness.
 
 This is also the constraint that limits spill slot reuse in
 [026](026-register-allocation.md).
@@ -131,10 +137,10 @@ This is also the constraint that limits spill slot reuse in
 
 The layout is fixed here, after allocation, because spill slots are part of it.
 
-The diagram below is the shape, not any target's frame. It was written as though
-every target saves the return address above the locals, and neither of this
-deck's targets does that. The layout pass takes the saved-word placement as
-configuration rather than assuming it.
+The diagram below is the shape and not any target's frame: it saves the return
+address above the locals, and neither target of this deck does that. The
+layout pass takes the placement of the saved words as configuration,
+`ssa.FrameConfig`, rather than assuming either one.
 
 On `arm64` the link register is saved at the **bottom** of the frame, inside the
 outgoing argument area. The word at the **top** holds the *caller's* saved frame
@@ -147,13 +153,12 @@ $$
 
 for a non-empty frame, so `Varp` sits one word below the top of the frame.
 
-An earlier version of this spec said an `arm64` frame reserves neither word.
-That is wrong, and it is the most dangerous error the deck has carried: it
-gives `Varp == Size`, which puts a local on top of the caller's saved frame
-pointer and places `Varp` one word above where the runtime looks. **The stack
-map is then well formed, the collector reads it, and it scans the wrong
-slots.** Nothing reports it. It was found by running a collector against a
-compiled function, which is the only thing that could have found it.
+Both words have to be reserved, and getting that wrong is the most dangerous
+mistake in this spec's area. A frame that reserves neither gives
+`Varp == Size`, which puts a local on top of the caller's saved frame pointer
+and places `Varp` one word above where the runtime looks. **The stack map is
+then well formed, the collector reads it, and it scans the wrong slots.**
+Nothing reports it, and no unit test of the map's contents can see it.
 
 ```
 higher addresses
@@ -174,16 +179,16 @@ lower addresses
 ```
 
 Pointer-containing slots are grouped and placed together, **directly below
-`Varp`**. An earlier version of this spec called that a size optimisation. It is
-not. The runtime scans exactly the region
+`Varp`**. The runtime scans exactly the region
 
 $$
 [\, \mathit{Varp} - \mathit{nbit} \times \mathit{PtrSize},\ \mathit{Varp} \,)
 $$
 
 so a pointer slot outside that run is a pointer the collector never sees. The
-grouping is a correctness constraint on the frame layout, and it places an
-obligation on the code emitter: `Varp` must end up where the layout pass put it.
+grouping is therefore a correctness constraint on the frame layout and not a
+size optimisation, and it places an obligation on the code emitter: `Varp` must
+end up where the layout pass put it.
 
 The bitmap being short is the benefit that follows, not the reason.
 
@@ -274,3 +279,26 @@ allocation, so the pipeline stops one pass earlier.
 The 162 stack objects are objects the analysis found, not records in an object
 file. Nothing writes `FUNCDATA_StackObjects` yet, for the reason at the top of
 this spec.
+
+## What was wrong
+
+Three claims of this spec were wrong, and each was found by running something
+rather than by reading it.
+
+**The spec said an address-taken local is a stack object.** The condition is
+narrower: the type must hold pointers as well. The corpus is what showed it. A
+zero-sized address-taken local gets offset 0 from `Varp` and the runtime reads
+a non-negative offset as one into the incoming argument area, so the record it
+produced described an argument.
+
+**The spec said an `arm64` frame reserves neither word.** It reserves the word
+at the top of the frame for the caller's saved frame pointer, and the link
+register goes at the bottom, inside the outgoing argument area. This was the
+most dangerous error the deck has carried, because the map it produces is well
+formed and describes the wrong slots. It was found by running a collector
+against a compiled function, which is the only thing that could have found it.
+
+**The spec called the grouping of the pointer slots below `Varp` a size
+optimisation.** It is a correctness constraint: the runtime scans that run and
+nothing else, so a pointer slot outside it is a pointer the collector never
+sees.

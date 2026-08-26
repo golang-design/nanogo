@@ -300,7 +300,7 @@ that table is not built.
   failing test rather than a failing build; the table is still never trusted.
 - One program per row of the table, run under differential execution
   ([004](004-conformance.md) L3).
-- Hosted mode ([000](000-decisions.md) decision 11) means these calls reach the
+- Hosted mode ([000](000-decisions.md) decision 10) means these calls reach the
   real runtime from M3 onward, so the tests are end-to-end from the start.
 
 The second bullet is reached in two halves, and only one of them is

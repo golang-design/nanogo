@@ -70,7 +70,7 @@ Two rules:
    the failure mode this rule exists to prevent.
 2. An unrecognised `//go:` directive is an error in nanogo's own source and a
    warning elsewhere, because new directives appear in new Go releases and
-   [000](000-decisions.md) decision 11 pins nanogo to one.
+   [000](000-decisions.md) decision 10 pins nanogo to one.
 
 Rule 1 is enforced, in `driver`, not in `syntax`. The parser decides nothing:
 it attaches a pending directive to whatever declaration follows and calls the

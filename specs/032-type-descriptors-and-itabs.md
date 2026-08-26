@@ -13,7 +13,7 @@ depends_on:
 Go's runtime and `reflect` need a description of every type that reaches an
 interface, a map, a channel, or reflection. The compiler emits those
 descriptions as data symbols. Their layout is `internal/abi`'s, exactly, by
-[000](000-decisions.md) decision 11.
+[000](000-decisions.md) decision 10.
 
 This spec also owns the symbol namespace, because the linker's handling of these
 symbols is keyed on their names, and because that keying is what killed the
@@ -315,7 +315,7 @@ generated equality functions, neither of which exists.
 
 - Layout: emit a descriptor with nanogo, read it back with `reflect` in a
   `gc`-compiled program running in the same binary. Hosted mode
-  ([000](000-decisions.md) decision 11) makes this direct. `rtype`'s test does
+  ([000](000-decisions.md) decision 10) makes this direct. `rtype`'s test does
   this by reading the `*abi.Type` out of a `reflect.Type`'s interface word,
   because `reflect` exposes no accessor for `Hash`, `TFlag`, `PtrBytes` or the
   bitmask. Every field of every type in its corpus agrees with `gc`'s.

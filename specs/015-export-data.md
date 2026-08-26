@@ -14,7 +14,7 @@ Compiling a package requires knowing the exported surface of every package it
 imports, without re-checking their source. That summary is export data.
 
 nanogo's export data is **`gc`'s format**, read and written. That decision comes
-from [000](000-decisions.md) decision 11 and is what makes the incremental
+from [000](000-decisions.md) decision 10 and is what makes the incremental
 bring-up of [051](051-build-integration.md) possible: a package compiled by
 nanogo can be imported by a package compiled by `gc`, and the reverse.
 

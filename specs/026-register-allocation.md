@@ -11,8 +11,10 @@ depends_on:
 # Register allocation
 
 Assign each SSA value a machine register, or a stack slot when no register is
-available. Runs after lowering ([025](025-lowering-and-rules.md)) and after
-scheduling has fixed the order of values within each block.
+available. Runs after lowering ([025](025-lowering-and-rules.md)), on the order
+of values each block already holds. [022](022-optimization-passes.md)'s
+`schedule` pass is what would choose that order for register pressure, and it
+is not built, so the order is the one construction and lowering left.
 
 ## The simplification Go's ABI provides
 
@@ -41,8 +43,8 @@ simplification.
 **Linear scan over a reverse postorder linearisation of the blocks.**
 
 Live intervals are computed by a liveness analysis of this pass, over SSA
-values. It is not [027](027-liveness-and-stackmaps.md)'s analysis. See the
-report below.
+values. It is not [027](027-liveness-and-stackmaps.md)'s analysis, and **What
+was wrong** below says why the two cannot be one.
 
 For each value in order:
 
@@ -97,21 +99,20 @@ a three-instruction exchange.
 A note on when this fires, because it is easy to conclude the code is dead. Under
 the hole-free range model of the spill-slot section below, a phi's range covers
 every predecessor's block end and every phi argument is live at that same
-point, so a phi's home is never
-an argument's home on that edge: sources and destinations are disjoint and no
-cycle forms. The parallel copy is still implemented and tested directly, because
-it becomes reachable the moment coalescing or hole-aware ranges land, and
-because a permutation bug found then would be found in the wrong place.
+point, so a phi's home is never an argument's home on that edge: sources and
+destinations are disjoint and no cycle forms. The parallel copy is implemented
+and tested directly all the same, because it becomes reachable the moment
+coalescing or hole-aware ranges land, and because a permutation bug found then
+would be found in the wrong place.
 
 **The lost copy problem.** A critical edge, one from a block with several
 successors to a block with several predecessors, has no block to put the copies
-in. Every critical edge is split by inserting an empty block before allocation.
-This is done once, as a pass, and it is why the pass list of
-[022](022-optimization-passes.md) can treat edges as ordinary.
+in. `ssa.SplitCriticalEdges` removes every one by inserting an empty block, and
+the driver runs it immediately before allocation. `Allocate` does not repair an
+edge it is handed: `checkEdges` refuses a function whose control-flow graph
+still holds one, so the precondition is checked and not assumed.
 
-### Reload registers, and the control value
-
-Two things this spec did not say, both found by building it.
+### Reserved registers, the control value, and a missing move
 
 **A spilled value needs a register to be reloaded into**, and it cannot be one
 the allocator handed out. The target reserves **two** scratch registers per
@@ -121,9 +122,16 @@ integer pair is free: R16 and R17 were never allocatable, because
 is not free. There is no reserved float register, so the target takes F30 and
 F31 from the top of the file and the allocator loses two.
 
-**A block's control value is a use.** Omitting it collapses a branch
-condition's live range to nothing and lets two live conditions share one
-register. The spec's list of what constitutes a use did not mention it.
+**A block's control value is a use.** A pass that leaves it out of the use set
+collapses a branch condition's live range to nothing and lets two live
+conditions share one register.
+
+**A copy from a slot to a slot has no encoding.** The reserved pair makes every
+reload possible, and the emitter's move table still has no arm for a copy whose
+source and destination are both slots. Such a copy fails the function with
+`no move from sN to sM`, and [042](042-arm64-backend.md) owns the table it is
+missing from. Ordinary code reaches it: `internal/stringslite.Index` is one
+case.
 
 ## Constraints from the ABI
 
@@ -143,33 +151,28 @@ to do with the program.
 ## Two-address forms
 
 `amd64` instructions overwrite one source operand. `arm64` does not. The
-allocator therefore needs, for the second target, a fix-up pass that inserts a
-copy when the destination differs from the first source.
+allocator copies the first source into the destination when the two differ, and
+records each such copy in `Alloc.Fixups`.
 
-This is confined to one pass, driven by a per-operation flag from
-[043](043-amd64-backend.md), and it is one of the two places where a target
-property reaches above [025](025-lowering-and-rules.md). The other is register
-class, which is universal.
+The fix-up is built and it produces nothing today. It is driven by the target's
+`TwoAddress` predicate, which the `arm64` description answers false for every
+value, so the list is always empty and no emitter reads it. This is one of the
+two places where a target property reaches above
+[025](025-lowering-and-rules.md); the other is register class, which is
+universal. [043](043-amd64-backend.md) is the target that turns the predicate
+on and it is unbuilt, so what covers the fix-up is the allocator's own tests: a
+target description with the predicate set, one instruction whose destination
+differs from its first source, and the reloaded operand the copy must not
+destroy.
 
 ## Spill slot reuse
 
-Two values may share a slot only when sharing cannot be observed. The rule this
-spec first gave was: disjoint live ranges, and neither value a pointer live at a
-safepoint in the other's interval. Implementing it showed that rule is both
-incomplete and, as stated, redundant.
+Two values may share a slot only when sharing cannot be observed. The rule is
+**disjoint live ranges, identical size, identical alignment, and an identical
+pointer map**.
 
-**Redundant, under the range model actually used.** Live ranges here are
-hole-free intervals from definition to last use. Under that model disjointness
-already implies the pointer clause, so the clause never rejects a sharing that
-disjointness accepted. It is implemented anyway, computed independently from the
-safepoint live sets, because it stops being redundant the moment ranges gain
-holes, and a rule that is required later should not be absent now.
-
-**Incomplete, in a way that matters more.** Disjointness is not sufficient.
-Two values may share a slot only when they also have **identical size,
-alignment and pointer map**.
-
-The reason is not the collector; it is stack copying.
+Disjointness alone is not sufficient. The reason is not the collector; it is
+stack copying.
 [035](035-goroutines-and-stack-growth.md) grows a stack by copying it and
 **rewriting every word the frame's pointer map calls a pointer**. The map is
 per frame, not per instant, and [027](027-liveness-and-stackmaps.md)'s liveness
@@ -182,9 +185,33 @@ This is why the rule is about the slot's description rather than about which
 value is live. Disjointness answers "can both be read"; the pointer map answers
 "will something else write here".
 
-## The report
+One clause of the rule rejects nothing today. Neither value may be a pointer
+live at a safepoint in the other's interval, and live ranges here are hole-free
+intervals from definition to last use, so disjointness already implies it. It
+is implemented anyway, computed independently from the safepoint live sets,
+because it stops being redundant the moment ranges gain holes, and a rule that
+is required later should not be absent now.
 
-Two claims of this spec were wrong and the code is what showed it.
+## Testing
+
+- The verifier extended with allocation invariants: no value in a clobbered
+  register across a call, no two live values in one register, every phi resolved.
+- A stress corpus of functions with more live values than registers, forcing
+  spills, checked by that verifier. The corpus is built by hand out of SSA and
+  is not a Go program, so it cannot be run against `gc`: the verifier is the
+  oracle here, not differential execution ([004](004-conformance.md) L3).
+- Parallel copy tests over hand-built permutations including cycles of length 2
+  and 3.
+- Spill-slot reuse checked for correctness rather than for size. The rule is in
+  the section above.
+- The distribution corpus, which is [027](027-liveness-and-stackmaps.md)'s and
+  runs this pass on the way through. Of the 17,809 functions that reach SSA
+  construction and lower completely, the allocator places all but 51. Those
+  refusals are why 17,758 functions carry a stack map and not 17,809.
+
+## What was wrong
+
+Four claims of this spec were wrong and the code is what showed each one.
 
 **The spec said one liveness analysis serves both this pass and
 [027](027-liveness-and-stackmaps.md), run twice. The code runs two different
@@ -201,20 +228,12 @@ instruction can read two operands that are both in slots, so one scratch
 register lets the second reload destroy the first. It was found by an
 instruction with two spilled operands.
 
-## Testing
+**The spec's list of what constitutes a use left out a block's control
+value.** Two live branch conditions were then given one register.
+`TestABlockControlValueIsAUse` pins the answer.
 
-- The verifier extended with allocation invariants: no value in a clobbered
-  register across a call, no two live values in one register, every phi resolved.
-- A stress corpus of functions with more live values than registers, forcing
-  spills, checked by that verifier. Differential execution
-  ([004](004-conformance.md) L3) is what this spec first named for it, and the
-  verifier is what it has: the pressure corpus is built by hand and is not a Go
-  program that can be run against `gc`.
-- Parallel copy tests over hand-built permutations including cycles of length 2
-  and 3.
-- Spill-slot reuse checked for correctness rather than for size. The rule is in
-  the section above.
-- The distribution corpus, which is [027](027-liveness-and-stackmaps.md)'s and
-  runs this pass on the way through. Of the 17,809 functions that reach SSA
-  construction and lower completely, the allocator places all but 51. Those
-  refusals are why 17,758 functions carry a stack map and not 17,809.
+**The spec's spill-slot rule was disjoint live ranges and the pointer clause,
+and nothing about the shape of the slot.** Size, alignment and pointer map have
+to match as well, for the stack-copying reason in the section above, and the
+pointer clause the spec did state rejects nothing that disjointness has not
+already rejected. It was found by implementing the rule as written.

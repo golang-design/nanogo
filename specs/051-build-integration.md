@@ -10,7 +10,7 @@ depends_on:
 
 # Build integration
 
-The mechanism that makes [000](000-decisions.md) decision 11 pay: a build in
+The mechanism that makes [000](000-decisions.md) decision 10 pay: a build in
 which nanogo compiles some packages and `gc` compiles the rest, producing one
 working binary.
 
@@ -291,7 +291,7 @@ about how much of the program nanogo produced.
 
 The third mode, and the one neither of the two above is: nanogo compiles every
 package including the runtime, for G2 and G3
-([000](000-decisions.md) decision 11).
+([000](000-decisions.md) decision 10).
 
 It uses the same object format, the same export data, and the same ABI. The
 difference is only who drives.

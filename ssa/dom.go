@@ -15,7 +15,7 @@ package ssa
 // The algorithm is the iterative one of Cooper, Harvey and Kennedy, "A Simple,
 // Fast Dominance Algorithm" (2001). Lengauer-Tarjan has the better asymptotic
 // bound, and this one is chosen anyway for two reasons. It is about forty
-// lines against about two hundred, which matters under decision 10's budget.
+// lines against about two hundred, in a compiler meant to be read end to end.
 // And it is fast in practice on the graphs a compiler sees: the paper measures
 // it faster than Lengauer-Tarjan below roughly a thousand blocks, and a Go
 // function almost never reaches that. It is also correct on an irreducible

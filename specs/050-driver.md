@@ -16,7 +16,7 @@ The one this spec is mostly about is `go tool compile`'s, because
 [051](051-build-integration.md) substitutes nanogo for `go tool compile`
 through `-toolexec` and the `go` command constructs the arguments. Every flag
 has to match: if one differs, the substitution does not work, and the bring-up
-strategy of [000](000-decisions.md) decision 11 is gone.
+strategy of [000](000-decisions.md) decision 10 is gone.
 
 The other is for a person.
 
@@ -111,7 +111,7 @@ Ignoring any of these produces a wrong build, silently.
 | `-importcfg file` | map from import path to export data file | [015](015-export-data.md) |
 | `-lang version` | the language version the source expects | [012](012-type-checking.md) |
 | `-buildid id` | recorded in the output | [053](053-determinism.md) |
-| `-goversion string` | required runtime version; a mismatch is an error | [000](000-decisions.md) decision 11 |
+| `-goversion string` | required runtime version; a mismatch is an error | [000](000-decisions.md) decision 10 |
 | `-trimpath list` | rewrite file paths in the output; see below | [053](053-determinism.md) |
 | `-c n` | concurrency | [053](053-determinism.md) |
 | `-pack` | write an archive, not a bare object | [040](040-object-format.md) |

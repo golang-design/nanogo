@@ -92,7 +92,7 @@ gate:    N2 == N3, byte for byte
 
 Stage 0 runs under `go build`. Stages 1 and 2 run under
 `go build -toolexec=<compiler>` in hosted mode
-([000](000-decisions.md) decision 11), with the allowlist of
+([000](000-decisions.md) decision 10), with the allowlist of
 [051](051-build-integration.md) covering every package nanogo's source needs.
 
 At G2 the same three stages run in a container with no `go` command

@@ -44,7 +44,7 @@ nanogo compiles its own source, and the compiler that results is stable.
 
 Allowed at G1: `go tool link` produces the executable. `go list` resolves the
 import graph. Any standard-library package is in nanogo's own dependency set.
-The build runs in **hosted mode** ([000](000-decisions.md) decision 11), so `gc`
+The build runs in **hosted mode** ([000](000-decisions.md) decision 10), so `gc`
 still compiles the runtime and the packages nanogo has not reached. Only
 `darwin/arm64` works.
 

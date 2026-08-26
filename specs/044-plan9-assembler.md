@@ -26,7 +26,7 @@ hand-written `.s` files in Plan 9 syntax, and G3 ([001](001-bootstrap-gates.md))
 is compiling the distribution.
 
 Until G3, `gc` and the `go` command assemble those files in hosted mode
-([000](000-decisions.md) decision 11).
+([000](000-decisions.md) decision 10).
 
 ## What has to be assembled
 

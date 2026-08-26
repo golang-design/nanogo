@@ -149,7 +149,7 @@ comment is the honest form of that dependency.
 **`gc` is the compiler tag nanogo sets**, not `nanogo`. The distribution
 branches on `gc` against `gccgo` in several places, and a third value would
 select neither branch. nanogo claims to be `gc`-compatible everywhere else
-([000](000-decisions.md) decision 11); here too.
+([000](000-decisions.md) decision 10); here too.
 
 ### Two questions, two methods
 

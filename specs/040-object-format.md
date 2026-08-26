@@ -12,7 +12,7 @@ depends_on:
 
 nanogo's output is a Go object file in the `goobj` format, the same one
 `cmd/compile` and `cmd/asm` produce and `cmd/link` consumes. This is
-[000](000-decisions.md) decision 3 and decision 11.
+[000](000-decisions.md) decision 3 and decision 10.
 
 ## The decision, restated with its evidence
 
@@ -67,7 +67,7 @@ The blank line is part of the shape. `obj.WriteObject` writes the header, then
 main gets the header and `!` with nothing between them, because the linker reads
 one thing out of the region and stops at the first empty line.
 
-A consequence for [000](000-decisions.md) decision 11's version pin: the header
+A consequence for [000](000-decisions.md) decision 10's version pin: the header
 carries the enabled `GOEXPERIMENT` list, and `go env GOEXPERIMENT` does not
 report it. The pin therefore cannot be reconstructed. nanogo probes instead: it
 assembles an empty file with the installed toolchain and reads the header line
@@ -407,7 +407,7 @@ to an imported function no entry names is an undefined symbol even when
 `-importcfg` says where the archive is.
 
 So the linker's check now compares two measured values rather than zero against
-zero, which is what [000](000-decisions.md) decision 11 leans on: a
+zero, which is what [000](000-decisions.md) decision 10 leans on: a
 nanogo-compiled package and a `gc`-compiled importer either agree or the link
 fails. **The loud failure is `cmd/link`'s and nothing here proves it.** No test
 in this repository builds a mismatched pair and asserts the refusal.

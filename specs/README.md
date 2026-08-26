@@ -179,7 +179,7 @@ Together those two are why nanogo writes object files and not assembly
 [`toolexec`](../spikes/toolexec) shows that a foreign compiler can be substituted
 per package by `go build -toolexec`, and measured what the `go` command actually
 sends: a larger flag set than the help text lists, plus the `-V=full` build-ID
-protocol. It is the evidence for [000](000-decisions.md) decision 11's mechanism,
+protocol. It is the evidence for [000](000-decisions.md) decision 10's mechanism,
 and [050](050-driver.md) records the two flags it corrected.
 
 ## Conventions

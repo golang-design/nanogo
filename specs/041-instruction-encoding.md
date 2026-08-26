@@ -107,7 +107,7 @@ cannot know them.
 Every reference to a symbol becomes a relocation: an offset in the symbol's data,
 a size, a type, an addend, and a target. The types are the linker's
 (`R_CALLARM64`, `R_ADDRARM64`, `R_PCREL`, and the rest), and they are used as
-`gc` uses them, by [000](000-decisions.md) decision 11.
+`gc` uses them, by [000](000-decisions.md) decision 10.
 
 Relocation types encode how the linker patches the instruction, so a wrong type
 produces a binary that jumps somewhere plausible. This is a class of bug that
