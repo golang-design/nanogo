@@ -16,7 +16,7 @@ It is a port, not a rewrite. The format is undocumented outside its
 implementation, so a second implementation written from a description would be
 a second guess. This file is the record of what was copied and of every place
 the copy differs, so that a re-port against a later release is a file-to-file
-diff and not an archaeology exercise.
+diff.
 
 ## Upstream revision
 
@@ -48,9 +48,9 @@ same reader twice: `go/internal/gcimporter` produces `go/types` packages and
 `cmd/compile/internal/importer` produces `cmd/compile/internal/types2`
 packages. nanogo's checker is a fork of `types2`, so the second one is a port
 of import paths and positions rather than a translation between two type APIs.
-[specs/015](../specs/015-export-data.md) names only the first and sizes the
-work by it, which overstates it: the ported reader is 637 lines against that
-spec's 1,259.
+[specs/015](../specs/015-export-data.md) sizes the port by the same row: 772
+non-test lines for the `types2` reader against 925 for its `go/types` twin.
+File for file, `reader.go` here is 645 lines against `ureader.go`'s 642.
 
 The third reader, `cmd/compile/internal/noder`, is the one `gc` itself uses and
 is the one that carries function bodies. It is not ported. What that defers is
@@ -88,12 +88,12 @@ that is not here is upstream's.
 
 | Change | Why |
 | --- | --- |
-| Import paths point at nanogo's `types2`, `syntax` and `export/pkgbits` | The whole point of the port. |
+| Import paths point at nanogo's `types2`, `syntax` and `export/pkgbits` | What the port is for: nanogo's checker is a fork of `types2`. |
 | `pos` consumes the position and returns `syntax.NoPos`; `posBases`, `posBase` and `posBaseIdx` are deleted | nanogo's `syntax.Pos` is an offset into the `FileSet` the compiled files were parsed with ([specs/010](../specs/010-scanner-and-positions.md)), and a file in another package is not in it. The fields are still read: they are inline in the element, and skipping them desyncs everything after. The position base is a reference to another element, so that element is never visited. The writer has the same gap from the other side: it writes every position as absent, so `SectionPosBase` is empty and a `gc` diagnostic about a declaration nanogo compiled says the position is unknown. |
 | `base.FatalfAt`, `base.Fatalf` and `base.Assertf` become `panicf` and `assertf` | Same reason as `Decoder.Sync`. |
 | `enableAlias` and its branch are removed | It selects between the alias representations of two `go/types` releases. nanogo is pinned to one. |
 | `readerTypeBound` is removed | Unused upstream as well. |
-| `ObjFunc` reads a generic method instead of asserting there is none | See below. |
+| `objIdx` keeps an object whose name no source can spell, and `ObjFunc` decodes the promoted generic method instead of asserting it cannot appear | See below. |
 
 ### The writer, `writer.go`
 
@@ -113,8 +113,9 @@ comes from `writer.go` for the public part of a declaration and from
 | `pos` writes an absent position | The mirror of the reader's gap. See below. |
 | No function body, and the private root lists none | The body writer is [specs/015](../specs/015-export-data.md)'s other half. |
 | A generic declaration is refused by name | See below. |
-| `funcExt` writes no `//go:` directive and no linkname | The driver records the verb and its position (`driver/pragma.go`, [specs/016](../specs/016-directives-and-pragmas.md)) and nothing carries it this far: the flag bits there are nanogo's own numbering and this field is read with `gc`'s. |
-| `funcExt` writes `ABIInternal` and an empty escape note per receiver and parameter | Every function nanogo compiles is ABIInternal ([specs/030](../specs/030-abi.md)), and an empty note parses as "leaks to the heap", which is what a caller must assume when no escape analysis has run ([specs/026](../specs/026-escape-analysis.md) is unbuilt). |
+| `funcExt` writes no `//go:` directive | The driver records the fourteen verbs its handler recognises, and their positions (`driver/pragma.go`, [specs/016](../specs/016-directives-and-pragmas.md)), and nothing carries them this far: the flag bits there are nanogo's own numbering and this field is read with `gc`'s. |
+| `funcExt` writes no linkname | `//go:linkname` is not one of those fourteen verbs, so the driver records nothing for the writer to drop ([016](../specs/016-directives-and-pragmas.md)). |
+| `funcExt` writes `ABIInternal` and an empty escape note per receiver and parameter | Every function nanogo compiles is ABIInternal ([specs/030](../specs/030-abi.md)), and an empty note parses as "leaks to the heap", which is what a caller must assume when no escape analysis has run ([specs/023](../specs/023-escape-analysis.md) is unbuilt). |
 | `typeExt` writes -1 for both type descriptor symbol indices | The importer finds them by name. It is what `gc` writes before it has assigned indices of its own. |
 | The private root carries the initialisation flag and no function body | `driver/inittask.go` decides the flag: an importer orders its own record after this package's only when it is set. The body list is empty because there is no body writer. |
 | A local alias is stripped to its right-hand side | Upstream does the same, to keep two local aliases from colliding on one symbol. |
@@ -122,8 +123,8 @@ comes from `writer.go` for the public part of a declaration and from
 
 ### What the writer made required elsewhere
 
-A package that can be imported owes an importer more than its export data. gc
-refers to an imported type twice, directly for the runtime type descriptor and
+A package that can be imported owes an importer more than its export data.
+`gc` refers to an imported type twice, directly for the runtime type descriptor and
 through DWARF for `go:info.<path>.<Type>`, and `cmd/link` builds the second out
 of the first, so both come back to `type:<path>.<Type>`. nanogo writes no
 descriptor for a declared type, and `driver/types.go` refuses such a package by
@@ -172,17 +173,34 @@ that assumption is not in the format, and reports each malformed shape by name.
 writes it first, because that assumption *is* in `internal/exportdata`'s
 reader and nanogo has to satisfy it.
 
-## What upstream cannot read and this can
+## The promoted generic method
 
-A method with type parameters of its own is new in Go 1.27. `gc` promotes one
-to a package-scope object under a name no source can spell, such as
-`(*List).Zip`, so it appears in the export data whether an importer wants it or
-not. Both upstream types-only readers assert that it cannot appear, so both
-fail on any package that declares one. `reader.go` decodes it.
+A method with type parameters of its own is new in Go 1.27
+(`types2/resolver.go` gates it on the `go1.27` language version). `gc` promotes
+one to a package-scope object under a name no source can spell, such as
+`(*List).Zip` or `Point.Map`, so it appears in the export data whether an
+importer wants it or not. The two upstream readers do two different things with
+it, and this reader does a third.
 
-The failure is reproducible against the Go tree: `go/internal/gcimporter`
-panics at `ureader.go`'s `assert(!r.Bool())` on the archive of a package with a
-generic method.
+`go/internal/gcimporter` drops it. Its `objIdx` returns early on any object
+name that holds a `.`, so the object is never decoded and never reaches a
+scope, and importing a package that declares one succeeds with the method
+present on its defining type and absent from the package scope.
+
+`cmd/compile/internal/importer`, the reader ported here, has no such early
+return. It inserts the object lazily under the unspellable name and asserts the
+standalone bool is false when something decodes it. A reader that looks up only
+names a source can spell never decodes it, so the assertion does not fire
+there.
+
+nanogo cannot leave it lazy. `writer.go` looks every name in the scope up
+before it asks whether the object is exported, so every name the export data
+declares is decoded on every package nanogo writes, and an assertion would
+refuse the package. `ObjFunc` therefore decodes the promoted object, and the
+scope holds it: on the fixture in `export_test.go` this reader's scope holds 18
+names against `go/internal/gcimporter`'s 16, the two extra being `(*List).Zip`
+and `Point.Map`. The type that declares the method decodes it a second time
+through `ObjType`, and that copy is the one in the method set.
 
 ## What neither can read
 
