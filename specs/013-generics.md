@@ -181,13 +181,23 @@ importer appears.
 
 ### Methods
 
-Go has no generic methods: a method may not declare its own type parameters. A
-method on a generic *type* is instantiated with the type, so `List[int].Push` is
-an ordinary method of the ordinary type `List[int]`.
+A method on a generic *type* is instantiated with the type, so `List[int].Push`
+is an ordinary method of the ordinary type `List[int]`. An instantiated type is
+a defined type, gets a descriptor like any other, and satisfies interfaces by
+the same rules, so that half of the language reaches
+[032](032-type-descriptors-and-itabs.md) as no special case at all.
 
-This is why generics do not reach [032](032-type-descriptors-and-itabs.md) as a
-special case. An instantiated type is a defined type, gets a descriptor like any
-other, and satisfies interfaces by the same rules.
+A method may also declare its own type parameters. `types2/resolver.go` gates
+the declaration on `go1_27` and names the feature "generic method",
+`export/pkgbits`'s version `V4` encodes one as a standalone function object,
+and `export/reader.go` reads one. So a method is a third place a type parameter
+is bound, beside a function and a type, and instantiating the receiver does not
+instantiate the method.
+
+What that costs is not settled here, and it should be settled before a
+stenciler is written. The discovery rule and the identity rule above are both
+stated over functions and types, and neither says what the key of an
+instantiated generic method is when the receiver is already concrete.
 
 ## What the rest of the compiler sees
 
@@ -205,6 +215,13 @@ than the sentence suggests. `ir.Convert` rejects a type parameter outright and a
 test asserts the rejection. That guard is what a stenciler will be measured
 against on the day one is written: it must stop firing because the bodies were
 instantiated, not because they were skipped.
+
+Two specs above 020 name a type parameter today, and they name the guard rather
+than the language: [032](032-type-descriptors-and-itabs.md) records that the
+refusal of a descriptor for one comes from `ir/convert.go` and not from
+`rtype`, and [060](060-selfhost.md) counts the one bootstrap package the guard
+refuses. Both are readings of the guard, and both go when the stenciler lands,
+which is the outcome the rule is asking for.
 
 ## Testing
 
@@ -224,3 +241,14 @@ stenciler and cannot be written before one exists.
   yield one symbol in the linked binary.
 - Rejection: the `mono` corpus, asserting nanogo rejects unbounded recursive
   instantiation at the right position rather than looping.
+
+## What was wrong
+
+**The spec said Go has no generic methods.** The sentence was "a method may not
+declare its own type parameters", and it carried the conclusion that generics
+reach [032](032-type-descriptors-and-itabs.md) as no special case, because
+every method of an instantiated type is an ordinary method. Half of that
+conclusion survives and the premise does not: Go 1.27 admits a generic method,
+which the fork's own checker gates by version and the fork's own reader
+decodes. The Methods section states both halves now, and it states the question
+the change opens rather than closing it by assertion.

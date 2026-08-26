@@ -78,7 +78,7 @@ everything the compiler cannot do yet.
 | `-embedcfg` | see [`go:embed`](#goembed) below |
 | a package with an assembly definition in `-symabis` | the ABI wrapper of [030](030-abi.md) is unbuilt |
 | a package-level variable whose type holds a pointer and whose descriptor `rtype` cannot build | the collector reads the pointer map of a data symbol through its type descriptor ([032](032-type-descriptors-and-itabs.md)) |
-| a type its code needs a descriptor for and `rtype` cannot fill in | [032](032-type-descriptors-and-itabs.md)'s method set gap |
+| a type its code needs a descriptor for and `rtype` cannot fill in | one of [032](032-type-descriptors-and-itabs.md)'s four stops, which the refusal names |
 | a function no pass in the list accepts | the pass names itself and the error names the function and its position |
 
 Each refusal names the spec that owns the gap, because the allowlist is the
