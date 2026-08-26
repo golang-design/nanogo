@@ -23,3 +23,7 @@
 
 # Dependency directories
 # vendor/
+
+# Agent worktrees, created under the repository while work runs in parallel.
+# They are checkouts of this repository and never belong in a commit.
+/.claude/worktrees/
