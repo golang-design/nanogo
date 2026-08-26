@@ -104,6 +104,29 @@ var corpus = []struct {
 	{"[1]string", reflect.TypeOf([1]string{})},
 	{"[16]byte", reflect.TypeOf([16]byte{})},
 	{"any", reflect.TypeOf((*any)(nil)).Elem()},
+	// The three channel directions, the four shapes of a signature and a
+	// literal interface. Each row's Hash is checked against the hash gc put in
+	// the descriptor reflect is reading, and gc computes it over the link
+	// string, so a spelling that differs from gc's by one character fails here
+	// as a hash mismatch.
+	{"chan int", reflect.TypeOf(make(chan int))},
+	{"chan<- int", reflect.TypeOf(make(chan<- int))},
+	{"<-chan int", reflect.TypeOf(make(<-chan int))},
+	{"chan (<-chan int)", reflect.TypeOf(make(chan (<-chan int)))},
+	{"[]chan int", reflect.TypeOf([]chan int(nil))},
+	{"func()", reflect.TypeOf(func() {})},
+	{"func() int", reflect.TypeOf(func() int { return 0 })},
+	{"func(int) error", reflect.TypeOf(func(int) error { return nil })},
+	{"func(int, string) (bool, error)", reflect.TypeOf(func(int, string) (bool, error) { return false, nil })},
+	{"func(int, ...string) (bool, error)", reflect.TypeOf(func(int, ...string) (bool, error) { return false, nil })},
+	{"func(...[]byte) func(int) int", reflect.TypeOf(func(...[]byte) func(int) int { return nil })},
+	{"[]func(chan<- int)", reflect.TypeOf(([]func(chan<- int))(nil))},
+	{"interface{ F() int }", reflect.TypeOf((*interface{ F() int })(nil)).Elem()},
+	{"interface{ Read([]byte) (int, error); Close() error }",
+		reflect.TypeOf((*interface {
+			Read([]byte) (int, error)
+			Close() error
+		})(nil)).Elem()},
 }
 
 // corpusTypes type-checks the corpus and returns one IR type per row.

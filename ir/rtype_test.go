@@ -77,6 +77,27 @@ var nameCorpus = []struct {
 	// already the whole prefix and nothing reparses.
 	{"<-chan (<-chan int)", "<-chan <-chan int", "<-chan <-chan int"},
 	{"[]chan T", "[]chan p.T", "[]chan p.T"},
+	// A signature. One result is bare and several are parenthesised, a
+	// variadic parameter is spelled from the slice's element, and no parameter
+	// name is in it: two functions differing only in a parameter's name are
+	// one type.
+	{"func()", "func()", "func()"},
+	{"func() int", "func() int", "func() int"},
+	{"func(int)", "func(int)", "func(int)"},
+	{"func(a int, b string) error", "func(int, string) error", "func(int, string) error"},
+	{"func(int, string) (bool, error)", "func(int, string) (bool, error)", "func(int, string) (bool, error)"},
+	{"func(int, ...string) (bool, error)", "func(int, ...string) (bool, error)", "func(int, ...string) (bool, error)"},
+	{"func(...[]byte) func(int) int", "func(...[]uint8) func(int) int", "func(...[]uint8) func(int) int"},
+	{"func(chan<- T) *T", "func(chan<- p.T) *p.T", "func(chan<- p.T) *p.T"},
+	{"[]func()", "[]func()", "[]func()"},
+	// A literal interface. The methods are exported here, so nothing is
+	// qualified; the qualifier is checked in rtype, against the package path
+	// gc used.
+	{"interface{ F() int }", "interface { F() int }", "interface { F() int }"},
+	{"interface{ Close() error; Read([]byte) (int, error) }",
+		"interface { Close() error; Read([]uint8) (int, error) }",
+		"interface { Close() error; Read([]uint8) (int, error) }"},
+	{"map[string]func(T)", "map[string]func(p.T)", "map[string]func(p.T)"},
 }
 
 // TestChanDirectionsAreThreeNames is the naming half of rtype's
@@ -102,6 +123,57 @@ func TestChanDirectionsAreThreeNames(t *testing.T) {
 			t.Errorf("%s int and %s int are both %s", dir, other, sym)
 		}
 		seen[sym] = dir
+	}
+}
+
+// TestInterfaceMethodOrderIsGcsAndNotByteOrder is the case a byte-range
+// exported test answers wrongly.
+//
+// gc puts every exported method ahead of every unexported one, then orders by
+// name in byte order. Ärger is exported, because the language's rule is an
+// upper-case letter and the letter need not be ASCII, and its first byte is
+// 0xC3, which is above every lower-case ASCII letter. So plain byte order puts
+// it after the unexported names and gc puts it before them. gc's own spelling
+// of the same interface is
+//
+//	interface { Read() int; Ärger() int; example.com/outer.flush() int }
+//
+// read out of a gc-compiled object with go tool nm.
+func TestInterfaceMethodOrderIsGcsAndNotByteOrder(t *testing.T) {
+	sig := func() *Type { return layOut(t, &Type{Kind: FuncKind, Params: []*Type{}, Results: []*Type{}}) }
+	// The order Converter produces, which is by name alone.
+	in := []Method{
+		{Name: "Ärger", Sig: sig()},
+		{Name: "flush", Pkg: "p", Sig: sig()},
+		{Name: "Read", Sig: sig()},
+	}
+	got := InterfaceMethodOrder(in)
+	want := []string{"Read", "Ärger", "flush"}
+	for i, w := range want {
+		if got[i].Name != w {
+			t.Fatalf("the order is %v, want %v", []Method{got[0], got[1], got[2]}, want)
+		}
+	}
+	// The input is left alone, so a caller that holds the IR's own order keeps
+	// it.
+	if in[0].Name != "Ärger" || in[1].Name != "flush" || in[2].Name != "Read" {
+		t.Errorf("the input was reordered: %s, %s, %s", in[0].Name, in[1].Name, in[2].Name)
+	}
+	// The spelling reads the same list, so it is ordered the same way.
+	ty := layOut(t, &Type{Kind: Interface, Methods: in})
+	link, err := TypeLinkString(ty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != "interface { Read(); Ärger(); p.flush() }" {
+		t.Errorf("the link string is %q", link)
+	}
+	name, err := TypeNameString(ty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "interface { Read(); Ärger(); p.flush() }" {
+		t.Errorf("the name string is %q", name)
 	}
 }
 
@@ -213,7 +285,33 @@ func TestTypeNameRefusals(t *testing.T) {
 	}{
 		{"a channel", &Type{Kind: Chan, Elem: mustLayoutNamed(Int64, "int")}, "direction"},
 		{"a function", &Type{Kind: FuncKind}, "signature"},
+		{
+			// The bit says the last parameter is a ... parameter and there is
+			// no last parameter, so the spelling would drop the bit.
+			"a variadic function with no parameters",
+			&Type{Kind: FuncKind, Params: []*Type{}, Results: []*Type{}, Variadic: true},
+			"variadic and its parameter list is empty",
+		},
+		{
+			// ...T is spelled from the slice's element, and there is no slice.
+			"a variadic function whose last parameter is not a slice",
+			&Type{Kind: FuncKind, Params: []*Type{mustLayoutNamed(Int64, "int")}, Results: []*Type{}, Variadic: true},
+			"rather than a slice",
+		},
 		{"an interface with methods", &Type{Kind: Interface}, "type of each method"},
+		{
+			"an interface method with no signature",
+			&Type{Kind: Interface, Methods: []Method{{Name: "F"}}},
+			"has no signature",
+		},
+		{
+			// Two packages may declare an unexported method of one name and
+			// they are different methods, so a spelling with no qualifier
+			// would be one name for two interfaces.
+			"an interface method that is unexported and carries no package",
+			&Type{Kind: Interface, Methods: []Method{{Name: "f", Sig: &Type{Kind: FuncKind, Params: []*Type{}, Results: []*Type{}}}}},
+			"the package that declares it is not in the IR type",
+		},
 		{"a literal struct", &Type{Kind: Struct, Fields: []Field{{Name: "A", Type: mustLayoutNamed(Int64, "int")}}}, "embedded field renamed through an alias"},
 		{"a slice of channels", &Type{Kind: Slice, Elem: &Type{Kind: Chan, Elem: mustLayoutNamed(Int64, "int")}}, "direction"},
 		{"an untyped constant", mustLayoutNamed(Int64, "untyped int"), "no canonical name"},

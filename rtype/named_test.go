@@ -123,6 +123,27 @@ type Unicode struct {
 	ärger int64
 }
 
+// ReaderLit is the literal interface behind Reader, as an alias so that gc
+// compiles the literal rather than a defined type.
+//
+// The unexported method is the point. A literal interface's spelling qualifies
+// an unexported method name with the package that declares it, by import path
+// in the link string and by package name in the name string, so this type is
+// the one that checks the qualifier against gc's.
+type ReaderLit = interface {
+	Read(p []byte) (int, error)
+	flush() error
+}
+
+// Reader is the same interface with a name. Its descriptor's Imethod array
+// holds an offset to the descriptor of each method's signature, which is a
+// function literal, so it is the row that was refused while a signature had no
+// spelling.
+type Reader interface {
+	Read(p []byte) (int, error)
+	flush() error
+}
+
 var namedCorpus = []struct {
 	src string
 	rt  reflect.Type
@@ -212,9 +233,11 @@ type Unicode struct {
 	ärger int64
 }
 
-// Reader is not in the corpus. Its descriptor is refused, and the refusal is
-// not this package's: an Imethod's Typ is an offset to the descriptor of the
-// method's signature, and ir/rtype.go spells no signature.
+type ReaderLit = interface {
+	Read(p []byte) (int, error)
+	flush() error
+}
+
 type Reader interface {
 	Read(p []byte) (int, error)
 	flush() error
@@ -1090,46 +1113,87 @@ func TestAnyKeepsANilPackagePath(t *testing.T) {
 	}
 }
 
-// TestInterfaceWithMethodsIsBlockedOnTheNamingFunction records exactly where
-// the last interface refusal lives, so that the day it moves is visible.
+// TestInterfaceWithMethodsIsDescribed is the row that was refused while a
+// function literal had no spelling.
 //
-// rtype's own refusal is gone: the method list and each method's signature are
-// in the IR type, and this package writes the InterfaceType header and the
-// Imethod array from them. What stops a descriptor is one line above this
-// package. An Imethod's Typ is an offset to the descriptor of the method's
-// signature, that signature is a function *literal*, and ir/rtype.go's
-// typeName spells no signature. A defined interface is nameable and its
-// methods' types are not.
-func TestInterfaceWithMethodsIsBlockedOnTheNamingFunction(t *testing.T) {
+// An Imethod's Typ is an offset to the descriptor of the method's signature,
+// and that signature is a function literal. The refusal came from one line
+// above this package, in ir/rtype.go's naming function, and it is gone: the
+// descriptor is written and each method points at the symbol gc names for the
+// same signature.
+func TestInterfaceWithMethodsIsDescribed(t *testing.T) {
 	_, pkg := namedTypes(t)
 	c := ir.NewConverter()
 	reader, err := c.Convert(pkg.Scope().Lookup("Reader").Type())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The facts this package needs are all present.
 	if len(reader.Methods) != 2 {
 		t.Fatalf("Reader carries %d methods, want 2", len(reader.Methods))
 	}
-	for _, m := range reader.Methods {
-		if m.Sig == nil {
-			t.Fatalf("Reader.%s carries no signature", m.Name)
+	syms, err := rtype.Descriptor(reader)
+	if err != nil {
+		t.Fatalf("a defined interface with methods: %v", err)
+	}
+	// The Imethod array is in the C..D section, whose offset the header's
+	// slice points at. Read the targets of the four-byte offsets instead, in
+	// the order they were emitted: name, signature, name, signature.
+	var offsets []string
+	for _, r := range syms[0].Relocs {
+		if r.Size == 4 && strings.HasPrefix(r.Target, "type:") {
+			offsets = append(offsets, r.Target)
 		}
 	}
-	// So is the interface's own name, because it is a defined type.
-	if _, err := ir.TypeSymbol(reader); err != nil {
-		t.Fatalf("a defined interface has no name: %v", err)
+	// Exported first, which is gc's order for an Imethod array.
+	for _, want := range []string{
+		"type:func([]uint8) (int, error)",
+		"type:func() error",
+	} {
+		found := false
+		for _, got := range offsets {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no method points at %s; the offsets are %v", want, offsets)
+		}
 	}
-	// What is missing is the name of a method's signature.
-	if _, err := ir.TypeSymbol(reader.Methods[0].Sig); err == nil {
-		t.Error("a function literal is nameable; this test and the refusal below are stale")
+}
+
+// TestLiteralInterfaceIsNamedAsGcNamesIt checks the spelling that qualifies an
+// unexported method with its package.
+//
+// Two packages may declare an unexported method of one name and they are
+// different methods, so the qualifier is part of the type. gc writes the import
+// path in the link string and the package name in the name string. The source
+// is type-checked under this package's own import path, so the two compilers
+// are naming one type, and the hash gc computed over its link string is the
+// oracle for the link string this one builds.
+func TestLiteralInterfaceIsNamedAsGcNamesIt(t *testing.T) {
+	_, pkg := namedTypes(t)
+	c := ir.NewConverter()
+	lit, err := c.Convert(pkg.Scope().Lookup("ReaderLit").Type())
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, err = rtype.Descriptor(reader)
-	if err == nil {
-		t.Fatal("an interface with methods was described; lift the refusal in this test")
+	rt := reflect.TypeOf((*ReaderLit)(nil)).Elem()
+	if got, err := ir.TypeNameString(lit); err != nil || got != rt.String() {
+		t.Errorf("the name string is %q (%v), want %q", got, err, rt.String())
 	}
-	if !strings.HasPrefix(err.Error(), "ir:") {
-		t.Errorf("the refusal is %q, want it to come from the naming function in package ir", err)
+	link, err := ir.TypeLinkString(lit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := namedPkgPath() + ".flush"; !strings.Contains(link, want) {
+		t.Errorf("the link string is %q, want it to qualify the unexported method as %s", link, want)
+	}
+	got, err := rtype.Hash(lit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := abiOf(rt).Hash; got != want {
+		t.Errorf("the hash of %q is %#08x and gc computed %#08x, so the two link strings differ", link, got, want)
 	}
 }
 

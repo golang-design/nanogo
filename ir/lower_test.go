@@ -606,6 +606,42 @@ func TestLowerCollectsAChannelDescriptor(t *testing.T) {
 	}
 }
 
+// TestLowerCollectsASignatureDescriptor is the pair of rows a function literal
+// was refused for.
+//
+// new of a function type allocates through a symbol that takes a *_type, and a
+// closure's captured variable moves to a heap cell of its own type. Both were
+// refused because a signature had no spelling. Both are built now, and the
+// collected symbol is the signature gc names.
+func TestLowerCollectsASignatureDescriptor(t *testing.T) {
+	for _, tc := range []struct{ row, body, want string }{
+		{"new of a function type", `func f() *func() { return new(func()) }`, "type:func()"},
+		{"a capture of a literal function type", `func f(h func(int), a int) { defer h(a) }`, "type:func(int)"},
+	} {
+		_, types, err := lowerCollect(t, tc.body)
+		if err != nil {
+			t.Errorf("%s: %v", tc.row, err)
+			continue
+		}
+		found := false
+		var got []string
+		for _, ty := range types {
+			name, err := TypeSymbol(ty)
+			if err != nil {
+				t.Errorf("%s: the collected type %s has no name: %v", tc.row, ty, err)
+				continue
+			}
+			got = append(got, name)
+			if name == tc.want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s collected %v, want it to hold %s", tc.row, got, tc.want)
+		}
+	}
+}
+
 // TestLowerCollectsOnARefusal checks that the list survives a refusal.
 //
 // A function that is refused is still lowered everywhere else, so a descriptor
@@ -1088,7 +1124,6 @@ func TestLowerRefusals(t *testing.T) {
 		{"make of a map", `func f() map[int]int { return make(map[int]int) }`, OMake, "descriptor"},
 		{"make of a channel", `func f() chan int { return make(chan int) }`, OMake, "descriptor"},
 		{"new of a literal struct", `func f() *struct{ A int } { return new(struct{ A int }) }`, ONew, "embedded field renamed through an alias"},
-		{"new of a function type", `func f() *func() { return new(func()) }`, ONew, "signature"},
 		{"len of a map", `func f(m map[int]int) int { return len(m) }`, OLen, "the length of map"},
 		{"len of a channel", `func f(c chan int) int { return len(c) }`, OLen, "the length of chan"},
 		{"range over a map", `func f(m map[int]int) { for k := range m { use(k) } }`, ORange, "mapiterinit"},
@@ -1096,10 +1131,6 @@ func TestLowerRefusals(t *testing.T) {
 		{"range over a channel", `func f(c chan int) { for v := range c { use(v) } }`, ORange, "channel"},
 		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
 		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
-		// The cell of a capture is allocated through runtime.newobject, which
-		// takes a *_type, so a capture whose type specs/032 cannot name
-		// refuses the closure and the refusal names the capture.
-		{"a capture of a literal function type", `func f(h func(int), a int) { defer h(a) }`, OClosure, "whose cell needs a type descriptor"},
 		{"defer of a builtin", `func f(c chan int) { defer close(c) }`, ODefer, "holds a close and not a call"},
 		{"defer of println", `func f(n int) { defer println(n) }`, ODefer, "holds a println and not a call"},
 		{"defer of recover", `func f() { defer recover() }`, ODefer, "holds a recover and not a call"},

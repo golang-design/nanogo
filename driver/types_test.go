@@ -26,11 +26,6 @@ func TestExportedTypeRefusalNamesWhatIsMissing(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "an interface with methods",
-			src:  "package lib\n\ntype I interface{ F() int }\n",
-			want: []string{"I", "a.go:3:6", "type:lib.I", "type of each method", "specs/032"},
-		},
-		{
 			// A type with a method needs an UncommonType whose entries carry
 			// the method's signature and the two ABI wrappers. Neither is
 			// built, and an entry left out would make reflect report an empty
@@ -68,6 +63,37 @@ func TestExportedTypeRefusalNamesWhatIsMissing(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the refusal does not mention %q: %v", want, err)
 				}
+			}
+		})
+	}
+}
+
+// TestExportedTypeIsDescribedForAnInterface is the row that left the table
+// above.
+//
+// A descriptor for an interface with methods needs an Imethod per method, each
+// an offset to the descriptor of the method's signature. That signature is a
+// function literal, and it had no canonical name until ir/rtype.go spelled one,
+// so the whole package was refused. Both spellings are there now, so the
+// package compiles and the importer's link resolves.
+func TestExportedTypeIsDescribedForAnInterface(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	for _, tc := range []struct{ what, src string }{
+		{"an exported method", "package lib\n\ntype I interface{ F() int }\n"},
+		{
+			// An unexported method's name is qualified by the package that
+			// declares it, which is this one, so the name encoder writes no
+			// package path of its own.
+			"an unexported method beside an exported one",
+			"package lib\n\ntype I interface {\n\tRead(p []byte) (int, error)\n\tflush() error\n}\n",
+		},
+		{"an embedded interface", "package lib\n\ntype R interface{ Read([]byte) (int, error) }\n\ntype RC interface {\n\tR\n\tClose() error\n}\n"},
+		{"a literal interface in a struct field", "package lib\n\ntype Holder struct{ V interface{ Len() int } }\n"},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			if _, err := compileSource(t, tc.src, func(c *Config) { c.Package = "lib" }); err != nil {
+				t.Errorf("the package was refused: %v", err)
 			}
 		})
 	}

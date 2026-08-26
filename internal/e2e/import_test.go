@@ -479,6 +479,17 @@ var linkingShapes = []linkShape{
 		main: "\tvar b lib.Buf\n\tvar g lib.Grid\n\tb[0] = 40\n\tg[1][2] = 2\n\tos.Exit(int(b[0]) + int(g[1][2]))\n",
 	},
 	{
+		// An interface with methods. Its descriptor's Imethod array holds an
+		// offset to the descriptor of each method's signature, and a signature
+		// is a function literal, so this shape was refused until ir/rtype.go
+		// spelled one. The importer puts the interface on a local variable,
+		// which is the shape that made the link fail, and calls no method: an
+		// itab is a different symbol and specs/032 still owes it.
+		name: "an interface with methods",
+		lib:  "type I interface{ F() int }\n",
+		main: "\tvar v lib.I\n\tif v != nil {\n\t\tos.Exit(1)\n\t}\n\tos.Exit(42)\n",
+	},
+	{
 		// A struct whose field names carry a tag, an embedded field and an
 		// unexported name. All three are in the field array, and the
 		// unexported one is why the descriptor carries a package path of its
@@ -549,7 +560,6 @@ func shapeModule(s linkShape) map[string]string {
 // write is in linkingShapes above and is linked and run rather than refused.
 var refusedShapes = []linkShape{
 	{name: "a named map", lib: "type M map[string]int\n", main: "M"},
-	{name: "an interface", lib: "type I interface{ F() int }\n", main: "I"},
 	{name: "a type with a method", lib: "type Code int\n\nfunc (c Code) V() int { return int(c) }\n", main: "Code"},
 	{name: "a struct that compares field by field", lib: "type Label struct{ Key, Value string }\n", main: "Label"},
 	{name: "a struct holding a map", lib: "type Table struct{ M map[string]int }\n", main: "Table"},

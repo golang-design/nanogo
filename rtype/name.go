@@ -8,8 +8,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
@@ -143,27 +141,14 @@ func pathToPrefix(s string) string {
 
 // isExportedName reports whether an unqualified identifier is exported.
 //
-// The language's rule is that the first character is an upper-case letter, and
-// "letter" is Unicode's rather than ASCII's. The ASCII fast path is not an
-// optimisation kept for speed: it is the shape gc's types.IsExported has, and
-// decoding a rune from a one-byte string is the case this avoids having to
-// reason about.
-//
-// This was ASCII-only and the difference is not cosmetic. The flag goes in an
-// internal/abi.Name's first byte and in the separator of the symbol that holds
-// it, a trailing dot for an exported name and a trailing dash otherwise, so a
-// method named Ärger came out unexported: reflect would refuse to call it, and
-// its name symbol would not merge with the one gc emitted for the same string.
-func isExportedName(name string) bool {
-	if name == "" {
-		return false
-	}
-	if c := name[0]; c < utf8.RuneSelf {
-		return c >= 'A' && c <= 'Z'
-	}
-	r, _ := utf8.DecodeRuneInString(name)
-	return unicode.IsUpper(r)
-}
+// The rule is ir.ExportedName's, because one identifier's exportedness decides
+// two things that have to agree. Here it decides the flag in an
+// internal/abi.Name's first byte and the separator of the symbol that holds it,
+// a trailing dot for an exported name and a trailing dash otherwise. In ir it
+// decides whether a literal interface's spelling qualifies the method name with
+// a package, and where the method sorts in the list. A second rule here would
+// let a method named Ärger be exported to one and unexported to the other.
+func isExportedName(name string) bool { return ir.ExportedName(name) }
 
 // fieldName returns the symbol holding one struct field's name.
 //

@@ -7,7 +7,6 @@ package rtype
 import (
 	"encoding/binary"
 	"fmt"
-	"sort"
 
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
@@ -125,34 +124,17 @@ func ifaceMethods(t *ir.Type, base int) ([]byte, []Reloc, []Symbol, error) {
 // imethods returns the methods an InterfaceType describes, in the order the
 // descriptor holds them.
 //
-// The order is gc's and not the IR's. gc sorts an interface's methods with
-// types.CompareSyms, which puts every exported name ahead of every unexported
-// one and orders within each group by name and then by package path. The IR
-// sorts by name alone, which is enough for determinism and is not this order,
-// so the encoder sorts rather than trusting the boundary.
-//
-// The two agree for every ASCII identifier, because a capital letter sorts
-// below every lower-case one, and agreeing is not the same as being the same
-// rule. A name beginning with a capital outside ASCII is exported and sorts
-// above no lower-case letter at all, so byte order would put it after the
-// unexported names and gc would put it before them.
+// The order is ir.InterfaceMethodOrder's, which is gc's and not the order
+// Converter sorts a method set into. It is defined there rather than here
+// because a literal interface's spelling reads the same list in the same order:
+// the name says "interface { Vis() int; p.hid() }" and the Imethod array has to
+// hold the two the same way round, or reflect reports a method the name does
+// not spell.
 func imethods(t *ir.Type) ([]ir.Method, error) {
 	if err := ifaceEmittable(t); err != nil {
 		return nil, err
 	}
-	out := make([]ir.Method, len(t.Methods))
-	copy(out, t.Methods)
-	sort.SliceStable(out, func(i, j int) bool {
-		ei, ej := isExportedName(out[i].Name), isExportedName(out[j].Name)
-		if ei != ej {
-			return ei
-		}
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
-		}
-		return out[i].Pkg < out[j].Pkg
-	})
-	return out, nil
+	return ir.InterfaceMethodOrder(t.Methods), nil
 }
 
 // ifaceEmittable reports the reason an interface's descriptor cannot be filled

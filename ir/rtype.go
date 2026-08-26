@@ -6,8 +6,11 @@ package ir
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Canonical names for type descriptors, per
@@ -44,25 +47,19 @@ import (
 // # What cannot be named, and why it is refused rather than guessed
 //
 // An ir.Type carries what type.go's two rules let it carry, and a spelling
-// needs more. Two kinds of Go type are distinguishable to the language and
-// not spellable from an ir.Type:
+// needs more. One kind of Go type is distinguishable to the language and not
+// spellable from an ir.Type: a literal struct. gc spells an embedded field that
+// was renamed through a type alias as "struct{ Int = int }", and ir.Converter
+// unaliases, so the alias is gone before the name is asked for. A struct's
+// field tags were on this list too and are not any more, because type.go
+// carries them along with each field's package and whether it is embedded.
 //
-//   - a function's signature, so func(int) and func(string) reduce to one;
-//   - a literal interface's and a literal struct's contents, which are spelled
-//     out in full. An interface's spelling holds the signature of every method
-//     and a struct's holds the type of every field, so both reduce to the
-//     first case: a signature is not in the IR type.
-//
-// A channel's direction used to be on this list and is not any more. type.go
-// carries it, so chan T, chan<- T and <-chan T are three ir.Types and three
-// spellings. What is refused is a channel whose ChanDir is the zero value,
-// which is a channel built below the type boundary and never converted.
-//
-// A struct's field tags used to be on this list and are not any more. type.go
-// carries them now, along with each field's package and whether it is
-// embedded. What is left for a struct is one case: gc spells an embedded field
-// that was renamed through a type alias as "struct{ Int = int }", and
-// ir.Converter unaliases, so the alias is gone before the name is asked for.
+// A channel's direction and a function's signature were both on this list. Both
+// are in type.go now, so chan T and chan<- T are two ir.Types and two
+// spellings, and so are func(int) and func(string). What is refused for each is
+// the zero value of the field it reads: a channel whose ChanDir is InvalidDir,
+// and a function whose Params or Results is nil, are types built below the type
+// boundary and never converted.
 //
 // For each of those, a name computed from the ir.Type would be the same name
 // for two different types. That is the deduplication failure specs/032 names,
@@ -179,13 +176,81 @@ func shortenPath(name string) string {
 		return name
 	}
 	path, base := name[:dot], name[dot+1:]
-	if slash := strings.LastIndex(path, "/"); slash >= 0 {
-		path = path[slash+1:]
-	}
+	path = pathBase(path)
 	if path == "" {
 		return base
 	}
 	return path + "." + base
+}
+
+// pathBase turns an import path into the package name a name string uses.
+//
+// It is shortenPath's rule applied to a bare path rather than to a qualified
+// name, which is what an interface method carries. The same approximation
+// holds and the same thing is unaffected by it: the link string, the symbol
+// and the hash all use the path.
+func pathBase(path string) string {
+	if slash := strings.LastIndex(path, "/"); slash >= 0 {
+		return path[slash+1:]
+	}
+	return path
+}
+
+// ExportedName reports whether an unqualified identifier is exported.
+//
+// The language's rule is that the first character is an upper-case letter, and
+// "letter" is Unicode's rather than ASCII's. The ASCII fast path is the shape
+// gc's types.IsExported has, and it avoids decoding a rune from a one-byte
+// string.
+//
+// It is here, next to the naming, because the answer is part of a type's
+// identity in two places and the two must agree. An interface's spelling
+// qualifies an unexported method name with its package and leaves an exported
+// one bare, and InterfaceMethodOrder puts every exported method ahead of every
+// unexported one. A rule that answered differently in one of them would give
+// one interface two link strings.
+func ExportedName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if c := name[0]; c < utf8.RuneSelf {
+		return c >= 'A' && c <= 'Z'
+	}
+	r, _ := utf8.DecodeRuneInString(name)
+	return unicode.IsUpper(r)
+}
+
+// InterfaceMethodOrder returns ms in the order gc writes an interface's
+// methods, which is a copy and leaves ms alone.
+//
+// The order is gc's types.CompareSyms: every exported name ahead of every
+// unexported one, then by name, then by the package path that qualifies an
+// unexported name. It is not the order Converter sorts a method set into,
+// which is by name alone.
+//
+// The two agree for every ASCII identifier, because a capital letter sorts
+// below every lower-case one, and agreeing is not being the same rule. A name
+// beginning with a capital outside ASCII is exported and sorts above no
+// lower-case letter at all, so byte order would put Ärger after the unexported
+// names and gc puts it before them.
+//
+// One order, because the spelling of a literal interface and the Imethod array
+// of its descriptor are the same list read twice. Two orders would make the
+// name say one thing and the descriptor another.
+func InterfaceMethodOrder(ms []Method) []Method {
+	out := make([]Method, len(ms))
+	copy(out, ms)
+	sort.SliceStable(out, func(i, j int) bool {
+		ei, ej := ExportedName(out[i].Name), ExportedName(out[j].Name)
+		if ei != ej {
+			return ei
+		}
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Pkg < out[j].Pkg
+	})
+	return out
 }
 
 // typeName writes one spelling of t into b. link selects the link string.
@@ -233,14 +298,54 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 		return typeName(b, t.Elem, link, depth+1)
 
 	case Interface:
-		if !t.EmptyIface {
+		if t.Methods == nil {
+			if t.EmptyIface {
+				// Built below the type boundary with no method list. The
+				// layout field says the set is empty, and an empty set is the
+				// whole spelling, so nothing is guessed by writing it.
+				b.WriteString("interface {}")
+				return nil
+			}
 			// What goes between the braces is each method's name and
-			// signature. The names are in the IR type and the signatures are
-			// not, so two interfaces whose methods differ only in signature
-			// would share this name.
-			return fmt.Errorf("ir: a literal interface's spelling holds the type of each method and a function's signature is not in the IR type")
+			// signature, so an interface with no method list would be spelled
+			// as the empty interface and every interface would share one name.
+			return fmt.Errorf("ir: a literal interface's spelling holds the name and the type of each method, and its method set is not in the IR type")
 		}
-		b.WriteString("interface {}")
+		if len(t.Methods) == 0 {
+			b.WriteString("interface {}")
+			return nil
+		}
+		b.WriteString("interface {")
+		for i, m := range InterfaceMethodOrder(t.Methods) {
+			if i > 0 {
+				b.WriteString(";")
+			}
+			b.WriteString(" ")
+			if !ExportedName(m.Name) {
+				// Two packages may declare an unexported method of one name
+				// and they are different methods, so the qualifier is part of
+				// the type. It is qualified the way a defined type's name is:
+				// by import path in the link string, by package name in the
+				// name string.
+				if m.Pkg == "" {
+					return fmt.Errorf("ir: the interface method %s is unexported and the package that declares it is not in the IR type", m.Name)
+				}
+				q := m.Pkg
+				if !link {
+					q = pathBase(q)
+				}
+				b.WriteString(q)
+				b.WriteString(".")
+			}
+			b.WriteString(m.Name)
+			if m.Sig == nil {
+				return fmt.Errorf("ir: the interface method %s has no signature, which its spelling holds", m.Name)
+			}
+			if err := signatureName(b, m.Sig, link, depth+1); err != nil {
+				return err
+			}
+		}
+		b.WriteString(" }")
 		return nil
 
 	case Struct:
@@ -278,7 +383,8 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 		return typeName(b, t.Elem, link, depth+1)
 
 	case FuncKind:
-		return fmt.Errorf("ir: a function's signature is not in the IR type")
+		b.WriteString("func")
+		return signatureName(b, t, link, depth)
 
 	case UnsafePtr:
 		// Reached only when Converter did not set the name, which happens for
@@ -287,4 +393,83 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 		return nil
 	}
 	return fmt.Errorf("ir: no canonical name for kind %s", t.Kind)
+}
+
+// signatureName writes a function type's parameter and result lists into b,
+// without the leading "func".
+//
+// The word is left to the caller because gc writes it for a function type and
+// leaves it out for an interface method: func(int) string is the type and
+// F(int) string is the method, and the part after the name is this.
+//
+// Parameter names are not in it. Two functions that differ only in the name of
+// a parameter are one type, so a name in the spelling would be two symbols for
+// one type, which is the mirror of the failure this file exists to prevent.
+func signatureName(b *strings.Builder, t *Type, link bool, depth int) error {
+	if t == nil {
+		return fmt.Errorf("ir: the name of a nil signature")
+	}
+	if t.Kind != FuncKind {
+		return fmt.Errorf("ir: %s is not a function type and has no signature to spell", t.Kind)
+	}
+	if depth > maxNameDepth {
+		return fmt.Errorf("ir: the name of %s nests deeper than %d", t.Kind, maxNameDepth)
+	}
+	if t.Params == nil || t.Results == nil {
+		// Converter sets both on every function type, the empty list included,
+		// so a nil one means the type was built below the type boundary. Read
+		// as the empty list it would spell func(int) as func(), and the linker
+		// deduplicates by name.
+		return fmt.Errorf("ir: a function's parameter and result lists are not in the IR type, so its signature has no spelling")
+	}
+	if t.Variadic && len(t.Params) == 0 {
+		// The bit says the last parameter is a ... parameter and there is no
+		// last parameter, so the spelling would drop the bit and name a
+		// variadic function as a non-variadic one.
+		return fmt.Errorf("ir: a function's signature is variadic and its parameter list is empty")
+	}
+	b.WriteString("(")
+	for i, p := range t.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if t.Variadic && i == len(t.Params)-1 {
+			// The parameter's own type is the slice, and gc spells the
+			// element: func(...int) and func([]int) have the same Params and
+			// are different types.
+			if p == nil || p.Kind != Slice {
+				return fmt.Errorf("ir: the last parameter of a variadic function is %s rather than a slice, so ...T has no element to name", p)
+			}
+			b.WriteString("...")
+			if err := typeName(b, p.Elem, link, depth+1); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := typeName(b, p, link, depth+1); err != nil {
+			return err
+		}
+	}
+	b.WriteString(")")
+
+	// One result is written bare and several are parenthesised, which is the
+	// language's own spelling and gc's.
+	switch len(t.Results) {
+	case 0:
+		return nil
+	case 1:
+		b.WriteString(" ")
+		return typeName(b, t.Results[0], link, depth+1)
+	}
+	b.WriteString(" (")
+	for i, r := range t.Results {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if err := typeName(b, r, link, depth+1); err != nil {
+			return err
+		}
+	}
+	b.WriteString(")")
+	return nil
 }
