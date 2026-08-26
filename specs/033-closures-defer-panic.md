@@ -66,6 +66,9 @@ first from a closure resumes it with a nil closure object, and calling the
 second from a function with no closure puts whatever the caller left in R26
 into a field the collector scans. `ssa.Func.NeedCtxt` carries the answer from
 `ir.Func.Closure` to the code generator.
+`internal/e2e`'s `TestToolexecGrowsAClosureStack` runs the tail: a recursive
+literal twenty thousand frames deep that reads a capture in every frame. Built
+with the other symbol it dies with a nil dereference.
 
 **The `panic` and `recover` refusals are not that gap.** Both are the interface
 one. `panic("boom")` and `panic(1)` are refused at `ssa.Build`, on the

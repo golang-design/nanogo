@@ -169,6 +169,71 @@ func TestToolexecKeepsCapturesThroughACollection(t *testing.T) {
 	}
 }
 
+// The program that grows a closure's stack.
+//
+// The stack-growth tail of specs/035-goroutines-and-stack-growth.md picks one
+// of two runtime symbols, and the choice is a correctness one.
+// runtime.morestack_noctxt writes zero into the context register before it
+// grows the stack, so a closure that grew its stack resumes with a nil closure
+// object and faults on its first capture. runtime.morestack saves the register
+// into g.sched.ctxt, which gogo restores.
+//
+// A unit test can read the relocation the tail carries and cannot run it. This
+// program runs it: the literal is recursive, so it re-enters its own prologue
+// twenty thousand frames deep with a frame wide enough that the check trips,
+// and every one of those frames reads a capture afterwards. Built with the
+// wrong symbol the program dies with a nil dereference.
+//
+// The recursion goes through a variable the literal captures and the enclosing
+// function assigns after making it, which is the by-reference capture: the
+// literal sees the assignment.
+const captureGrowProgram = `package main
+
+import "os"
+
+type frame struct {
+	a, b, c, d, e, f, g, h int
+	i, j, k, l, m, n, o, p int
+}
+
+type recfn func(int) int
+
+func main() {
+	base := 1
+	var rec recfn
+	rec = func(n int) int {
+		var f frame
+		f.a = base
+		if n == 0 {
+			return f.a
+		}
+		return rec(n-1) + f.a
+	}
+	if rec(20000) == 20001 {
+		os.Exit(7)
+	}
+	os.Exit(1)
+}
+`
+
+// TestToolexecGrowsAClosureStack runs the stack-growth tail of a closure.
+func TestToolexecGrowsAClosureStack(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/capturegrow\n\ngo 1.27\n",
+		"main.go": captureGrowProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "capturegrow", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := exitCode(t, filepath.Join(h.mod, "capturegrow")); got != 7 {
+		t.Fatalf("the program exited %d, want 7: the closure lost its captures across the stack growth", got)
+	}
+}
+
 // The program that defers a call with an operand and recovers inside it.
 //
 // runtime.deferproc takes one word and calls it with nothing, so an operand
