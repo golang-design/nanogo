@@ -161,8 +161,9 @@ This is not a hypothetical. `internal/audit`'s probe corpus compiles each probe
 twice, once with nanogo and once with `gc`, runs both and compares, and three
 probes are classed `wrong` today: `buildinfo-named`, `embed-directive` and
 `panic-fires`. `internal/audit/testdata/ratchet.txt` names each with its
-symptom. Every one is a construct nanogo's own source does not depend on, which
-is exactly the shape of bug the fixed point cannot see.
+symptom. A fixed point reached while any of the three stands would prove
+nothing about them, which is what the paragraph above says and what the corpus
+is there to catch instead.
 
 ## The dependency retirement ladder
 
