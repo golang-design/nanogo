@@ -146,10 +146,10 @@ What nanogo refuses, by name, with the reason:
 
 	A local array.
 
-	make of a slice whose element type may carry methods, and a struct
-	with a pointer field. make([]int, n) compiles and make([]byte, n) does
-	not: each needs a type descriptor, and specs/032 does not put a method
-	set in the IR type.
+	make of a slice whose element type has methods, or is an interface.
+	make([]byte, n) and make([]T, n) for a method-free struct T compile;
+	make([]C, n) where C has one method is refused, because the descriptor
+	for it needs the method's signature (specs/032).
 
 	A generic function.
 
@@ -162,23 +162,27 @@ What nanogo refuses, by name, with the reason:
 	cgo out of scope. Instrumentation such as -race goes to gc, because
 	nanogo does not implement the flags it needs.
 
-What nanogo does not announce:
-
-	Three failures reach a running program or a stack trace instead of a
-	diagnostic. They are what the probe corpus found, and a corpus is a
-	sample, so there may be a fourth.
+One refusal that reads as a crash:
 
 	A function that returns a value wider than four machine registers
-	crashes the compiler: "ssa: lower: Store: no arm64 rule lowered this
-	operation", with a Go stack trace and no position in your source.
+	stops the build with "panic: ssa: lower: Store: no arm64 rule lowered
+	this operation" and a Go stack trace, naming no position in your
+	source. No program comes out, so it is a refusal, but it is a poor one.
 
-	go:embed is accepted and the variable is empty at run time. The
-	program runs and does the wrong thing, with nothing said at compile
-	time.
+What nanogo does not announce:
+
+	Three failures produce a program that behaves differently from the one
+	gc builds, with nothing said at compile time. They are what the probe
+	corpus found, and a corpus is a sample, so there may be a fourth.
+
+	go:embed is accepted and the variable is empty at run time.
 
 	panic of a value that is already an interface compiles, and the
 	runtime then dies with "runtime: name offset out of range" instead of
 	printing the panic. The type descriptor it reaches for is wrong.
+
+	runtime/debug.ReadBuildInfo compiles and finds nothing, because nanogo
+	writes no modinfo line into the executable.
 
 What a nanogo-compiled package cannot do:
 
@@ -186,9 +190,6 @@ What a nanogo-compiled package cannot do:
 	declaration of New" naming a file under GOROOT, is missing from
 	nanogo's diagnostic, because an imported declaration has no position
 	in the file set of the package being compiled.
-
-	Carry build information. nanogo writes no modinfo line, so
-	runtime/debug.ReadBuildInfo finds nothing in the executable.
 
 Environment:
 

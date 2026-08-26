@@ -194,26 +194,33 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
 - `range` over a string, and a conversion between `string` and `[]byte`.
 - Floating point: arithmetic, a parameter, a result, and `println` of a float.
 - A local array.
-- `make` of a slice whose element type may carry methods, and a struct with a
-  pointer field. `make([]int, n)` compiles and `make([]byte, n)` does not:
-  each needs a type descriptor, and a method set is not in the IR type yet.
+- `make` of a slice whose element type has methods, or is an interface.
+  `make([]byte, n)` and `make([]T, n)` for a method-free struct `T` compile;
+  `make([]C, n)` where `C` has one method is refused, because the descriptor
+  for it needs the method's signature.
 - Generics.
 - Taking the address of a variable the compiler keeps in a register.
 - A package with assembly in it, and a package that imports `"C"`.
 
+One refusal reads as a crash. A function that returns a value wider than four
+machine registers stops the build with `panic: ssa: lower: Store: no arm64
+rule lowered this operation` and a Go stack trace, naming no position in your
+source. No program comes out, so it is a refusal, but it is a poor one.
+
 ### Three failures nanogo does not announce
 
-These cost more than any refusal, because nothing is said at compile time.
-They are what the probe corpus found, and a corpus is a sample, so there may
-be a fourth.
+These cost more than any refusal, because nothing is said at compile time and
+a program comes out that behaves differently from the one `gc` builds. They
+are what the probe corpus found, and a corpus is a sample, so there may be a
+fourth.
 
 | What you write | What happens |
 | --- | --- |
-| a function returning a value wider than four machine registers | the compiler crashes: `panic: ssa: lower: Store: no arm64 rule lowered this operation`, with a Go stack trace and no position in your source |
 | `//go:embed` | it compiles, and the variable is empty at run time |
 | `panic(err)` where the operand is already an interface | it compiles, and the runtime dies with `runtime: name offset out of range` instead of printing the panic |
+| `runtime/debug.ReadBuildInfo` | it compiles, and finds nothing, because nanogo writes no modinfo line |
 
-The first two are bugs with no fix yet. Until there is one, do not put a
+All three are bugs with no fix yet. Until there is one, do not put a
 nanogo-compiled package into a program you care about.
 
 ## What nanogo does not do
@@ -250,9 +257,6 @@ Name one, or build the other with the `go` command.
 `other declaration of New` naming a file under `GOROOT`, is missing from
 nanogo's diagnostic, because an imported declaration has no position in the
 file set of the package being compiled.
-
-**It writes no build information.** nanogo emits no modinfo line, so
-`runtime/debug.ReadBuildInfo` finds nothing in the executable.
 
 ## How it works
 
