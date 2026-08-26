@@ -13,32 +13,31 @@ depends_on:
 The first target, by [000](000-decisions.md) decision 9: the host is the target,
 so the feedback loop is one command.
 
-The backend is a lowering rule set, a register description, and a set of
-encoders. Everything general is above it.
+The backend is a lowering rule set, a machine operation set, a register
+description, a set of encoders, and one emitter. Everything general is above
+it.
 
-## Where the backend is, which is one place more than this spec said
+## Where the backend is
 
-The spec said the backend is three things and nothing else. It is five files,
-and the fifth is the one this spec spends the most words on. The prologue, the
-epilogue, the frame layout and the stack-growth tail below are emitted by
-`ssagen/prologue.go`, which is neither a rule nor an encoder. This was found by
-looking for the listing below in `ssa/` and finding it under `ssagen/`.
+Five parts, in the files below. The part that is neither a rule nor an encoder
+is `ssagen/prologue.go`, which emits the prologue, the epilogue, the frame
+layout and the stack-growth tail.
 
 | Part | File |
 | --- | --- |
 | Lowering rules | `ssa/rules/arm64.go` |
 | Machine operation set | `ssa/macharm64.go` |
 | Register description | `ssa/target.go`, over `obj/arm64/arm64.go`'s tables |
-| Encoders | `obj/arm64/encode.go`, `obj/arm64/float.go` |
+| Encoders | `obj/arm64/encode.go`, `obj/arm64/float.go`, `obj/arm64/condsel.go` |
 | Prologue, frame, growstack tail | `ssagen/prologue.go` |
 
 The distinction matters for [000](000-decisions.md) decision 5. A rule set and
 an encoder are what a second target is supposed to supply. `ssagen` sits above
 the target boundary and holds target-specific code anyway, so
 [043](043-amd64-backend.md) has to edit it, and decision 5 does not predict
-that. The line audit found the same gap from the other side:
-`ssagen` is 2,634 lines and decision 10's accounting has no estimate to weigh
-them against, so they are spent and unbudgeted.
+that. The line accounting shows the same gap from the other side: `ssagen` is
+2,634 lines and decision 10 budgeted none of them, so they are spent and
+unbudgeted. Decision 10 now carries a row that records the omission.
 
 ## Register description
 
@@ -64,8 +63,8 @@ From [030](030-abi.md), with the allocation view:
 The zero register is not allocatable but is useful: storing zero, comparing
 against zero, and materialising zero all use it, and the rules should.
 
-The floating-point registers arrived with group 6. An earlier version of this
-table marked them deferred, because rule groups 1 to 5 need none of them.
+The floating-point registers belong to group 6. Rule groups 1 to 5 need none of
+them.
 
 F30 and F31 are held back for the same reason R16 and R17 are, and it is not
 the linker's: [026](026-register-allocation.md) reserves a pair per class for
@@ -112,20 +111,19 @@ growstack:
     JMP   0                     // re-execute the function
 ```
 
-The `MOVD R30, R3` is a correction. `runtime.morestack` reads the caller's
-return address from R3, which `runtime/asm_arm64.s` states in a comment on the
-entry point, and an earlier version of this listing omitted it. The order is
-significant too: R3 is also the fourth argument register, so the arguments are
-saved before it is overwritten.
+The `MOVD R30, R3` is required. `runtime.morestack` reads the caller's return
+address from R3, which `runtime/asm_arm64.s` states in a comment on the entry
+point. The order is significant too: R3 is also the fourth argument register, so
+the arguments are saved before it is overwritten.
 
 The callee is not spelled in the emitter. `runtime.morestack_noctxt` comes from
 `rtsym`, which [031](031-runtime-lowering.md) owns and which is checked against
-the runtime's own source rather than typed in: 45 symbols against 2,435 runtime
+the runtime's own source rather than typed in: 70 symbols against 2,435 runtime
 functions, with `morestack_noctxt` the one entry that has no Go declaration and
 is checked against `runtime/asm_arm64.s` instead. `ssagen`'s
 `TestMorestackComesFromRtsym` gates it.
 
-### The prologue has four forms, not one
+### The prologue has four forms
 
 The listing above is the form for a mid-sized frame. The guard comparison has
 three forms and the frame push has two, because both depend on how large the
@@ -153,14 +151,10 @@ out of the runtime rather than trusting the copies here.
 The 8 or 16 bytes at the top of a frame hold the **caller's** saved frame
 pointer, not this function's. Without them a call overwrites it. So the locals
 area is the frame size less that reservation, and the incoming argument area
-starts at SP+8 rather than at SP. An earlier version of this spec described the
-saved frame pointer in a way that read as though the reservation were this
-frame's own.
+starts at SP+8 rather than at SP.
 
-Four details are required and are stated because they are easy to lose.
-They were found by writing the encoder, and the first two mean an earlier
-version of this listing did not assemble. The count was wrong too: the text
-said three and the list below has four.
+Four details are required and are easy to lose. The first two are what make the
+listing assemble at all, and both were found by writing the encoder.
 
 - **The goroutine register is spelled `g`, not `R28`.** Plan 9 arm64 syntax
   names it that way, and `MOVD 16(R28), R16` is not accepted. This matters again
@@ -168,11 +162,9 @@ said three and the list below has four.
 - **`CMP R16, RSP` needs the add-and-subtract extended-register class.** In the
   shifted-register class, register 31 reads as the zero register, so there is no
   encoding of that instruction there. The extended-register class is the one
-  where 31 means the stack pointer. Neither this spec nor
-  [041](041-instruction-encoding.md) mentioned the class existed, and the
-  prologue cannot be encoded without it. `obj/arm64`'s
-  `TestPrologueIsEncodable` walks every line of this listing and asserts each
-  one encodes.
+  where 31 means the stack pointer, and the prologue cannot be encoded without
+  it. `obj/arm64`'s `TestPrologueIsEncodable` walks every line of this listing
+  and asserts each one encodes.
 - The frame pointer is saved **below** the new stack pointer, at `-8(RSP)`. It is
   in the reserved region below SP, not in the frame. This is Go's convention on
   `arm64` and the frame size does not include it.
@@ -192,16 +184,14 @@ order they are worth writing:
 2. Loads and stores of every width, signed and unsigned.
 3. Address computation, folding constant offsets and scaled indices.
 4. Branches and the condition-code forms.
-5. Calls. The spec said four shapes, static, closure, interface and deferred,
-   and there are three. `ssa/op.go` has `OpStaticCall`, `OpClosureCall` and
+5. Calls, in three shapes. `ssa/op.go` has `OpStaticCall`, `OpClosureCall` and
    `OpInterCall` and no deferred call, and that is correct: a `defer` never
-   becomes a call operation. It becomes a static call to
-   `runtime.deferproc` and one to `runtime.deferreturn`, which
-   [033](033-closures-defer-panic.md) owns. This was found by reading the call
-   operations against the rule table, and the lowering pass that came later
-   confirmed the shape.
-6. Floating point. Written. The two things in it that are not a transcription
-   of the integer rules are the constant, whose immediate reaches 256 values
+   becomes a call operation. It becomes a static call to `runtime.deferproc`
+   and one to `runtime.deferreturn`, which
+   [033](033-closures-defer-panic.md) owns.
+6. Floating point. Written as rules and encoders, and refused by `ssagen`
+   below. The two things in it that are not a transcription of the integer
+   rules are the constant, whose immediate reaches 256 values
    and nothing else, and the condition codes, which are not the integer ones:
    `FCMP` has four outcomes and an IEEE 754 comparison has to be false in the
    unordered one, so `<` is `MI` and `<=` is `LS` where the integer rules use
@@ -217,18 +207,33 @@ Groups 1 to 6 are written and groups 7 and 8 are not. `ssa/rules/arm64.go`,
 `ssa/macharm64.go` and `obj/arm64` all stop at the same place, which is what
 keeps an unencodable operation from existing.
 
-Group 6 is written and does not reach a call boundary, and the spec said only
-"Written", which reads as more than is true. `ssagen/prologue.go`'s
-`valuePlaces` refuses a value the ABI would place in a floating-point register,
-so a float parameter or a float result is a compile error. This was found by
-reading the emitter for the call path after the rules said group 6 was done.
+**Group 6 is written as far as the encoder and no floating-point value reaches
+an object.** `ssagen` refuses one at three doors, and a reader who takes
+"written" for a working construct is reading more than the rules claim.
+`incoming` and `reg` are in `ssagen/ssagen.go`, and `valuePlaces` is in
+`ssagen/prologue.go`:
+
+| Door | Refuses | Message |
+| --- | --- | --- |
+| `incoming` | a parameter the ABI places in a floating-point register | `parameter a is float64, and this target has no floating-point code generator` |
+| `valuePlaces` | a call-site operand and a result | `value 0 is float64, and this target has no floating-point encoder` |
+| `reg` | any value the allocator puts in a floating-point register | `the allocation puts a value in F30, and this target has no floating-point code generator` |
+
+`reg` is the door that makes the refusal total rather than a call-boundary
+limit: the allocator has a floating-point free list, and nothing below it does,
+so a move copies with an integer `MOV` and a spill stores with an integer store.
+A function with a float local and no float in its signature is refused there,
+and so is a package-level float variable, because the initialisation function
+[040](040-object-format.md) describes assigns it.
 
 The gating stops at the same place. The rules, the machine operations and the
 encoders are covered: `ssa/macharm64_test.go`'s `TestARM64Encoders` puts every
 operation through `ARM64Encode`, and `obj/arm64/float_test.go` compares 99,368
 floating-point encodings against `go tool asm`. What no test does is emit a
-floating-point instruction through `ssagen` into an object. The two tests that
-name a float there assert the refusal at the boundary, not the emission.
+floating-point instruction through `ssagen` into an object.
+`TestIncomingRefusesAFloatParameter`, `TestRegRefusesAFloatRegister` and
+`TestFloatRegisterRefusalDoesNotReachTheEncoder` assert the three refusals, not
+an emission.
 
 One target-neutral operation has no rule at all. `ssa/rules/arm64.go`'s
 `Deferred` list names `OpConstString`, because a string constant is two words
@@ -259,7 +264,8 @@ It is not in this deck's scope but nothing here excludes it.
 What is gated today:
 
 - **Differential disassembly** per [041](041-instruction-encoding.md): 981,124
-  encodings agree with `go tool asm`, summed over 43 tests.
+  encodings agree with `go tool asm`. The figure is the encoder package's own
+  count, printed by its `TestMain`, and never a sum of the per-test log lines.
 - **Source text to a running process.** `ssagen`'s `TestLinkAndRun` compiles a
   function with nanogo, links it against the real Go runtime with
   `go tool link`, and runs it. 18 cases.
@@ -272,9 +278,19 @@ What is gated today:
 What this section asked for and does not have:
 
 - **Differential execution over the whole corpus** ([004](004-conformance.md)
-  L3). 18 hand-written cases is not a corpus. The blocker is above this spec:
-  SSA construction accepts two functions in five of the distribution, so there
-  is no body of programs to run yet.
+  L3). 18 hand-written cases is not a corpus. The harness is no longer the
+  blocker: `internal/gotest` sweeps Go's own 356 vendored files, carries out the
+  single-file recipes with `gc` as the oracle, and files every other file under
+  a named class. 9 of the 356 are **matched**, which is the only class that
+  proves code generation: nanogo compiled the program, it ran, and its output
+  and exit status are `gc`'s. 3 more are compiled without being run, and 74 are
+  rejected, which exercises the checker and not the back end. The blocker is
+  above this spec: the compiler refuses the rest, and 24,508 of the
+  distribution's 39,947 functions get past SSA construction once the lowering
+  pass has run, which is what the driver does. The 9/3/74 split lives in
+  `internal/gotest/testdata/ratchet.txt`, not in
+  `internal/hygiene/testdata/facts.json`, so it is ratcheted and not gated on a
+  number.
 - **A debug build asserting RSP is 16-byte aligned at every call.** No such
   build exists. What exists is static: `ssagen`'s `checkFrame` refuses a frame
   size that is not a multiple of 16, so the alignment is a property of the
@@ -282,3 +298,48 @@ What this section asked for and does not have:
   catch an instruction that moves the stack pointer outside the prologue, and
   stronger in another, it fails at compile time on every function rather than
   on the paths a test runs.
+
+## What was wrong
+
+The spec said the backend is a rule set, a register description and a set of
+encoders, and nothing else. `ssagen/prologue.go` is a fifth part that names the
+target, which is the counterexample [000](000-decisions.md) decision 5 records.
+This was found by looking for the prologue listing in `ssa/` and finding it
+under `ssagen/`.
+
+The register table marked the floating-point registers deferred, which was true
+only while rule groups 1 to 5 were the whole rule set.
+
+The prologue listing omitted `MOVD R30, R3`, so `runtime.morestack` would have
+read the caller's return address from a register nothing wrote. The listing also
+did not assemble: it spelled the goroutine register `R28` where Plan 9 arm64
+syntax needs `g`, and it used `CMP R16, RSP` without the add-and-subtract
+extended-register class, which neither this spec nor
+[041](041-instruction-encoding.md) said existed. The list of details under that
+listing was introduced as three items and holds four.
+
+The spec described the reserved words at the top of a frame as though the saved
+frame pointer were this function's. It is the caller's.
+
+The spec gave calls four shapes, static, closure, interface and deferred. There
+are three, because a `defer` becomes a static call to `runtime.deferproc` and
+not a call operation. This was found by reading `ssa/op.go`'s call operations
+against the rule table.
+
+**The spec said group 6 refuses a float at the call boundary, and the refusal is
+total.** It named `valuePlaces` alone, so a float local read as though it
+compiled. `reg` refuses every value the allocator puts in a floating-point
+register, which is what makes a float local, and a package-level float
+variable, a compile error too.
+
+**The spec said there is no body of programs to run.** `internal/gotest` sweeps
+Go's own corpus now. The 9 matched files are programs nanogo compiled and ran
+against `gc`'s output, which is [004](004-conformance.md) L3 on the files the
+compiler accepts.
+
+The `rtsym` count was 45 and the table holds 70
+([031](031-runtime-lowering.md)).
+
+The encoding total was described as a sum over 43 tests. It is the encoder
+package's own count and a sum of the log lines is a different, smaller number,
+which [041](041-instruction-encoding.md) records.

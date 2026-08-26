@@ -46,9 +46,9 @@ So: object files. The encoder is the price and it is a bounded one.
 
 ### The file wrapper comes first
 
-An earlier version of this spec started the layout at the magic. That is wrong,
-and it is the kind of wrong that produces a linker error with no relation to the
-cause. A real object file begins with a text header:
+The layout does not start at the magic. A file begins with a text header, and a
+writer that starts at the magic produces a linker error with no relation to the
+cause:
 
 ```
 go object <goos> <arch> <version> [GOARM64=...] X:<experiments>
@@ -62,12 +62,10 @@ close the header. **The linker compares the header line, not the magic**, and it
 refuses the first object it reads with "not package main" when the `main` line
 is absent.
 
-The blank line is part of the shape and this spec's listing did not have one.
-`obj.WriteObject` writes the header, then `main` and an empty line for a main
-package, then `!`. A package that is not main gets the header and `!` with
-nothing between them, because the linker reads one thing out of the region and
-stops at the first empty line. This was found by reading the writer against the
-listing.
+The blank line is part of the shape. `obj.WriteObject` writes the header, then
+`main` and an empty line for a main package, then `!`. A package that is not
+main gets the header and `!` with nothing between them, because the linker reads
+one thing out of the region and stops at the first empty line.
 
 A consequence for [000](000-decisions.md) decision 11's version pin: the header
 carries the enabled `GOEXPERIMENT` list, and `go env GOEXPERIMENT` does not
@@ -126,11 +124,10 @@ is the emission order, and a test locks it.
 `AuxPcsp`, `AuxPcfile` and `AuxPcline` are all mandatory. Without `AuxFuncInfo`
 the symbol belongs to no compilation unit and `cmd/link` panics in its DWARF
 pass with no diagnostic; without the other three, `generatePctab` calls
-`SymSize` on an unchecked index and faults on symbol 0. An earlier version of
-this spec named only the first.
+`SymSize` on an unchecked index and faults on symbol 0.
 
 **A pc-value table must be unnamed; a FUNCDATA bitmap must be named.** The rule
-is not uniform and an earlier version of this spec stated only half of it.
+is not uniform, so each half is stated.
 
 A stack map bitmap is named `gclocals·<base64>`, which is `gc`'s scheme, and the
 name matters: the content-hash class is derived from the name, and only
@@ -175,8 +172,7 @@ The `Aux` block attaches metadata symbols to a function symbol by type:
 | `AuxPcsp`, `AuxPcfile`, `AuxPcline`, `AuxPcinline`, `AuxPcdata` | the pc-value tables |
 | `AuxDwarfInfo`, `AuxDwarfLoc`, `AuxDwarfRanges`, `AuxDwarfLines` | [046](046-debug-info.md) |
 
-The pc-value rows are a correction. An earlier version of this spec said
-`AuxFuncInfo` holds the pc-value tables. It does not: each table is its own aux
+`AuxFuncInfo` does not hold the pc-value tables. Each table is its own aux
 symbol, and a writer that packs them into `AuxFuncInfo` produces an object the
 linker reads as having none.
 
@@ -342,8 +338,7 @@ A `PCDATA` stream is a mapping from program counter to a small integer, encoded
 as a delta-compressed sequence: for each change, a value delta and a pc delta.
 The runtime decodes it linearly.
 
-Four properties of the encoding that a writer must have exactly right, none of
-which an earlier version of this spec stated:
+Four properties of the encoding that a writer must have exactly right:
 
 1. The **value delta is zigzag-signed**. Values go down as well as up.
 2. The **pc delta is unsigned and scaled by `MinLC`**, which is 4 on `arm64`.
@@ -354,20 +349,19 @@ which an earlier version of this spec stated:
 4. The stream **ends with a final pc delta and then a zero byte**. A table
    without the terminator runs into whatever follows it.
 
-One limit of the encoder, found by its first real consumer and recorded rather
-than fixed: **it cannot express a leading region whose value is the initial
-value.** An entry equal to the initial value at offset 0 is skipped, so a table
-that starts at $-1$ and changes later encodes as though it held the later value
-from the start. The reference implementation emits a zero value delta as its
-first pair instead, which the runtime accepts only in first position.
+One limit of the encoder is recorded rather than fixed: **it cannot express a
+leading region whose value is the initial value.** An entry equal to the
+initial value at offset 0 is skipped, so a table that starts at $-1$ and
+changes later encodes as though it held the later value from the start. The
+reference implementation emits a zero value delta as its first pair instead,
+which the runtime accepts only in first position.
 
 This is benign for the two streams nanogo emits today: the runtime substitutes
 zero for $-1$ in the stack map index, and a leading unsafe-point region only
 costs preemption opportunities. It is a real divergence from `gc`'s bytes, and
 it would corrupt any table that genuinely needs a $-1$ prefix.
 
-nanogo produces two, and the count is a correction. This spec listed four
-indices and the writer emits two, which `ssa/stackmap.go` declares and
+nanogo produces two streams, which `ssa/stackmap.go` declares and
 `ssagen/stackmap.go` fills:
 
 | Index | Contents |
@@ -378,16 +372,14 @@ indices and the writer emits two, which `ssa/stackmap.go` declares and
 Plus the line and file tables, which are the same encoding over source positions
 from [010](010-scanner-and-positions.md).
 
-The two that are gone were not dropped, they were never reachable. The spec
-said nanogo produces a `PCDATA_InlTreeIndex` and a `PCDATA_ArgLiveIndex`
-stream; the code declares neither constant. This was found by reading the index
-constants in `ssa/stackmap.go` against the table. The inline tree waits on
+There is no `PCDATA_InlTreeIndex` and no `PCDATA_ArgLiveIndex`, and neither is
+a constant the code declares. The inline tree waits on
 [024](024-inlining-and-devirtualization.md), which is unbuilt, so there is no
 tree to index. Argument liveness is an optimization of the collector's scan and
 nanogo does not compute one.
 
 The `AuxFuncdata` count has the same shape. The format allows one entry per
-`FUNCDATA` index and nanogo writes exactly two, `FUNCDATA_ArgsPointerMaps` and
+`FUNCDATA` index and nanogo writes two, `FUNCDATA_ArgsPointerMaps` and
 `FUNCDATA_LocalsPointerMaps`. `FUNCDATA_StackObjects` is computed and not written.
 `ssa.StackMaps.ObjectsSym` builds the table, and 162 functions of the
 distribution corpus have one, but `ssagen` passes it no way to name a local's
@@ -398,31 +390,30 @@ descriptor's pointer mask. The omission is conservative rather than wrong. Such
 a local stays in the locals bitmap for the whole of its marked lifetime, so the
 collector scans it and never misses it.
 
-## The fingerprint, which is plumbing with no value in it
+## The fingerprint
 
 Each object records a fingerprint of the package's export data, and each import
 records the fingerprint it was compiled against. The linker checks them and
 refuses a mismatched build.
 
-That is the format. It is not what nanogo does, and this is the one part of
-this spec's scope that is written down and not built. `obj.Package` has a
-`Fingerprint` field and `obj.AddImport` takes one, and nothing outside `obj`
-ever sets either. `driver/compile.go` records no import at all, so the Autolib
-block is empty and the fingerprint is eight zero bytes. This was found by
-grepping for every writer of the field and finding only the writer that copies
-it into the object.
+nanogo writes both halves. `driver/compile.go`'s `writeOutput` takes the
+fingerprint [015](015-export-data.md)'s writer returns beside the export data
+payload and puts it in the object's header, whether or not `-pack` asked for an
+archive: a bare object has nowhere to put the `__.PKGDEF` member, so it carries
+the fingerprint and not the data. `emitPackage` adds one Autolib entry per
+direct import, carrying the fingerprint that import's own export data has. The
+Autolib entry is also what makes the linker load the archive at all, so a call
+to an imported function no entry names is an undefined symbol even when
+`-importcfg` says where the archive is.
 
-The spec claimed the opposite. It said the fingerprint is "the mechanism that
-makes hosted mode ([000](000-decisions.md) decision 11) safe: a nanogo-compiled
-package and a `gc`-compiled importer either agree or fail loudly." They do not
-fail loudly. Zero equals zero, so the linker's check passes on any pair, and a
-nanogo object compiled against stale export data links silently. The safety net
-decision 11 leans on is declared and absent.
-
-It was absent for a reason above this spec: the fingerprint is a hash of the
-export data a package *writes*, and [015](015-export-data.md)'s writer was
-unbuilt, so there was nothing to hash. The writer exists now, so the input is
-there and the field is the work that is left.
+So the linker's check now compares two measured values rather than zero against
+zero, which is what [000](000-decisions.md) decision 11 leans on: a
+nanogo-compiled package and a `gc`-compiled importer either agree or the link
+fails. **The loud failure is `cmd/link`'s and nothing here proves it.** No test
+in this repository builds a mismatched pair and asserts the refusal.
+`obj/obj_test.go` pins where the bytes go, `driver/importer_test.go` pins the
+Autolib entry, and `export/writer_test.go` pins that one package hashes the
+same way twice. A test that drives a real mismatch is the work that is left.
 
 **Nothing else may be added to the archive to carry a fact about it.**
 [054](054-distribution.md) tried exactly that, appending a member naming which
@@ -442,8 +433,7 @@ There is no compatibility range and no negotiation: a mismatch is an error
 naming both, and it also names the header line so that a reader can see which
 release produced it.
 
-Two details of when, because "asserts it at startup" was what this spec said
-and is not what happens. The check runs when the driver is about to write an
+Two details of when. The check runs when the driver is about to write an
 object (`driver/compile.go`, `writeOutput`), not at process start, and it runs
 once per process behind a `sync.Once` because it costs an `asm` invocation. A
 compile that fails before it reaches the writer therefore never checks the
@@ -465,23 +455,22 @@ tested against reality rather than argued, and it passed:
 | pc-value encoder against `-d=pctab` | byte-identical |
 | Determinism | identical bytes across processes, working directories and environments |
 
-The pc-value row is narrower than it looks and is worth reading exactly. The
-test takes the entries `go tool compile -d=pctab=pctospadj` prints, re-encodes
-them with `obj.EncodePCData`, and compares the bytes. It proves the encoding of
-[040](040-object-format.md)'s delta scheme against `gc`'s, which is the part
-that is easy to get wrong. It does not compare nanogo's own line or file stream
-against `gc`'s for the same function, because nanogo and `gc` do not lay out
-the same instructions.
+The pc-value row is narrower than it looks. The test takes the entries
+`go tool compile -d=pctab=pctospadj` prints, re-encodes them with
+`obj.EncodePCData`, and compares the bytes. It proves the encoding of the delta
+scheme above against `gc`'s, which is the part that is easy to get wrong. It
+does not compare nanogo's own line or file stream against `gc`'s for the same
+function, because nanogo and `gc` do not lay out the same instructions.
 
 The link result is the one that matters. It is the earliest empirical answer to
 whether nanogo's objects are objects the Go toolchain accepts, and it arrived
 before any code generator existed.
 
-The comparison against `go tool asm` is a subset check and not byte equality,
-which is worth stating rather than glossing: the assembler fabricates
-`.arginfo0`, `.args_stackmap` and a `gofile..` symbol that a compiler does not,
-and its string and file tables differ. Byte equality is asserted between nanogo
-and nanogo, which is what [053](053-determinism.md) needs.
+The comparison against `go tool asm` is a subset check and not byte equality:
+the assembler fabricates `.arginfo0`, `.args_stackmap` and a `gofile..` symbol
+that a compiler does not, and its string and file tables differ. Byte equality
+is asserted between nanogo and nanogo, which is what
+[053](053-determinism.md) needs.
 
 ## Writing, not reading
 
@@ -491,7 +480,8 @@ by the linker, at G2, and [045](045-linker.md) owns it.
 
 ## Testing
 
-Every check below is written and gated, in `obj/write_test.go`:
+Every check below is written and gated, in `obj/write_test.go` except where the
+bullet names another file:
 
 - `TestNMReadsWhatWasWritten` and `TestObjdumpReadsText` run `go tool nm` and
   `go tool objdump` on nanogo's output. `TestSameSymbolsAsAssembler` compares
@@ -511,3 +501,48 @@ Every check below is written and gated, in `obj/write_test.go`:
   from two processes with different environments and working directories. This
   is the earliest place the G1 fixed point can be broken and the cheapest place
   to check it.
+
+## What was wrong
+
+The spec started the layout at the magic. A file begins with a text header
+instead, and the header's shape is what the linker compares. The listing also
+had no blank line in it, which `obj.WriteObject` writes for a main package.
+Both were found by reading the writer against the listing.
+
+The spec named `AuxFuncInfo` as the one auxiliary symbol a TEXT symbol needs. A
+TEXT symbol needs four, and the three that were missing fault the linker in
+`generatePctab` rather than reporting.
+
+The spec stated half of the naming rule: that a pc-value table must be unnamed.
+The other half is that a FUNCDATA bitmap must be named `gclocals·<base64>`,
+because the content-hash class is derived from the name.
+
+The spec said `AuxFuncInfo` holds the pc-value tables. Each table is its own aux
+symbol, and an object that packs them into `AuxFuncInfo` is one the linker reads
+as having no pc-value tables at all.
+
+The spec stated none of the four properties of the pc-value encoding, and a
+writer that guesses any of them produces a table that decodes to the wrong
+program counters.
+
+The spec said the version check is asserted at startup. It runs once per
+process, when the driver is about to write an object, so a compile that fails
+earlier never reaches it.
+
+The spec listed four `PCDATA` indices and the writer emits two.
+`PCDATA_InlTreeIndex` and `PCDATA_ArgLiveIndex` were never reachable rather
+than dropped: the code declares neither constant. This was found by reading the
+index constants in `ssa/stackmap.go` against the table.
+
+**The spec said the fingerprint was declared and absent, and it is written
+now.** It said `obj.Package` had a `Fingerprint` field that nothing outside
+`obj` ever set, that `driver/compile.go` recorded no import, and therefore that
+the Autolib block was empty and the fingerprint eight zero bytes, so the
+linker's check passed on any pair. That was true while [015](015-export-data.md)
+had no writer, because the fingerprint is a hash of the export data a package
+writes and there was nothing to hash. The writer landed, `writeOutput` records
+what it returns, and `emitPackage` records one Autolib entry per import. An
+object nanogo wrote for a `println` program carries a fingerprint whose eight
+bytes are not zero. What the earlier text got right and this one keeps is that
+the loud failure is the linker's behaviour and not a property nanogo's own
+suite proves.

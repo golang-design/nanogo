@@ -24,14 +24,24 @@ nanogo encodes the instructions its own code generator emits. That set is fixed
 by [025](025-lowering-and-rules.md)'s rules and is on the order of a hundred
 instructions per target, each with a small number of operand forms.
 
-The set grows only when a rule is added, so the two files change together and a
-rule with no encoder is a build failure rather than a crash.
+The set grows only when a rule is added, so the rule file and the encoder change
+together. A machine operation with no encoder is a named test failure rather
+than a crash at the emitter: `ssa/macharm64_test.go`'s `TestARM64Encoders` puts
+every operation through `ARM64Encode` and asserts the list of operations that do
+not encode is empty.
 
 `obj/arm64` draws its line where the rules draw theirs. It encodes groups 1 to
 6 of [042](042-arm64-backend.md) and no atomic instruction and no inline
 `memmove` form, which are groups 7 and 8. `ssa/macharm64.go` and
 `ssa/rules/arm64.go` stop at the same place, so no operation exists that no
 encoder can take.
+
+Group 6 is the one place where the encoder is ahead of what a program can
+reach. `obj/arm64/float.go` encodes the floating-point forms and the sweep below
+compares them, and `ssagen` refuses every floating-point value before one is
+emitted, which [042](042-arm64-backend.md) states, counts and owns. A reader who
+takes an encoder's existence as a working construct is reading this spec for a
+claim it does not make.
 
 ## Structure
 
@@ -42,10 +52,10 @@ func AddRegReg(size Size, dst, a, b Reg) uint32
 func AddRegImm(size Size, dst, a Reg, imm int64) (uint32, bool)  // false if imm does not fit
 ```
 
-The leading `size` is a correction. An earlier version of this spec omitted it,
-and a code generator needs both the 32-bit and 64-bit form of every arithmetic
-and logical instruction. Carrying the width as a parameter rather than doubling
-the function count is the cheaper of the two ways to fix it.
+The leading `size` is what makes one function serve both widths. A code
+generator needs the 32-bit and the 64-bit form of every arithmetic and logical
+instruction, and carrying the width as a parameter is cheaper than doubling the
+function count.
 
 Returning "does not fit" rather than panicking is deliberate.
 [025](025-lowering-and-rules.md)'s rules are responsible for choosing a form that
@@ -64,7 +74,8 @@ unscaled and signed; branch offsets are 26 bits for `B`, 19 bits for conditional
 branches and `CBZ`, and **14 bits for `TBZ` and `TBNZ`**.
 
 The 14-bit range is the tightest branch on the target and is the one a lowering
-rule is most likely to violate. An earlier version of this spec did not name it.
+rule is most likely to violate, so it is named separately from the 19-bit
+conditional branches it sits beside.
 
 **Logical immediates** deserve more than "only certain patterns". The encoding
 is a replicated run of ones described by `N`, `immr` and `imms`, and three
@@ -128,17 +139,12 @@ not needed. On `amd64` it is, and [043](043-amd64-backend.md) owns it.
   finishes. A reader who runs one test sees a much smaller number, because no
   single test compares more than a fraction of it.
 
-  **This number was corrected twice, and the second correction was wrong.** An
-  audit summed the per-test log lines, got 913,069, and changed this spec to
-  say so. The sum is smaller than the truth because not every comparison
-  happens inside a test that logs a count, and the audit had also double
-  counted `TestMain`'s own line in one variant of the same sum. 981,124 is the
-  figure the package reports and it is the one to quote.
-
-  The lesson is worth more than the number. A total that is reconstructed by
-  adding up log lines is a second implementation of the count, and the two
-  implementations disagreed. `internal/hygiene` now reads `TestMain`'s line,
-  which is the count itself rather than a reconstruction of it.
+  **The total is the package's own count and never a sum of the log lines.** A
+  total reconstructed by adding up per-test lines is a second implementation of
+  the count, and it is a smaller number, because not every comparison happens
+  inside a test that logs one. `internal/hygiene` reads `TestMain`'s line, which
+  is the count itself. Any other document that states the figure states the same
+  one: the gate holds it in five places.
 
   Two traps in reading `go tool asm -S`, both of which produce a comparison that
   passes while testing nothing:
@@ -170,3 +176,20 @@ not needed. On `amd64` it is, and [043](043-amd64-backend.md) owns it.
   instruction sequence.
 - Rule coverage from [025](025-lowering-and-rules.md): every operation a rule can
   emit has an encoder.
+
+## What was wrong
+
+The spec's function signatures had no `size` parameter, so they named one form
+of each arithmetic and logical instruction where the code generator needs two.
+
+The spec gave branch offsets as 26 bits for `B` and 19 bits for the conditional
+branches, and did not name the 14 bits of `TBZ` and `TBNZ`. That is the tightest
+branch on the target.
+
+**The comparison total was corrected twice and the second correction was
+wrong.** An audit summed the per-test log lines, got 913,069, and wrote that
+figure here. The sum is smaller than the truth, because not every comparison
+happens inside a test that logs a count, and one variant of the same sum also
+double counted `TestMain`'s own line. The figure to quote is the one the package
+reports, and `internal/hygiene` now reads that line rather than reconstructing
+it.
