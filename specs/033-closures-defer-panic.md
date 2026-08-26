@@ -16,17 +16,19 @@ interactions are where the bugs are.
 
 ## What is built
 
-Two separate gaps decide the table below. Closures, `defer` and `go` are built
-in their captureless form and refuse every capture, because a capture is read
-through the context register. `panic` and `recover` are built and are gated by
-a different thing: an interface. `ir/lower.go` performs the rows and
-`internal/e2e` runs each one as a program.
+Closures are built, captures and all. `defer` and `go` are built in their
+captureless form and refuse an argument, which is the row below that is left.
+`panic` and `recover` are built and are gated by a different thing: an
+interface. `ir/lower.go` performs the rows and `internal/e2e` runs each one as
+a program.
 
 | Feature | State |
 | --- | --- |
 | a function literal that captures nothing | built; a heap-allocated one-word `funcval` holding the code pointer |
 | a **declared** function used as a func value | built; the same heap-allocated one-word `funcval` |
-| a method value, or a literal with a capture list | **refused**; a capture is read through the context register and no SSA operation reads one |
+| a literal with a capture list | built; a heap closure object holding the code pointer and one heap cell per capture |
+| a method value | **refused**; its receiver is bound by value and only a capture through a heap cell is built |
+| a named result a literal captures | **refused**; the single exit of a function that defers already owns that storage |
 | `defer f()` with no arguments and no captures | built; `runtime.deferproc`, plus the single exit below |
 | `defer` with arguments | **refused**; an argument becomes a capture |
 | `go f()` on the same terms | built; `runtime.newproc` takes the same one word |
@@ -111,11 +113,44 @@ defers becomes a `goto` to that label.
 ### Capture is by reference, and this spec does not decide it
 
 The section "Capture by value or by reference" below hands the choice to
-[023](023-escape-analysis.md). There is no escape analysis, and the IR builder
-does not wait for one: it makes **every** capture a capture by reference. One
-`ir.Object` is shared by the enclosing function and the literal, and the
-builder sets `Addrtaken` on it unconditionally. That is correct and it is slow,
-and it is what a closure of a variable nobody assigns costs today.
+[023](023-escape-analysis.md). There is no escape analysis, and nothing waits
+for one: **every** capture is a capture by reference. One `ir.Object` is shared
+by the enclosing function and the literal, and lowering moves that object into
+a heap cell of its own, so both functions reach one variable through one
+pointer.
+
+The cell is not an optimisation this spec skipped. A literal that outlives the
+frame that made it would read a frame slot that no longer exists, which is
+memory corruption and not a wrong value, and deciding that a literal does not
+outlive its frame is [023](023-escape-analysis.md)'s judgement. So the cell is
+what a capture costs until that pass exists.
+
+**The cell is allocated where the variable is declared and not at the entry.**
+A variable declared in the body of a loop is a fresh variable on every
+iteration, which is the Go 1.22 rule the IR builder already performs by putting
+the declaration inside the loop. One cell allocated at the entry would be one
+variable for every iteration, and every literal made in the loop would read the
+last one's value. Lowering puts the allocation in the innermost statement list
+that holds every mention of the variable: the loop body when the variable is
+declared there, and in front of the loop when the loop's own condition names
+it.
+
+**The closure object's type is one type per arity and not one per closure.**
+The object is allocated through `runtime.newobject`, which takes a `*_type`,
+and [032](032-type-descriptors-and-itabs.md) refuses a name for a literal
+struct. A struct synthesised per closure would need a synthesised name per
+closure and would inherit every refusal its capture types carry: a capture of
+func type would refuse the whole closure for a reason that has nothing to do
+with the closure. So the object is `.closureN`, a code pointer followed by N
+`unsafe.Pointer` words, and no capture's own type is asked for. The collector
+needs one fact about the object and `unsafe.Pointer` says it: the code pointer
+stays a `uintptr` and every capture word is traced.
+
+`internal/e2e`'s `TestToolexecKeepsCapturesThroughACollection` is the evidence.
+It runs a program whose only reference to a heap object is the capture, under
+`GODEBUG=gccheckmark=1,clobberfree=1` and `GOGC=1`, so a capture word the map
+missed is a crash where the mistake is, and a code pointer the map claimed
+would send the collector after a text address.
 
 Everything past the sections above is a design and not a description.
 

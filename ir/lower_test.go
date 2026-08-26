@@ -56,6 +56,7 @@ func none()        {}
 func use(int)      {}
 func useAny(any)   {}
 func useFn(func()) {}
+func sink(func() int) {}
 func one() int         { return 1 }
 func two() (int, int)  { return 1, 2 }
 `
@@ -969,7 +970,6 @@ func TestLowerRefusals(t *testing.T) {
 		{"range over a map", `func f(m map[int]int) { for k := range m { use(k) } }`, ORange, "mapiterinit"},
 		{"range over a string", `func f(s string) { for i := range s { use(i) } }`, ORange, "UTF-8"},
 		{"range over a channel", `func f(c chan int) { for v := range c { use(v) } }`, ORange, "channel"},
-		{"a closure that captures", `func f(a int) func() int { return func() int { return a } }`, OClosure, "a capture list of 1"},
 		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
 		{"defer of a call with arguments", `func f() { defer use(1) }`, ODefer, "an argument list of 1"},
 		{"go of a method call", `func f(t T) { go t.M() }`, OGo, "an argument list of 1"},

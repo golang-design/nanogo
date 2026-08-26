@@ -2163,6 +2163,12 @@ func (b *builder) closure(x *syntax.FuncLit) Expr {
 		b.noteUse(o)
 		node.Args = append(node.Args, &Node{Op: OLocal, Pos: o.Pos, Type: o.Type, Obj: o})
 	}
+	// The literal reads each of these through the closure object the caller
+	// leaves in the context register (specs/033-closures-defer-panic.md). The
+	// list and the node's Args are the same list in the same order, which is
+	// what makes a capture's position in the object a fact both halves read.
+	fn.Captures = caps
+	fn.Closure = closureContext(caps, x.Pos())
 	b.out.Funcs = append(b.out.Funcs, fn)
 	return node
 }

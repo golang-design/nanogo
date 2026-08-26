@@ -115,6 +115,7 @@ func LowerAndCollect(fn *Func) ([]*Type, error) {
 		hdrs:  make(map[*Type]*Type),
 		descs: make(map[string]*Object),
 	}
+	l.openCaptures()
 	fn.Body = l.stmts(fn.Body)
 	if l.ndefer > 0 {
 		l.deferExit()
@@ -161,6 +162,14 @@ type lowerer struct {
 	// caller emitting the descriptors reads.
 	descs  map[string]*Object
 	needed []*Type
+
+	// capIndex names the field of the closure object each of this function's
+	// own captures is read from, and cells names the heap cell of each
+	// variable this function declares and a literal in it captures. Both are
+	// lookup tables and neither is ranged over; capturedHere carries the
+	// order (specs/053-determinism.md).
+	capIndex map[*Object]int
+	cells    map[*Object]*Object
 
 	// ndefer counts the defer statements this function lowered. One is enough
 	// to owe the function the single exit deferExit builds, so the count is
@@ -1738,18 +1747,21 @@ const deferExitLabel = ".deferexit"
 // closureExpr lowers a function literal.
 func (l *lowerer) closureExpr(n Expr) Expr {
 	if n.Index != closureLiteral {
-		l.refuse(n, "a method value captures its receiver, which is read through the context register, which no SSA operation reads")
-		return n
-	}
-	if len(n.Args) > 0 {
-		l.refuse(n, fmt.Sprintf("a capture list of %d: a capture is read through the context register, which no SSA operation reads", len(n.Args)))
+		// A method value binds its receiver by value and not through a cell,
+		// so the receiver is a copy the closure object holds rather than a
+		// variable two functions share. closure.go builds the cell form and
+		// this is not it.
+		l.refuse(n, "a method value captures its receiver by value, and only a capture through a heap cell is built")
 		return n
 	}
 	if n.Obj == nil || n.Obj.Class != ClassFunc {
 		l.refuse(n, "a function literal with no symbol")
 		return n
 	}
-	return l.funcValue(n, n.Obj, n.Type)
+	if len(n.Args) == 0 {
+		return l.funcValue(n, n.Obj, n.Type)
+	}
+	return l.closureValue(n, n.Obj, n.Args, n.Type)
 }
 
 // funcValue builds the func value of a function that captures nothing.
