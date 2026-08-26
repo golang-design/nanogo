@@ -242,6 +242,33 @@ type Type struct {
 	// there makes reflect report Int64 for an int.
 	Basic string
 
+	// Params and Results are a function type's parameter and result types, in
+	// declaration order, for Kind == FuncKind.
+	//
+	// They are descriptor fields by the rule above and nothing that generates
+	// code reads them: a function value is one pointer-sized word whatever it
+	// is a function of, and specs/030-abi.md's calling convention is applied
+	// to a call's own operands rather than to a type. What needs them is a
+	// FuncType descriptor, whose tail is an array of *Type with one entry per
+	// parameter and one per result, and a method descriptor's Mtyp, which is a
+	// TypeOff to exactly this type.
+	//
+	// A nil slice is not "no parameters" in general. It is the empty list only
+	// when the type came from Converter, which sets both on every function
+	// type. A type built below the boundary by hand carries neither, and the
+	// descriptor writer refuses it rather than writing a FuncType claiming
+	// func().
+	Params  []*Type
+	Results []*Type
+
+	// Variadic reports whether the last parameter is a ... parameter.
+	//
+	// The parameter's own type is already the slice type, so this is not
+	// recoverable from Params: func(...int) and func([]int) have the same
+	// Params and are different types. internal/abi.FuncType puts the bit in
+	// the top bit of OutCount, and reflect reads it.
+	Variadic bool
+
 	// Instantiated reports whether the type is an instantiation of a generic
 	// type.
 	//
@@ -272,16 +299,23 @@ type Type struct {
 }
 
 // Method is one method of a defined type's method set.
-//
-// The signature is absent. A descriptor's Method carries an Mtyp offset to the
-// descriptor of the method's type with the receiver removed, and that needs a
-// function's signature, which this boundary does not carry either. The writer
-// refuses a method rather than emitting an Mtyp of zero, because zero is a
-// legal Mtyp that means "this method is unexported and reflect may not call
-// it", so a zero here would be read as a fact rather than as a gap.
 type Method struct {
 	// Name is the method's name, unqualified.
 	Name string
+
+	// Sig is the method's type with the receiver removed, as a Type of kind
+	// FuncKind.
+	//
+	// With the receiver removed, because that is the type a descriptor's Mtyp
+	// points at and the type reflect.Method.Type reports for a method reached
+	// through reflect.Type.Method. types2 keeps the receiver apart from the
+	// parameters, so this is the signature's own parameter list and no
+	// stripping happens here.
+	//
+	// A nil Sig is a gap and is refused. Zero is a legal Mtyp that means "this
+	// method is unexported and reflect may not call it", so a zero written for
+	// a missing signature would be read as a fact rather than as an absence.
+	Sig *Type
 
 	// Pkg is the import path that qualifies Name when Name is unexported, and
 	// is empty for an exported name. Two packages may declare an unexported
@@ -402,6 +436,19 @@ func layout(t *Type, inProgress map[*Type]bool, pending *[]*Type) error {
 	}
 	inProgress[t] = true
 	defer delete(inProgress, t)
+
+	// A function's parameters and results, and a method's signature, are types
+	// reachable from t and contained in nothing. A func value is one word
+	// whatever it is a function of, and a method is not part of its type's
+	// layout at all, so neither can take part in the containment recursion and
+	// both are queued for the reason Layout gives. The descriptor writer still
+	// needs their size and pointer map: a FuncType's tail names each one and a
+	// method's Mtyp names its signature.
+	for i := range t.Methods {
+		*pending = append(*pending, t.Methods[i].Sig)
+	}
+	*pending = append(*pending, t.Params...)
+	*pending = append(*pending, t.Results...)
 
 	if s, ok := scalarLayout[t.Kind]; ok {
 		t.Size, t.Align = s.size, s.align

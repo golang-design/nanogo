@@ -435,6 +435,8 @@ func TestConvertRejectsTypesWithNoRepresentation(t *testing.T) {
 
 func F[T any](x T) (int, string) { return 0, "" }
 
+func G(x int) (int, string) { return 0, "" }
+
 type C interface{ ~int | ~string }
 `)
 	c := NewConverter()
@@ -453,10 +455,17 @@ type C interface{ ~int | ~string }
 	if _, err := c.Convert(iface.EmbeddedType(0)); err == nil {
 		t.Error("a constraint union converted")
 	}
+	// A generic function's own signature is refused for the same reason its
+	// type parameter is: converting it converts every parameter type, and one
+	// of them is the parameter. specs/013 instantiates before this pass, and
+	// ir/build.go refuses a generic declaration before it asks.
+	if _, err := c.Convert(pkg.Scope().Lookup("F").Type()); err == nil {
+		t.Error("an uninstantiated generic signature converted")
+	}
 	// A failed conversion leaves nothing behind: the cache entry installed
 	// before the recursion is removed, so a later good conversion is not
 	// served a half-built type.
-	if _, err := c.Convert(pkg.Scope().Lookup("F").Type()); err != nil {
+	if _, err := c.Convert(pkg.Scope().Lookup("G").Type()); err != nil {
 		t.Errorf("the signature failed after a failed conversion: %v", err)
 	}
 }
@@ -662,14 +671,40 @@ func (c Counter) private() {}
 	}
 
 	counter := conv("Counter")
-	want := []Method{
+	want := []methodShape{
 		{Name: "Add", PtrOnly: true},
 		{Name: "Value"},
 		{Name: "private", Pkg: "p"},
 	}
-	if !reflect.DeepEqual(counter.Methods, want) {
-		t.Errorf("Counter's method set is %+v, want %+v", counter.Methods, want)
+	if got := methodShapes(counter.Methods); !reflect.DeepEqual(got, want) {
+		t.Errorf("Counter's method set is %+v, want %+v", got, want)
 	}
+	// Every method carries a signature. The descriptor's Mtyp is a TypeOff to
+	// exactly this type, and zero is a legal Mtyp meaning "unexported, reflect
+	// may not call it", so a nil here would be written as a fact.
+	for _, m := range counter.Methods {
+		if m.Sig == nil {
+			t.Errorf("Counter.%s carries no signature", m.Name)
+		} else if m.Sig.Kind != FuncKind {
+			t.Errorf("Counter.%s has a signature of kind %s", m.Name, m.Sig.Kind)
+		}
+	}
+}
+
+// methodShape is a Method without its signature, so that a test about which
+// methods are in a set is not also a test about what each one's type is.
+type methodShape struct {
+	Name    string
+	Pkg     string
+	PtrOnly bool
+}
+
+func methodShapes(ms []Method) []methodShape {
+	out := make([]methodShape, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, methodShape{Name: m.Name, Pkg: m.Pkg, PtrOnly: m.PtrOnly})
+	}
+	return out
 }
 
 // TestConvertMethodSetFollowsPromotion checks that the method set is the
@@ -695,28 +730,234 @@ type ByValue struct{ base }
 type ByPointer struct{ *base }
 `)
 	c := NewConverter()
-	names := func(name string) []Method {
+	names := func(name string) []methodShape {
 		t.Helper()
 		out, err := c.Convert(pkg.Scope().Lookup(name).Type())
 		if err != nil {
 			t.Fatal(err)
 		}
-		return out.Methods
+		for _, m := range out.Methods {
+			if m.Sig == nil {
+				t.Errorf("%s.%s carries no signature", name, m.Name)
+			}
+		}
+		return methodShapes(out.Methods)
 	}
 
 	// Promoted is shadowed by the field of the same name; PtrPromoted is not
 	// shadowed and stays, which is what makes this a shadowing test rather
 	// than a test that embedding promotes nothing.
-	want := []Method{{Name: "PtrPromoted", PtrOnly: true}}
+	want := []methodShape{{Name: "PtrPromoted", PtrOnly: true}}
 	if got := names("Shadow"); !reflect.DeepEqual(got, want) {
 		t.Errorf("Shadow's method set is %+v, want %+v", got, want)
 	}
-	want = []Method{{Name: "Promoted"}, {Name: "PtrPromoted", PtrOnly: true}}
+	want = []methodShape{{Name: "Promoted"}, {Name: "PtrPromoted", PtrOnly: true}}
 	if got := names("ByValue"); !reflect.DeepEqual(got, want) {
 		t.Errorf("ByValue's method set is %+v, want %+v", got, want)
 	}
-	want = []Method{{Name: "Promoted"}, {Name: "PtrPromoted"}}
+	want = []methodShape{{Name: "Promoted"}, {Name: "PtrPromoted"}}
 	if got := names("ByPointer"); !reflect.DeepEqual(got, want) {
 		t.Errorf("ByPointer's method set is %+v, want %+v", got, want)
+	}
+}
+
+// TestConvertCarriesTheSignature pins the half of the type boundary a
+// FuncType descriptor and a method's Mtyp both need.
+//
+// specs/032-type-descriptors-and-itabs.md refused a channel, a function and an
+// interface with methods on the same sentence: "a function's signature is not
+// in the IR type". It is now, and this is what says so.
+func TestConvertCarriesTheSignature(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+func Nullary()                        {}
+func Args(a int, b string) error      { return nil }
+func Two() (int, string)              { return 0, "" }
+func Variadic(a int, rest ...string)  {}
+func Slice(a int, rest []string)      {}
+`)
+	c := NewConverter()
+	conv := func(name string) *Type {
+		t.Helper()
+		out, err := c.Convert(pkg.Scope().Lookup(name).Type())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Kind != FuncKind {
+			t.Fatalf("%s has kind %s, want func", name, out.Kind)
+		}
+		return out
+	}
+
+	// Empty and not nil, for the reason Methods is empty and not nil: a nil
+	// list is what a type built below the boundary carries, and the two have
+	// to be told apart.
+	nullary := conv("Nullary")
+	if nullary.Params == nil || len(nullary.Params) != 0 {
+		t.Errorf("Nullary's parameters are %v, want a non-nil empty list", nullary.Params)
+	}
+	if nullary.Results == nil || len(nullary.Results) != 0 {
+		t.Errorf("Nullary's results are %v, want a non-nil empty list", nullary.Results)
+	}
+
+	args := conv("Args")
+	if len(args.Params) != 2 || args.Params[0].Kind != Int64 || args.Params[1].Kind != String {
+		t.Errorf("Args takes %v, want int and string", args.Params)
+	}
+	if len(args.Results) != 1 || args.Results[0].Name != "error" {
+		t.Errorf("Args returns %v, want error", args.Results)
+	}
+
+	if got := conv("Two"); len(got.Results) != 2 {
+		t.Errorf("Two returns %d results, want 2", len(got.Results))
+	}
+
+	// The variadic bit is not recoverable from the parameter list. The last
+	// parameter's own type is already the slice, so these two types have the
+	// same parameters and are different types.
+	variadic, slice := conv("Variadic"), conv("Slice")
+	if !variadic.Variadic {
+		t.Error("Variadic's last parameter is ... and the type does not say so")
+	}
+	if slice.Variadic {
+		t.Error("Slice takes a slice and the type calls it variadic")
+	}
+	if len(variadic.Params) != len(slice.Params) ||
+		variadic.Params[1].Kind != Slice || slice.Params[1].Kind != Slice {
+		t.Fatalf("the two parameter lists differ: %v and %v", variadic.Params, slice.Params)
+	}
+}
+
+// TestConvertMethodSignatureDropsTheReceiver checks the shape a descriptor's
+// Mtyp needs.
+//
+// reflect.Type.Method reports the method's type with the receiver removed, and
+// so does the descriptor. types2 keeps the receiver out of Params, so the
+// check is that nothing put it back.
+func TestConvertMethodSignatureDropsTheReceiver(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type T struct{ n int }
+
+func (t T) Get() int       { return t.n }
+func (t *T) Set(v int)     {}
+func (t T) Mixed(a int, b string) (bool, error) { return false, nil }
+`)
+	c := NewConverter()
+	out, err := c.Convert(pkg.Scope().Lookup("T").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := func(name string) Method {
+		t.Helper()
+		for _, m := range out.Methods {
+			if m.Name == name {
+				return m
+			}
+		}
+		t.Fatalf("T has no method %s", name)
+		return Method{}
+	}
+
+	get := byName("Get")
+	if len(get.Sig.Params) != 0 {
+		t.Errorf("Get's signature takes %v, want nothing; the receiver is not a parameter", get.Sig.Params)
+	}
+	if len(get.Sig.Results) != 1 || get.Sig.Results[0].Kind != Int64 {
+		t.Errorf("Get returns %v, want int", get.Sig.Results)
+	}
+	set := byName("Set")
+	if len(set.Sig.Params) != 1 || set.Sig.Params[0].Kind != Int64 {
+		t.Errorf("Set takes %v, want one int", set.Sig.Params)
+	}
+	mixed := byName("Mixed")
+	if len(mixed.Sig.Params) != 2 || len(mixed.Sig.Results) != 2 {
+		t.Errorf("Mixed is %d in and %d out, want 2 and 2", len(mixed.Sig.Params), len(mixed.Sig.Results))
+	}
+}
+
+// TestConvertLaysOutASignaturesParts is the layout invariant applied to the
+// two lists this change added.
+//
+// ir.Layout promises that every type reachable from t has a non-zero
+// alignment, and a descriptor writer reads the size and pointer map of every
+// parameter and every result. A parameter left unlaid out has size zero, which
+// the writer would put in the descriptor without noticing.
+func TestConvertLaysOutASignaturesParts(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Big struct {
+	p *int
+	s string
+}
+
+func F(a Big, b *Big) (Big, []Big) { return a, nil }
+
+type T struct{}
+
+func (T) M(a Big) *Big { return nil }
+`)
+	c := NewConverter()
+	f, err := c.Convert(pkg.Scope().Lookup("F").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range append(append([]*Type{}, f.Params...), f.Results...) {
+		if p.Align == 0 {
+			t.Errorf("part %d of F is not laid out: %s", i, p)
+		}
+	}
+	if got := f.Params[0]; got.Size != 3*PtrSize {
+		t.Errorf("F's first parameter is %d bytes, want %d", got.Size, 3*PtrSize)
+	}
+
+	tt, err := c.Convert(pkg.Scope().Lookup("T").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := tt.Methods[0]
+	if m.Sig.Align == 0 {
+		t.Fatalf("M's signature is not laid out")
+	}
+	if m.Sig.Params[0].Align == 0 || m.Sig.Results[0].Align == 0 {
+		t.Error("M's signature is laid out and its parameter or result is not")
+	}
+}
+
+// TestConvertSignatureOfARecursiveMethod checks that a method whose signature
+// names the type it is declared on terminates.
+//
+// The converter installs a cache entry before it recurses, and the method set
+// is built while that entry is still empty. A method returning *T reaches the
+// entry, and the walk has to stop there rather than convert T again.
+func TestConvertSignatureOfARecursiveMethod(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Node struct{ next *Node }
+
+func (n *Node) Next() *Node      { return n.next }
+func (n *Node) Link(o *Node)     {}
+`)
+	c := NewConverter()
+	out, err := c.Convert(pkg.Scope().Lookup("Node").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Methods) != 2 {
+		t.Fatalf("Node has %d methods, want 2", len(out.Methods))
+	}
+	for _, m := range out.Methods {
+		if m.Sig == nil {
+			t.Fatalf("Node.%s carries no signature", m.Name)
+		}
+	}
+	next := out.Methods[1]
+	if next.Name != "Next" {
+		t.Fatalf("the second method is %s, want Next", next.Name)
+	}
+	// The result is *Node, and its element is the very type being converted.
+	// One IR type per checker type is what the cache is for.
+	if got := next.Sig.Results[0]; got.Kind != Ptr || got.Elem != out {
+		t.Errorf("Next returns %s, want a pointer back to the type itself", got)
 	}
 }

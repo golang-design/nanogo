@@ -199,7 +199,7 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 		// The name above is the generic type's, without the arguments, so an
 		// instantiation has to be marked as one. See the field's comment.
 		out.Instantiated = t.TypeArgs().Len() > 0
-		ms, err := methodSet(t)
+		ms, err := c.methodSet(t)
 		if err != nil {
 			return err
 		}
@@ -282,8 +282,14 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 	case *types2.Signature:
 		// FuncKind, not Func. A function value is one word, a pointer to a
 		// closure object; the signature is not part of the machine type.
+		//
+		// The signature crosses the boundary anyway, as a descriptor field by
+		// type.go's second rule. A FuncType descriptor's tail is the type of
+		// every parameter and every result, and a method descriptor's Mtyp is
+		// a TypeOff to a type of exactly this kind, so nothing below the
+		// boundary can write either without them.
 		out.Kind = FuncKind
-		return nil
+		return c.signature(out, t)
 
 	case *types2.Interface:
 		out.Kind = Interface
@@ -337,6 +343,56 @@ func isExportedName(name string) bool {
 	return c >= 'A' && c <= 'Z'
 }
 
+// signature fills out's parameter and result types from t.
+//
+// The receiver is not among them. types2 keeps it in Recv() and out of
+// Params(), which is exactly the shape a method descriptor's Mtyp needs: the
+// method's type with the receiver removed.
+//
+// Both slices are empty rather than nil when the list is empty, for the reason
+// Methods is: a nil slice on a converted type would be indistinguishable from
+// one nobody filled in, and the descriptor writer refuses the second.
+func (c *Converter) signature(out *Type, t *types2.Signature) error {
+	params := t.Params()
+	out.Params = make([]*Type, 0, params.Len())
+	for i := 0; i < params.Len(); i++ {
+		pt, err := c.convert(params.At(i).Type())
+		if err != nil {
+			return err
+		}
+		out.Params = append(out.Params, pt)
+	}
+	results := t.Results()
+	out.Results = make([]*Type, 0, results.Len())
+	for i := 0; i < results.Len(); i++ {
+		rt, err := c.convert(results.At(i).Type())
+		if err != nil {
+			return err
+		}
+		out.Results = append(out.Results, rt)
+	}
+	// The last parameter's own type is already the slice, so this bit is not
+	// recoverable from the list: func(...int) and func([]int) have the same
+	// parameters and are different types.
+	out.Variadic = t.Variadic()
+	return nil
+}
+
+// methodSig converts a method's type.
+//
+// The object's type is a *types2.Signature whose Recv is the receiver and
+// whose Params are not, so converting it gives the type with the receiver
+// removed and nothing is stripped here. A method object with any other type is
+// a malformed checker result rather than a program this compiler can refuse
+// usefully, so it is reported by name.
+func (c *Converter) methodSig(fn *types2.Func) (*Type, error) {
+	sig, ok := fn.Type().(*types2.Signature)
+	if !ok {
+		return nil, fmt.Errorf("ir: the method %s has type %T and not a signature", fn.Name(), fn.Type())
+	}
+	return c.convert(sig)
+}
+
 // methodSet returns the method set of a pointer to t, sorted by name.
 //
 // The pointer's set is the larger of the two and Method.PtrOnly separates them,
@@ -357,7 +413,7 @@ func isExportedName(name string) bool {
 // The addressable argument is what selects the two sets: with it the checker
 // answers for a variable whose address can be taken, which is the method set of
 // the pointer.
-func methodSet(t *types2.Named) ([]Method, error) {
+func (c *Converter) methodSet(t *types2.Named) ([]Method, error) {
 	var cands []*types2.Func
 	seen := make(map[types2.Type]bool)
 	collectMethodNames(t, seen, &cands, 0)
@@ -392,7 +448,15 @@ func methodSet(t *types2.Named) ([]Method, error) {
 		}
 		valObj, _, _ := types2.LookupFieldOrMethod(t, false, pkg, name)
 		_, inValue := valObj.(*types2.Func)
-		out = append(out, Method{Name: name, Pkg: path, PtrOnly: !inValue})
+		// The signature comes from the object the lookup resolved to and not
+		// from the candidate, because a promoted method's declaration is on
+		// the embedded type and the lookup is what says which declaration this
+		// name reaches.
+		sig, err := c.methodSig(ptrObj.(*types2.Func))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Method{Name: name, Pkg: path, Sig: sig, PtrOnly: !inValue})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Name != out[j].Name {
