@@ -92,7 +92,8 @@ func Compile(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	if err := checkExportedTypes(cfg, pkg, fset); err != nil {
+	owed, err := checkExportedTypes(cfg, pkg, fset)
+	if err != nil {
 		return err
 	}
 	p, err := ir.Build(pkg, files, info)
@@ -103,7 +104,7 @@ func Compile(cfg *Config) error {
 		return err
 	}
 
-	out, hasInit, err := emitPackage(cfg, p, fset, imp.reader.Imports())
+	out, hasInit, err := emitPackage(cfg, p, fset, imp.reader.Imports(), owed)
 	if err != nil {
 		return err
 	}
@@ -346,7 +347,7 @@ func checkTarget(pkg, arch string) error {
 // Declaration order, not map order: the object's symbol table is written by
 // walking the lists in the order symbols were added, so two runs over the same
 // input must add them in the same order (specs/053-determinism.md).
-func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []export.Import) (*obj.Package, bool, error) {
+func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []export.Import, owed []*ir.Type) (*obj.Package, bool, error) {
 	if err := checkTarget(cfg.Package, cfg.TargetArch()); err != nil {
 		return nil, false, err
 	}
@@ -369,7 +370,13 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// an allocation passes a *_type to the runtime. The union is a slice in
 	// first-use order rather than a set, because the object's symbol table is
 	// written in the order symbols were added (specs/053-determinism.md).
-	var needed []*ir.Type
+	//
+	// The descriptors the package owes an importer come first. gc emits one
+	// for every type a package declares, used or not, because an importer
+	// refers to it directly and through DWARF and cmd/link resolves neither on
+	// its own. checkExportedTypes decided the set and refused the package if
+	// any of it could not be written, so nothing here can fail on it.
+	needed := append([]*ir.Type{}, owed...)
 	// The data symbols of the package-level variables. They go in before any
 	// function is compiled, so that a variable nanogo cannot write is refused
 	// by name and position rather than reported by the linker as an undefined
@@ -491,6 +498,18 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type) error {
 		syms   []*obj.Symbol
 		relocs [][]rtype.Reloc
 	)
+	// A descriptor names other descriptors, and cmd/link resolves each by
+	// name, so the object owes the closure and not only the roots. The
+	// descriptors the runtime owns are left out of it: the runtime is in every
+	// link and gc refers to its copies rather than emitting a second one.
+	types, err := descriptorClosure(types)
+	if err != nil {
+		return &UnsupportedError{
+			Package: cfg.Package,
+			What:    "a type its code needs a descriptor for",
+			Detail:  err.Error(),
+		}
+	}
 	for _, t := range types {
 		set, err := rtype.Descriptor(t)
 		if err != nil {

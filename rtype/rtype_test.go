@@ -393,6 +393,32 @@ func TestStrIsAnOffset(t *testing.T) {
 }
 
 // TestTailsAreReferences checks the kind-specific fields.
+// descriptorSize is the size the five sections of a descriptor add up to.
+//
+// internal/abi.Type, the kind-specific header, the optional UncommonType, the
+// variable-length data the header points at and the method array. It is
+// written out here rather than taken from the encoder, so that a section the
+// encoder places wrongly is a failure rather than two agreeing computations.
+func descriptorSize(rt reflect.Type) int {
+	n := rtype.TypeSize
+	switch rt.Kind() {
+	case reflect.Pointer, reflect.Slice:
+		n += 8
+	case reflect.Array:
+		n += 24
+	case reflect.Interface:
+		n += 32
+	case reflect.Struct:
+		n += 32 + 24*rt.NumField()
+	}
+	// gc gives an UncommonType to every type that has a name, predeclared
+	// types included, so that reflect can report a package path.
+	if rt.Name() != "" {
+		n += 16
+	}
+	return n
+}
+
 func TestTailsAreReferences(t *testing.T) {
 	types := corpusTypes(t)
 	for i, c := range corpus {
@@ -402,11 +428,11 @@ func TestTailsAreReferences(t *testing.T) {
 			continue
 		}
 		d := syms[0]
+		if want := descriptorSize(c.rt); len(d.Data) != want {
+			t.Errorf("%s: %d bytes, want %d", c.src, len(d.Data), want)
+		}
 		switch c.rt.Kind() {
 		case reflect.Pointer, reflect.Slice:
-			if len(d.Data) != rtype.TypeSize+8 {
-				t.Errorf("%s: %d bytes, want %d", c.src, len(d.Data), rtype.TypeSize+8)
-			}
 			r, ok := reloc(d, rtype.TypeSize)
 			if !ok {
 				t.Errorf("%s: no element reference", c.src)
@@ -420,23 +446,12 @@ func TestTailsAreReferences(t *testing.T) {
 				t.Errorf("%s: element is %s, want %s", c.src, r.Target, want)
 			}
 		case reflect.Array:
-			if len(d.Data) != rtype.TypeSize+24 {
-				t.Errorf("%s: %d bytes, want %d", c.src, len(d.Data), rtype.TypeSize+24)
-			}
 			got := binary.LittleEndian.Uint64(d.Data[rtype.TypeSize+16:])
 			if got != uint64(c.rt.Len()) {
 				t.Errorf("%s: length %d, want %d", c.src, got, c.rt.Len())
 			}
 			if _, ok := reloc(d, rtype.TypeSize+8); !ok {
 				t.Errorf("%s: no slice reference", c.src)
-			}
-		case reflect.Interface:
-			if len(d.Data) != rtype.TypeSize+32 {
-				t.Errorf("%s: %d bytes, want %d", c.src, len(d.Data), rtype.TypeSize+32)
-			}
-		default:
-			if len(d.Data) != rtype.TypeSize {
-				t.Errorf("%s: %d bytes, want %d", c.src, len(d.Data), rtype.TypeSize)
 			}
 		}
 	}

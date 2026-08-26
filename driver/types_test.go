@@ -26,28 +26,36 @@ func TestExportedTypeRefusalNamesWhatIsMissing(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "a struct",
-			src:  "package lib\n\ntype Point struct{ X, Y int }\n",
-			want: []string{"Point", "a.go:3:6", "type:lib.Point", "specs/032"},
-		},
-		{
-			name: "a named basic type",
-			src:  "package lib\n\ntype Code int\n",
-			want: []string{"Code", "type:lib.Code", "specs/032"},
-		},
-		{
-			name: "an interface",
+			name: "an interface with methods",
 			src:  "package lib\n\ntype I interface{ F() int }\n",
-			want: []string{"I", "type:lib.I"},
+			want: []string{"I", "a.go:3:6", "type:lib.I", "type of each method", "specs/032"},
 		},
 		{
-			// Every declared type, not only the exported ones. An importer
-			// cannot name an unexported type, but cmd/link's defgotype walks
-			// into a struct's fields, so a variable of an exported type
-			// reaches the unexported types inside it.
-			name: "an unexported type",
-			src:  "package lib\n\ntype hidden struct{ n int }\n\nfunc F() int { return hidden{n: 1}.n }\n",
-			want: []string{"hidden", "type:lib.hidden"},
+			// A type with a method needs an UncommonType whose entries carry
+			// the method's signature and the two ABI wrappers. Neither is
+			// built, and an entry left out would make reflect report an empty
+			// method set for a type that has one.
+			name: "a type with a method",
+			src:  "package lib\n\ntype Code int\n\nfunc (c Code) String() string { return \"\" }\n",
+			want: []string{"Code", "type:lib.Code", "String", "ABI wrappers"},
+		},
+		{
+			// A struct whose fields do not compare as one region of memory
+			// needs a generated equality function, which specs/032 has no
+			// writer for. Leaving Equal nil would make the runtime panic on a
+			// map whose key is this type.
+			name: "a struct that compares field by field",
+			src:  "package lib\n\ntype Label struct{ Key, Value string }\n",
+			want: []string{"Label", "type:lib.Label", "equality function"},
+		},
+		{
+			// The closure and not only the root. cmd/link's defgotype walks
+			// from a struct descriptor into the type of every field, so a
+			// field whose own descriptor cannot be written stops the package
+			// even though the struct's could be.
+			name: "a struct holding a map",
+			src:  "package lib\n\ntype Table struct{ M map[string]int }\n",
+			want: []string{"Table", "type:lib.Table", "group type"},
 		},
 	}
 	for _, tt := range tests {

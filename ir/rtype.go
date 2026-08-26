@@ -43,22 +43,28 @@ import (
 //
 // # What cannot be named, and why it is refused rather than guessed
 //
-// An ir.Type is a size, an alignment and a pointer map, by the rule at the top
-// of type.go. Four kinds of Go type are distinguishable to the language and not
-// to that boundary:
+// An ir.Type carries what type.go's two rules let it carry, and a spelling
+// needs more. Three kinds of Go type are distinguishable to the language and
+// not spellable from an ir.Type:
 //
 //   - a channel's direction, so chan T and chan<- T reduce to one ir.Type;
 //   - a function's signature, so func(int) and func(string) reduce to one;
-//   - an interface's method set, so interface{ M() } and interface{ N() }
-//     reduce to one;
-//   - a struct field's tag and whether it is embedded, so struct{ A int } and
-//     struct{ A int "x" } reduce to one.
+//   - a literal interface's and a literal struct's contents, which are spelled
+//     out in full. An interface's spelling holds the signature of every method
+//     and a struct's holds the type of every field, so both reduce to the
+//     first case: a signature is not in the IR type.
+//
+// A struct's field tags used to be on this list and are not any more. type.go
+// carries them now, along with each field's package and whether it is
+// embedded. What is left for a struct is one case: gc spells an embedded field
+// that was renamed through a type alias as "struct{ Int = int }", and
+// ir.Converter unaliases, so the alias is gone before the name is asked for.
 //
 // For each of those, a name computed from the ir.Type would be the same name
 // for two different types. That is the deduplication failure specs/032 names,
 // and it is silent: the linker merges the two and the program reads one type's
 // descriptor for the other's values. So they are refused, and the refusal names
-// the field the IR does not carry. A defined type is exempt from all four,
+// the field the IR does not carry. A defined type is exempt from all of them,
 // because its name is its identity: type S func(int) is named main.S and no
 // signature is needed to say so.
 
@@ -212,19 +218,23 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 
 	case Interface:
 		if !t.EmptyIface {
-			// The method set is what would go between the braces, and
-			// specs/020-ir.md's boundary drops it. Two interfaces with
-			// different methods would share this name.
-			return fmt.Errorf("ir: an interface's method set is not in the IR type")
+			// What goes between the braces is each method's name and
+			// signature. The names are in the IR type and the signatures are
+			// not, so two interfaces whose methods differ only in signature
+			// would share this name.
+			return fmt.Errorf("ir: a literal interface's spelling holds the type of each method and a function's signature is not in the IR type")
 		}
 		b.WriteString("interface {}")
 		return nil
 
 	case Struct:
 		// A defined struct was answered above. What is left is a literal
-		// struct type, whose spelling holds each field's tag, and a tag is not
-		// in the IR type.
-		return fmt.Errorf("ir: a struct's field tags are not in the IR type")
+		// struct type, whose spelling holds the type of every field, so a
+		// field of function type reduces to the signature case. gc also
+		// spells an embedded field renamed through a type alias as
+		// "struct{ Int = int }", and Converter unaliases, so the fact that
+		// tells the two apart is gone before the name is asked for.
+		return fmt.Errorf("ir: a literal struct's spelling distinguishes an embedded field renamed through an alias, which is not in the IR type")
 
 	case Chan:
 		return fmt.Errorf("ir: a channel's direction is not in the IR type")

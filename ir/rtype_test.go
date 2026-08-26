@@ -174,8 +174,8 @@ func TestTypeNameRefusals(t *testing.T) {
 	}{
 		{"a channel", &Type{Kind: Chan, Elem: mustLayoutNamed(Int64, "int")}, "direction"},
 		{"a function", &Type{Kind: FuncKind}, "signature"},
-		{"an interface with methods", &Type{Kind: Interface}, "method set"},
-		{"a literal struct", &Type{Kind: Struct, Fields: []Field{{Name: "A", Type: mustLayoutNamed(Int64, "int")}}}, "field tags"},
+		{"an interface with methods", &Type{Kind: Interface}, "type of each method"},
+		{"a literal struct", &Type{Kind: Struct, Fields: []Field{{Name: "A", Type: mustLayoutNamed(Int64, "int")}}}, "embedded field renamed through an alias"},
 		{"a slice of channels", &Type{Kind: Slice, Elem: &Type{Kind: Chan, Elem: mustLayoutNamed(Int64, "int")}}, "direction"},
 		{"an untyped constant", mustLayoutNamed(Int64, "untyped int"), "no canonical name"},
 		{"a void", &Type{Kind: Void}, "no canonical name"},

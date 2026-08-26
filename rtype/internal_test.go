@@ -23,8 +23,29 @@ import (
 // when a refusal above is lifted: this is what each encoder does with a kind
 // it cannot describe, and it is a refusal rather than a plausible number.
 
+// structOf lays out a literal struct for the algorithm tests.
+func structOf(t *testing.T, fields ...ir.Field) *ir.Type {
+	t.Helper()
+	out := &ir.Type{Kind: ir.Struct, Fields: fields}
+	if err := ir.Layout(out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 func TestAlgAnswersForEveryKind(t *testing.T) {
-	str := &ir.Type{Kind: ir.String, Name: "string"}
+	str := &ir.Type{Kind: ir.String, Name: "string", Basic: "string"}
+	b := &ir.Type{Kind: ir.Uint8, Name: "uint8", Basic: "uint8"}
+	i64 := &ir.Type{Kind: ir.Int64, Name: "int64", Basic: "int64"}
+	twoStrings := structOf(t, ir.Field{Name: "A", Type: str}, ir.Field{Name: "B", Type: str})
+	oneString := structOf(t, ir.Field{Name: "A", Type: str})
+	twoBytes := structOf(t, ir.Field{Name: "A", Type: b}, ir.Field{Name: "B", Type: b})
+	// One byte then an eight-byte field leaves seven bytes of padding, which a
+	// memory comparison would read.
+	padded := structOf(t, ir.Field{Name: "A", Type: b}, ir.Field{Name: "B", Type: i64})
+	withSlice := structOf(t,
+		ir.Field{Name: "A", Type: i64},
+		ir.Field{Name: "B", Type: &ir.Type{Kind: ir.Slice, Elem: i64}})
 	for _, tc := range []struct {
 		what string
 		typ  *ir.Type
@@ -33,10 +54,19 @@ func TestAlgAnswersForEveryKind(t *testing.T) {
 		{"nothing", nil, algNone},
 		{"a void", &ir.Type{Kind: ir.Void}, algNone},
 		{"an invalid type", &ir.Type{Kind: ir.Invalid}, algNone},
-		// A struct compares field by field, because padding is not compared
-		// and a memory comparison would read it.
-		{"a struct", &ir.Type{Kind: ir.Struct}, algSpecial},
-		{"a tuple", &ir.Type{Kind: ir.Tuple}, algSpecial},
+		// A struct compares field by field whenever a field does not compare
+		// as memory, or is blank, or is followed by padding. One with no
+		// fields at all is nothing to compare and reaches memequal0.
+		{"an empty struct", &ir.Type{Kind: ir.Struct}, algMem},
+		{"a struct of two strings", twoStrings, algSpecial},
+		{"a struct of one string", oneString, algString},
+		{"a struct of two bytes", twoBytes, algMem},
+		{"a padded struct", padded, algSpecial},
+		{"a struct holding a slice", withSlice, algNone},
+		// A tuple has a struct's layout and so has a struct's algorithm. No
+		// tuple is ever compared, and answering as a struct is what keeps the
+		// two from drifting apart.
+		{"a tuple of two strings", &ir.Type{Kind: ir.Tuple, Fields: twoStrings.Fields}, algSpecial},
 		// The two interface layouts read their first word differently, so each
 		// has its own function and calling the other reads a function pointer
 		// at the wrong offset.
@@ -47,7 +77,7 @@ func TestAlgAnswersForEveryKind(t *testing.T) {
 		{"a slice", &ir.Type{Kind: ir.Slice}, algNone},
 		{"a channel", &ir.Type{Kind: ir.Chan}, algMem},
 		{"a string", str, algString},
-		{"an array of structs", &ir.Type{Kind: ir.Array, Len: 2, Elem: &ir.Type{Kind: ir.Struct}}, algSpecial},
+		{"an array of structs", &ir.Type{Kind: ir.Array, Len: 2, Elem: twoStrings}, algSpecial},
 		{"an array of slices", &ir.Type{Kind: ir.Array, Len: 2, Elem: &ir.Type{Kind: ir.Slice}}, algNone},
 		{"an array of strings", &ir.Type{Kind: ir.Array, Len: 2, Elem: str}, algSpecial},
 	} {
@@ -58,9 +88,12 @@ func TestAlgAnswersForEveryKind(t *testing.T) {
 }
 
 func TestEqualFuncRefusesWhatItCannotName(t *testing.T) {
-	// A struct needs the generated function specs/032 describes.
-	if _, _, err := equalFunc(&ir.Type{Kind: ir.Struct}); err == nil {
-		t.Error("a struct was given an equality function")
+	// A struct whose fields do not compare as one region of memory needs the
+	// generated function specs/032 describes.
+	str := &ir.Type{Kind: ir.String, Name: "string", Basic: "string"}
+	two := structOf(t, ir.Field{Name: "A", Type: str}, ir.Field{Name: "B", Type: str})
+	if _, _, err := equalFunc(two); err == nil {
+		t.Error("a struct of two strings was given an equality function")
 	}
 	// An interface with methods reaches runtime.interequal, which reads the
 	// first word as an *itab.
@@ -104,9 +137,9 @@ func TestAbiKindRefusesAnAmbiguousWord(t *testing.T) {
 }
 
 func TestKindTailRefusesWhatItCannotDescribe(t *testing.T) {
-	// A kind with no tail written.
-	if _, _, err := kindTail(&ir.Type{Kind: ir.Struct}); err == nil {
-		t.Error("a struct was given a tail")
+	// A kind with no header written.
+	if _, _, _, err := kindTail(&ir.Type{Kind: ir.Map}, "type:m", 64); err == nil {
+		t.Error("a map was given a header")
 	}
 	// An element with no canonical name stops the composite that holds it.
 	for _, tc := range []struct {
@@ -117,13 +150,35 @@ func TestKindTailRefusesWhatItCannotDescribe(t *testing.T) {
 		{"a pointer to a function", &ir.Type{Kind: ir.Ptr, Elem: &ir.Type{Kind: ir.FuncKind}}},
 		{"an array of channels", &ir.Type{Kind: ir.Array, Len: 2, Elem: &ir.Type{Kind: ir.Chan}}},
 	} {
-		if _, _, err := kindTail(tc.typ); err == nil {
-			t.Errorf("%s: was given a tail", tc.what)
+		if _, _, _, err := kindTail(tc.typ, "type:x", 64); err == nil {
+			t.Errorf("%s: was given a header", tc.what)
 		}
 	}
+	// A struct's fields are in the variable-length section rather than in the
+	// header, so a field whose type cannot be named stops kindData.
+	chans := &ir.Type{Kind: ir.Struct, Fields: []ir.Field{{Name: "A", Type: &ir.Type{Kind: ir.Chan}}}}
+	if _, _, _, err := kindData(chans, 64); err == nil {
+		t.Error("a struct of channels was given a field array")
+	}
 	// An array whose element does not lay out cannot name its slice type.
-	if _, _, err := kindTail(&ir.Type{Kind: ir.Array, Len: 2, Elem: &ir.Type{Kind: ir.Void}}); err == nil {
-		t.Error("an array of voids was given a tail")
+	if _, _, _, err := kindTail(&ir.Type{Kind: ir.Array, Len: 2, Elem: &ir.Type{Kind: ir.Void}}, "type:a", 64); err == nil {
+		t.Error("an array of voids was given a header")
+	}
+	// kindTailSize is what places the UncommonType, so a kind whose header it
+	// sizes differently from what kindTail builds would overlap the two.
+	// Descriptor checks that, and this checks the check is not vacuous.
+	for _, k := range []ir.Kind{ir.Ptr, ir.Slice, ir.Array, ir.Interface, ir.Struct, ir.Int64, ir.String} {
+		typ := &ir.Type{Kind: k, Len: 1, Elem: &ir.Type{Kind: ir.Int64, Name: "int", Basic: "int"}}
+		if err := ir.Layout(typ); err != nil {
+			continue
+		}
+		got, _, _, err := kindTail(typ, "type:x", 64)
+		if err != nil {
+			continue
+		}
+		if len(got) != kindTailSize(typ) {
+			t.Errorf("%s: kindTail built %d bytes and kindTailSize says %d", k, len(got), kindTailSize(typ))
+		}
 	}
 }
 
@@ -136,11 +191,28 @@ func TestEmittableRefusalsSurviveWithoutTheName(t *testing.T) {
 		typ  *ir.Type
 		want string
 	}{
-		{"a literal struct", &ir.Type{Kind: ir.Struct}, "field tags"},
 		{"a channel", &ir.Type{Kind: ir.Chan}, "direction"},
 		{"a function", &ir.Type{Kind: ir.FuncKind}, "signature"},
-		{"an interface with methods", &ir.Type{Kind: ir.Interface}, "method set"},
+		{"an interface with methods", &ir.Type{Kind: ir.Interface}, "type of each method"},
 		{"nothing", nil, "nil type"},
+		{
+			"a defined type whose method set nobody computed",
+			&ir.Type{Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int"},
+			"method set of p.T is not in the IR type",
+		},
+		{
+			"a pointer to one",
+			&ir.Type{Kind: ir.Ptr, Elem: &ir.Type{Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int"}},
+			"method set of p.T is not in the IR type",
+		},
+		{
+			"a defined type that has a method",
+			&ir.Type{
+				Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int",
+				Methods: []ir.Method{{Name: "String"}},
+			},
+			"the first is String",
+		},
 	} {
 		err := emittable(tc.typ)
 		if err == nil {

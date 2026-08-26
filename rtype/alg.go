@@ -17,11 +17,9 @@ import (
 // field points at. Both are reproduced here because both end up in bytes the
 // runtime reads.
 //
-// The set below is smaller than gc's. A struct never reaches this package, for
-// the reason the package comment gives, so the field-by-field rules that make
-// a struct's algorithm are not needed and are not written. What is needed is
-// the basic kinds, the pointer-shaped kinds, and an array, whose algorithm is
-// its element's.
+// The set is gc's: the basic kinds, the pointer-shaped kinds, an array, whose
+// algorithm is its element's, and a struct, whose algorithm is in struct.go
+// because it needs the field offsets to find the padding.
 type algKind uint8
 
 const (
@@ -105,10 +103,7 @@ func alg(t *ir.Type) algKind {
 	case ir.Array:
 		return arrayAlg(t)
 	case ir.Struct, ir.Tuple:
-		// Not reached: a struct is refused before its algorithm is asked for.
-		// The answer is still stated, because a caller that reached here with
-		// one would otherwise get a memory comparison over the padding.
-		return algSpecial
+		return structAlg(t)
 	case ir.Void, ir.Invalid:
 		return algNone
 	}

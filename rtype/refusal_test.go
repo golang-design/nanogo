@@ -41,30 +41,34 @@ func TestDescriptorRefusals(t *testing.T) {
 		want string
 	}{
 		{
-			// The largest refusal by count, and the one that also stops itabs:
-			// a defined type's method set is not in the IR type, so a
-			// descriptor for one would claim it has no methods.
-			"a defined type",
+			// ir.Converter sets Methods on every defined type, empty set
+			// included, so a defined type whose Methods is nil was built below
+			// the type boundary by hand. A descriptor written from it would
+			// claim a method set nobody established.
+			"a defined type whose method set nobody computed",
 			func(t *testing.T) *ir.Type {
-				return lay(t, &ir.Type{Kind: ir.Struct, Name: "bytes.Buffer"})
+				return lay(t, &ir.Type{Kind: ir.Struct, Name: "bytes.Buffer", PkgPath: "bytes"})
 			},
-			"method set",
+			"method set of bytes.Buffer is not in the IR type",
 		},
 		{
 			// A method with a pointer receiver belongs to the pointer's method
 			// set, so a pointer to a defined type carries one too.
 			"a pointer to a defined type",
 			func(t *testing.T) *ir.Type {
-				return lay(t, &ir.Type{Kind: ir.Ptr, Elem: &ir.Type{Kind: ir.Struct, Name: "bytes.Buffer"}})
+				return lay(t, &ir.Type{Kind: ir.Ptr, Elem: &ir.Type{Kind: ir.Struct, Name: "bytes.Buffer", PkgPath: "bytes"}})
 			},
-			"method set",
+			"method set of bytes.Buffer is not in the IR type",
 		},
 		{
+			// A literal struct's spelling holds each unexported field's
+			// package and distinguishes an embedded field renamed through an
+			// alias, and ir.Converter unaliases before it names.
 			"a literal struct",
 			func(t *testing.T) *ir.Type {
 				return lay(t, &ir.Type{Kind: ir.Struct, Fields: []ir.Field{{Name: "A", Type: intType(t)}}})
 			},
-			"field tags",
+			"embedded field renamed through an alias",
 		},
 		{
 			"a channel",
@@ -88,7 +92,7 @@ func TestDescriptorRefusals(t *testing.T) {
 		{
 			"an interface with methods",
 			func(t *testing.T) *ir.Type { return lay(t, &ir.Type{Kind: ir.Interface}) },
-			"method set",
+			"type of each method",
 		},
 		{
 			// int and int64 are one ir.Kind and two abi.Kinds, so a word with

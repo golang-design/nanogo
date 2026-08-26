@@ -155,12 +155,41 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 		return nil, err
 	}
 
-	tail, tailRelocs, err := kindTail(t)
+	// The five section markers of cmd/compile's writeType, whose comment draws
+	// the same picture:
+	//
+	//	0 .. A  internal/abi.Type
+	//	A .. B  the kind-specific header
+	//	B .. C  internal/abi.UncommonType, when the type has a name or a method
+	//	C .. D  the variable-length data the header points at
+	//	D .. E  the method array
+	//
+	// The order is not free. UncommonType has to start pointer-aligned and
+	// Moff is measured from B, so a header that grew after the UncommonType
+	// was written would move the methods without moving the offset that finds
+	// them.
+	a := TypeSize
+	b := a + kindTailSize(t)
+	c := b
+	if hasUncommon(t) {
+		c = b + uncommonSize
+	}
+	body, bodyRelocs, bodySyms, err := kindData(t, c)
 	if err != nil {
 		return nil, err
 	}
-	data := make([]byte, TypeSize+len(tail))
-	copy(data[TypeSize:], tail)
+	d := c + len(body)
+
+	tail, tailRelocs, tailSyms, err := kindTail(t, name, c)
+	if err != nil {
+		return nil, err
+	}
+	if len(tail) != b-a {
+		return nil, fmt.Errorf("rtype: %s has a %d byte header and kindTailSize says %d", t, len(tail), b-a)
+	}
+	data := make([]byte, d)
+	copy(data[a:], tail)
+	copy(data[c:], body)
 
 	h, err := Hash(t)
 	if err != nil {
@@ -191,6 +220,22 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 
 	out := []Symbol{{}}
 	relocs := tailRelocs
+	relocs = append(relocs, bodyRelocs...)
+	out = append(out, tailSyms...)
+	out = append(out, bodySyms...)
+
+	if hasUncommon(t) {
+		un, unRelocs, unSyms, err := uncommonTail(t, d-c)
+		if err != nil {
+			return nil, err
+		}
+		copy(data[b:], un)
+		for _, r := range unRelocs {
+			r.Off += int32(b)
+			relocs = append(relocs, r)
+		}
+		out = append(out, unSyms...)
+	}
 
 	// The pointer bitmask, from ir.Type.PtrBits and not recomputed.
 	// specs/032 states the reason: two computations of one fact give two
@@ -239,6 +284,72 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 	return out, nil
 }
 
+// Referenced returns the types whose descriptors t's descriptor points at.
+//
+// A descriptor is not a leaf. A slice names its element, an array names its
+// element and the slice type of that element, and a struct names the type of
+// every field. cmd/link resolves each of those by name, and its DWARF pass
+// walks the same edges to build a debug entry, so a package that emits a
+// descriptor owes every descriptor that one reaches. gc closes the set the
+// same way, in writeType, by calling itself on each edge before it writes the
+// bytes that name them.
+//
+// The order is the order the fields are written in, so a caller that walks
+// this set produces the same object on every run (specs/053-determinism.md).
+func Referenced(t *ir.Type) ([]*ir.Type, error) {
+	if t == nil {
+		return nil, fmt.Errorf("rtype: the references of a nil type")
+	}
+	switch t.Kind {
+	case ir.Ptr, ir.Slice:
+		return []*ir.Type{t.Elem}, nil
+	case ir.Array:
+		st, err := SliceOf(t.Elem)
+		if err != nil {
+			return nil, err
+		}
+		return []*ir.Type{t.Elem, st}, nil
+	case ir.Struct:
+		out := make([]*ir.Type, 0, len(t.Fields))
+		for _, f := range t.Fields {
+			out = append(out, f.Type)
+		}
+		return out, nil
+	}
+	return nil, nil
+}
+
+// RuntimeOwned reports whether the runtime already defines t's descriptor.
+//
+// gc emits the descriptor of a predeclared type, of unsafe.Pointer, of any, of
+// error and of a slice of one of those only when it is compiling package
+// runtime, and every other package refers to the runtime's copy
+// (cmd/compile/internal/reflectdata.writtenByWriteBasicTypes). The runtime is
+// in every link, so the reference always resolves.
+//
+// Reproducing the rule is not an optimisation. A descriptor nanogo emits for
+// one of these is a second definition of a symbol that already exists, and
+// while dupok makes that legal it makes the two copies' bytes a thing that can
+// differ without anyone noticing.
+func RuntimeOwned(t *ir.Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.Kind == ir.Slice && t.Name == "" {
+		return RuntimeOwned(t.Elem)
+	}
+	if t.Kind == ir.Interface && t.Name == "" && t.EmptyIface {
+		// any, spelled as a type literal.
+		return true
+	}
+	if t.Name == "" || t.PkgPath != "" {
+		return false
+	}
+	// A name with no import path is the universe's: a predeclared type, or
+	// error, whose descriptor the runtime owns as well.
+	return !defined(t) || t.Name == "error"
+}
+
 // Hash returns the type hash gc computes for t.
 //
 // specs/032 says the hash "must match what the runtime computes". The runtime
@@ -268,12 +379,14 @@ func emittable(t *ir.Type) error {
 	if t == nil {
 		return fmt.Errorf("rtype: a descriptor for a nil type")
 	}
-	if hasMethodSet(t) {
-		return fmt.Errorf("rtype: %s may have methods and a method set is not in the IR type", t)
+	ms, err := methodSet(t)
+	if err != nil {
+		return err
+	}
+	if len(ms) > 0 {
+		return methodRefusal(t, ms)
 	}
 	switch t.Kind {
-	case ir.Struct:
-		return fmt.Errorf("rtype: a struct's field tags are not in the IR type")
 	case ir.Chan:
 		return fmt.Errorf("rtype: a channel's direction is not in the IR type")
 	case ir.FuncKind:
@@ -282,26 +395,17 @@ func emittable(t *ir.Type) error {
 		return fmt.Errorf("rtype: a map descriptor names the runtime's group type, which specs/032 does not carry")
 	case ir.Interface:
 		if !t.EmptyIface {
-			return fmt.Errorf("rtype: an interface's method set is not in the IR type")
+			// The method set is in the IR type now. What is not is the type of
+			// each method: an InterfaceType's Imethod carries a TypeOff to the
+			// descriptor of the method's signature, and a function's signature
+			// does not cross the type boundary.
+			return fmt.Errorf("rtype: an interface descriptor names the type of each method and a function's signature is not in the IR type")
 		}
 	}
 	if words := t.PtrBytes() / ir.PtrSize; words > maxPtrmaskBytes*8 {
 		return fmt.Errorf("rtype: %d pointer words needs the on-demand mask, which is not built", words)
 	}
 	return nil
-}
-
-// hasMethodSet reports whether t may carry methods.
-//
-// A defined type may, and so may a pointer to one, because a method with a
-// pointer receiver belongs to the pointer's method set. Everything else is
-// given no method by the language, so its descriptor has no UncommonType tail
-// and nothing is being claimed by leaving one out.
-func hasMethodSet(t *ir.Type) bool {
-	if defined(t) {
-		return true
-	}
-	return t.Kind == ir.Ptr && defined(t.Elem)
 }
 
 // predeclaredKinds is the name and IR kind of every predeclared type that has
@@ -347,6 +451,17 @@ func defined(t *ir.Type) bool {
 	}
 	k, ok := predeclaredKinds[t.Name]
 	return !ok || k != t.Kind
+}
+
+// definedIn returns the import path a defined type's descriptor is owed by.
+//
+// It is empty for a type this package cannot attribute, which is a type built
+// below the type boundary by hand.
+func definedIn(t *ir.Type) string {
+	if !defined(t) {
+		return ""
+	}
+	return t.PkgPath
 }
 
 // abiKinds maps an IR kind to internal/abi.Kind, for the kinds where one IR
@@ -396,9 +511,18 @@ const (
 // it gets here, and it is written anyway: this is a field where a plausible
 // wrong answer is silent.
 func abiKind(t *ir.Type) (uint8, error) {
+	// ir.Type.Basic and not ir.Type.Name. A defined type has a name of its own
+	// and the underlying spelling is what decides the kind, so type
+	// ArchFamilyType int is Int and not Int64. Name is the fallback for a type
+	// built below the type boundary rather than converted from the checker,
+	// where the predeclared spelling is the name.
+	basic := t.Basic
+	if basic == "" {
+		basic = t.Name
+	}
 	switch t.Kind {
 	case ir.Int64:
-		switch t.Name {
+		switch basic {
 		case "int":
 			return abiInt, nil
 		case "int64":
@@ -406,7 +530,7 @@ func abiKind(t *ir.Type) (uint8, error) {
 		}
 		return 0, fmt.Errorf("rtype: %s is int or int64 and the IR type does not say which", t)
 	case ir.Uint64:
-		switch t.Name {
+		switch basic {
 		case "uint":
 			return abiUint, nil
 		case "uint64":
@@ -423,12 +547,15 @@ func abiKind(t *ir.Type) (uint8, error) {
 // tflag returns the descriptor's TFlag byte.
 func tflag(t *ir.Type) (uint8, error) {
 	var f uint8
-	// A predeclared basic type has a name and an UncommonType with an empty
-	// package path, which is why the two flags move together here. gc sets
-	// Uncommon whenever the type has a symbol or a method, and a type with a
-	// method does not reach this package at all.
 	if t.Name != "" {
-		f |= tflagNamed | tflagUncommon
+		f |= tflagNamed
+	}
+	// The flag and the tail are one decision. Set with no tail, the runtime
+	// reads sixteen bytes past the end of the symbol; clear with a tail,
+	// reflect reports no package path for a type that has one. hasUncommon is
+	// what Descriptor places the section by, so it is what sets the bit.
+	if hasUncommon(t) {
+		f |= tflagUncommon
 	}
 	name, err := ir.TypeNameString(t)
 	if err != nil {
@@ -455,8 +582,33 @@ func tflag(t *ir.Type) (uint8, error) {
 	return f, nil
 }
 
-// kindTail returns the kind-specific fields that follow internal/abi.Type.
-func kindTail(t *ir.Type) ([]byte, []Reloc, error) {
+// kindTailSize is the size of the kind-specific header that follows
+// internal/abi.Type.
+//
+// It is a function of the kind alone and is answered before the header is
+// built, because the UncommonType that follows the header has to be placed
+// before the header can point past it. Descriptor checks the two against each
+// other, so a kind added to one and not the other is a build failure rather
+// than a descriptor whose sections overlap.
+func kindTailSize(t *ir.Type) int {
+	switch t.Kind {
+	case ir.Ptr, ir.Slice:
+		return 8
+	case ir.Array:
+		return 24
+	case ir.Interface:
+		return 32
+	case ir.Struct:
+		return structTailSize
+	}
+	return 0
+}
+
+// kindTail returns the kind-specific header that follows internal/abi.Type.
+//
+// self is the descriptor's own symbol and dataOff is the start of the
+// variable-length section, for a header whose fields point into it.
+func kindTail(t *ir.Type, self string, dataOff int) ([]byte, []Reloc, []Symbol, error) {
 	elemRef := func(off int32, e *ir.Type) (Reloc, error) {
 		name, err := ir.TypeSymbol(e)
 		if err != nil {
@@ -468,42 +620,70 @@ func kindTail(t *ir.Type) ([]byte, []Reloc, error) {
 	case ir.Ptr, ir.Slice:
 		r, err := elemRef(TypeSize, t.Elem)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return make([]byte, 8), []Reloc{r}, nil
+		return make([]byte, 8), []Reloc{r}, nil, nil
 
 	case ir.Array:
 		// Elem, then the slice type of the same element, then the length.
 		// reflect reads Slice for reflect.Value.Slice on an array.
 		e, err := elemRef(TypeSize, t.Elem)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		st := &ir.Type{Kind: ir.Slice, Elem: t.Elem}
-		if err := ir.Layout(st); err != nil {
-			return nil, nil, err
-		}
-		s, err := elemRef(TypeSize+8, st)
+		st, err := SliceOf(t.Elem)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		sl, err := elemRef(TypeSize+8, st)
+		if err != nil {
+			return nil, nil, nil, err
 		}
 		tail := make([]byte, 24)
 		binary.LittleEndian.PutUint64(tail[16:], uint64(t.Len))
-		return tail, []Reloc{e, s}, nil
+		return tail, []Reloc{e, sl}, nil, nil
 
 	case ir.Interface:
 		// An empty interface: a nil package path and an empty method slice.
 		// The three words of the slice are its pointer, length and capacity,
 		// and all three are zero.
-		return make([]byte, 32), nil, nil
+		return make([]byte, 32), nil, nil, nil
+
+	case ir.Struct:
+		return structTail(t, self, dataOff)
 	}
 	if noTail[t.Kind] {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	// A struct, a map, a channel, a function and an interface with methods all
-	// have a tail this package does not write. Answering "no tail" for one of
+	// A map, a channel, a function and an interface with methods all have a
+	// header this package does not write. Answering "no header" for one of
 	// them would produce a descriptor the runtime reads past the end of.
-	return nil, nil, fmt.Errorf("rtype: no descriptor tail for %s", t.Kind)
+	return nil, nil, nil, fmt.Errorf("rtype: no descriptor header for %s", t.Kind)
+}
+
+// kindData returns the variable-length section the kind-specific header points
+// at, which starts at base within the descriptor.
+//
+// Only a struct has one today. A function's parameter array and an interface's
+// method array live here too, and both are refused before they get this far.
+func kindData(t *ir.Type, base int) ([]byte, []Reloc, []Symbol, error) {
+	if t.Kind == ir.Struct {
+		return structFields(t, base)
+	}
+	return nil, nil, nil, nil
+}
+
+// SliceOf returns the IR type of a slice whose element is t.
+//
+// An array's descriptor names the slice type of the same element, so a package
+// that emits one owes the other. The type is built here rather than by the
+// caller so that the two agree on the layout, which ir.Layout computes.
+func SliceOf(elem *ir.Type) (*ir.Type, error) {
+	st := &ir.Type{Kind: ir.Slice, Elem: elem}
+	if err := ir.Layout(st); err != nil {
+		return nil, err
+	}
+	return st, nil
 }
 
 // noTail is the kinds whose descriptor is internal/abi.Type and nothing more.

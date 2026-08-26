@@ -891,7 +891,7 @@ func TestLowerRefusals(t *testing.T) {
 		// wanted.
 		{"make of a map", `func f() map[int]int { return make(map[int]int) }`, OMake, "descriptor"},
 		{"make of a channel", `func f() chan int { return make(chan int) }`, OMake, "descriptor"},
-		{"new of a literal struct", `func f() *struct{ A int } { return new(struct{ A int }) }`, ONew, "field tags"},
+		{"new of a literal struct", `func f() *struct{ A int } { return new(struct{ A int }) }`, ONew, "embedded field renamed through an alias"},
 		{"new of a function type", `func f() *func() { return new(func()) }`, ONew, "signature"},
 		{"a slice literal of channels", `func f() []chan int { return []chan int{nil} }`, OCompositeLit, "direction"},
 		{"len of a map", `func f(m map[int]int) int { return len(m) }`, OLen, "the length of map"},
