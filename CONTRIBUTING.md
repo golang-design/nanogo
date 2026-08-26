@@ -36,12 +36,13 @@ Two of them are `darwin/arm64` assembly and build nowhere else, which is
 
 ## The gates
 
-Eight jobs run in CI, and each one is runnable locally.
+Nine jobs run in CI, and each one is runnable locally.
 
 | Job | Command | What it protects |
 | --- | --- | --- |
 | `test` | `go test ./...` and `go test -race ./...`, on linux and macos | correctness |
 | `go test corpus` | `go test ./internal/gotest/` on an arm64 runner | that nanogo still compiles what it compiled, against Go's own test corpus |
+| `probe corpus` | `go test ./internal/audit/` on an arm64 runner | that the capability claims in the documentation still match the compiler |
 | `cross-compile` | `GOOS=... GOARCH=... go build ./... && go vet ./...` | that the compiler builds for every host, whatever it emits |
 | `gofmt` | `gofmt -l .`, spikes included | style |
 | `coverage` | see below | that no package is carried by another |
@@ -120,9 +121,20 @@ Three documents state capabilities and all three must agree with the corpus:
 `README.md`, `doc.go`, and `driver/help.go`, whose text `driver/help_test.go`
 pins phrase by phrase.
 
-No gate enforces this. A gate over prose was tried and removed, because it
-failed contributors on wording rather than on truth. The corpus is evidence a
-reviewer can run in seconds, which is the part that was missing.
+The `probe corpus` job gates this, and it gates behaviour rather than prose.
+A gate over prose was tried and removed, because it failed contributors on
+wording rather than on truth. What CI compares instead is
+[`internal/audit/testdata/ratchet.txt`](internal/audit/testdata/ratchet.txt),
+a checked-in record of how each probe was classified, against a fresh sweep.
+
+A probe that moves from refused to working fails the job. That reads as
+backwards and is the whole point: the sentence that described the old refusal
+is now wrong in three documents, and the job is what makes somebody read them.
+Refresh the ratchet and correct the prose in the same change, and say in the
+commit message which claim moved.
+
+A probe that moves the other way, or a refusal that starts producing a wrong
+answer, is a regression and fails for the ordinary reason.
 
 ## Environment variables the tests read
 
