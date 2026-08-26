@@ -44,12 +44,19 @@ func TestHelpStatesTheLimits(t *testing.T) {
 		LogEnv,
 		"-fallback",
 		"specs/050-driver.md",
-		// The three failures with no diagnostic. A user meets these as a
-		// crash or as a wrong answer, so the help has to name them.
+		// The failures with no diagnostic. A user meets these as a crash
+		// or as a wrong answer, so the help has to name them.
 		"What nanogo does not announce",
 		"wider than four machine registers",
 		"go:embed",
 		"name offset out of range",
+		// The corpus records three probes as wrong, and this is the
+		// third. probes/buildinfo-named compiles and then disagrees
+		// with gc, so it is a wrong answer like the two above and it
+		// needs the same pin. Without it, writing the modinfo line
+		// would fail no documentation test and this sentence would be
+		// left describing a limitation that had gone.
+		"modinfo",
 		// nanogo build, and the three limits a user must not discover by
 		// hitting them: one architecture, whose standard library it is,
 		// and who writes the executable.
