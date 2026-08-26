@@ -89,7 +89,7 @@ believed.
 | [013](013-generics.md) | Generics | `draft` | full stenciling; the stenciler is not written |
 | [014](014-package-loader.md) | Package loader | `in progress` | `go list` at G1, direct resolution at G2 |
 | [015](015-export-data.md) | Export data | `in progress` | `gc`-compatible; both directions work, a generic declaration is refused |
-| [016](016-directives-and-pragmas.md) | Directives and pragmas | `draft` | the complete `//go:` table; nothing reads one yet |
+| [016](016-directives-and-pragmas.md) | Directives and pragmas | `in progress` | the complete `//go:` table; fourteen verbs are recorded and no pass reads one |
 
 ### Middle end
 

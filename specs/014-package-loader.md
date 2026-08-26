@@ -21,8 +21,7 @@ G1 is allowed to ask the `go` command. G2 is not.
 
 The G1 half is built and gated. `GoList` implements the interface below,
 `loader` is above the 90% coverage gate, and the constraint evaluator agrees
-with
-`go/build` over the corpora at the end of this file.
+with `go/build` over the corpora at the end of this file.
 
 The G2 half is not built. There is no `go.mod` reader, no minimal version
 selection, and no import resolution against the module cache or `vendor/`. The
@@ -35,11 +34,14 @@ it is the piece a differential corpus can exercise with no compiler present. It
 was built in M0 for that reason, ahead of the milestone
 [003](003-sequencing.md) placed it in.
 
-**Nothing above the loader calls it yet.** No package outside `loader` imports
-it. In hosted mode the `go` command has already resolved the graph and hands the
-driver a file list, so the loader's first consumer is whole-world mode. This is
-worth writing down: the package is proved against `go list` and against
-`go/build`, not against a compiler that depends on it.
+**The G1 half has two consumers and neither is the compile path.**
+`driver/build.go` calls `loader.GoList` to resolve the graph `nanogo build` was
+given a pattern for, and `internal/gotest` takes its build constraints from
+`loader.Context`. Nothing else imports the package. Hosted mode does not: under
+`-toolexec` the `go` command has already resolved the graph and hands the
+driver one package's file list on the command line, so the loader is not in
+that path at all. Whole-world mode is the consumer that will put it there, and
+that is G2 work.
 
 ## G1: ask the toolchain
 
@@ -48,23 +50,20 @@ package graph with file lists, import maps, build-tag decisions, and the path to
 each dependency's compiled archive. The `go` command has already applied module
 resolution, vendoring, build constraints, and file suffix rules.
 
-`-e` is not optional and an earlier draft of this spec omitted it. Without it,
-one unresolvable import makes the `go` command exit before printing anything,
-so the requirement below that a per-package error must not fail the whole load
-is unreachable. With it, the error arrives attached to the package it belongs
-to, which is where a compiler can report it.
+`-e` is not optional. Without it, one unresolvable import makes the `go`
+command exit before printing anything, so the requirement below that a
+per-package error must not fail the whole load is unreachable. With it, the
+error arrives attached to the package it belongs to, which is where a compiler
+can report it.
 
-This is not a placeholder to be embarrassed about. It is the correct dependency
-at G1 and it lets M1 through M6 in [003](003-sequencing.md) proceed without a
-module system.
+Asking the toolchain is the correct dependency at G1, and it lets M1 through M6
+in [003](003-sequencing.md) proceed without a module system.
 
-**The spec offered `golang.org/x/tools/go/packages` as a wrapper over the same
-call, to be used where its convenience is worth the dependency. It is not used,
-and it should not be.** `go.mod` declares no requirements at all. A front end
-that depends on a tooling module has one more module to compile before it can
-compile itself, which is a cost G1 pays for convenience G1 does not need.
-`GoList` runs the `go` command and decodes the JSON stream itself, in 242 lines.
-This was found by reading `go.mod` during this audit.
+**`golang.org/x/tools/go/packages` wraps the same call and is not used.**
+`go.mod` declares no requirements at all. A front end that depends on a tooling
+module has one more module to compile before it can compile itself, which is a
+cost G1 pays for convenience G1 does not need. `GoList` runs the `go` command
+and decodes the JSON stream itself, in 242 lines.
 
 The seam is one interface, and it is the whole reason this is a spec:
 
@@ -156,7 +155,7 @@ select neither branch. nanogo claims to be `gc`-compatible everywhere else
 ### Two questions, two methods
 
 "Do this file's build constraints match" and "is this file in the package" are
-different questions, and conflating them cost a red CI run.
+different questions, and the loader answers each with its own method.
 
 | Method | Question | Oracle |
 | --- | --- | --- |
@@ -178,11 +177,11 @@ blank or dot name, and a text search gets at least one of those wrong. The parse
 is not wasted in the compiler proper, since a file that reaches this point is
 one nanogo is about to parse anyway.
 
-**This was found by CI on linux and could not be found on darwin.** The file
-that exposed it is
+**That disagreement is invisible on darwin.** The file that exposes it is
 `crypto/internal/sysrand/internal/seccomp/seccomp_linux.go`, whose `_linux`
-suffix excludes it on darwin before its imports are ever read. It is the
-argument for the two-platform test matrix, written down.
+suffix excludes it on darwin before its imports are ever read, so only a linux
+run sees it. It is the argument for the two-platform test matrix, written
+down.
 
 ### Import resolution order
 
@@ -204,11 +203,12 @@ in one binary and their symbols must not collide.
 
 ## Testing
 
-Two corpora, and they are not interchangeable. An earlier draft of this spec
-asked for one differential against `go list` "over the whole distribution",
-which is not achievable: **`go list` is an oracle only for its own `GOROOT`.**
-Pointed at a newer checkout of the Go repository than the installed toolchain,
-it answers about the toolchain instead, and the comparison is meaningless.
+Two corpora, and they are not interchangeable, because **`go list` is an oracle
+only for its own `GOROOT`.** Pointed at a newer checkout of the Go repository
+than the installed toolchain, it answers about the toolchain instead, and the
+comparison is meaningless. One differential against `go list` over the whole
+distribution is therefore not achievable, and asking for one is asking for a
+comparison with no meaning.
 
 | Corpus | Oracle | What it proves |
 | --- | --- | --- |
@@ -240,7 +240,7 @@ The measured results, with `NANOGO_REQUIRE_CORPUS=1` set:
 | Per-file constraints against `go/build.MatchFile` | 6,821 files per platform, 0 mismatches, on `linux/amd64` and on `darwin/arm64` |
 | `crypto` under `-tags purego` | 599 files, 0 mismatches |
 | Package-level partition | 765 directories and 6,560 files on `linux/amd64`, 762 and 6,564 on `darwin/arm64` |
-| `go list` agreement | 524 packages, 6,966 files, 0 mismatches: 379 standard library packages and 145 of nanogo's own |
+| `go list` agreement | 536 packages, 7,128 files, 0 mismatches: 379 standard library packages and 157 of nanogo's own. This is the count `internal/hygiene/testdata/facts.json` gates as `loader.golist.packages` |
 
 ### One deliberate difference from `go/build`
 
@@ -252,3 +252,37 @@ This is intentional. A syntax error belongs to the parser
 that reported it would report it worse, and would have to parse every file twice.
 The consequence is that a corpus walk skips `testdata` directories, where
 deliberately broken files live.
+
+## What was wrong
+
+**The spec said no package outside `loader` imports it.** That was true when
+the loader had no caller above it and stopped being true when `nanogo build`
+landed: `driver/build.go` resolves its package graph through `loader.GoList`,
+and `internal/gotest` reads its build constraints from `loader.Context`. The
+claim the sentence was making, that the package is proved against `go list` and
+`go/build` rather than against a compiler that depends on it, still holds for
+the compile path, which the loader is not in.
+
+**The `go list` agreement was recorded at 524 packages and 6,966 files.** It is
+536 and 7,128, and the nanogo half moved from 145 packages to 157 as the
+repository grew. The package count is gated, so the prose is the half that
+drifted.
+
+**`-e` was omitted from the `go list` invocation.** Without it one unresolvable
+import makes the `go` command exit before printing anything, which makes the
+per-package error requirement unreachable.
+
+**The spec offered `golang.org/x/tools/go/packages` as a wrapper worth taking
+where its convenience paid.** It is not taken and should not be: `go.mod`
+declares no requirements, and a front end that depends on a tooling module has
+one more module to compile before it can compile itself.
+
+**The spec asked for one differential against `go list` over the whole
+distribution.** `go list` answers only about its own `GOROOT`, so pointed at a
+newer checkout it compares the toolchain with itself. The corpus was split in
+two, and only the `go/build.MatchFile` half runs against a tree the installed
+`go` does not know.
+
+**`MatchFile` and `IncludeFile` were one method.** Folding the cgo rule into
+the constraint evaluator was the shortcut, and the two methods above are what
+replaced it. CI on linux found it; a darwin-only run could not have.

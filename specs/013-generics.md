@@ -126,7 +126,7 @@ A stenciled body is an ordinary monomorphic function. Nothing downstream sees a
 generic at all: not [020](020-ir.md), not [021](021-ssa-construction.md), not
 escape analysis, not the register allocator. There is no second path to be wrong on.
 
-## What it costs, stated plainly
+## What it costs
 
 | Cost | Size | Mitigation |
 | --- | --- | --- |
@@ -214,7 +214,10 @@ of the ported upstream test files and it runs. The other three wait on a
 stenciler and cannot be written before one exists.
 
 - Go's `test/typeparam` corpus, which is the reference implementation's own
-  generics suite, run under [004](004-conformance.md) L2.
+  generics suite, run under [004](004-conformance.md) L2. It is not vendored
+  yet: `internal/gotest/testdata/go/test` holds the 356 top-level files of
+  `test/` and none of its subdirectories, so a stenciler brings the corpus with
+  it.
 - Instantiation set closure: for a corpus of generic programs, assert the
   discovered set matches a hand-computed expected set. This is the part that
   fails silently by being too small.

@@ -1,6 +1,6 @@
 ---
 title: "Directives and pragmas: the comments that change code generation"
-status: draft
+status: in progress
 layer: front end
 gate: "G1 for the subset nanogo uses, G3 for all of it"
 depends_on:
@@ -30,12 +30,23 @@ consumer:
 | The parser accumulates directives and binds them to the declaration that follows | built |
 | The parser hands back a directive that no declaration claimed, so the handler can reject it | built |
 | `ir.Func` carries the directives of the declaration it was built from | built |
-| The driver's handler records the verb and its position | built: `driver/pragma.go` |
+| The driver's handler records fourteen verbs and their positions | built: `driver/pragma.go`'s `pragmaVerb` |
 | A misplaced directive is an error | built: `newPragmaHandler` and `checkDirectives` |
 | Any pass reads a directive | **not built** |
 
-`ir.Func.Pragma` now carries a `*driver.pragma` for a function that was marked,
-and nothing below reads it. The chain is complete except at its far end, and
+The fourteen are `//go:build`, `noescape`, `norace`, `nosplit`, `noinline`,
+`nocheckptr`, `systemstack`, `nowritebarrier`, `nowritebarrierrec`,
+`yeswritebarrierrec`, `cgo_unsafe_args`, `uintptrkeepalive`, `uintptrescapes`
+and `registerparams`. Three verbs the tables below name are absent:
+**`//go:linkname`**, `//go:notinheap` and `//go:noabiwrap`. A verb the driver
+does not recognise maps to no flag, so it is neither recorded nor reportable as
+misplaced. For the last two that costs nothing, because honouring them costs
+nothing. For `//go:linkname` it is the gap this spec's opening paragraph
+describes: a `//go:linkname` in a package nanogo compiles is a comment, and the
+symbol it was meant to bind keeps its declared name.
+
+`ir.Func.Pragma` carries a `*driver.pragma` for a function that was marked, and
+nothing below reads it. The chain is complete except at its far end, and
 `driver.TestNosplitIsStillDropped` gates that end: two packages that differ
 only by a `//go:nosplit` must produce the same object until somebody makes one
 of them not.
@@ -45,13 +56,11 @@ of them not.
 [010](010-scanner-and-positions.md) routes the comment to the parser with its
 position. The parser attaches it to the declaration that follows.
 
-The spec then had [012](012-type-checking.md) copy the directive onto the object
-when the object is created. That is not what the code does. The directive
-travels on the syntax declaration into `ir.Func.Pragma`, and the checker never
-sees one. This was found by grepping `types2` for `Pragma` during this audit,
-which returns one hit, and that hit is upstream's own code. The IR is the better
-place for the same reason [012](012-type-checking.md) gives for layout: the
-consumers of a directive are all below the checker.
+The directive then travels on the syntax declaration into `ir.Func.Pragma`.
+The checker never sees one: `types2` holds a single occurrence of the word
+`Pragma` and it is upstream's own code. The IR is the right place for the same
+reason [012](012-type-checking.md) gives for layout, that the consumers of a
+directive are all below the checker.
 
 Two rules:
 
@@ -88,10 +97,14 @@ recorded nor reported, which makes it a comment wherever it stands on a line of
 its own. That is deliberate for the release-skew reason above, and the missing
 half is the error in nanogo's own source and the warning elsewhere.
 
-The corpus proves both halves of rule 1: `test/directive.go` and
-`test/directive2.go` were accepted in full before this, which
-[004](004-conformance.md)'s harness classes as `missed`, and they now report
-the same message at the same twenty positions as `go tool compile`.
+The corpus carries rule 1 in `test/directive.go` and `test/directive2.go`,
+which annotate 23 misplaced directives between them and which
+[004](004-conformance.md)'s harness now classes as `rejected` rather than
+`missed`. What `rejected` proves is narrower than the file looks: the harness
+compares the first error's line only, because `gc` collapses several errors on
+one line and nanogo stops after ten, so comparing the whole set would compare
+two reporting policies. The positions themselves are pinned one at a time by
+`driver.TestMisplacedDirectiveIsRejected`, whose expected lines are `gc`'s.
 
 ## The table
 
@@ -106,7 +119,7 @@ Getting one of these wrong produces a program that is wrong, not slow.
 | `//go:nowritebarrierrec` | The same, transitively through calls. | [034](034-write-barriers.md) |
 | `//go:yeswritebarrierrec` | Stops the recursive check above. | [034](034-write-barriers.md) |
 | `//go:systemstack` | Must run on the system stack; calling it from a user stack is an error the compiler inserts a check for. | [035](035-goroutines-and-stack-growth.md) |
-| `//go:linkname a b` | Binds local symbol `a` to external symbol `b`, in either direction. | [032](032-type-descriptors-and-itabs.md) |
+| `//go:linkname a b` | Binds local symbol `a` to external symbol `b`, in either direction. Not recognised by `pragmaVerb`, so not recorded either. | [032](032-type-descriptors-and-itabs.md) |
 | `//go:uintptrescapes` | A `uintptr` argument keeps the referent alive across the call. | [023](023-escape-analysis.md) |
 | `//go:uintptrkeepalive` | The same, without forcing escape. | [023](023-escape-analysis.md) |
 | `//go:cgo_unsafe_args` | Argument area may be addressed as one block. | out of scope; [000](000-decisions.md) decision 8 |
@@ -118,16 +131,13 @@ failure mode at run time is a stack overflow in code that cannot grow the stack,
 inside the scheduler. [035](035-goroutines-and-stack-growth.md) owns the
 computation.
 
-It is also the one row where the code contradicts this spec rather than lagging
-it. `ssagen/prologue.go` sets a function's `nosplit` flag from the frame size
-and from whether the function is a leaf, and never from a directive. Omitting
-the check for a function that cannot overflow is sound on its own terms. The
-consequence is that a `//go:nosplit` on any other function is dropped. It is no
-longer dropped in silence at the point it is written, because rule 1 now
-reports a directive that stands in the wrong place, but a directive in the
-right place still reaches no consumer. The chain-depth computation does not
-exist at all. This was found by reading `prologue.go` for its use of the word
-during this audit.
+`ssagen/prologue.go` decides `nosplit` without reading the directive:
+`f.nosplit = f.size == 0 || (f.leaf && f.size < stackSmall)`. Omitting the
+check for a function that cannot overflow is sound on its own terms, and the
+consequence is that a `//go:nosplit` on any other function is dropped. It is
+not dropped in silence when it stands in the wrong place, because rule 1
+reports that, but a directive in the right place reaches no consumer. The
+chain-depth computation does not exist at all.
 
 `//go:linkname` deserves another. It breaks the package boundary and the
 standard library uses it heavily, in both directions: pulling a runtime symbol
@@ -147,14 +157,20 @@ need not exist in the type checker's world at all.
 ### Optimisation hints, safe to ignore
 
 nanogo may ignore every directive in this group and still be correct. It must
-still *parse* them and must not error on them.
+not error on one, which it satisfies in two ways: a recognised verb is recorded
+and no pass reads it, and an unrecognised verb stays a comment.
 
-| Directive | Effect if honoured |
-| --- | --- |
-| `//go:noinline` | Suppress inlining. Not honoured: inlining is not built ([024](024-inlining-and-devirtualization.md)), so there is nothing to suppress. |
-| `//go:norace`, `//go:nocheckptr` | Suppress instrumentation nanogo does not implement. Parsed, no effect. |
-| `//go:notinheap` | Type is not heap-allocated. Parsed; affects write barrier elision only as an optimisation. |
-| `//go:registerparams`, `//go:noabiwrap` | Historical or ABI-transition directives. Parsed, no effect. |
+| Directive | Recognised | Effect if honoured |
+| --- | --- | --- |
+| `//go:noinline` | yes | Suppress inlining. Not honoured: inlining is not built ([024](024-inlining-and-devirtualization.md)), so there is nothing to suppress. |
+| `//go:norace`, `//go:nocheckptr` | yes | Suppress instrumentation nanogo does not implement. Recorded, no effect. |
+| `//go:registerparams` | yes | An ABI-transition directive. Recorded, no effect. |
+| `//go:notinheap` | no | Type is not heap-allocated. Would affect write barrier elision only as an optimisation. |
+| `//go:noabiwrap` | no | Historical. |
+
+A verb that is not recognised cannot be reported as misplaced either. In this
+group that costs nothing, which is why the two `no` rows are not the same
+omission as `//go:linkname`.
 
 ## `unsafe`
 
@@ -170,25 +186,72 @@ map is a collector bug that appears as corruption under load.
 [027](027-liveness-and-stackmaps.md) and
 [032](032-type-descriptors-and-itabs.md) carry that obligation.
 
-The spec said nanogo's own object writer uses `unsafe`, which is what made this
-a G1 requirement. It does not. No package in the repository imports `unsafe`,
-found by grepping for the import during this audit.
+No compiler source file in the repository imports `unsafe`. The only importers
+are three test files, `ir/type_test.go`, `ir/convert_test.go` and
+`rtype/rtype_test.go`, which construct the layouts they assert against.
 
-The G1 requirement holds for a stronger reason. nanogo compiles the standard
-library and the runtime, which use `unsafe` throughout, and five intrinsics are
-already IR nodes: `ir/build.go` builds `unsafe.Add`, `Slice`, `SliceData`,
-`String` and `StringData`. `Sizeof`, `Alignof` and `Offsetof` never reach the
-builder at all, because the checker folds them to constants.
+The G1 requirement rests on the distribution and not on nanogo's own source.
+nanogo compiles the standard library and the runtime, which use `unsafe`
+throughout, and five intrinsics are already IR nodes: `ir/build.go` builds
+`unsafe.Add`, `Slice`, `SliceData`, `String` and `StringData`. `Sizeof`,
+`Alignof` and `Offsetof` never reach the builder at all, because the checker
+folds them to constants.
 
 ## Testing
 
-None of this is built, because no directive is honoured yet.
+What is built is the placement rule and the proof that nothing is honoured:
+
+- `driver.TestMisplacedDirectiveIsRejected` pins each misplaced case at the
+  line `gc` reports it on, and `driver/pragma_test.go` covers the recorded flag
+  set including the three verbs that imply another.
+- `test/directive.go` and `test/directive2.go` are `rejected` in
+  [004](004-conformance.md)'s corpus, on the first error's line.
+- `driver.TestNosplitIsStillDropped` asserts that two packages differing only
+  by a `//go:nosplit` produce the same object, so the day a pass reads one this
+  test fails and has to be rewritten.
+
+What is not built, and waits on a consumer:
 
 - A corpus asserting that each correctness-required directive changes generated
   code in the specified way, checked by inspecting the emitted object rather
   than by running.
-- Rejection tests: a misplaced directive, an unknown directive in nanogo's own
-  source, a `//go:nosplit` chain that exceeds the budget, and a
-  `//go:nowritebarrier` function that needs one.
-- `//go:linkname` in both directions, across packages, linked and run.
+- Rejection tests: an unknown directive in nanogo's own source, a
+  `//go:nosplit` chain that exceeds the budget, and a `//go:nowritebarrier`
+  function that needs one.
+- `//go:linkname` in both directions, across packages, linked and run. It needs
+  the verb recognised first.
 - The runtime is the real test and it arrives at M9.
+
+## What was wrong
+
+**The spec had [012](012-type-checking.md) copy the directive onto the object
+when the object is created.** The directive never reaches the checker. It
+travels on the syntax declaration into `ir.Func.Pragma`, which is the right
+place, because every consumer of a directive is below the checker.
+
+**The spec claimed both files of the directive corpus report the same message
+at the same twenty positions as `go tool compile`.** The two files annotate 23
+positions, and [004](004-conformance.md)'s harness compares one of them: the
+first error's line. The per-position claim belongs to
+`driver.TestMisplacedDirectiveIsRejected` and not to the corpus.
+
+**The `//go:nosplit` row read as a plan the code lagged.** It is the reverse.
+`ssagen/prologue.go` sets the flag from the frame size and the leaf property
+and never from a directive, so a `//go:nosplit` in the right place on a
+function that needs one is dropped. The chain-depth computation
+[035](035-goroutines-and-stack-growth.md) owns does not exist.
+
+**The spec said nanogo's own object writer uses `unsafe`, which is what made
+`unsafe` a G1 requirement.** It does not, and no compiler source file in the
+repository does. The G1 requirement holds anyway, because nanogo compiles the
+standard library and the runtime, which use `unsafe` throughout.
+
+**The optimisation-hint table said every directive in it is parsed.**
+`//go:notinheap` and `//go:noabiwrap` are not in `pragmaVerb` and are not
+recognised at all. Neither is `//go:linkname`, which is in the
+correctness-required table and is the one where not recognising it costs
+something.
+
+**`status` was `draft`.** Six rows of the table above are built and three tests
+gate them, which is `in progress` by
+[the deck's definition](README.md#reading-the-deck-honestly).

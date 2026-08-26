@@ -46,14 +46,13 @@ The measured result:
 | packages with export data in the closure of an empty `main` that write | 23 of 27 |
 
 The allowlist can now grow in either direction, which is what the writer was
-blocking. `internal/goarch` and `internal/goos` are the demonstration: each is
-constants and type aliases, each compiles to no symbol at all, and every Go
-program imports both through the runtime. nanogo compiles the pair and `gc`
-compiles the other 27 packages of the build against the export data nanogo
-wrote
-(`internal/e2e/import_test.go`). Both were refused until the writer existed,
-under a message about having no function bodies, which said the export data
-was missing and not that code generation could not reach them.
+blocking. `internal/goos` is the demonstration: it is constants and type
+aliases, it compiles to no symbol at all, and every Go program imports it
+through the runtime. nanogo compiles it and `gc` compiles the other 32 packages
+of the build against the export data nanogo wrote
+(`internal/e2e/import_test.go`). `internal/goarch` is the same shape and is
+**not** on that allowlist, because it declares one defined type and the next
+section refuses a package that does.
 
 ### The limit the writer exposed: a declared type has no descriptor
 
@@ -99,12 +98,16 @@ which reports what it cannot write where it arises. And an alias, because an
 alias declares no type: the right-hand side is owed by whichever package
 declares it.
 
-What that costs, measured: of the 28 packages with export data in the closure
-of an empty `main`, 18 declare a defined type. Seventeen of them were already
-refused for another reason. The one this check takes away is `internal/goarch`,
-which is constants and one defined type, `ArchFamilyType`, and which linked by
-luck: no package in that build put a variable of that type anywhere.
-`internal/goos` declares no type and carries the claim on its own.
+What that costs, measured: of the 27 packages with export data in the closure
+of an empty `main`, 18 declare a defined type. Fourteen of the 18 are refused
+for another reason anyway, most of them for assembly. The four this check takes
+away on its own are `internal/goarch`, `internal/goexperiment`,
+`internal/profilerecord` and `internal/runtime/pprof/label`: each compiles when
+the check is removed, and each is refused with the check in place.
+`internal/goarch` is the one to look at, because it is constants and one
+defined type, `ArchFamilyType`, and it linked by luck: no package in that build
+put a variable of that type anywhere. `internal/goos` declares no type and
+carries the claim on its own.
 
 ### Why a generic declaration is refused
 
@@ -162,11 +165,12 @@ files already have, and the `-trimpath` rewriting that makes them the same on
 two machines ([053](053-determinism.md)).
 
 Two further things the writer does not carry, each of which an importer can
-observe. A `//go:` directive of any kind. The driver records the verb and its
-position now ([016](016-directives-and-pragmas.md)), and the writer carries
-none of it: the flag bits there are nanogo's own numbering and this field is
-read with `gc`'s. That includes `//go:linkname`, so an
-importer of a package nanogo compiled would call the declared name and not the
+observe. A `//go:` directive of any kind. The driver records fourteen verbs and
+their positions now ([016](016-directives-and-pragmas.md)), and the writer
+carries none of them: the flag bits there are nanogo's own numbering and this
+field is read with `gc`'s. `//go:linkname` is worse than uncarried, because it
+is not one of the fourteen and nothing records it in the first place, so an
+importer of a package nanogo compiled calls the declared name and not the
 linkname target. And escape analysis results, which are written as empty notes;
 an empty note parses as "leaks to the heap", which is the conservative answer a
 caller must assume ([023](023-escape-analysis.md)).
@@ -218,22 +222,23 @@ The costs are real and are accepted:
    | Component | Lines | Role |
    | --- | --- | --- |
    | `internal/pkgbits` | 1,568 | the container: sections, indices, cross-references |
-   | `cmd/compile/internal/noder` writer, reader, linker | 8,097 | encoding and decoding declarations and bodies |
-   | `go/internal/gcimporter` | 1,259 | the types-only reader, against `go/types` |
+   | `cmd/compile/internal/noder` writer, reader, linker | 8,054 | encoding and decoding declarations and bodies |
+   | `go/internal/gcimporter` | 925 | the types-only reader, against `go/types` |
    | `cmd/compile/internal/importer` | 772 | **the same reader, against `types2`** |
 
-   The last row is the one this spec had wrong. It named only
-   `go/internal/gcimporter` and sized the port by it, which measured the wrong
-   thing twice: that reader produces `go/types` packages and would have to be
-   translated, and it is 1,259 lines. Its `types2` twin needs no translation,
-   because nanogo's checker is a fork of `types2`, and it is 772. The reader
-   here measures 1,948 lines including the container's read half and the
-   archive, against an estimate of 7,000 for the whole component.
+   Those are non-test lines on the pinned release, go1.27.0, and they move
+   with it.
 
-   What is left of the estimate is the function bodies. The container's write
-   half and the declaration writer landed after that sentence was written and
-   measure 900 lines together, including the archive member; `noder`'s reader
-   for the bodies below, and the writer that produces them, are still owed.
+   The last row is the one a port is sized by. `go/internal/gcimporter`
+   produces `go/types` packages and would have to be translated; its `types2`
+   twin needs no translation, because nanogo's checker is a fork of `types2`.
+   The reader here measures 1,948 lines including the container's read half and
+   the archive, against an estimate of 7,000 for the whole component.
+
+   What is left of the estimate is the function bodies. The write half measures
+   1,294 lines: `export/pkgbits/encoder.go` at 371, `export/writer.go` at 799
+   and `driver/archive.go` at 124. `noder`'s reader for the bodies below, and
+   the writer that produces them, are still owed.
 3. **Both directions are required, and which one comes first depends on where
    the allowlist starts.** A leaf package has no imports, so compiling it with
    nanogo exercises no reader, but anything that imports it reads what nanogo
@@ -311,14 +316,12 @@ applies without exception. Types are interned in first-use order, and the walk
 that fixes that order is fixed itself: the package-scope declarations are
 visited in `Scope.Names` order, which is sorted.
 
-Two sentences this section used to carry were wrong, and building the writer
-found both. Declarations are **not** written in source order: `gc` writes them
-in sorted name order and nanogo does the same, so that the two compilers'
-export data for one package stays comparable. A type's methods are **not**
-sorted by name: `gc` writes them in declaration order, which is the order the
-checker holds them in, and sorting them would make nanogo's output differ from
-`gc`'s for no gain. Neither is a determinism question. Both orders are fixed
-by the input, which is all determinism asks.
+Declarations are written in sorted name order, which is `gc`'s order, so that
+the two compilers' export data for one package stays comparable. A type's
+methods are written in declaration order, which is the order the checker holds
+them in and is again `gc`'s; sorting them would make nanogo's output differ
+from `gc`'s for no gain. Neither order is a determinism question. Both are
+fixed by the input, which is all determinism asks.
 
 This is the most likely single place for the G1 fixed point to break, because
 the type checker's internal maps are the natural thing to range over and the
@@ -378,7 +381,7 @@ What the writer has:
   package that imports a library nanogo compiled; `gc` imports a package that
   declares no function at all, so what it reads is the export data and nothing
   else; nanogo imports its own export data; and nanogo compiles
-  `internal/goarch` while `gc` compiles the other 28 packages of the build
+  `internal/goos` while `gc` compiles the other 32 packages of the build
   against it. All four programs run (`internal/e2e/import_test.go`).
 
 What the writer still needs:
@@ -386,3 +389,46 @@ What the writer still needs:
 - Generic bodies: an importer instantiates a generic declared in a package it
   only has export data for, and the instantiation compiles and runs. This is
   the whole of what is refused, and it needs the body writer.
+
+## What was wrong
+
+**The writer's demonstration named `internal/goarch` and `internal/goos` as a
+pair.** Only `internal/goos` is on that allowlist. `internal/goarch` declares
+`ArchFamilyType`, and the descriptor check above refuses a package that
+declares a defined type, so naming the pair claimed a capability the same spec
+takes away eight paragraphs later. The count beside it was wrong twice over: 27
+and then 28 packages, where the build in `internal/e2e/import_test.go` compiles
+33 and nanogo compiles one of them.
+
+**Both packages were refused before the writer existed, and for a message that
+misnamed the reason.** The driver refused them for having no function bodies,
+which said the export data was missing rather than that code generation could
+not reach them. That is what the writer removed.
+
+**The cost of the descriptor check was recorded as one package.** It is four:
+`internal/goarch`, `internal/goexperiment`, `internal/profilerecord` and
+`internal/runtime/pprof/label` each compile when the check is removed. Fourteen
+of the 18 type-declaring packages in the closure are refused for another reason
+anyway, not seventeen. The measurement is a build of each package with the
+check disabled, so it moves as `rtype` grows and as the lowering table fills.
+
+**The format sizes were measured on an earlier release.**
+`go/internal/gcimporter` is 925 non-test lines and not 1,259, and `noder`'s
+writer, reader and linker are 8,054 and not 8,097. The argument the table
+carries is unchanged: the `types2` reader at 772 lines is the one to size a
+port by, because it needs no translation.
+
+**The write half was recorded at 900 lines.** It is 1,294, and the sentence did
+not say which files it counted, which is why it could drift without anyone
+seeing it. The three files are named now.
+
+**The `//go:` row understated `//go:linkname`.** The claim was that the driver
+records the verb and the writer carries none of it.
+`//go:linkname` is not one of the fourteen verbs the driver recognises, so
+there is nothing recorded for the writer to drop
+([016](016-directives-and-pragmas.md)).
+
+**The determinism section said declarations are written in source order and a
+type's methods sorted by name.** Both are wrong, and building the writer found
+both: `gc` writes declarations in sorted name order and methods in declaration
+order, and nanogo matches it in each case.
