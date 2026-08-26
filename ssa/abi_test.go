@@ -967,6 +967,103 @@ func TestAssignABILeavesANarrowResultListAlone(t *testing.T) {
 	}
 }
 
+// TestAssignABIRefusesAWideResultItCannotMeasure covers the lists the walk
+// cannot renumber.
+//
+// The index of a SelectN is the word of the result area it reads, and the word
+// a result starts at is the sum of the widths of the results before it. A list
+// with a gap in it, one that reads a result twice, or one spread over two
+// blocks gives no such sum. The pass refuses rather than guess, but only when
+// the list holds a result that would otherwise reach lowering as a store no
+// rule has: a list of single-word results is one this pass never touches.
+func TestAssignABIRefusesAWideResultItCannotMeasure(t *testing.T) {
+	tg := NewArm64Target()
+	// An unnamed type, so the refusal has to describe it by its width.
+	wide := abiStruct("", 5, abiTInt)
+
+	build := func(shape string) *Func {
+		f := NewFunc("f")
+		b := f.Entry
+		b.Kind = BlockRet
+		mem := b.NewValue(0, OpInitMem, MemType)
+		call := b.NewValue(0, OpStaticCall, MemType, mem)
+		call.Aux = &ir.Object{Name: "main.g"}
+		sel := b.NewValue(0, OpSelectN, wide, call)
+		read := b
+		switch shape {
+		case "a result read twice":
+			b.NewValue(0, OpSelectN, wide, call)
+		case "a result nothing reads":
+			sel.AuxInt = 1
+		case "a result read in another block":
+			read = f.NewBlock(BlockRet)
+			b.Kind = BlockPlain
+			b.Succs = append(b.Succs, read)
+			read.Preds = append(read.Preds, b)
+			sel.Block = read
+			b.Values = b.Values[:len(b.Values)-1]
+			read.Values = append(read.Values, sel)
+		}
+		o := &ir.Object{Name: "v", Type: wide, Class: ir.ClassLocal}
+		f.Frame = append(f.Frame, o)
+		addr := read.NewValue(0, OpLocalAddr, abiPtrTo(wide), call)
+		addr.Aux = o
+		st := read.NewValue(0, OpStore, MemType, addr, sel, call)
+		st.AuxInt = wide.Size
+		if shape == "a result stored twice" {
+			st2 := read.NewValue(0, OpStore, MemType, addr, sel, st)
+			st2.AuxInt = wide.Size
+			st = st2
+		}
+		read.Control = read.NewValue(0, OpMakeResult, MemType, st)
+		return f
+	}
+
+	for _, shape := range []string{
+		"a result read twice",
+		"a result nothing reads",
+		"a result read in another block",
+		"a result stored twice",
+	} {
+		t.Run(shape, func(t *testing.T) {
+			f := build(shape)
+			err := AssignABI(f, tg)
+			if err == nil {
+				t.Fatalf("the pass placed a list it cannot measure\n%s", f)
+			}
+			if !strings.Contains(err.Error(), "a 40-byte value") {
+				t.Errorf("the refusal is %q, and it has to name the value", err)
+			}
+		})
+	}
+}
+
+// TestAssignABIIgnoresACallItDoesNotTouch is the other half of the survey.
+//
+// A call whose results are each one word is a call this pass has nothing to
+// finish, so a result list it cannot measure is not a fault: the indices are
+// decomposition's and they are already right.
+func TestAssignABIIgnoresACallItDoesNotTouch(t *testing.T) {
+	tg := NewArm64Target()
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	call := b.NewValue(0, OpStaticCall, MemType, mem)
+	call.Aux = &ir.Object{Name: "main.g"}
+	// One result of two read, which is a list with a gap in it.
+	sel := b.NewValue(0, OpSelectN, abiTInt, call)
+	sel.AuxInt = 1
+	b.Control = b.NewValue(0, OpMakeResult, MemType, sel, call)
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatalf("a call of single-word results was refused: %v\n%s", err, f)
+	}
+	if sel.AuxInt != 1 {
+		t.Errorf("the result was renumbered to %d, and nothing here moved it", sel.AuxInt)
+	}
+}
+
 // TestAssignABIKeepsAStoreItDoesNotOwn is the other half of the exact match.
 //
 // The pass deletes exactly the store that writes an incoming parameter into
