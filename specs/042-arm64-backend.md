@@ -280,16 +280,17 @@ What this section asked for and does not have:
   L3). 18 hand-written cases is not a corpus. The harness is no longer the
   blocker: `internal/gotest` sweeps Go's own 356 vendored files, carries out the
   single-file recipes with `gc` as the oracle, and files every other file under
-  a named class. 9 of the 356 are **matched**, which is the only class that
+  a named class. 10 of the 356 are **matched**, which is the only class that
   proves code generation: nanogo compiled the program, it ran, and its output
   and exit status are `gc`'s. 3 more are compiled without being run, and 74 are
   rejected, which exercises the checker and not the back end. The blocker is
   above this spec: the compiler refuses the rest, and 24,508 of the
   distribution's 39,947 functions get past SSA construction once the lowering
-  pass has run, which is what the driver does. The 9/3/74 split lives in
+  pass has run, which is what the driver does. The 10/3/74 split lives in
   `internal/gotest/testdata/ratchet.txt`, not in
   `internal/hygiene/testdata/facts.json`, so it is ratcheted and not gated on a
-  number.
+  number. Their sum is the 87 [004](004-conformance.md) states, and only the sum
+  is checked against the ratchet.
 - **A debug build asserting RSP is 16-byte aligned at every call.** No such
   build exists. What exists is static: `ssagen`'s `checkFrame` refuses a frame
   size that is not a multiple of 16, so the alignment is a property of the
@@ -332,7 +333,7 @@ register, which is what makes a float local, and a package-level float
 variable, a compile error too.
 
 **The spec said there is no body of programs to run.** `internal/gotest` sweeps
-Go's own corpus now. The 9 matched files are programs nanogo compiled and ran
+Go's own corpus now. The 10 matched files are programs nanogo compiled and ran
 against `gc`'s output, which is [004](004-conformance.md) L3 on the files the
 compiler accepts.
 
