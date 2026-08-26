@@ -154,18 +154,25 @@ the next section.
 Construction does not lower a Go construct. It **rejects** one. `ssa.Build`
 tests `ir.Op.IsGoSpecific` at the head of both the statement walk and the
 expression walk, and a node in that set ends the function with the error
-`<op> reached SSA construction`. Thirteen further call sites of
+`<op> reached SSA construction`. Twelve further call sites of
 `builder.unsupported` reject a form construction has no case for, with
 `<op>: <what> is not built yet`.
 
-The two together are the shape of the middle end today, and the number is the
+A third mechanism refuses one case and only one: an address taken of a local
+that `classify` placed in an SSA value. That is not a language gap. `classify`
+decides where every local lives before construction begins, so reaching the
+case means the decision was made and then contradicted, and a repair there
+would be the memory corruption this spec warns about further up.
+
+The three together are the shape of the middle end today, and the number is the
 one fact this spec most needs to carry:
 
 **SSA construction accepts 17,905 of the 39,947 functions the IR builder
 produces for the Go distribution, which is 44.8%.** 17,809 of those lower
 completely to arm64 machine operations, so the older claim that *what
 construction accepts, the back end finishes* is now 99.5% true rather than
-100% true. The 96 exceptions are named below.
+100% true. The 96 exceptions are characterised below; the corpus test is what
+lists them.
 
 That figure measures construction alone, on a tree straight out of `ir.Build`,
 and it is not what the compiler reaches. The driver runs [020](020-ir.md)'s
@@ -198,18 +205,25 @@ that [020](020-ir.md) lowers does not reach construction in a real compile:
 | 318 | `the address of <name> is taken but it lives in a value` |
 | 290 | `assign: a multi-value assignment from index` |
 | 279, 276 | `typeassert`, `typeswitch` |
-| 135 to 11 each | `print`, `recover`, `copy`, `min`, `select`, `println`, `send`, `recv`, `cap`, `max`, `clear`, `real`, `close`, `delete`, `complex`, `imag`, `go`, and the five `unsafe` intrinsics |
-| the rest | addresses of a call result and of a constant |
+| 135 down to 2 each | `print`, `recover`, `copy`, `min`, `send`, `select`, `println`, `recv`, `cap`, `max`, `clear`, `real`, `close`, `delete`, `complex`, `imag`, `go`, and the five `unsafe` intrinsics |
+| 71, 20, 15, 1 | the address of a call result, of a constant, of a type assertion, and of a `make` |
+| 2 | `assign: a multi-value assignment from recv` |
 
-Every row of that table except the two multi-value assignment rows and the
-`field <n> of <interface>` row is a row of [020](020-ir.md)'s lowering table.
-About half of those rows are now performed by `ir/lower.go`, and the rest
-arrive here intact and are refused. [020](020-ir.md)'s **State** column says
-which is which, and its own corpus counts the rows that are still unpaid.
+Every row of that table that names a Go construct is a row of
+[020](020-ir.md)'s lowering table. About half of those rows are now performed
+by `ir/lower.go`, and the rest arrive here intact and are refused.
+[020](020-ir.md)'s **State** column says which is which, and its own corpus
+counts the rows that are still unpaid.
 
-The two multi-value rows left are a two-value type assertion and a two-value
-map read, and both are the corresponding single-value form's refusal: neither
-form is built.
+Five rows are gaps in construction itself and are in no lowering table. The
+three multi-value assignment rows, the `field <n> of <interface>` row, and the
+address rows, which are an address of a call result, of a constant, of a type
+assertion and of a `make`, plus the separate refusal of an address taken of a
+name that construction placed in a value.
+
+The three multi-value rows left are a two-value type assertion, a two-value map
+read and a two-value channel receive, and each is the corresponding
+single-value form's refusal: none of the three forms is built.
 
 A third such row is gone. Construction refused a multi-value assignment with
 any result wider than a register, 2,191 functions, because `SelectN`'s index
@@ -422,6 +436,27 @@ is written down. This spec measures construction on an unlowered tree, which is
 what says how much of the language construction itself handles. What the
 compiler reaches is the other measurement, 24,508 of 39,947 with the pass run
 first, and [020](020-ir.md) owns it.
+
+**The refusal table's tail understated how far the tail runs.** The row read
+"135 to 11 each" and the smallest cause in it is a two-operand
+`unsafe.SliceData` at 2. Beside it, "the rest" was given as the address of a
+call result and of a constant, and the corpus reports four address causes, 71,
+20, 15 and 1, plus a two-value channel receive at 2. The counts above are
+`ssa/build_test.go`'s output for a corpus run of this spec's own gate.
+
+**Two multi-value assignment rows were three.** A two-value channel receive is
+refused with the two-value type assertion and the two-value map read, for the
+same reason all three give: the single-value form is not built either. It is
+the smallest row of the table, which is why it was read as absent.
+
+**The count of `builder.unsupported` call sites disagreed with itself.** The
+prose above said thirteen and the note below said twelve. `ssa/build.go` has
+twelve, and this section now says so once.
+
+**The 96 functions that construction accepts and lowering does not finish were
+promised by name.** They are characterised, not listed. The list is the corpus
+test's output and nothing here should copy it, for the reason
+[020](020-ir.md) gives about a per-row count in prose.
 
 The deck read the fraction the other way round for a while. The reading to
 avoid is "every function of the distribution compiles", which is true only of
