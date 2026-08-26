@@ -11,9 +11,11 @@ depends_on:
 # Plan 9 assembler
 
 **This spec describes unbuilt work.** There is no `asm` package. Nothing in the
-tree parses Plan 9 syntax, and the only thing that reads it is a test helper:
-`ssagen/prologue_test.go` writes assembly text and hands it to `go tool asm` as
-an oracle, which is the reverse of what this spec builds.
+tree parses Plan 9 syntax. The tree only emits it, and always to hand to
+`go tool asm` as an oracle: `ssagen/prologue_test.go`,
+`obj/arm64/encode_test.go` and `obj/arm64/condsel_test.go` all write assembly
+text and read back what the reference assembler made of it. That is the reverse
+of what this spec builds.
 
 The dependency this retires is therefore still live.
 [000](000-decisions.md) decision 4 lists `go tool asm` as retired at G3 by this

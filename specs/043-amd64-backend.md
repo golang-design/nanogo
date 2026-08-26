@@ -37,8 +37,7 @@ a test. It is already known to fail in one place, and
 away: `ssagen` sits above [025](025-lowering-and-rules.md)'s target boundary,
 names a target, and holds an arm64 prologue, so this target is an edit there.
 This spec is the milestone that forces `ssagen` to get a spec and a target
-interface of its own. The criterion is what the rest of the diff is measured
-against.
+interface of its own.
 
 ## What amd64 breaks that arm64 did not
 
@@ -65,13 +64,12 @@ same assumption for an 8-bit or 16-bit operation is not.
 | RCX | yes, constrained | fixed as the variable shift count |
 | RSP | no | stack pointer |
 | RBP | no | frame pointer |
-| R12, R13 | no | permanent scratch in Go's amd64 convention, reserved the way `arm64` reserves R27 |
+| R12, R13 | yes | permanent scratch in Go's amd64 convention; `gc` allocates both, and a reservation here would be a choice with a spilling cost |
 | R14 | no | current goroutine |
 | R15 | no | GOT reference temporary in a dynamically linked binary; [045](045-linker.md) excludes those, so this reservation is a choice and not a requirement |
 | X15 | no | holds zero |
 
-RDX carries two fixed roles and is an argument register in neither convention,
-which is why the argument sequence steps over it.
+RDX carries two fixed roles and is in neither convention's argument sequence.
 
 The constrained registers are what a pre-coloured operand is for, and the
 mechanism is already in the allocator. `ssa/target.go`'s `UseReg` fixes the
@@ -141,7 +139,8 @@ Everything in [042](042-arm64-backend.md), plus:
   a dynamically linked binary and holds nothing else.
 - The same description called R12 the assembler's scratch, which is `arm64`'s
   R27 role moved to the wrong machine. R12 and R13 are permanent scratch
-  registers on amd64. R13 was absent from the table, so the table described 15
+  registers on amd64, which means caller-clobberable and not unallocatable:
+  `gc` allocates both. R13 was absent from the table, so the table described 15
   of the 16 general registers it counted.
 - The absence of `obj/amd64` was found by listing the tree. `obj/` holds
   `arm64` and nothing else.

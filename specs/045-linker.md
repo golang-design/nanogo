@@ -17,8 +17,8 @@ times to turn compiled source into a running process, and
 [040](040-object-format.md)'s whole proof rests on it accepting the object.
 Every `nanogo build` says so on the way out, on success and on failure alike:
 `nanogo: the executable was written by go tool link; nanogo has no linker
-(specs/045-linker.md)`. The refusal to be silent about it is deliberate, and it
-names this file.
+(specs/045-linker.md)`. The line names this file, so a reader who wonders what
+wrote the binary arrives here.
 
 So the reader should hold two facts together. Every claim below about what a Go
 linker must build, `pclntab` and `moduledata` and the ABI wrappers, is
