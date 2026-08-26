@@ -26,10 +26,12 @@ import (
 //
 //  1. At most one error per position. A second error at a position already
 //     reported is a consequence of the first, so errorAt drops it.
-//  2. No production returns nil. A production that fails returns a BadExpr,
-//     BadStmt or BadDecl covering the range it consumed, so that one syntax
-//     error produces one message rather than one message plus the type errors
-//     that follow from a hole in the tree.
+//  2. No production returns nil. A production that fails returns a BadExpr or
+//     a BadStmt covering the range it consumed, so that one syntax error
+//     produces one message rather than one message plus the type errors that
+//     follow from a hole in the tree. There is no BadDecl and none is needed:
+//     a declaration that fails is still a TypeDecl, VarDecl or FuncDecl, with
+//     a BadExpr in the part that could not be read.
 //
 // See specs/011-parser-and-ast.md.
 
