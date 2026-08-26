@@ -6,6 +6,7 @@ gate: G1
 depends_on:
   - 030-abi.md
   - 027-liveness-and-stackmaps.md
+  - 033-closures-defer-panic.md
 ---
 
 # Goroutines, stack growth, preemption
@@ -25,10 +26,17 @@ the frames really are copied and the maps of
 [027](027-liveness-and-stackmaps.md) really are read by the copier.
 
 The goroutine half is half built. `go f()` with no arguments lowers to
-`runtime.newproc` on a one-word func value, and `internal/e2e` runs a goroutine
-that reaches its own panic. `go f(a, b)` is refused: an argument becomes a
-capture, and a capture is read through the context register, which no SSA
-operation reads ([033](033-closures-defer-panic.md)).
+`runtime.newproc` on a one-word func value, which is the word
+[033](033-closures-defer-panic.md)'s `defer` passes to `runtime.deferproc`.
+`internal/e2e` starts a goroutine whose body divides by zero and reads the
+runtime's panic as the evidence that it ran, because nanogo compiles no `panic`
+statement of its own: the operand's conversion to an interface is
+[032](032-type-descriptors-and-itabs.md)'s gap.
+
+`go f(a, b)` is refused, and so is `defer f(a)`, with the same message: an
+argument becomes a capture, and a capture is read through the context register,
+which no SSA operation reads ([033](033-closures-defer-panic.md)). `go t.m()`
+is refused by the same rule, because the receiver is an argument.
 
 The `//go:nosplit` half is not built either, and it is the part of this spec
 most likely to be misread. See "The nosplit budget" below.
@@ -43,10 +51,11 @@ CMP   R16, RSP
 BLS   morestack
 ```
 
-R28 holds the current goroutine on `arm64` ([030](030-abi.md)), and the guard is
-at a fixed offset in it. If the stack pointer is below the guard, the function
-jumps to a tail that calls `runtime.morestack_noctxt`, which grows the stack and
-re-executes the function from the top.
+`g` is R28 on `arm64` ([030](030-abi.md)), and the guard is at a fixed offset
+in it, which `ssagen/prologue.go` spells as `2*8`. If the stack pointer is
+below the guard, the function jumps to a tail that calls
+`runtime.morestack_noctxt`, which grows the stack and re-executes the function
+from the top.
 
 ### The listing is one of three forms
 
@@ -64,9 +73,7 @@ read from the runtime by a test, which is what this spec asks for.
 The reason for the second row is that the stack pointer alone under-tests the
 guard once the frame is larger than the region the runtime guarantees below it.
 The reason for the third is that `SP - framesize` can underflow, and an
-underflowed comparison succeeds where it must fail. Neither was in this spec.
-Both were found by comparing the emitted instructions against `go tool asm` on
-functions with large frames.
+underflowed comparison succeeds where it must fail.
 
 Three requirements follow:
 
@@ -78,11 +85,14 @@ Three requirements follow:
    It must also **pass the caller's return address in R3** on `arm64`, which
    `runtime.morestack` reads and `runtime/asm_arm64.s` documents at its entry
    point. The order matters: R3 is the fourth argument register, so the
-   arguments are saved before it is overwritten. An earlier version of this
-   spec and of [042](042-arm64-backend.md) omitted the move entirely.
-3. **The prologue and the tail are unsafe points.** The frame is not established.
-   `PCDATA $PCDATA_UnsafePoint` marks them, per
-   [027](027-liveness-and-stackmaps.md).
+   arguments are saved before it is overwritten.
+3. **The growth tail is an unsafe point. The prologue is built not to be
+   one.** `PCDATA $PCDATA_UnsafePoint` marks the tail, per
+   [027](027-liveness-and-stackmaps.md). The prologue is not marked, and does
+   not need to be: the small form pushes the link register and moves the stack
+   pointer in one pre-indexed store, and the large form writes both saved words
+   through a scratch register before the stack pointer moves, so no instruction
+   boundary inside it shows a half-written frame.
 
 A leaf function with a small frame skips the check entirely, since it cannot
 overflow the guard region. The threshold is the same one `gc` uses: a frame of
@@ -101,8 +111,12 @@ $$
 \sum_{i=1}^{n} (s_i + \mathit{callOverhead}) \;\le\; \mathit{StackNosplit}
 $$
 
-where `StackNosplit` is the runtime's reserved region, 800 bytes on 64-bit
-platforms in recent releases, and read from the runtime rather than hard-coded.
+where `StackNosplit` is the runtime's reserved region,
+`internal/abi.StackNosplitBase` times `internal/runtime/sys.StackGuardMultiplier`.
+Both are read from the runtime rather than hard-coded, and the multiplier is
+not one on every configuration, so the budget is not a single number the
+compiler may carry. Neither constant is in the source today, so neither has the
+test `StackSmall` and `StackBig` have.
 
 The compiler computes this over the call graph and **rejects** an overflow at
 compile time. The runtime failure mode is a stack overflow inside code that
@@ -112,10 +126,9 @@ This is a G3 requirement, like the write barrier checks of
 [034](034-write-barriers.md), and for the same reason: only the runtime uses the
 directive.
 
-### What "nosplit" means in the code today, which is not this
+### What `nosplit` means in the code today
 
-Read the paragraphs above as a plan. Three things are true of the code and none
-of them is what a reader would assume.
+Read the paragraphs above as a plan. Three things are true of the code.
 
 **The `//go:nosplit` directive is never read.** No pass looks at it. The
 emitter has a field called `nosplit`, and it is computed from the shape of the
@@ -132,9 +145,6 @@ correctly by refusing to assert anything.
 
 **Nothing computes the sum.** There is no call graph traversal, no
 `StackNosplit` constant anywhere in the source, and no rejection.
-
-The gap was found by looking for the directive and finding a structural
-predicate wearing its name.
 
 ## Stack copying
 
@@ -161,15 +171,22 @@ This can happen at almost any instruction.
 The compiler's obligation is small but not zero:
 
 - Mark unsafe ranges with `PCDATA $PCDATA_UnsafePoint`, so the runtime does not
-  preempt where the frame is inconsistent. This is built. The ranges marked are
-  the prologue, the growth tail, and each frame teardown, and the stream is
-  written into the object file.
+  preempt where the frame is inconsistent. This is built. Three kinds of range
+  are marked and the stream is written into the object file: the growth tail,
+  each frame teardown, and each write of a pointer-holding location that takes
+  more than one store, which `ssa.HalfWrittenPointer` names. The third is a
+  string, a slice or an interface, which holds one word of the new value and
+  the rest of the old one between the stores. The prologue is not among them,
+  for the reason in requirement 3.
 - Ensure that a loop without a call contains a preemptible point. A loop with no
   calls and no preemptible instruction is a goroutine that cannot be stopped;
   asynchronous preemption is what removed the need for the compiler to insert
   explicit checks, and the remaining obligation is only not to mark such a loop
-  unsafe throughout. Nothing checks this. It holds by accident: the only unsafe
-  ranges nanogo marks are the three above, and none of them is a loop body.
+  unsafe throughout. Nothing checks this. It holds because no range nanogo
+  marks spans a loop: the teardown and the growth tail are outside any loop
+  body, and a half-written pointer range is the two or three stores of one
+  assignment, so a loop that contains one still has preemptible instructions
+  between them.
 
 Frames stopped by asynchronous preemption are scanned **conservatively** by the
 collector, since there is no precise map for an arbitrary instruction. That is
@@ -183,13 +200,9 @@ arguments are evaluated in the current goroutine, at the `go` statement, and
 copied into the new goroutine's initial frame. Getting the evaluation point wrong
 is a visible semantic bug, not a performance one.
 
-The argument half is not built. `go f()` with an empty argument list lowers
-to `runtime.newproc`, which is the same one-word func value `defer` passes to
-`runtime.deferproc`. An argument list is refused, because the arguments have to
-be captured and the captured form is read through the context register that
-[033](033-closures-defer-panic.md) owns. So the evaluation point above is not
-yet a decision the code has taken: with no arguments there is nothing to
-evaluate.
+The argument half is not built, for the reason at the top of this spec, so the
+evaluation point above is not yet a decision the code has taken: with no
+arguments there is nothing to evaluate.
 
 ## Testing
 
@@ -204,14 +217,41 @@ evaluate.
 
 Of those four, one exists. `ssagen` recurses 200,000 frames under
 `gccheckmark`, at one frame size, carrying an integer rather than a pointer.
-The other three wait on the code they would test: there is no stack objects
-table ([032](032-type-descriptors-and-itabs.md) blocks it), no goroutine to
-preempt, and no budget to reject a chain.
+Of the other three, one is blocked and two are only unwritten:
 
-Two tests this spec did not name are the ones that hold the prologue in place.
-`ssagen` compares 101 emitted prologue and tail instructions against
-`go tool asm` on the same function, so a wrong encoding is a diff and not a
-crash. And it reads `StackSmall` and `StackBig` out of `internal/abi/stack.go`
-and fails when they move, which is what "read from the runtime rather than
-hard-coded" has to mean for a constant that is written into the instruction
-stream.
+- The stack objects test is blocked, though not where this spec said. The
+  table is computed and never written: `ssa.StackMaps.ObjectsSym` builds one
+  and `ssagen` does not call it, because the lookup from an `ir.Type` to its
+  descriptor's `runtime.gcbits` symbol reference is missing.
+  [027](027-liveness-and-stackmaps.md) owns that gap and records how many
+  functions of the corpus have an object to write.
+- The preemption test is not blocked. `go f()` runs, and a goroutine spinning
+  in a loop with no call in it is preempted under `GOMAXPROCS=1`: the program
+  finishes, and the same program hangs under `GODEBUG=asyncpreemptoff=1`. That
+  contrast is the assertion the test needs, and the code it needs is built.
+- The nosplit test waits on the budget, which nothing computes.
+
+Two more tests hold the prologue in place. `ssagen` compares 101 emitted
+prologue and tail instructions against `go tool asm` on the same function, so a
+wrong encoding is a diff and not a crash. And it reads `StackSmall` and
+`StackBig` out of `internal/abi/stack.go` and fails when they move, which is
+what "read from the runtime rather than hard-coded" has to mean for a constant
+that is written into the instruction stream.
+
+## What was wrong
+
+- This spec listed the marked unsafe ranges as the prologue, the growth tail
+  and each teardown. The prologue is not marked, and a write of a
+  pointer-holding location that takes more than one store is. That last kind is
+  the only one that falls inside a loop body, which is what the claim about
+  loops turned on.
+- It said there was no goroutine to preempt. There is one, so the preemption
+  test is unwritten rather than blocked.
+- It said [032](032-type-descriptors-and-itabs.md) blocked the stack objects
+  table. 032 writes the descriptor now; what is missing is the symbol
+  reference lookup in `ssagen`.
+- The three prologue forms and the move of the return address into R3 were not
+  in this spec. Both came out of comparing the emitted instructions against
+  `go tool asm` on functions with large frames, and
+  [042](042-arm64-backend.md) records the move from the back end's side. The
+  save order is stated above because the other order loses an argument.

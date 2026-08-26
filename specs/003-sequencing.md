@@ -46,9 +46,9 @@ parsing, and the `-V=full` protocol before any compilation exists, and
 [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md). The whole Go
 grammar including generics. No type checking.
 
-**Done when** nanogo parses every `.go` file in `~/dev/go.dev/go/src` that
-`go/parser` parses, and rejects every file `go/parser` rejects. Disagreements are
-enumerated, not tolerated.
+**Done when** nanogo parses every `.go` file that `go/parser` parses, over the
+Go trees the corpus test reads, and rejects every file `go/parser` rejects.
+Disagreements are enumerated, not tolerated.
 
 This gate is worth its cost. The corpus is 16,293 files that exercise every
 corner of the grammar, and it costs nothing to collect.
@@ -177,7 +177,7 @@ its gate is not met.**
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
 | M2 types | done, less a generic declaration in export data | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads and writes gc's export data |
 | M3 first binary | **in progress** | a leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs; the clause "with its tests passing" is unmet, because `go test -toolexec` is not run |
-| M4 runtime interface | **in progress** | liveness, stack maps, the ABI, the stack growth check and type descriptors are built, a nanogo-allocated object survives a collection, and `panic`, `recover`, `defer`, `go` and a closure work as long as nothing is captured; itabs, write barriers and every capture are not built |
+| M4 runtime interface | **in progress** | liveness, stack maps, the ABI and the stack growth check are built, and a nanogo-allocated object survives a collection. The type descriptors an allocation needs are written, and a package that declares a type whose method set the IR type does not hold is refused. `defer` and `go` of a function value run, a captureless closure runs, and a deferred call runs while the goroutine panics on a runtime-raised panic; a `panic` statement, a read of the value `recover` returns, itabs, write barriers and every capture are not built |
 | M5 to M10 | not started | |
 | the distribution | built, and reporting a zero | a tarball unpacks into a tree `driver.FindRoot` resolves, and its 27 archives account for themselves: 0 by nanogo, 27 by `gc` |
 
@@ -207,7 +207,7 @@ language, and each one is there for a claim:
 | a package that imports `math/bits` and `strconv` | the same, against archives the toolchain ships |
 | a library nanogo compiled and an importer `gc` compiled | `gc` reads the export data nanogo *wrote* ([015](015-export-data.md)) |
 | a library that declares no function at all | the archive is export data and nothing else, so nothing but the format is under test |
-| `internal/goos` on the allowlist | nanogo compiles a package the closure of every Go program contains, and `gc` compiles the other 28 against it |
+| `internal/goos` on the allowlist | nanogo compiles a package the closure of every Go program contains, and `gc` compiles the other 32 packages of that build against it, the runtime included |
 | six library shapes, each linked and run | the seam holds one step past the cross-read, where a symbol the library owes is first observable |
 | seven type declarations, each refused by name | a package an importer could not link against fails at compile time and not at link time ([032](032-type-descriptors-and-itabs.md)) |
 | a variadic call | the slice literal allocates, and the descriptor `rtype` emitted is one `mallocgc` accepts |
@@ -226,9 +226,11 @@ frame in the traceback.
 
 The gate's last clause is unmet. It says "with its tests passing", and nothing
 runs `go test -toolexec`, so no package's own tests have been compiled by
-nanogo. Past the gate, and belonging to M4 rather than to M3, no standard
-library package compiles, because the language nanogo accepts is narrower than
-any real package.
+nanogo. Past the gate, and belonging to M4 rather than to M3, five packages of
+the bootstrap closure compile and the rest are refused: `internal/goos`,
+`internal/asan`, `internal/msan`, `internal/race` and `internal/runtime/math`
+reach for no construct nanogo refuses. [060](060-selfhost.md) owns that census
+and the refusal each of the others gives.
 
 The corpus says how much narrower. The IR builder produces a typed tree for
 536 packages of the Go distribution, 39,947 functions and 4,188,075 nodes. The
@@ -283,10 +285,12 @@ half of the spec, are not built.
 [033](033-closures-defer-panic.md), [034](034-write-barriers.md) and the
 `newproc` half of [035](035-goroutines-and-stack-growth.md) are untouched.
 
-M4's own gate is unchanged and unmet. `fmt.Println` does not compile, because
-`fmt` is a package and no standard library package compiles. What the gate did
-gain is its first evidence: a nanogo-compiled frame holds a pointer live
-across `runtime.GC()` and the collector reads the mask nanogo wrote. One
+M4's own gate is unchanged and unmet. `fmt.Println` does not compile: `fmt`
+declares `Formatter`, and a package that declares a type whose method set the IR
+type does not hold is refused before any function body is reached
+([032](032-type-descriptors-and-itabs.md)). What the gate did gain is its first
+evidence: a nanogo-compiled frame holds a pointer live across `runtime.GC()`
+and the collector reads the mask nanogo wrote. One
 object in one frame is not the `GOGC=1` stress loop the gate asks for.
 
 Measured coverage. The figures are rounded down, and the gate is 90% per

@@ -77,7 +77,7 @@ believed.
 | [001](001-bootstrap-gates.md) | Bootstrap gates | `draft` | G1, G2, G3, and the fixed point |
 | [002](002-architecture.md) | Architecture | `in progress` | pipeline, two IRs, package layout |
 | [003](003-sequencing.md) | Sequencing | `in progress` | milestones M0 to M10, risks, deviations |
-| [004](004-conformance.md) | Conformance | `in progress` | four levels of proof; L1 and L2 built, L3 partial, L4 blocked |
+| [004](004-conformance.md) | Conformance | `in progress` | four levels of proof; L1 built for the front end, L2 for the single-file recipes, L3 partial, L4 blocked |
 
 ### Front end
 
@@ -110,8 +110,8 @@ believed.
 | --- | --- | --- | --- |
 | [030](030-abi.md) | ABI | `in progress` | layout and calling convention |
 | [031](031-runtime-lowering.md) | Runtime lowering | `in progress` | the calls the compiler generates |
-| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `in progress` | and the symbol namespace; descriptors reach the object file, itabs are not built |
-| [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | `in progress` | the captureless half of each is built; every capture is refused |
+| [032](032-type-descriptors-and-itabs.md) | Type descriptors and itabs | `in progress` | and the symbol namespace; the descriptors an allocation needs reach the object file, a package that declares a type whose method set the IR type does not hold is refused, and itabs are not built |
+| [033](033-closures-defer-panic.md) | Closures, defer, panic, recover | `in progress` | `defer` and `go` of a function value run, a captureless closure runs, and a deferred call runs while the goroutine panics; a `panic` statement, a read of `recover`'s value, and every capture are refused |
 | [034](034-write-barriers.md) | Write barriers | `draft` | not written |
 | [035](035-goroutines-and-stack-growth.md) | Goroutines and stack growth | `in progress` | prologue built; `newproc` not |
 
@@ -155,10 +155,10 @@ believed.
 
 | | |
 | --- | --- |
-| Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the export data reader and writer, the typed IR and part of its lowering table, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, type descriptors, the object writer, the arm64 encoder, the driver, and `nanogo build` |
-| Proved | A leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs. A nanogo-compiled frame keeps an allocation alive across `runtime.GC()`, so a real collector reads the stack map and the pointer mask nanogo wrote. A deferred call runs while the goroutine is panicking, in the frame order `gc` produces |
+| Built and gated | The scanner, the parser, the forked type checker, the package loader's G1 half, the export data reader and writer, the typed IR and part of its lowering table, SSA construction and lowering, register allocation, liveness and stack maps, the ABI, the type descriptors an allocation needs, the object writer, the arm64 encoder, the driver, and `nanogo build` |
+| Proved | A leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs. A nanogo-compiled frame keeps an allocation alive across `runtime.GC()`, so a real collector reads the stack map and the pointer mask nanogo wrote. A deferred call runs while the goroutine is panicking on a runtime-raised panic, in the frame order `gc` produces |
 | The largest gap | Three functions in five of the Go distribution get past SSA construction, and the unbuilt rows of [020](020-ir.md)'s lowering table block the other two. No SSA operation reads the context register, so every capture is refused. [020](020-ir.md) owns the table with a state per row, [021](021-ssa-construction.md) owns the pass, and [003](003-sequencing.md) carries the counts |
-| Not started | Escape analysis, inlining, generics instantiation, itabs, `recover`, write barriers, the linker, the assembler, DWARF, and the amd64 backend |
+| Not started | Escape analysis, inlining, generics instantiation, itabs, a `panic` statement, reading the value `recover` returns, write barriers, the linker, the assembler, DWARF, and the amd64 backend |
 | Decided against | Assembly text as a build path, a from-scratch type checker, GC-shape stenciling with dictionaries |
 
 ## The spikes

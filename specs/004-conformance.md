@@ -29,19 +29,21 @@ flowchart TD
 
 Each level catches a class the level above cannot.
 
-**Two levels are built, one is partial, and one cannot be run.** L1 is built
-and large for the front end. L2 now has a harness: `internal/gotest` vendors
-Go's `test/` directory and carries out the single-file recipes, with `gc` as
-the oracle. That harness is also the first thing in the repository that
-performs L3 as decision 6 states it, building the same program with both
-compilers and comparing the two outputs, so the two levels now share a gate.
-L4 cannot be run until [060](060-selfhost.md) reports otherwise. The table below is the state of each level, and each section says
+**Two levels have a harness, one is partial, and one cannot be run.** L1 is
+built and large for the front end, and does not reach the checker. L2 has a
+harness for the single-file recipes: `internal/gotest` vendors Go's `test/`
+directory and carries those out with `gc` as the oracle, and counts by class
+every file whose recipe it cannot carry out. That harness is also the first
+thing in the repository that performs L3 as decision 6 states it, building the
+same program with both compilers and comparing the two outputs, so the two
+levels now share a gate. L4 cannot be run until [060](060-selfhost.md) reports
+otherwise. The table below is the state of each level, and each section says
 what stands and what does not.
 
 | Level | State | What runs today |
 | --- | --- | --- |
 | L1 agreement | built for the front end, partial for the checker | scanner, parser, build constraints and `go list`, over the distribution |
-| L2 corpus | built for the single-file kinds | 356 files vendored, each doing what its header says, `internal/gotest` |
+| L2 corpus | built for the single-file kinds | 356 files vendored; `internal/gotest` carries out the single-file recipes and puts every other file in a named class |
 | L3 differential execution | partial | instruction encodings, runtime symbols, prologues, 18 mixed-toolchain link-and-run cases, and whole programs built through a real `go build -toolexec=nanogo` and run |
 | L4 fixed point | **not built** | no stage is runnable, per [060](060-selfhost.md) |
 
@@ -59,7 +61,7 @@ the front end is now measured against it:
 | Scanner token streams | 19,674 files of 19,691, 17 skipped, 0 failures | `go/scanner` |
 | Parse accept and reject | 16,293 files, 14 documented exceptions | `go/parser` |
 | Build-constraint selection | 6,821 files per platform, 0 mismatches | `go/build` |
-| Package and file lists | 524 packages, 0 mismatches | `go list` |
+| Package and file lists | 536 packages, the distribution and nanogo's own tree, 0 mismatches | `go list` |
 | IR construction | 536 packages of 663, 39,947 functions | none; it is a build, not a comparison |
 
 The type checker is the half that does not meet this level's bar. It agrees with
@@ -230,14 +232,15 @@ Three sources of $P$, in order of value:
    exactly the class L1 and L2 miss: arithmetic edge cases, shift counts,
    overflow, and conversion rounding.
 
-None of those three sources exists. What exists is differential against `gc`
-lower down, where `gc` is the oracle for a part of the output rather than for a
-program's behaviour:
+None of those three sources exists. What does exist at whole-program scale is
+L2's `run` recipes, where `gc` is the oracle for behaviour and `ratchet.txt`
+records how far they reach. Below that, `gc` is the oracle for a part of the
+output rather than for a program's behaviour:
 
 | Comparison | Scale | Oracle |
 | --- | --- | --- |
 | arm64 instruction encodings | 981,124, counted by the package itself | `go tool asm` |
-| Runtime symbol signatures | 45 checked against 2,435 runtime functions | the runtime source |
+| Runtime symbol signatures | 70 checked against 2,435 runtime functions | the runtime source |
 | Function prologues | 101 instructions, 2 stack constants | `go tool asm`, `internal/abi` |
 | Link and run | 18 cases, source text to a running process | the expected exit status, hand written |
 
@@ -295,7 +298,7 @@ Performance of the generated code. nanogo is slower than `gc`, by
 *time* does get one, from M6 onward, because the fixed-point build is run
 constantly and a compiler that takes an hour to compile itself stops being used.
 
-## Corrections
+## What was wrong
 
 **L1's corpus was described as "roughly 14,000 files" and the level was
 described as one thing.** It is two. The scanner and the parser are compared
