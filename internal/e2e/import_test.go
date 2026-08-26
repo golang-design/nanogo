@@ -274,9 +274,9 @@ func TestNanogoImportsWhatNanogoWrote(t *testing.T) {
 //
 // internal/goos is in the closure of every Go program: it is constants and
 // nothing else, it compiles to no symbol at all, and the runtime imports it.
-// With it on the allowlist, nanogo compiles it and gc compiles the other
-// twenty-eight packages of the build against the export data nanogo wrote,
-// runtime included. The program then runs.
+// With it and internal/goarch on the allowlist, nanogo compiles the pair and gc
+// compiles the other thirty-one packages of the build against the export data
+// nanogo wrote, runtime included. The program then runs.
 //
 // internal/goarch is here too, and it is the one that says the type descriptor
 // writer works against the real runtime. It declares ArchFamilyType, a defined
