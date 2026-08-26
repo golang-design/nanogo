@@ -115,10 +115,16 @@ What nanogo compiles:
 	an init function of the compiled package and of every package it
 	imports, so a package variable such as os.Stdout is not nil.
 
-	defer and go of a declared function that takes no arguments. Deferred
-	calls run in reverse order, including calls deferred in a loop.
+	defer and go, arguments included. The operands are evaluated where
+	the statement is written, and deferred calls run in reverse order,
+	including calls deferred in a loop.
 
-	A closure that captures nothing.
+	A closure, capturing or not. A capture is by reference, so the
+	literal and the function around it share one variable, and a literal
+	that outlives the frame that made it keeps its captures.
+
+	A declared function used as a value: passed to a function, returned
+	from one, or assigned to a variable and called through it.
 
 	print and println of integers, strings and booleans, with any number
 	of operands.
@@ -129,10 +135,13 @@ What nanogo compiles:
 
 What nanogo refuses, by name, with the reason:
 
-	A closure that captures a variable, and defer or go whose call has an
-	argument, because the argument becomes a capture and nothing reads the
-	context register. A method's receiver is an argument, so defer f.end()
-	is refused with it.
+	A method value, such as f := t.M, and defer i.Close() on an interface
+	value. Both bind a receiver into the func value, and only a capture
+	through a heap cell is built.
+
+	A closure whose capture has no canonical type name, which is a
+	capture of a literal func type or a literal struct type. The capture
+	lives in a heap cell and the cell needs a type descriptor.
 
 	defer of print or println. A builtin is not a function value, so there
 	is nothing to hand the runtime.

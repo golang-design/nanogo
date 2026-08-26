@@ -33,11 +33,11 @@
 // arithmetic, comparisons, numeric conversions, calls including variadic,
 // recursive and method calls, the control statements, slices, strings,
 // range over a slice or an integer, a struct type declared in the package
-// being compiled, package-level variables, init functions, defer and go of a
-// declared function that takes no arguments, print and println, and a closure
-// that captures nothing all compile.
+// being compiled, package-level variables, init functions, defer and go with
+// their arguments, print and println, a closure with or without captures, and
+// a declared function used as a value all compile.
 //
-// A closure that captures a variable, defer or go whose call has an argument,
+// A method value, defer of a method of an interface,
 // append, a conversion to an interface, a type assertion, a type switch,
 // every map and channel operation, range over a string, floating point,
 // generics, and a package with a go:embed directive in it are refused, each

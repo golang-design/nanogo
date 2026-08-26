@@ -35,7 +35,7 @@ func TestHelpStatesTheLimits(t *testing.T) {
 		"append",            // probes/append-int
 		"map operation",     // probes/map-make-assign
 		"channel operation", // probes/chan-buffered
-		"captures a variable",
+		"A method value",    // probes/defer-method-value
 		"Floating point",
 		"generic function",
 		`imports "C"`,
