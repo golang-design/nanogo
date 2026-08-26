@@ -36,14 +36,21 @@ Two of them are `darwin/arm64` assembly and build nowhere else, which is
 
 ## The gates
 
-Four gates run in CI. Each one is runnable locally with one command.
+Eight jobs run in CI, and each one is runnable locally.
 
-| Gate | Command | What it protects |
+| Job | Command | What it protects |
 | --- | --- | --- |
-| Tests and the race detector | `go test ./...` and `go test -race ./...` | correctness |
-| Per-package coverage at 90% | see below | that no package is carried by another |
-| The numbers in the documentation | `go test ./internal/hygiene/` | that a quoted count is still the measured count |
-| `gofmt`, including the spikes | `gofmt -l .` | style |
+| `test` | `go test ./...` and `go test -race ./...`, on linux and macos | correctness |
+| `go test corpus` | `go test ./internal/gotest/` on an arm64 runner | that nanogo still compiles what it compiled, against Go's own test corpus |
+| `cross-compile` | `GOOS=... GOARCH=... go build ./... && go vet ./...` | that the compiler builds for every host, whatever it emits |
+| `gofmt` | `gofmt -l .`, spikes included | style |
+| `coverage` | see below | that no package is carried by another |
+| `determinism` | `go test ./...` twice, byte for byte | [`specs/053`](specs/053-determinism.md), because G1 is a byte-identical fixed point |
+| `spikes` | each spike from its own directory | that the evidence a decision rests on still runs |
+| `vanity import path` | the module path in `go.mod` | that `golang.design/x/nanogo` still resolves |
+
+The numbers in the documentation are gated inside `test`, by
+`go test ./internal/hygiene/`.
 
 ### Coverage is gated per package at 90%
 
@@ -84,6 +91,38 @@ If you reword a sentence the gate reads, the gate fails saying so rather than
 switching itself off. That is deliberate: a check a prose edit can silently
 disable protects nothing. Do not delete a claim to quiet the gate. If a number
 no longer belongs, remove it from the gate's list in the same change.
+
+### The capability claims are not gated, so they are probed
+
+The gate above reads numbers. It cannot see a sentence that says nanogo
+refuses `defer`, and in August 2026 that sentence was in `README.md`, `doc.go`
+and `nanogo help` for weeks after `defer` started working. The same audit
+found `println`, an empty function body, strings, package-level variables,
+package initialization and export data all documented as impossible while all
+six worked.
+
+[`internal/audit/testdata/probes`](internal/audit/testdata/probes) is the
+answer. One directory per Go construct, one `main` package each, and `gc` as
+the oracle: the same program is compiled by both and the two runs are
+compared, so no probe carries an expected value that can itself go stale.
+
+```sh
+NG=$(pwd)/nanogo sh internal/audit/testdata/probes/run.sh
+```
+
+Each line reads `REFUSED` with the message, `OK` when nanogo agreed with gc,
+or `WRONG` when it did not. `WRONG` is the row that matters: a program nanogo
+compiled into something that behaves differently is worse than one it refused.
+
+When you lift a refusal, or find a construct nobody has probed, add the probe
+in the same change and correct the sentence that described the old behaviour.
+Three documents state capabilities and all three must agree with the corpus:
+`README.md`, `doc.go`, and `driver/help.go`, whose text `driver/help_test.go`
+pins phrase by phrase.
+
+No gate enforces this. A gate over prose was tried and removed, because it
+failed contributors on wording rather than on truth. The corpus is evidence a
+reviewer can run in seconds, which is the part that was missing.
 
 ## Environment variables the tests read
 
@@ -235,9 +274,13 @@ time, or the environment reach the output.
 | `driver/`, `cmd/nanogo/` | `gc`-compatible flags, `-toolexec` dispatch, the pass list | 050, 051 |
 | `specs/` | The design deck, and the normative decisions | read 000 first |
 | `spikes/` | Small programs that answer a question a spec depends on | evidence for 000 |
+| `dist/`, `cmd/nanogo-dist/` | The distribution tree and its tarball | 054, 062 |
 | `internal/e2e/` | Real `go build -toolexec=nanogo` builds, run end to end | 051 |
+| `internal/gotest/` | Go's own test corpus, swept against nanogo with gc as the oracle | 004 |
+| `internal/audit/` | Probe programs that say what the compiler accepts | |
 | `internal/covercheck/` | The per-package coverage gate | |
 | `internal/hygiene/` | Checks over the repository's own source and documentation | |
+| `internal/release/` | The release build and its checks | 054 |
 | `.github/workflows/` | The gates, each with the reason it exists | |
 
 Each package names the spec it implements and the bootstrap gate it serves in
@@ -248,11 +291,17 @@ its doc comment.
 For a design objection, quote the claim you disagree with and say what you
 would do instead.
 
-For a bug, send the smallest program that shows it, the target
-(`darwin/arm64` or `linux/amd64`), and what `gc` does with the same input. That
-last part is the whole story more often than not: nanogo is object-compatible
-with `gc` by [decision 11](specs/000-decisions.md), so a difference from `gc`
-is a nanogo bug until proven otherwise.
+For a bug, send the smallest program that shows it and what `gc` does with the
+same input. That last part is the whole story more often than not: nanogo is
+object-compatible with `gc` by [decision 11](specs/000-decisions.md), so a
+difference from `gc` is a nanogo bug until proven otherwise. The target is
+`darwin/arm64`; nanogo emits arm64 machine code and refuses a build for any
+other `GOARCH` by name.
+
+A program that nanogo compiles and that then behaves differently from `gc` is
+the most valuable report there is, and it belongs in
+[`internal/audit/testdata/probes`](internal/audit/testdata/probes) as well as
+in the issue.
 
 ## License
 
