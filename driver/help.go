@@ -168,6 +168,11 @@ What nanogo refuses, by name, with the reason:
 	A package with assembly in it. An assembly definition uses ABI0 and a
 	Go call uses ABIInternal, and nanogo generates no wrapper between them.
 
+	A package with a go:embed directive in it, naming the patterns the
+	directive binds. Reading -embedcfg, resolving the patterns and
+	building the embed.FS structure is unbuilt, and a variable nanogo
+	compiled would be its zero value at run time.
+
 	A package that imports "C". Decision 8 of specs/000-decisions.md puts
 	cgo out of scope. Instrumentation such as -race goes to gc, because
 	nanogo does not implement the flags it needs.
@@ -181,11 +186,9 @@ One refusal that reads as a crash:
 
 What nanogo does not announce:
 
-	Two failures produce a program that behaves differently from the one
-	gc builds, with nothing said at compile time. They are what the probe
-	corpus found, and a corpus is a sample, so there may be a third.
-
-	go:embed is accepted and the variable is empty at run time.
+	One failure produces a program that behaves differently from the one
+	gc builds, with nothing said at compile time. It is what the probe
+	corpus found, and a corpus is a sample, so there may be another.
 
 	panic of a value that is already an interface compiles, and the
 	runtime then dies with "runtime: name offset out of range" instead of

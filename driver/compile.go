@@ -132,10 +132,15 @@ func checkSupported(cfg *Config) error {
 		}
 	}
 	if cfg.EmbedCfgFile != "" {
+		// The data emitter is not what is missing: ssagen binds a data symbol
+		// to a package-level variable already. The front end is: reading
+		// -embedcfg, resolving its patterns to the listed files, and building
+		// the embed.FS structure.
 		return &UnsupportedError{
 			Package: cfg.Package,
 			What:    "a package that uses go:embed",
-			Detail:  "-embedcfg needs the data emitter of specs/050-driver.md, which is unbuilt",
+			Detail: "reading -embedcfg, resolving the patterns and building the embed.FS structure is the " +
+				"unbuilt front end of specs/050-driver.md",
 		}
 	}
 	return checkAssembly(cfg)

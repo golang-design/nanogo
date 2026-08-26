@@ -152,7 +152,7 @@ need not exist in the type checker's world at all.
 | `//go:noescape` | On a bodyless declaration: no argument escapes. The compiler must believe it. |
 | `//go:wasmimport`, `//go:wasmexport` | Out of scope; no wasm target in this deck. |
 | `//go:build` | Build constraint, handled in [014](014-package-loader.md). |
-| `//go:embed` | Binds a package-level `string`, `[]byte` or `embed.FS` to the files a pattern matches. It is not a pragma: `gc` reads it out of the comment and pairs it with the `-embedcfg` file the `go` command writes, so `pragmaVerb` does not recognise it and nothing here records it. [050](050-driver.md) owns the gap and states what each of the two build paths does with it today. |
+| `//go:embed` | Binds a package-level `string`, `[]byte` or `embed.FS` to the files a pattern matches. It is not a pragma: `gc` reads it out of the comment and pairs it with the `-embedcfg` file the `go` command writes, so `pragmaVerb` does not recognise it and nothing here records it. [050](050-driver.md) owns the gap. Both build paths refuse a package that carries the directive, and neither reads it out of a comment: `nanogo build` keys off `go list`'s `EmbedPatterns` and the `-toolexec` path keys off the `-embedcfg` flag the `go` command sends. |
 | `//line` | Position rewriting, handled in [010](010-scanner-and-positions.md). |
 
 ### Optimisation hints, safe to ignore

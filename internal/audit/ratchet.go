@@ -73,21 +73,26 @@ const ratchetHeader = `# What the probe corpus proved about nanogo, on the day t
 # README.md, doc.go or driver/help.go has just become false, and it has to be
 # corrected in the same change that lifted the refusal.
 #
-# The wrong rows are recorded, not hidden. They are real bugs with no fix yet,
-# and every one of them is documented:
+# One wrong row is recorded, not hidden. It is a real bug with no fix yet, and
+# it is documented:
 #
-#	embed-directive   go:embed compiles and the variable is empty at run time
 #	panic-fires       panic on an operand that is already an interface dies
 #	                  with "runtime: name offset out of range"
 #
-# buildinfo-named was the third and is fixed: nanogo build writes the modinfo
-# line, so runtime/debug.ReadBuildInfo answers. It is an ok row now.
+# Two rows that used to sit beside it are gone. buildinfo-named is ok: nanogo
+# build writes the modinfo line, so runtime/debug.ReadBuildInfo answers.
+# embed-directive is refused: nanogo build reads the embed patterns out of the
+# same go list answer it already reads, and will not compile a package that
+# carries a go:embed directive. A refusal is not the whole fix, and it is the
+# right resting state until the front end exists, because a variable that is
+# silently empty is worse than a build that stops.
 #
-# The two above, and the compiler crash that keeps struct-return-wide refused,
-# are pinned as exact strings in driver/help_test.go: "go:embed", "name offset
-# out of range" and "wider than four machine registers". That coupling is
-# deliberate. Fixing one of these bugs fails that test, which forces the
-# documentation to be corrected in the same change rather than months later.
+# That row, the go:embed refusal, and the compiler crash that keeps
+# struct-return-wide refused, are pinned as exact strings in
+# driver/help_test.go: "name offset out of range", "go:embed" and
+# "wider than four machine registers". That coupling is deliberate. Changing one
+# fails that test, which forces the documentation to be corrected in the same
+# change rather than months later.
 #
 # Sorted, so a refresh produces a diff and not a reshuffle
 # (specs/053-determinism.md).

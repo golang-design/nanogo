@@ -201,25 +201,28 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
 - Generics.
 - Taking the address of a variable the compiler keeps in a register.
 - A package with assembly in it, and a package that imports `"C"`.
+- A package with a `//go:embed` directive in it, naming the patterns the
+  directive binds. Reading `-embedcfg`, resolving the patterns and building the
+  `embed.FS` structure is unbuilt, and a variable nanogo compiled would be its
+  zero value at run time.
 
 One refusal reads as a crash. A function that returns a value wider than four
 machine registers stops the build with `panic: ssa: lower: Store: no arm64
 rule lowered this operation` and a Go stack trace, naming no position in your
 source. No program comes out, so it is a refusal, but it is a poor one.
 
-### Two failures nanogo does not announce
+### One failure nanogo does not announce
 
-These cost more than any refusal, because nothing is said at compile time and
-a program comes out that behaves differently from the one `gc` builds. They
-are what the probe corpus found, and a corpus is a sample, so there may be a
-third.
+This costs more than any refusal, because nothing is said at compile time and
+a program comes out that behaves differently from the one `gc` builds. It is
+what the probe corpus found, and a corpus is a sample, so there may be
+another.
 
 | What you write | What happens |
 | --- | --- |
-| `//go:embed` | it compiles, and the variable is empty at run time |
 | `panic(err)` where the operand is already an interface | it compiles, and the runtime dies with `runtime: name offset out of range` instead of printing the panic |
 
-Both are bugs with no fix yet. Until there is one, do not put a
+It is a bug with no fix yet. Until there is one, do not put a
 nanogo-compiled package into a program you care about.
 
 ## What nanogo does not do

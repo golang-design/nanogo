@@ -39,16 +39,15 @@
 //
 // A closure that captures a variable, defer or go whose call has an argument,
 // append, a conversion to an interface, a type assertion, a type switch,
-// every map and channel operation, range over a string, floating point, and
-// generics are refused, each with a message that names the function, the
-// position and the construct.
+// every map and channel operation, range over a string, floating point,
+// generics, and a package with a go:embed directive in it are refused, each
+// with a message that names the function, the position and the construct.
 //
-// Three failures have no such diagnostic, and they cost more than any
-// refusal. A function that returns a value wider than four machine registers
-// crashes the compiler. A go:embed variable is accepted and is empty at run
-// time. A panic of a value that is already an interface compiles and the
-// runtime then dies reading a type descriptor. "nanogo help" describes each
-// one, and internal/audit/testdata/probes reproduces them.
+// Two failures have no such diagnostic, and they cost more than any refusal.
+// A function that returns a value wider than four machine registers crashes
+// the compiler. A panic of a value that is already an interface compiles and
+// the runtime then dies reading a type descriptor. "nanogo help" describes
+// both, and internal/audit/testdata/probes reproduces them.
 //
 // nanogo emits arm64 machine code, and a build for another GOARCH is refused
 // before anything is compiled. darwin/arm64 is the target the tests run on.

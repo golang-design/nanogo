@@ -255,32 +255,61 @@ because it is small: parse the config, resolve patterns to the listed files, emi
 a string or byte slice or `embed.FS` structure. It is listed here so it is not
 forgotten, since a standard library package uses it and G3 needs it.
 
-None of it is written. `checkSupported` refuses `-embedcfg`, which is the state
-to keep until the front end exists. The data symbol an embedded file needs is
-not the missing piece: `ssagen.AddGlobals` binds a data symbol to a
-package-level variable and `ssagen`'s string constants write read-only bytes.
-What is missing is the front end, which reads the config, resolves the patterns
-and builds the `embed.FS` structure. `checkSupported`'s message still says the
-data emitter is what is missing, and that message is the part to correct next.
+None of it is written, and both build paths refuse it. The data symbol an
+embedded file needs is not the missing piece: `ssagen.AddGlobals` binds a data
+symbol to a package-level variable and `ssagen`'s string constants write
+read-only bytes. What is missing is the front end, which reads the config,
+resolves the patterns and builds the `embed.FS` structure. The refusals say
+that, and no longer say the data emitter is missing.
 
-**The refusal covers one of the two paths, and the other is a miscompile.**
-`checkSupported` reads a compile command line, so it fires when the `go`
-command sends `-embedcfg` under `-toolexec` ([051](051-build-integration.md)):
+**One directive, two paths, and each path learns of it differently.** The two
+refusals are not a duplicate: they read different inputs, because the two
+paths are told about the directive in different ways.
+
+Under `-toolexec` ([051](051-build-integration.md)) the `go` command has
+already resolved the patterns and it hands nanogo an `-embedcfg` file.
+`checkSupported` reads the compile command line, so the flag's presence is the
+whole signal:
 
 ```
-nanogo: main: nanogo cannot compile a package that uses go:embed:
--embedcfg needs the data emitter of specs/050-driver.md, which is unbuilt
+nanogo: main: nanogo cannot compile a package that uses go:embed: reading
+-embedcfg, resolving the patterns and building the embed.FS structure is the
+unbuilt front end of specs/050-driver.md
 ```
 
-`nanogo build` builds its own compile command line and never puts `-embedcfg`
-on it, so there is nothing for `checkSupported` to see. The package compiles,
-links and runs, and every embedded variable is its zero value: a program that
-prints `len(data)` for a 14-byte file prints 14 under `gc` and 0 here. That is
-the worse failure of the two and it is the one a user meets first, because
-`nanogo build` is the user's command. The fix is not a second refusal beside
-`checkSupported`. It is in `driver/build.go`, which has to notice a
-`//go:embed` directive on the package it is about to compile, and the directive
-is one [016](016-directives-and-pragmas.md) does not record.
+`nanogo build` writes its own compile command line and puts no `-embedcfg` on
+it, so `checkSupported` sees nothing. Until August 2026 that was a silent
+miscompile: the package compiled, linked and ran, and every embedded variable
+was its zero value, so a program printing `len(data)` for a 7-byte file
+printed 7 under `gc` and 0 here. `checkTargets` in `driver/build.go` refuses it
+now, before a source file is read:
+
+```
+nanogo: probes/embed-directive: nanogo cannot compile a package that uses
+go:embed: the directive binds seven.txt and nanogo has no front end for it:
+reading -embedcfg, resolving the patterns and building the embed.FS structure
+is the unbuilt part of specs/050-driver.md. A variable nanogo compiled would
+be its zero value at run time and nothing would say so
+```
+
+**The signal is `go list`'s `EmbedPatterns` and not a scan of the comments.**
+`rootPaths` already asks `go list` which packages the patterns matched and what
+the module's `go` directive says, and `EmbedPatterns` comes back in the same
+listing. It is the field the `go` command computes for itself, over the same
+build-constrained file set it reports, and it is what decides whether the `go`
+command writes an `-embedcfg` at all. Keying the refusal off it makes the two
+paths refuse the same packages by construction. A second reader of the
+directive inside nanogo would have to reproduce the rule that the comment binds
+the next package-level `var`, the rule that a directive inside a function is an
+error, and the file-set rules, and it would drift from `cmd/go` the first time
+any of them changed. [016](016-directives-and-pragmas.md) records that
+`//go:embed` is not a pragma and that nothing in `driver/pragma.go` recognises
+it, which is still true and is why there is no scanner to reuse.
+
+**A dependency that embeds is not this command's business.** `nanogo build`
+compiles the packages named on the command line and the `go` command builds
+everything beneath them, so a dependency's `//go:embed` is `gc`'s to handle and
+it handles it correctly. The refusal covers the targets only.
 
 ## Exit status and output
 

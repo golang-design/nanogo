@@ -346,7 +346,7 @@ func (b *builder) toolchain() (goroot, goversion string, err error) {
 // where the archive may come from, and asking the go command a third time
 // would be asking a question already answered.
 func (b *builder) targets() ([]*loader.Package, map[string]*loader.Package, string, error) {
-	names, lang, err := b.rootPaths()
+	roots, err := b.rootPaths()
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -358,8 +358,8 @@ func (b *builder) targets() ([]*loader.Package, map[string]*loader.Package, stri
 	for _, p := range graph {
 		index[p.ImportPath] = p
 	}
-	targets := make([]*loader.Package, 0, len(names))
-	for _, name := range names {
+	targets := make([]*loader.Package, 0, len(roots.Paths))
+	for _, name := range roots.Paths {
 		p := index[name]
 		if p == nil {
 			return nil, nil, "", fmt.Errorf("go list named %s and then did not describe it", name)
@@ -371,45 +371,81 @@ func (b *builder) targets() ([]*loader.Package, map[string]*loader.Package, stri
 	// dependency order: a target that imports another target is refused
 	// below, because nanogo writes no export data.
 	sort.Slice(targets, func(i, j int) bool { return targets[i].ImportPath < targets[j].ImportPath })
-	if err := b.checkTargets(targets); err != nil {
+	if err := b.checkTargets(targets, roots.Embeds); err != nil {
 		return nil, nil, "", err
 	}
-	return targets, index, lang, nil
+	return targets, index, roots.Lang, nil
 }
 
-// rootPaths asks which packages the patterns matched, and what the main
-// module's go directive says.
+// rootListing is what the first go list answered about the packages the
+// patterns matched.
 //
-// The two travel together because they come from the same listing. -lang is
+// The three facts travel together because they come from one listing and
+// because each of them is the go command's answer rather than something nanogo
+// could derive: which packages matched, what the module's go directive says,
+// and which of the matched packages carry a go:embed directive.
+type rootListing struct {
+	// Paths is the import path of each match, in the go command's order.
+	Paths []string
+
+	// Lang is the -lang value the module's go directive asks for. It is
+	// empty outside a module, which disables the language version checks,
+	// as gc does when there is no go directive to read.
+	Lang string
+
+	// Embeds is the go:embed patterns of each match that has any, keyed by
+	// import path. A package with none is absent.
+	Embeds map[string][]string
+}
+
+// rootFormat is the listing rootPaths reads.
+//
+// EmbedPatterns is the go command's own answer, computed from the same file
+// set it reports, and it is what decides whether the go command sends
+// -embedcfg to the compiler. Keying the refusal below off it means the two
+// build paths refuse the same packages by construction, rather than by nanogo
+// implementing the directive's rules a second time and drifting from them.
+const rootFormat = "{{.ImportPath}}\t{{if .Module}}{{.Module.GoVersion}}{{end}}\t{{join .EmbedPatterns \" \"}}"
+
+// rootPaths asks which packages the patterns matched, what the main module's
+// go directive says, and which matches carry a go:embed directive.
+//
+// The three travel together because they come from the same listing. -lang is
 // what the go command derives from the go directive and sends to gc, and a
 // compiler that left it empty would accept language constructs the module says
-// it does not use.
-func (b *builder) rootPaths() ([]string, string, error) {
-	const format = "{{.ImportPath}}\t{{if .Module}}{{.Module.GoVersion}}{{end}}"
-	out, err := b.runGo(append([]string{"list", "-f", format}, b.opts.Patterns...)...)
+// it does not use. The embed patterns are what [builder.checkTargets] refuses
+// a package by.
+func (b *builder) rootPaths() (*rootListing, error) {
+	out, err := b.runGo(append([]string{"list", "-f", rootFormat}, b.opts.Patterns...)...)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	var names []string
-	lang := ""
+	roots := &rootListing{Embeds: make(map[string][]string)}
 	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		name, version, _ := strings.Cut(line, "\t")
+		// The fields are positional and the last one may be empty, so the
+		// line is split and not trimmed first.
+		line = strings.TrimRight(line, "\r\n")
+		fields := strings.SplitN(line, "\t", 3)
+		name := strings.TrimSpace(fields[0])
 		if name == "" {
 			continue
 		}
-		names = append(names, name)
-		if lang == "" && version != "" {
-			lang = "go" + version
+		roots.Paths = append(roots.Paths, name)
+		if len(fields) > 1 {
+			if version := strings.TrimSpace(fields[1]); roots.Lang == "" && version != "" {
+				roots.Lang = "go" + version
+			}
+		}
+		if len(fields) > 2 {
+			if patterns := strings.Fields(fields[2]); len(patterns) > 0 {
+				roots.Embeds[name] = patterns
+			}
 		}
 	}
-	if len(names) == 0 {
-		return nil, "", fmt.Errorf("no packages match %s", strings.Join(b.opts.Patterns, " "))
+	if len(roots.Paths) == 0 {
+		return nil, fmt.Errorf("no packages match %s", strings.Join(b.opts.Patterns, " "))
 	}
-	return names, lang, nil
+	return roots, nil
 }
 
 // checkTargets refuses a package nanogo cannot compile, before it reads a
@@ -419,7 +455,7 @@ func (b *builder) rootPaths() ([]string, string, error) {
 // the package to gc. A package the user named on the command line is a package
 // the user asked nanogo to compile, so a silent fall back would make a green
 // build mean nothing, which is the failure the allowlist had.
-func (b *builder) checkTargets(targets []*loader.Package) error {
+func (b *builder) checkTargets(targets []*loader.Package, embeds map[string][]string) error {
 	own := make(map[string]bool, len(targets))
 	for _, t := range targets {
 		own[t.ImportPath] = true
@@ -427,6 +463,16 @@ func (b *builder) checkTargets(targets []*loader.Package) error {
 	for _, t := range targets {
 		if t.Err != nil {
 			return t.Err
+		}
+		if patterns := embeds[t.ImportPath]; len(patterns) > 0 {
+			return &UnsupportedError{
+				Package: t.ImportPath,
+				What:    "a package that uses go:embed",
+				Detail: "the directive binds " + someOf(patterns, 3) + " and nanogo has no front end for it: " +
+					"reading -embedcfg, resolving the patterns and building the embed.FS structure is the " +
+					"unbuilt part of specs/050-driver.md. A variable nanogo compiled would be its zero value " +
+					"at run time and nothing would say so",
+			}
 		}
 		if len(t.CgoFiles) > 0 {
 			return &UnsupportedError{

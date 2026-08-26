@@ -194,44 +194,69 @@ func TestRootPathsReadsTheModuleLanguageVersion(t *testing.T) {
 		}
 		return []byte("example.com/m\t1.27\nexample.com/m/lib\t1.27\n"), nil
 	}
-	names, lang, err := b.rootPaths()
+	roots, err := b.rootPaths()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"example.com/m", "example.com/m/lib"}; !reflect.DeepEqual(names, want) {
-		t.Errorf("rootPaths = %q, want %q", names, want)
+	if want := []string{"example.com/m", "example.com/m/lib"}; !reflect.DeepEqual(roots.Paths, want) {
+		t.Errorf("rootPaths = %q, want %q", roots.Paths, want)
 	}
-	if lang != "go1.27" {
-		t.Errorf("lang = %q, want %q", lang, "go1.27")
+	if roots.Lang != "go1.27" {
+		t.Errorf("lang = %q, want %q", roots.Lang, "go1.27")
+	}
+}
+
+// TestRootPathsReadsTheEmbedPatterns is the listing half of the go:embed
+// refusal. EmbedPatterns is what the go command computes for itself and what
+// decides whether it sends -embedcfg, so reading it is what keeps the two
+// build paths refusing the same packages.
+func TestRootPathsReadsTheEmbedPatterns(t *testing.T) {
+	b, _ := testBuilder(t, &buildOptions{Patterns: []string{"./..."}})
+	b.runGo = func(args ...string) ([]byte, error) {
+		if !strings.Contains(strings.Join(args, " "), "EmbedPatterns") {
+			t.Errorf("the listing does not ask for the embed patterns: go %s", strings.Join(args, " "))
+		}
+		return []byte("example.com/m\t1.27\tseven.txt static/*\nexample.com/m/lib\t1.27\t\n"), nil
+	}
+	roots, err := b.rootPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"seven.txt", "static/*"}; !reflect.DeepEqual(roots.Embeds["example.com/m"], want) {
+		t.Errorf("embeds = %q, want %q", roots.Embeds["example.com/m"], want)
+	}
+	// A package with no directive is absent, not present and empty.
+	if _, ok := roots.Embeds["example.com/m/lib"]; ok {
+		t.Error("a package with no go:embed directive was recorded as having one")
 	}
 }
 
 func TestRootPathsOutsideAModule(t *testing.T) {
 	b, _ := testBuilder(t, &buildOptions{Patterns: []string{"./x.go"}})
 	b.runGo = func(...string) ([]byte, error) { return []byte(commandLineArguments + "\t\n"), nil }
-	names, lang, err := b.rootPaths()
+	roots, err := b.rootPaths()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 1 || names[0] != commandLineArguments {
-		t.Errorf("rootPaths = %q", names)
+	if len(roots.Paths) != 1 || roots.Paths[0] != commandLineArguments {
+		t.Errorf("rootPaths = %q", roots.Paths)
 	}
 	// An empty -lang disables the language version checks, which is what gc
 	// does when there is no module to read a go directive from.
-	if lang != "" {
-		t.Errorf("lang = %q, want it empty", lang)
+	if roots.Lang != "" {
+		t.Errorf("lang = %q, want it empty", roots.Lang)
 	}
 }
 
 func TestRootPathsRejectsAnEmptyMatch(t *testing.T) {
 	b, _ := testBuilder(t, &buildOptions{Patterns: []string{"./nothing"}})
 	b.runGo = func(...string) ([]byte, error) { return []byte("\n \n"), nil }
-	_, _, err := b.rootPaths()
+	_, err := b.rootPaths()
 	if err == nil || !strings.Contains(err.Error(), "no packages match") {
 		t.Fatalf("rootPaths = %v, want it to report an empty match", err)
 	}
 	b.runGo = func(...string) ([]byte, error) { return nil, errors.New("no such directory") }
-	if _, _, err := b.rootPaths(); err == nil {
+	if _, err := b.rootPaths(); err == nil {
 		t.Fatal("a failing listing was accepted")
 	}
 }
@@ -243,20 +268,26 @@ func TestCheckTargetsRefusesByName(t *testing.T) {
 	tests := []struct {
 		name    string
 		targets []*loader.Package
+		embeds  map[string][]string
 		want    string
 	}{
 		{"cgo", []*loader.Package{{ImportPath: "m", Name: "m", GoFiles: []string{"a.go"}, CgoFiles: []string{"c.go"}}},
-			`imports "C"`},
+			nil, `imports "C"`},
 		{"assembly", []*loader.Package{{ImportPath: "m", Name: "m", GoFiles: []string{"a.go"}, SFiles: []string{"a.s"}}},
-			"assembly"},
-		{"no files", []*loader.Package{{ImportPath: "m", Name: "m"}}, "no Go files"},
+			nil, "assembly"},
+		{"no files", []*loader.Package{{ImportPath: "m", Name: "m"}}, nil, "no Go files"},
 		{"a broken package", []*loader.Package{{ImportPath: "m", Err: &loader.Error{ImportPath: "m", Msg: "no such package"}}},
-			"no such package"},
+			nil, "no such package"},
+		// The silent miscompile this refusal replaces: nanogo build never
+		// sends -embedcfg, so nothing reached checkSupported, the package
+		// compiled and the variable was empty at run time.
+		{"go:embed", []*loader.Package{{ImportPath: "m", Name: "main", GoFiles: []string{"a.go"}}},
+			map[string][]string{"m": {"seven.txt"}}, "go:embed"},
 		{"one target imports another", []*loader.Package{
 			{ImportPath: "m", Name: "main", GoFiles: []string{"a.go"},
 				ImportPaths: []string{"m/lib"}, Deps: []string{"m/lib"}},
 			{ImportPath: "m/lib", Name: "lib", GoFiles: []string{"b.go"}},
-		}, "no packagefile entry for another target"},
+		}, nil, "no packagefile entry for another target"},
 		// The edge may be transitive. dependencies drops a target from the
 		// closure, so an unchecked transitive edge would reach go tool link as
 		// a missing package instead of a diagnostic.
@@ -264,12 +295,12 @@ func TestCheckTargetsRefusesByName(t *testing.T) {
 			{ImportPath: "m", Name: "main", GoFiles: []string{"a.go"},
 				ImportPaths: []string{"m/mid"}, Deps: []string{"m/mid", "m/leaf"}},
 			{ImportPath: "m/leaf", Name: "leaf", GoFiles: []string{"c.go"}},
-		}, "m/leaf"},
+		}, nil, "m/leaf"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := testBuilder(t, &buildOptions{})
-			err := b.checkTargets(tt.targets)
+			err := b.checkTargets(tt.targets, tt.embeds)
 			if err == nil {
 				t.Fatal("the package was accepted")
 			}
@@ -286,8 +317,13 @@ func TestCheckTargetsRefusesByName(t *testing.T) {
 func TestCheckTargetsAcceptsAPlainPackage(t *testing.T) {
 	b, _ := testBuilder(t, &buildOptions{})
 	targets := []*loader.Package{{ImportPath: "m", Name: "main", GoFiles: []string{"a.go"}, ImportPaths: []string{"fmt"}}}
-	if err := b.checkTargets(targets); err != nil {
+	if err := b.checkTargets(targets, nil); err != nil {
 		t.Fatalf("checkTargets refused a plain package: %v", err)
+	}
+	// A go:embed directive on a dependency is not this command's business:
+	// the go command builds it and gc embeds the data correctly.
+	if err := b.checkTargets(targets, map[string][]string{"fmt": {"x.txt"}}); err != nil {
+		t.Fatalf("checkTargets refused a package whose dependency embeds: %v", err)
 	}
 }
 
