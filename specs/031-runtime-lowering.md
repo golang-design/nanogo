@@ -18,7 +18,7 @@ fixed contract.
 
 ## What is built, and what is not
 
-**The table is built and gated.** `rtsym` holds 106 symbols, checked against
+**The table is built and gated.** `rtsym` holds 120 symbols, checked against
 2,435 functions parsed out of the runtime's source: 0 missing, 0 differing.
 Nine of them are defined in assembly, and a second test checks that each symbol
 exists, because no Go source states their signatures.
@@ -32,7 +32,7 @@ checkable. The check is the same: the type's spelling is compared against the
 runtime's source, so a field inserted ahead of `enabled`, or padding that stops
 the four-byte load from being valid, is a build failure.
 
-**The 106 symbols and the contract below are not the same set, in either
+**The 120 symbols and the contract below are not the same set, in either
 direction.** The sections below still name one call `rtsym` does not hold:
 `decoderune`. `rtsym` holds calls those sections do not enumerate at all: the
 whole `print*` family, `deferproc` and `deferreturn`, and `newproc` and
@@ -126,7 +126,7 @@ unexported, so none appears in export data and `go/importer` finds none of them:
 a probe against the installed toolchain returned nothing for any of them. The
 test parses `GOROOT/src/runtime` directly.
 
-**And the runtime's source is not one directory.** Ten of the 106 are not
+**And the runtime's source is not one directory.** Ten of the 120 are not
 declared in package `runtime`. `runtime.morestack_noctxt` and
 `runtime.gcWriteBarrier1` through `gcWriteBarrier8` are written in
 `runtime/asm_arm64.s` and have no Go declaration anywhere, so the table records
@@ -258,12 +258,23 @@ function pointer read at the wrong offset.
 `runtime.memmove`, `memclrNoHeapPointers`, `memclrHasPointers`, `memequal`,
 `memequal{0,8,16,32,64,128}`, `memequal_varlen`, `strequal`, `f32equal`,
 `f64equal`, `c64equal`, `c128equal`, and `interequal` and `nilinterequal` in
-the interface group.
+the interface group. Beside each one, the hash of the same name:
+`memhash{0,8,16,32,64,128}`, `memhash_varlen`, `strhash`, `f32hash`, `f64hash`,
+`c64hash`, `c128hash`, `interhash` and `nilinterhash`.
 
 Fourteen of those are the type descriptor's equality algorithms: the twelve
 from `memequal0` to `c128equal`, plus `interequal` and `nilinterequal`. A
 generated function is needed only for a struct or an array whose parts do not
 compare as one region of memory. `memequal0` is what a zero-size type reaches.
+
+**The fourteen hashes are the same fourteen, and the pairing is not a
+convenience.** A map descriptor's `Hasher` is chosen by the algorithm its
+`Equal` is chosen by, because two values that compare equal must hash alike or
+a map loses keys it holds. `gc` derives both from one `AlgKind` for that
+reason, [032](032-type-descriptors-and-itabs.md) reproduces it in one function
+rather than two, and a test asserts the two tables cover the same set: an
+algorithm with an equality function and no hash would give a comparable type a
+nil `Hasher`, which the runtime calls.
 
 `memclr` is split by whether the region contains pointers, and choosing the wrong
 one leaves stale pointers visible to the collector.

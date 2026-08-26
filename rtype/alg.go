@@ -44,6 +44,36 @@ const (
 	algComplex128
 )
 
+// hashFuncs names the runtime hash function for each algorithm with one.
+//
+// One per entry of algFuncs and chosen by the same algKind, which is not a
+// convenience. Two values that compare equal must hash alike or a map loses
+// keys it holds, so gc derives both from one AlgKind and this reproduces that
+// rather than making a second decision. A test asserts the two tables cover
+// the same set.
+var hashFuncs = map[algKind]string{
+	algString:     "runtime.strhash",
+	algIface:      "runtime.interhash",
+	algNilIface:   "runtime.nilinterhash",
+	algFloat32:    "runtime.f32hash",
+	algFloat64:    "runtime.f64hash",
+	algComplex64:  "runtime.c64hash",
+	algComplex128: "runtime.c128hash",
+}
+
+// memHashFuncs names the fixed-width memory hashes, by byte count.
+//
+// The same widths memEqualFuncs covers, for the same reason: a size with no
+// entry is hashed by memhash_varlen, which reads the size out of the closure.
+var memHashFuncs = map[int64]string{
+	0:  "runtime.memhash0",
+	1:  "runtime.memhash8",
+	2:  "runtime.memhash16",
+	4:  "runtime.memhash32",
+	8:  "runtime.memhash64",
+	16: "runtime.memhash128",
+}
+
 // algFuncs names the runtime function for each algorithm with one.
 //
 // algMem is absent because its function depends on the size, and algNone and
@@ -138,20 +168,40 @@ func arrayAlg(t *ir.Type) algKind {
 //
 // An empty name means t is not comparable.
 func equalFunc(t *ir.Type) (name string, varlen bool, err error) {
+	return algFunc(t, "equality", algFuncs, memEqualFuncs, "runtime.memequal_varlen")
+}
+
+// hashFunc returns the runtime function that hashes a value of t, and reports
+// whether the closure that names it carries the size.
+//
+// An empty name means t cannot be a map key, which is the same set of types
+// that cannot be compared: the language forbids a slice, a map or a function
+// as a key exactly because it forbids comparing one.
+func hashFunc(t *ir.Type) (name string, varlen bool, err error) {
+	return algFunc(t, "hash", hashFuncs, memHashFuncs, "runtime.memhash_varlen")
+}
+
+// algFunc is the body both of the two above share.
+//
+// One function and not two, because the choice is one decision made twice. Two
+// values that compare equal must hash alike or a map loses keys it holds, so a
+// hash chosen by a rule of its own is a bug that shows up as a lookup miss
+// rather than as a wrong answer.
+func algFunc(t *ir.Type, what string, byAlg map[algKind]string, byWidth map[int64]string, varlenFn string) (string, bool, error) {
 	switch a := alg(t); a {
 	case algNone:
 		return "", false, nil
 	case algSpecial:
-		return "", false, fmt.Errorf("rtype: %s needs a generated equality function, which specs/032 has no writer for", t)
+		return "", false, fmt.Errorf("rtype: %s needs a generated %s function, which specs/032 has no writer for", t, what)
 	case algMem:
-		if fn, ok := memEqualFuncs[t.Size]; ok {
+		if fn, ok := byWidth[t.Size]; ok {
 			return fn, false, nil
 		}
-		return "runtime.memequal_varlen", true, nil
+		return varlenFn, true, nil
 	default:
-		fn, ok := algFuncs[a]
+		fn, ok := byAlg[a]
 		if !ok {
-			return "", false, fmt.Errorf("rtype: no equality function for %s", t)
+			return "", false, fmt.Errorf("rtype: no %s function for %s", what, t)
 		}
 		return fn, false, nil
 	}

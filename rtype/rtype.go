@@ -864,6 +864,30 @@ func equalClosure(t *ir.Type) (string, []Symbol, error) {
 	if err != nil || fn == "" {
 		return "", nil, err
 	}
+	return algClosure(fn, varlen, "eqfunc", t.Size)
+}
+
+// hashClosure returns the symbol a map descriptor's Hasher field points at,
+// and the extra symbols that definition needs.
+//
+// The field holds a func value, as Equal does, so what it points at is a
+// closure symbol and never the code. Pointing it at the function makes the
+// runtime call whatever the first instruction encodes.
+func hashClosure(t *ir.Type) (string, []Symbol, error) {
+	fn, varlen, err := hashFunc(t)
+	if err != nil || fn == "" {
+		return "", nil, err
+	}
+	return algClosure(fn, varlen, "hashfunc", t.Size)
+}
+
+// algClosure builds the one-word closure that names a runtime algorithm.
+//
+// prefix is gc's name for the family, "eqfunc" or "hashfunc". The two are
+// built the same way and gc names them the same way, so the shape is written
+// once: a symbol holding the function's address, and for the variable-length
+// form a second word holding the size the function reads out of it.
+func algClosure(fn string, varlen bool, prefix string, size int64) (string, []Symbol, error) {
 	if rtsym.Lookup(fn) == nil {
 		// The name reaches the linker, so it is checked against the runtime's
 		// own source rather than spelled here. specs/031 states the rule and
@@ -871,9 +895,9 @@ func equalClosure(t *ir.Type) (string, []Symbol, error) {
 		return "", nil, fmt.Errorf("rtype: %s is not in rtsym", fn)
 	}
 	if varlen {
-		name := fmt.Sprintf("type:.eqfunc.M%d", t.Size)
+		name := fmt.Sprintf("type:.%s.M%d", prefix, size)
 		data := make([]byte, 2*ir.PtrSize)
-		binary.LittleEndian.PutUint64(data[ir.PtrSize:], uint64(t.Size))
+		binary.LittleEndian.PutUint64(data[ir.PtrSize:], uint64(size))
 		return name, []Symbol{{
 			Name:   name,
 			Kind:   obj.SRODATA,

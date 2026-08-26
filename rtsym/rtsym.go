@@ -208,6 +208,34 @@ var syms = []Sym{
 	{Name: "runtime.interequal", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupInterface},
 	{Name: "runtime.nilinterequal", Sig: "func(unsafe.Pointer, unsafe.Pointer) bool", Group: GroupInterface},
 
+	// The hash algorithms a map descriptor's Hasher field points at.
+	//
+	// One per equality algorithm and chosen by the same rule, which is not a
+	// coincidence: gc derives both from one AlgKind, because two values that
+	// compare equal must hash alike or a map loses keys it holds. So a type
+	// whose Equal is runtime.strequal has runtime.strhash for its Hasher, and
+	// a mismatch between the two tables is a map that cannot find its own
+	// entries.
+	//
+	// The field is a func value like Equal, so what it points at is a one-word
+	// closure symbol holding the address of the function named here, and
+	// memhash_varlen takes the size out of that closure the way
+	// memequal_varlen does.
+	{Name: "runtime.memhash0", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.memhash8", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.memhash16", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.memhash32", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.memhash64", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.memhash128", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.memhash_varlen", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.strhash", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.f32hash", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.f64hash", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.c64hash", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.c128hash", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupMemory},
+	{Name: "runtime.interhash", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupInterface},
+	{Name: "runtime.nilinterhash", Sig: "func(unsafe.Pointer, uintptr) uintptr", Group: GroupInterface},
+
 	// Panics. Every one of these never returns.
 	{Name: "runtime.gopanic", Sig: "func(any)", NoReturn: true, Group: GroupPanic},
 	{Name: "runtime.gorecover", Sig: "func() any", Group: GroupPanic},

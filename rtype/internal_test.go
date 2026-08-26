@@ -5,10 +5,12 @@
 package rtype
 
 import (
+	"encoding/binary"
 	"strings"
 	"testing"
 
 	"golang.design/x/nanogo/ir"
+	"golang.design/x/nanogo/rtsym"
 )
 
 // The guards that Descriptor cannot reach today.
@@ -508,5 +510,150 @@ func TestImethodOrderSeparatesTwoPackages(t *testing.T) {
 	iface.PkgPath = "z/pkg"
 	if err := ifaceEmittable(iface); err == nil {
 		t.Fatal("a method from another package was accepted")
+	}
+}
+
+// TestHashAndEqualCoverTheSameAlgorithms is the invariant a map depends on.
+//
+// Two values that compare equal must hash alike, or a map loses keys it holds.
+// gc derives both functions from one AlgKind for that reason, and the two
+// tables here have to answer for the same set of kinds: an algorithm with an
+// equality function and no hash would give a comparable type a nil Hasher,
+// which the runtime calls.
+func TestHashAndEqualCoverTheSameAlgorithms(t *testing.T) {
+	for a := range algFuncs {
+		if _, ok := hashFuncs[a]; !ok {
+			t.Errorf("algorithm %d has an equality function and no hash function", a)
+		}
+	}
+	for a := range hashFuncs {
+		if _, ok := algFuncs[a]; !ok {
+			t.Errorf("algorithm %d has a hash function and no equality function", a)
+		}
+	}
+	for w := range memEqualFuncs {
+		if _, ok := memHashFuncs[w]; !ok {
+			t.Errorf("width %d has a fixed-width memory comparison and no hash", w)
+		}
+	}
+	for w := range memHashFuncs {
+		if _, ok := memEqualFuncs[w]; !ok {
+			t.Errorf("width %d has a fixed-width memory hash and no comparison", w)
+		}
+	}
+	// Every name in both tables reaches the linker, so rtsym is what checks it
+	// against the runtime's source rather than this file spelling it.
+	for _, m := range []map[algKind]string{algFuncs, hashFuncs} {
+		for _, fn := range m {
+			if rtsym.Lookup(fn) == nil {
+				t.Errorf("%s is not in rtsym", fn)
+			}
+		}
+	}
+	for _, m := range []map[int64]string{memEqualFuncs, memHashFuncs} {
+		for _, fn := range m {
+			if rtsym.Lookup(fn) == nil {
+				t.Errorf("%s is not in rtsym", fn)
+			}
+		}
+	}
+	for _, fn := range []string{"runtime.memequal_varlen", "runtime.memhash_varlen"} {
+		if rtsym.Lookup(fn) == nil {
+			t.Errorf("%s is not in rtsym", fn)
+		}
+	}
+}
+
+// TestHashFuncFollowsTheType checks the choice per kind, against the same
+// table equalFunc is checked with.
+func TestHashFuncFollowsTheType(t *testing.T) {
+	str := &ir.Type{Kind: ir.String}
+	iface := &ir.Type{Kind: ir.Interface}
+	eface := &ir.Type{Kind: ir.Interface, EmptyIface: true}
+	slice := &ir.Type{Kind: ir.Slice, Elem: &ir.Type{Kind: ir.Int64}}
+	for _, tc := range []struct {
+		what   string
+		typ    *ir.Type
+		want   string
+		varlen bool
+	}{
+		{"a bool", &ir.Type{Kind: ir.Bool}, "runtime.memhash8", false},
+		{"an int64", &ir.Type{Kind: ir.Int64}, "runtime.memhash64", false},
+		{"a float32", &ir.Type{Kind: ir.Float32}, "runtime.f32hash", false},
+		{"a float64", &ir.Type{Kind: ir.Float64}, "runtime.f64hash", false},
+		{"a complex64", &ir.Type{Kind: ir.Complex64}, "runtime.c64hash", false},
+		{"a complex128", &ir.Type{Kind: ir.Complex128}, "runtime.c128hash", false},
+		{"a string", str, "runtime.strhash", false},
+		{"an interface with methods", iface, "runtime.interhash", false},
+		{"an empty interface", eface, "runtime.nilinterhash", false},
+		{"a slice", slice, "", false},
+		{"a 24-byte array of bytes", &ir.Type{Kind: ir.Array, Len: 24, Elem: &ir.Type{Kind: ir.Uint8}}, "runtime.memhash_varlen", true},
+	} {
+		if err := ir.Layout(tc.typ); err != nil {
+			t.Fatalf("%s: %v", tc.what, err)
+		}
+		got, varlen, err := hashFunc(tc.typ)
+		if err != nil {
+			t.Errorf("%s: %v", tc.what, err)
+			continue
+		}
+		if got != tc.want || varlen != tc.varlen {
+			t.Errorf("%s hashes with %q varlen %v, want %q varlen %v", tc.what, got, varlen, tc.want, tc.varlen)
+		}
+	}
+}
+
+// TestHashClosureIsAFuncValue checks the symbol the Hasher field points at.
+//
+// The field holds a func value and not a code address, so it points at a
+// one-word closure. Pointing it at the function makes the runtime call
+// whatever the first instruction encodes. gc names the variable-length form
+// type:.hashfunc.M<size>, with the size in the closure's second word, which is
+// how memhash_varlen learns how much to hash.
+func TestHashClosureIsAFuncValue(t *testing.T) {
+	str := &ir.Type{Kind: ir.String}
+	if err := ir.Layout(str); err != nil {
+		t.Fatal(err)
+	}
+	name, syms, err := hashClosure(str)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "runtime.strhash·f" {
+		t.Errorf("the closure is %s, want runtime.strhash·f", name)
+	}
+	if len(syms) != 1 || len(syms[0].Data) != ir.PtrSize || !syms[0].Dupok {
+		t.Fatalf("the closure symbol is %+v", syms)
+	}
+	if len(syms[0].Relocs) != 1 || syms[0].Relocs[0].Target != "runtime.strhash" {
+		t.Errorf("the closure points at %+v, want runtime.strhash", syms[0].Relocs)
+	}
+
+	arr := &ir.Type{Kind: ir.Array, Len: 200, Elem: &ir.Type{Kind: ir.Uint8}}
+	if err := ir.Layout(arr); err != nil {
+		t.Fatal(err)
+	}
+	name, syms, err = hashClosure(arr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "type:.hashfunc.M200" {
+		t.Errorf("the closure is %s, want type:.hashfunc.M200", name)
+	}
+	if got := binary.LittleEndian.Uint64(syms[0].Data[ir.PtrSize:]); got != 200 {
+		t.Errorf("the closure carries size %d, want 200", got)
+	}
+	if syms[0].Relocs[0].Target != "runtime.memhash_varlen" {
+		t.Errorf("the closure points at %s, want runtime.memhash_varlen", syms[0].Relocs[0].Target)
+	}
+
+	// A type that is not comparable cannot be a map key and has no hash. An
+	// empty name says so, the way it does for Equal.
+	slice := &ir.Type{Kind: ir.Slice, Elem: &ir.Type{Kind: ir.Int64}}
+	if err := ir.Layout(slice); err != nil {
+		t.Fatal(err)
+	}
+	if name, _, err := hashClosure(slice); err != nil || name != "" {
+		t.Errorf("a slice hashes with %q, %v", name, err)
 	}
 }
