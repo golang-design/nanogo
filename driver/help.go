@@ -10,20 +10,27 @@ import "runtime"
 //
 // It states the limits before it states the features. nanogo compiles a small
 // part of Go, and a user who finds that out by hitting an error has already
-// spent the afternoon. Every line here is measured against what the compiler
-// does today, and the tests in internal/e2e keep it that way.
-const Help = `nanogo is a Go compiler for one target: darwin/arm64.
+// spent the afternoon.
+//
+// Every line here corresponds to a program that was compiled and run. The
+// corpus is internal/audit/testdata/probes, one directory per construct, and
+// run.sh in it reproduces the whole list. Prose does not re-run, so a claim
+// with no probe behind it is a claim that will be wrong within a month: this
+// text said defer, println and an empty function body were refused for weeks
+// after each of them started working.
+const Help = `nanogo is a Go compiler for arm64. It is under construction and it
+compiles a small part of Go.
 
 usage:
 	nanogo build [-o output] [-v] [packages]   compile and link a program
-	go build -toolexec=nanogo ./...           substitute nanogo in a go build
+	go build -toolexec=nanogo ./...            substitute nanogo in a build
 	nanogo <tool> [arguments]                  one toolchain invocation
 	nanogo version                             the pinned release and this build
 	nanogo help                                this message
 
 nanogo build:
 
-	nanogo build .             compile the package in this directory and link it
+	nanogo build .             compile the package here and link it
 	nanogo build ./hello.go    compile the named files and link them
 	nanogo build -o hello .    write the executable to hello
 	nanogo build -v .          report each package as it is compiled
@@ -41,57 +48,144 @@ nanogo build:
 	The executable is written by go tool link. nanogo has no linker:
 	specs/045-linker.md is G2 work and unbuilt.
 
-	So every build prints how many packages nanogo compiled and how many
-	the toolchain did. A build in which nanogo compiled one package of
-	twenty-eight must not read as though nanogo built the program.
+	So every build prints how many packages nanogo compiled, how many the
+	toolchain did, and which tree the standard library came from. A build
+	in which nanogo compiled one package of twenty-eight must not read as
+	though nanogo built the program.
 
 	A package named on the command line is never handed to gc. When nanogo
 	cannot compile it the build stops and names the function, the position
 	and the construct.
 
-	One target, darwin/arm64. One package nanogo compiles may not import
-	another package the same command compiles, because nanogo writes no
-	export data.
+	One command may not name two packages where one imports the other.
+	nanogo writes the import configuration before it compiles anything, so
+	the second target has no packagefile entry for the first. That is an
+	ordering nanogo build does not do yet, not a limit of the archive:
+	build one of the two with the go command, or name one of them.
+
+Target:
+
+	nanogo emits arm64 machine code. A build for another GOARCH is refused
+	before anything is compiled, naming the architecture asked for:
+
+		nanogo cannot compile for this target: nanogo emits arm64
+		machine code and the build is for amd64
+
+	darwin/arm64 is the target the tests run on and the one to report a
+	bug against.
 
 What nanogo compiles:
 
-	One target. nanogo emits arm64 machine code. It refuses to compile on
-	any other host.
-	A package that imports. nanogo reads gc's export data, so an import
-	resolves to what the archive names for it declares, and a call reaches
-	the symbol that package defines.
-	Functions whose bodies are return statements, assignments and short
-	variable declarations, if, for, range over a slice, switch with
-	fallthrough, labels, goto, break, continue, calls, methods, variadic
-	calls, arithmetic, comparisons, conversions, indexing, slice
-	expressions, len, make of a slice, and slice and struct composite
-	literals.
+	Integer arithmetic, comparisons, conversions between numeric types,
+	indexing, and constants.
+
+	Statements: return, assignment, :=, multi-value assignment such as
+	a, b = b, a, if, for, switch including the expressionless form,
+	fallthrough, break, continue, labels and goto.
+
+	Calls: recursive, variadic, methods on a value and on a pointer
+	receiver, a call whose results are several registers wide, and a call
+	into a package gc compiled. A function whose body is empty compiles.
+
+	Slices: a slice literal, make of a slice of int, len, index and slice
+	expressions, and range over a slice or over an integer.
+
+	Strings: a literal, len, concatenation, indexing, comparison, and a
+	string as a parameter or a result.
+
+	Structs declared in the package being compiled: a composite literal,
+	reading and writing a field, and passing one by value. A struct up to
+	four machine words is returned by value; wider is the first entry
+	under "What nanogo does not announce" below.
+
+	new, and reading and writing through the pointer.
+
+	Package-level variables, including one whose initialiser is an
+	expression, a string, or a slice literal. Package initialisation runs:
+	an init function of the compiled package and of every package it
+	imports, so a package variable such as os.Stdout is not nil.
+
+	defer and go of a declared function that takes no arguments. Deferred
+	calls run in reverse order, including calls deferred in a loop.
+
+	A closure that captures nothing.
+
+	print and println of integers, strings and booleans, with any number
+	of operands.
+
+	The archive nanogo writes carries export data, so a package nanogo
+	compiled can be imported: gc compiles a package that imports it and
+	the program runs (specs/015-export-data.md).
 
 What nanogo refuses, by name, with the reason:
 
-	A closure, defer, panic, append, a string literal, a conversion to
-	an interface, and a map composite literal. Nothing performs the
-	lowering specs/020-ir.md describes for them, so each one reaches SSA
-	construction intact and is refused there.
-	A function whose body is empty. nanogo cannot tell an empty body from
-	a declaration that has none, so it reports one as a missing body.
-	A multi-value assignment whose call returns a value wider than a
-	machine register.
+	A closure that captures a variable, and defer or go whose call has an
+	argument, because the argument becomes a capture and nothing reads the
+	context register. A method's receiver is an argument, so defer f.end()
+	is refused with it.
+
+	defer of print or println. A builtin is not a function value, so there
+	is nothing to hand the runtime.
+
+	A conversion to an interface, a type assertion, and a type switch.
+	The first is why fmt.Println is refused: every argument to fmt
+	converts to any. It is also why panic("boom") is refused, while
+	panic(err) whose operand is already an interface is not.
+
+	recover, when its result is read.
+
+	append.
+
+	Every map operation and every channel operation, including a
+	package-level variable whose type is a channel.
+
+	range over a string, and a conversion between string and []byte.
+
+	Floating point: arithmetic, a parameter, a result, and println of a
+	float.
+
+	A local array.
+
+	make of a slice whose element type may carry methods, and a struct
+	with a pointer field. make([]int, n) compiles and make([]byte, n) does
+	not: each needs a type descriptor, and specs/032 does not put a method
+	set in the IR type.
+
+	A generic function.
+
+	Taking the address of a variable the compiler keeps in a register.
+
 	A package with assembly in it. An assembly definition uses ABI0 and a
 	Go call uses ABIInternal, and nanogo generates no wrapper between them.
-	A package with package-level variables or an init function.
-	go:embed, cgo, the runtime, and instrumentation such as -race.
+
+	A package that imports "C". Decision 8 of specs/000-decisions.md puts
+	cgo out of scope. Instrumentation such as -race goes to gc, because
+	nanogo does not implement the flags it needs.
+
+What nanogo does not announce:
+
+	Three failures reach a running program or a stack trace instead of a
+	diagnostic. They are what the probe corpus found, and a corpus is a
+	sample, so there may be a fourth.
+
+	A function that returns a value wider than four machine registers
+	crashes the compiler: "ssa: lower: Store: no arm64 rule lowered this
+	operation", with a Go stack trace and no position in your source.
+
+	go:embed is accepted and the variable is empty at run time. The
+	program runs and does the wrong thing, with nothing said at compile
+	time.
+
+	panic of a value that is already an interface compiles, and the
+	runtime then dies with "runtime: name offset out of range" instead of
+	printing the panic. The type descriptor it reaches for is wrong.
 
 What a nanogo-compiled package cannot do:
 
-	Be imported. The archive nanogo writes holds the object and no
-	export data, so gc cannot compile a package that imports it. nanogo
-	reads export data and does not write it, so it takes packages from
-	the top of the import graph downwards.
-
-	Report a position inside an imported package. An imported
-	declaration has no position in the file set of the package being
-	compiled, so a diagnostic about one says the position is unknown.
+	Report a position inside an imported package. gc's second line, "other
+	declaration of New" naming a file under GOROOT, is missing from
+	nanogo's diagnostic, because an imported declaration has no position
+	in the file set of the package being compiled.
 
 	Carry build information. nanogo writes no modinfo line, so
 	runtime/debug.ReadBuildInfo finds nothing in the executable.
@@ -100,9 +194,11 @@ Environment:
 
 	NANOGOROOT        the nanogo distribution to take the standard library
 	                  from. Unset means the tree the nanogo binary is
-	                  installed in, and then the installed Go toolchain. No
-	                  distribution is built today, so every build reaches the
-	                  third of those and uses gc-built archives.
+	                  installed in, and then the installed Go toolchain.
+	                  nanogo-dist build writes such a tree. It carries the
+	                  packages the smallest Go program needs, every one of
+	                  them compiled by gc, and a program that imports one
+	                  it does not carry is refused by name with the count.
 	NANOGO_ALLOWLIST  a file that lists the import paths nanogo compiles,
 	                  one per line, # starts a comment. It selects packages
 	                  in a go build -toolexec=nanogo run and has no effect on
@@ -131,14 +227,13 @@ Documentation: specs/050-driver.md and specs/051-build-integration.md.
 //
 // It is not the -V=full line. That one answers a protocol: the go command
 // parses it into the compiler's build ID and a fourth field would change every
-// cache key. This one is for a person, so it names the host as well, which is
-// what decides whether nanogo can compile anything at all.
+// cache key. This one is for a person, so it names the host as well.
 func HumanVersion() string {
 	host := runtime.GOOS + "/" + runtime.GOARCH
 	// The object header nanogo writes is the host toolchain's, so the
 	// operating system it targets is the host's. The architecture is not:
-	// nanogo emits arm64 wherever it runs, which is why a host that is not
-	// arm64 cannot compile anything.
+	// nanogo emits arm64 wherever it runs, and a build for any other GOARCH
+	// is refused before a function is compiled.
 	return "nanogo " + BuildIdentity() +
 		" (objects for " + runtime.GOOS + "/" + TargetArch +
 		", compatible with " + PinnedGoVersion +

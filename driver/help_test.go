@@ -16,25 +16,43 @@ import (
 // already lost the afternoon, so every refusal driver/compile.go implements
 // has to appear here. When a refusal goes away, this test is what says the
 // help text still describes it.
+//
+// The list pins phrases, and a phrase pinned as a refusal becomes a lie when
+// the refusal is lifted. "package-level variables" and "init function" were
+// pinned here as things nanogo could not compile until August 2026, when both
+// started working and this test went on requiring the sentence that said they
+// did not. So a phrase belongs here only while a probe in
+// internal/audit/testdata/probes shows the behaviour it describes.
 func TestHelpStatesTheLimits(t *testing.T) {
 	for _, want := range []string{
-		"darwin/arm64",      // one target
+		"arm64",             // the one architecture
+		"darwin/arm64",      // the target the tests run on
 		"allowlist",         // how a package is selected
 		"gc",                // what happens to everything else
-		"export data",       // why a package cannot import or be imported
-		"composite literal", // the largest gap in SSA construction
+		"export data",       // the archive carries it, so it can be imported
 		"assembly",          // the ABI wrapper that is not generated
-		"package-level variables",
-		"init function",
-		"go:embed",
+		"a type assertion",  // probes/type-assert
+		"append",            // probes/append-int
+		"map operation",     // probes/map-make-assign
+		"channel operation", // probes/chan-buffered
+		"captures a variable",
+		"Floating point",
+		"generic function",
+		`imports "C"`,
 		"-race",
 		AllowlistEnv,
 		LogEnv,
 		"-fallback",
 		"specs/050-driver.md",
+		// The three failures with no diagnostic. A user meets these as a
+		// crash or as a wrong answer, so the help has to name them.
+		"What nanogo does not announce",
+		"wider than four machine registers",
+		"go:embed",
+		"name offset out of range",
 		// nanogo build, and the three limits a user must not discover by
-		// hitting them: one target, whose standard library it is, and who
-		// writes the executable.
+		// hitting them: one architecture, whose standard library it is,
+		// and who writes the executable.
 		"nanogo build",
 		"the installed Go toolchain",
 		"go tool link",
