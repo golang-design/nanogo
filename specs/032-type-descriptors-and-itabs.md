@@ -125,7 +125,7 @@ Four things stop a descriptor, and each names itself in the refusal:
 | --- | --- |
 | a method | the two ABI wrappers `Ifn` and `Tfn` that `gc` generates beside every method |
 | a struct or an array whose parts do not compare as one region of memory | the generated equality function this spec owes |
-| a map | the runtime's group type, which this spec does not carry |
+| a map | a *name* for the slot group, which `gc` spells `noalg.map.group[K]V` |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
 Writing a tail that claims a type has no methods is the failure the first row
@@ -545,6 +545,61 @@ That file's refusal also carries a sentence that is now false. It says "a
 function's signature is not in the IR type". It is. What is missing is the
 *spelling*, and the message should say so, for the reason the method refusal's
 did.
+
+### The map's group type is synthesised, and only its name is missing
+
+This spec said a map was refused because its descriptor "names the runtime's
+group type, which specs/032 does not carry". Two things in that sentence were
+wrong. The group type is not the runtime's: `gc` **synthesises** it, because
+the collector needs a pointer map for a group and only a type carries one, and
+it is written nowhere in the runtime's source. And nothing stopped this spec
+from carrying it, because everything it is built from is already at the
+boundary.
+
+`rtype/map.go` builds it now. Go's map is a swiss table from 1.24 on, so the
+group is
+
+```go
+type group struct {
+    ctrl  uint64
+    slots [abi.MapGroupSlots]struct {
+        key  K
+        elem E
+    }
+}
+```
+
+with `K` replaced by `*K` when the key is larger than `abi.MapMaxKeyBytes`, and
+the same for the element. The substitution is in the *type* and not only in the
+`MapIndirectKey` flag, because the group is what the collector scans: a group
+built from a 200-byte array with the flag set has the collector read that array
+as a pointer.
+
+Every computed field of the `MapType` header follows from that one layout, and
+they are computed together for a reason. The runtime finds a key with
+`KeysOff + i*KeyStride` and an element with `ElemsOff + i*ElemStride`, so an
+offset derived apart from its stride is a read at the wrong address rather than
+a wrong answer anything reports. `GroupSize`, `KeysOff`, `KeyStride`,
+`ElemsOff`, `ElemStride`, `ElemOff` and `Flags` are checked against the
+descriptor `gc` emitted for the same map type, for eight map types covering an
+indirect key, an indirect element, a zero-size element, an interface key and a
+struct key.
+
+`Hasher` is a func value like `Equal` and is chosen by the same algorithm, for
+the reason [031](031-runtime-lowering.md) gives: two values that compare equal
+must hash alike or a map loses keys it holds. A nil `Hasher` is **not** the
+option a nil `Equal` is. The runtime calls it on every operation, so a key with
+no hash is a map this compiler cannot describe rather than one that fails when
+used.
+
+**What is left is one spelling.** `gc` names the group
+`noalg.map.group[K]V` in the link string and `map.group[K]V` in the name
+string. Both are `ir/rtype.go`'s to produce and it produces neither: the group
+is a struct with no name, so it reaches that file's literal-struct case and is
+refused. The `noalg.` prefix is not decoration either. It says the type has no
+equality or hash function of its own, and the group has none: `gc` gives its
+descriptor a `TFlag` of `TFlagExtraStar` alone, with no `TFlagNamed`, no
+`TFlagUncommon` and no `TFlagRegularMemory`.
 
 ### `PtrToThis` was blamed on a relocation that exists
 

@@ -6,8 +6,10 @@ package rtype
 
 import (
 	"encoding/binary"
+	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/rtsym"
@@ -655,5 +657,339 @@ func TestHashClosureIsAFuncValue(t *testing.T) {
 	}
 	if name, _, err := hashClosure(slice); err != nil || name != "" {
 		t.Errorf("a slice hashes with %q, %v", name, err)
+	}
+}
+
+// The runtime's own view of a map type, for the map tests below.
+//
+// Mirrored here and not taken from the package, for the reason rtype_test.go's
+// abiType is mirrored: the package writes the offsets down as constants
+// because they are the target runtime's layout, and this file runs inside the
+// target's own binary, so reading them through a Go struct is the independent
+// answer.
+type abiTypeHead struct {
+	Size_       uintptr
+	PtrBytes    uintptr
+	Hash        uint32
+	TFlag       uint8
+	Align_      uint8
+	FieldAlign_ uint8
+	Kind_       uint8
+	Equal       func(unsafe.Pointer, unsafe.Pointer) bool
+	GCData      *byte
+	Str         int32
+	PtrToThis   int32
+}
+
+type abiMapType struct {
+	abiTypeHead
+	Key        *abiTypeHead
+	Elem       *abiTypeHead
+	Group      *abiTypeHead
+	Hasher     func(unsafe.Pointer, uintptr) uintptr
+	GroupSize  uintptr
+	KeysOff    uintptr
+	KeyStride  uintptr
+	ElemsOff   uintptr
+	ElemStride uintptr
+	ElemOff    uintptr
+	Flags      uint32
+}
+
+type ifaceWords struct{ typ, data unsafe.Pointer }
+
+func abiMapOf(rt reflect.Type) *abiMapType {
+	return (*abiMapType)((*ifaceWords)(unsafe.Pointer(&rt)).data)
+}
+
+type bigKey struct {
+	A [40]byte
+	B string
+}
+
+// mapCorpus is one map type written twice: as the IR sees it, and as the
+// compiler that built this test laid it out.
+var mapCorpus = []struct {
+	what string
+	key  func(*testing.T) *ir.Type
+	elem func(*testing.T) *ir.Type
+	rt   reflect.Type
+}{
+	{"map[string]int", tString, tInt, reflect.TypeOf(map[string]int(nil))},
+	{"map[int]*int", tInt, tPtrInt, reflect.TypeOf(map[int]*int(nil))},
+	{"map[int8]int8", tInt8, tInt8, reflect.TypeOf(map[int8]int8(nil))},
+	{"map[float64]struct{}", tFloat64, tEmptyStruct, reflect.TypeOf(map[float64]struct{}(nil))},
+	{"map[any]any", tAny, tAny, reflect.TypeOf(map[any]any(nil))},
+	{"map[[200]byte][300]byte", tBigArray, tBiggerArray, reflect.TypeOf(map[[200]byte][300]byte(nil))},
+	{"map[bigKey]bigKey", tBigKey, tBigKey, reflect.TypeOf(map[bigKey]bigKey(nil))},
+	{"map[[16]byte]bool", tArray16, tBool, reflect.TypeOf(map[[16]byte]bool(nil))},
+}
+
+func tString(t *testing.T) *ir.Type { return lay2(t, &ir.Type{Kind: ir.String, Name: "string"}) }
+func tInt(t *testing.T) *ir.Type    { return lay2(t, &ir.Type{Kind: ir.Int64, Name: "int", Basic: "int"}) }
+func tInt8(t *testing.T) *ir.Type {
+	return lay2(t, &ir.Type{Kind: ir.Int8, Name: "int8", Basic: "int8"})
+}
+func tBool(t *testing.T) *ir.Type {
+	return lay2(t, &ir.Type{Kind: ir.Bool, Name: "bool", Basic: "bool"})
+}
+func tFloat64(t *testing.T) *ir.Type {
+	return lay2(t, &ir.Type{Kind: ir.Float64, Name: "float64", Basic: "float64"})
+}
+func tPtrInt(t *testing.T) *ir.Type { return lay2(t, &ir.Type{Kind: ir.Ptr, Elem: tInt(t)}) }
+func tAny(t *testing.T) *ir.Type {
+	return lay2(t, &ir.Type{Kind: ir.Interface, EmptyIface: true, Methods: []ir.Method{}})
+}
+func tEmptyStruct(t *testing.T) *ir.Type { return lay2(t, &ir.Type{Kind: ir.Struct}) }
+
+func tBigArray(t *testing.T) *ir.Type {
+	return lay2(t, &ir.Type{Kind: ir.Array, Len: 200, Elem: lay2(t, &ir.Type{Kind: ir.Uint8, Name: "uint8", Basic: "uint8"})})
+}
+
+func tBiggerArray(t *testing.T) *ir.Type {
+	return lay2(t, &ir.Type{Kind: ir.Array, Len: 300, Elem: lay2(t, &ir.Type{Kind: ir.Uint8, Name: "uint8", Basic: "uint8"})})
+}
+
+func tArray16(t *testing.T) *ir.Type {
+	return lay2(t, &ir.Type{Kind: ir.Array, Len: 16, Elem: lay2(t, &ir.Type{Kind: ir.Uint8, Name: "uint8", Basic: "uint8"})})
+}
+
+func tBigKey(t *testing.T) *ir.Type {
+	return lay2(t, &ir.Type{Kind: ir.Struct, Fields: []ir.Field{
+		{Name: "A", Type: tBigArray40(t)},
+		{Name: "B", Type: tString(t)},
+	}})
+}
+
+func tBigArray40(t *testing.T) *ir.Type {
+	return lay2(t, &ir.Type{Kind: ir.Array, Len: 40, Elem: lay2(t, &ir.Type{Kind: ir.Uint8, Name: "uint8", Basic: "uint8"})})
+}
+
+func lay2(t *testing.T, ty *ir.Type) *ir.Type {
+	t.Helper()
+	if err := ir.Layout(ty); err != nil {
+		t.Fatal(err)
+	}
+	return ty
+}
+
+func mapOf(t *testing.T, key, elem *ir.Type) *ir.Type {
+	t.Helper()
+	return lay2(t, &ir.Type{Kind: ir.Map, Key: key, Elem: elem})
+}
+
+// TestMapGroupAgainstReflect is the check that answers the refusal this
+// package carried for a map.
+//
+// The slot group is a struct the compiler synthesises. It is written nowhere
+// in the runtime's source, the collector scans it, and getting its layout
+// wrong is a map that reads a key where an element is. So it is checked
+// against the group gc synthesised for the same map type, read out of the real
+// descriptor, field by field.
+func TestMapGroupAgainstReflect(t *testing.T) {
+	for _, c := range mapCorpus {
+		t.Run(c.what, func(t *testing.T) {
+			key, elem := c.key(t), c.elem(t)
+			group, err := GroupOf(key, elem)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := abiMapOf(c.rt)
+			if uint64(group.Size) != uint64(want.Group.Size_) {
+				t.Errorf("group size %d, want %d", group.Size, want.Group.Size_)
+			}
+			if uint64(group.PtrBytes()) != uint64(want.Group.PtrBytes) {
+				t.Errorf("group PtrBytes %d, want %d", group.PtrBytes(), want.Group.PtrBytes)
+			}
+			if uint8(group.Align) != want.Group.Align_ {
+				t.Errorf("group alignment %d, want %d", group.Align, want.Group.Align_)
+			}
+		})
+	}
+}
+
+// TestMapPlanAgainstReflect checks every computed field of the MapType header.
+//
+// The runtime finds a key with KeysOff + i*KeyStride and an element with
+// ElemsOff + i*ElemStride, so an offset computed apart from the stride is a
+// read at the wrong address rather than a wrong answer anything reports.
+func TestMapPlanAgainstReflect(t *testing.T) {
+	for _, c := range mapCorpus {
+		t.Run(c.what, func(t *testing.T) {
+			p, err := mapPlanOf(mapOf(t, c.key(t), c.elem(t)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := abiMapOf(c.rt)
+			for _, f := range []struct {
+				name string
+				got  int64
+				want uintptr
+			}{
+				{"GroupSize", p.groupSize, w.GroupSize},
+				{"KeysOff", p.keysOff, w.KeysOff},
+				{"KeyStride", p.keyStride, w.KeyStride},
+				{"ElemsOff", p.elemsOff, w.ElemsOff},
+				{"ElemStride", p.elemStride, w.ElemStride},
+				{"ElemOff", p.elemOff, w.ElemOff},
+			} {
+				if uint64(f.got) != uint64(f.want) {
+					t.Errorf("%s %d, want %d", f.name, f.got, f.want)
+				}
+			}
+			if p.flags != w.Flags {
+				t.Errorf("Flags %#b, want %#b", p.flags, w.Flags)
+			}
+			// GroupSize is documented as Group.Size_, and the two come from
+			// one computation here, so this asserts the documentation rather
+			// than a second answer.
+			if p.groupSize != p.group.Size {
+				t.Errorf("GroupSize %d and the group is %d bytes", p.groupSize, p.group.Size)
+			}
+		})
+	}
+}
+
+// TestMapTypeLayoutMatchesInternalAbi checks the offsets the header is written
+// at.
+//
+// They are constants in map.go because they are the target runtime's layout
+// rather than the layout of the compiler that built this test. Here the mirror
+// is the point: this binary holds the runtime the descriptor is written for.
+func TestMapTypeLayoutMatchesInternalAbi(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  int
+		want uintptr
+	}{
+		{"Key", TypeSize + mapOffKey, unsafe.Offsetof(abiMapType{}.Key)},
+		{"Elem", TypeSize + mapOffElem, unsafe.Offsetof(abiMapType{}.Elem)},
+		{"Group", TypeSize + mapOffGroup, unsafe.Offsetof(abiMapType{}.Group)},
+		{"Hasher", TypeSize + mapOffHasher, unsafe.Offsetof(abiMapType{}.Hasher)},
+		{"GroupSize", TypeSize + mapOffGroupSize, unsafe.Offsetof(abiMapType{}.GroupSize)},
+		{"KeysOff", TypeSize + mapOffKeysOff, unsafe.Offsetof(abiMapType{}.KeysOff)},
+		{"KeyStride", TypeSize + mapOffKeyStride, unsafe.Offsetof(abiMapType{}.KeyStride)},
+		{"ElemsOff", TypeSize + mapOffElemsOff, unsafe.Offsetof(abiMapType{}.ElemsOff)},
+		{"ElemStride", TypeSize + mapOffElemStride, unsafe.Offsetof(abiMapType{}.ElemStride)},
+		{"ElemOff", TypeSize + mapOffElemOff, unsafe.Offsetof(abiMapType{}.ElemOff)},
+		{"Flags", TypeSize + mapOffFlags, unsafe.Offsetof(abiMapType{}.Flags)},
+	} {
+		if uintptr(tc.got) != tc.want {
+			t.Errorf("%s is written at %d, want %d", tc.name, tc.got, tc.want)
+		}
+	}
+	if got := TypeSize + mapTailSize; uintptr(got) != unsafe.Sizeof(abiMapType{}) {
+		t.Errorf("a MapType is %d bytes and internal/abi's is %d", got, unsafe.Sizeof(abiMapType{}))
+	}
+}
+
+// TestMapHeaderBytes checks that the header the encoder writes holds the plan.
+//
+// mapTail cannot finish, because the pointer to the slot group has no name.
+// The bytes it computes before that are still the ones a descriptor would
+// carry, so they are checked through the plan rather than left untested until
+// the naming function grows a spelling.
+func TestMapHeaderBytes(t *testing.T) {
+	m := mapOf(t, tString(t), tInt(t))
+	if _, _, _, err := mapTail(m); err == nil {
+		t.Fatal("a map header was written; the group type is nameable and this test is stale")
+	}
+	p, err := mapPlanOf(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The three flags a string key sets and does not set.
+	if p.flags&mapNeedKeyUpdate == 0 {
+		t.Error("a string key does not ask for a key update; an equal string may point at a larger backing array")
+	}
+	if p.flags&mapHashMightPanic != 0 {
+		t.Error("a string key is marked as able to panic while hashing")
+	}
+	if p.flags&(mapIndirectKey|mapIndirectElem) != 0 {
+		t.Error("a string key or an int element is stored indirectly")
+	}
+}
+
+// TestMapIsRefusedOnTheGroupsName records where the last map refusal lives.
+//
+// Everything this package computes for a map agrees with gc. What stops the
+// descriptor is one spelling: gc names the slot group noalg.map.group[K]V in
+// the link string and map.group[K]V in the name string, and the naming
+// function in package ir produces neither, so a struct with no name reaches
+// its literal-struct case.
+func TestMapIsRefusedOnTheGroupsName(t *testing.T) {
+	m := mapOf(t, tString(t), tInt(t))
+	p, err := mapPlanOf(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ir.TypeSymbol(p.group); err == nil {
+		t.Error("the slot group is nameable; lift the refusal below")
+	}
+	// The map itself is nameable, and so are its key and its element, so the
+	// group is the only gap.
+	for _, ty := range []*ir.Type{m, m.Key, m.Elem} {
+		if _, err := ir.TypeSymbol(ty); err != nil {
+			t.Errorf("%s has no name: %v", ty, err)
+		}
+	}
+	err = mapEmittable(m)
+	if err == nil {
+		t.Fatal("a map was emittable")
+	}
+	for _, want := range []string{"slot group", "noalg.map.group"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal is %q, want it to name %q", err, want)
+		}
+	}
+}
+
+// TestMapKeyMustBeHashable is the other refusal a map carries.
+//
+// A nil Hasher is not the option a nil Equal is. The runtime calls the Hasher
+// on every operation, so a key with no hash function is a map this compiler
+// cannot describe rather than one that panics only when used.
+func TestMapKeyMustBeHashable(t *testing.T) {
+	slice := lay2(t, &ir.Type{Kind: ir.Slice, Elem: tInt(t)})
+	err := mapEmittable(mapOf(t, slice, tInt(t)))
+	if err == nil {
+		t.Fatal("a map with a slice key was emittable")
+	}
+	if !strings.Contains(err.Error(), "hash function") {
+		t.Errorf("the refusal is %q, want it to name the hash function", err)
+	}
+	// A key that needs a generated hash is refused by the generated-function
+	// gap and not by this one, and the message says which.
+	pair := lay2(t, &ir.Type{Kind: ir.Struct, Fields: []ir.Field{
+		{Name: "A", Type: tString(t)},
+		{Name: "B", Type: tString(t)},
+	}})
+	err = mapEmittable(mapOf(t, pair, tInt(t)))
+	if err == nil {
+		t.Fatal("a map with a key needing a generated hash was emittable")
+	}
+	if !strings.Contains(err.Error(), "generated hash function") {
+		t.Errorf("the refusal is %q, want it to name the generated hash function", err)
+	}
+}
+
+// TestReferencedFollowsAMap checks the edges cmd/link walks.
+//
+// The slot group is the one nobody else emits. It is synthesised here, so a
+// map's descriptor owes it as well as the key's and the element's.
+func TestReferencedFollowsAMap(t *testing.T) {
+	m := mapOf(t, tString(t), tInt(t))
+	got, err := Referenced(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("a map reaches %d types, want the key, the element and the group", len(got))
+	}
+	if got[0] != m.Key || got[1] != m.Elem {
+		t.Error("the first two are not the key and the element")
+	}
+	if got[2].Kind != ir.Struct || len(got[2].Fields) != 2 {
+		t.Errorf("the third is %s, want the slot group struct", got[2])
 	}
 }

@@ -348,6 +348,15 @@ func Referenced(t *ir.Type) ([]*ir.Type, error) {
 		out = append(out, t.Params...)
 		out = append(out, t.Results...)
 		return out, nil
+	case ir.Map:
+		// The key, the element and the slot group. The group is a type this
+		// package synthesises and no other package will emit, so a map's
+		// descriptor owes it.
+		p, err := mapPlanOf(t)
+		if err != nil {
+			return nil, err
+		}
+		return []*ir.Type{t.Key, t.Elem, p.group}, nil
 	case ir.Interface:
 		// An Imethod's Typ is an offset to the descriptor of the method's
 		// signature, so an interface owes one descriptor per method.
@@ -437,7 +446,7 @@ func emittable(t *ir.Type) error {
 	case ir.FuncKind:
 		return funcEmittable(t)
 	case ir.Map:
-		return fmt.Errorf("rtype: a map descriptor names the runtime's group type, which specs/032 does not carry")
+		return mapEmittable(t)
 	case ir.Interface:
 		if err := ifaceEmittable(t); err != nil {
 			return err
@@ -636,6 +645,8 @@ func kindTailSize(t *ir.Type) int {
 		return chanTailSize
 	case ir.FuncKind:
 		return funcTailSize
+	case ir.Map:
+		return mapTailSize
 	case ir.Interface:
 		return ifaceTailSize
 	case ir.Struct:
@@ -691,6 +702,9 @@ func kindTail(t *ir.Type, self string, dataOff int) ([]byte, []Reloc, []Symbol, 
 
 	case ir.FuncKind:
 		return funcTail(t)
+
+	case ir.Map:
+		return mapTail(t)
 
 	case ir.Struct:
 		return structTail(t, self, dataOff)
