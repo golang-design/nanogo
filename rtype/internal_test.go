@@ -320,6 +320,37 @@ func TestPathToPrefixEscapes(t *testing.T) {
 	}
 }
 
+// TestIsExportedNameIsTheLanguagesRule pins the test that decides an
+// internal/abi.Name's first byte and the separator of the symbol that holds
+// it.
+//
+// The language's rule is that the first character is an upper-case letter, and
+// "letter" is Unicode's. This was a byte range, so a method or field named
+// Ärger came out unexported: reflect would refuse to call it, and its name
+// symbol carried a trailing dash where gc wrote a dot, so the two did not
+// merge.
+func TestIsExportedNameIsTheLanguagesRule(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"A", true},
+		{"Ann", true},
+		{"a", false},
+		{"ann", false},
+		{"_hidden", false},
+		{"Ärger", true},  // U+00C4, an upper-case letter outside ASCII
+		{"ärger", false}, // U+00E4, its lower-case form
+		{"Ελλάς", true},  // U+0395, Greek capital epsilon
+		{"日本", false},    // a letter with no case at all
+		{"", false},
+	} {
+		if got := isExportedName(tc.name); got != tc.want {
+			t.Errorf("isExportedName(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestStructPkgPathRefusesWhatItCannotAttribute covers the two shapes that
 // cannot come from the checker.
 //

@@ -277,7 +277,13 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 			// reachable from anywhere and its descriptor carries no path,
 			// which is also what makes two structurally equal struct types
 			// with exported fields one symbol rather than two.
-			if !isExportedName(f.Name()) && f.Pkg() != nil {
+			//
+			// The checker answers whether the name is exported. The rule is
+			// the language's, "the first character is an upper-case letter",
+			// and the letter need not be ASCII, so asking is the only way to
+			// get the same answer the checker used when it decided what this
+			// package can see.
+			if !f.Exported() && f.Pkg() != nil {
 				fl.Pkg = f.Pkg().Path()
 			}
 			out.Fields = append(out.Fields, fl)
@@ -347,18 +353,6 @@ func namedString(t *types2.Named) string {
 		return pkg.Path() + "." + obj.Name()
 	}
 	return obj.Name()
-}
-
-// isExportedName reports whether an identifier is exported.
-//
-// The unqualified name, not the qualified one: a method's and a field's name
-// hold no package.
-func isExportedName(name string) bool {
-	if name == "" {
-		return false
-	}
-	c := name[0]
-	return c >= 'A' && c <= 'Z'
 }
 
 // chanDirs maps the type checker's channel directions to the IR's.
@@ -444,7 +438,7 @@ func (c *Converter) interfaceMethods(t *types2.Interface) ([]Method, error) {
 	for i := 0; i < t.NumMethods(); i++ {
 		f := t.Method(i)
 		path := ""
-		if !isExportedName(f.Name()) && f.Pkg() != nil {
+		if !f.Exported() && f.Pkg() != nil {
 			path = f.Pkg().Path()
 		}
 		sig, err := c.methodSig(f)
@@ -502,7 +496,7 @@ func (c *Converter) methodSet(t *types2.Named) ([]Method, error) {
 		name := f.Name()
 		pkg := (*types2.Package)(nil)
 		path := ""
-		if !isExportedName(name) {
+		if !f.Exported() {
 			pkg = f.Pkg()
 			if pkg != nil {
 				path = pkg.Path()

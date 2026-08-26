@@ -843,12 +843,11 @@ func isExported(t *ir.Type) bool {
 	if t == nil || t.Name == "" {
 		return false
 	}
-	base := t.Name[strings.LastIndex(t.Name, ".")+1:]
-	if base == "" {
-		return false
-	}
-	c := base[0]
-	return c >= 'A' && c <= 'Z'
+	// The part after the last dot, and the same test the field and method
+	// names get. One rule, in one function, because a type whose name is
+	// exported by one rule and not by the other gets two name symbols for one
+	// string.
+	return isExportedName(t.Name[strings.LastIndex(t.Name, ".")+1:])
 }
 
 // equalClosure returns the symbol the descriptor's Equal field points at, and

@@ -1162,3 +1162,59 @@ type Chain interface{ Next() Chain }
 		t.Errorf("Next returns %s, want the interface itself", got)
 	}
 }
+
+// TestConvertExportedIsTheCheckersAnswer pins which rule decides that a name
+// is exported.
+//
+// The language says the first character is an upper-case letter, and the
+// letter need not be ASCII. This was a byte range here, so a field or method
+// named Ärger was treated as unexported: the field got a package path it
+// should not carry, which put a path on a struct descriptor that has none, and
+// the method got one that qualifies a name reflect can reach without it.
+func TestConvertExportedIsTheCheckersAnswer(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type S struct {
+	Ärger int64
+	ärger int64
+}
+
+type T int64
+
+func (T) Ärger() {}
+func (T) ärger() {}
+`)
+	c := NewConverter()
+	s, err := c.Convert(pkg.Scope().Lookup("S").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Fields[0]; got.Name != "Ärger" || got.Pkg != "" {
+		t.Errorf("the exported field is %q with package %q, want Ärger with none", got.Name, got.Pkg)
+	}
+	if got := s.Fields[1]; got.Pkg != "p" {
+		t.Errorf("the unexported field carries package %q, want p", got.Pkg)
+	}
+
+	tt, err := c.Convert(pkg.Scope().Lookup("T").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tt.Methods) != 2 {
+		t.Fatalf("T has %d methods, want 2", len(tt.Methods))
+	}
+	for _, m := range tt.Methods {
+		switch m.Name {
+		case "Ärger":
+			if m.Pkg != "" {
+				t.Errorf("the exported method carries package %q, want none", m.Pkg)
+			}
+		case "ärger":
+			if m.Pkg != "p" {
+				t.Errorf("the unexported method carries package %q, want p", m.Pkg)
+			}
+		default:
+			t.Errorf("T has an unexpected method %q", m.Name)
+		}
+	}
+}

@@ -114,6 +114,15 @@ type Variadic func(head Flags, rest ...*Ident) (int, error)
 // package for a type that has one.
 type NamedEmpty interface{}
 
+// Unicode holds an exported field whose first letter is not ASCII. The
+// language says an identifier is exported when its first character is an
+// upper-case letter, and the letter need not be ASCII, so an exported test
+// written as a byte range answers wrongly here.
+type Unicode struct {
+	Ärger int64
+	ärger int64
+}
+
 var namedCorpus = []struct {
 	src string
 	rt  reflect.Type
@@ -132,6 +141,7 @@ var namedCorpus = []struct {
 	{"Nullary", reflect.TypeOf(Nullary(nil))},
 	{"Variadic", reflect.TypeOf(Variadic(nil))},
 	{"NamedEmpty", reflect.TypeOf((*NamedEmpty)(nil)).Elem()},
+	{"Unicode", reflect.TypeOf(Unicode{})},
 }
 
 // namedRefusals are the rows that must be refused, with the words the refusal
@@ -196,6 +206,11 @@ type Nullary func()
 type Variadic func(head Flags, rest ...*Ident) (int, error)
 
 type NamedEmpty interface{}
+
+type Unicode struct {
+	Ärger int64
+	ärger int64
+}
 
 // Reader is not in the corpus. Its descriptor is refused, and the refusal is
 // not this package's: an Imethod's Typ is an offset to the descriptor of the
