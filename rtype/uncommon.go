@@ -35,12 +35,17 @@ const (
 
 // hasUncommon reports whether t's descriptor carries an UncommonType.
 //
-// gc's rule is "the type has a name or a method", and a predeclared type has a
-// name, so int carries one with an empty package path and no methods. The rule
-// is reproduced rather than narrowed because the flag and the tail have to
-// agree: TFlagUncommon set with no tail makes the runtime read sixteen bytes
-// past the end of the symbol, and the tail with the flag clear makes reflect
-// report no package path for a type that has one.
+// gc's rule is "the type has a name or a method". Only the first half is here,
+// and the second half is unreachable: the only type with a method and no name
+// is a pointer to a defined type, and a type with a method is refused. When
+// methods are written this has to grow the second half, or *T will carry
+// methods with nowhere to put them.
+//
+// A predeclared type has a name, so int carries an UncommonType with an empty
+// package path and no methods. That is not an oddity to optimise away. The
+// flag and the section are one decision: TFlagUncommon set with no section
+// makes the runtime read sixteen bytes past the end of the symbol, which is
+// what nanogo emitted for every named type before this file existed.
 func hasUncommon(t *ir.Type) bool {
 	return t.Name != ""
 }

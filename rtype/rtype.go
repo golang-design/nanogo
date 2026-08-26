@@ -18,28 +18,51 @@
 // function, in one package, used by everything". The encoders never build a
 // name.
 //
+// # The five sections of a descriptor
+//
+// cmd/compile's writeType draws them and this package places them the same way:
+//
+//	0 .. A  internal/abi.Type
+//	A .. B  the kind-specific header: a slice's element, an array's element,
+//	        slice type and length, a struct's package path and field slice
+//	B .. C  internal/abi.UncommonType, for a type that has a name or a method
+//	C .. D  the variable-length data the header points at, which today is a
+//	        struct's field array
+//	D .. E  the method array
+//
+// The order is not free. The UncommonType has to start pointer-aligned, and its
+// Moff is measured from B rather than from the descriptor, so a header that
+// grew after the UncommonType was written would move the method array without
+// moving the offset that finds it.
+//
 // # What is emitted and what is refused
 //
-// The set this package can encode is decided by one question: is the type's
-// method set knowably empty? A descriptor carries an UncommonType tail
-// whenever the type has methods, and an ir.Type carries no method set
-// (type.go's rule: below the IR a type is a size, an alignment and a pointer
-// map). So a descriptor for a type that might have methods would claim it has
-// none, reflect would report an empty method set, and an itab built against it
-// would find no functions.
+// A defined type is emitted. Its method set crosses the type boundary
+// (ir.Type.Methods), so the UncommonType can carry the package path that
+// reflect.Type.PkgPath reads and a method count that was established rather
+// than assumed. A struct is emitted, with the field array that carries each
+// name, tag, embedded bit, type and offset.
 //
-// A method set is knowably empty for a predeclared basic type, because the
-// language gives those none, and for a slice, an array, a map, a channel, a
-// function, a literal struct and a literal interface, because the language
-// gives none of those a method either. It is not knowable for a defined type
-// or for a pointer to one, and those are refused. That is the same gap that
-// stops itabs, stated from the other side, and it is a gap in the IR type
-// boundary rather than in this package.
+// Four things are refused, and each names what is missing:
 //
-// Four other refusals are recorded where they arise: a struct's field tags, a
-// channel's direction, a function's signature and an interface's method set
-// are all absent from an ir.Type, so a descriptor for one of those composite
-// forms cannot be filled in either.
+//   - A type that has a method. The entry needs an Mtyp, which is the
+//     descriptor of the method's type with the receiver removed, and a
+//     function's signature is not in the IR type; and it needs Ifn and Tfn,
+//     the two ABI wrappers, one of which gc generates in the declaring package
+//     and nanogo does not generate at all. Zero is a legal Mtyp meaning
+//     "unexported, reflect may not call it", so a zero written for a gap would
+//     be read as a fact. This is the same gap that stops itabs.
+//   - A struct whose fields do not compare as one region of memory. Its Equal
+//     needs a generated function, which specs/032 has no writer for, and a nil
+//     Equal on a comparable type makes the runtime panic when a value of it is
+//     used as a map key.
+//   - A map, whose descriptor names the runtime's group type.
+//   - A channel, a function, and an interface with methods, each of which
+//     needs something an ir.Type does not carry: a direction, a signature, and
+//     the type of each method. Those three are refused by the naming function
+//     in ir/rtype.go before they reach this package, and emittable answers for
+//     them anyway, because a refusal that depends on which check runs first is
+//     a refusal nobody has checked.
 //
 // # One known divergence from gc, in the pointer bitmask of an interface
 //
