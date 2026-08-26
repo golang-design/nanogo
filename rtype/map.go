@@ -311,6 +311,12 @@ func mapTail(t *ir.Type) ([]byte, []Reloc, []Symbol, error) {
 // embedded field renamed through an alias, which ir.Converter unaliases away.
 // So the refusal is asked of the group rather than restated here, and it moves
 // on its own when the literal struct is spelled.
+//
+// Descriptor is asked and its symbols are thrown away, which is work rather
+// than a shallower check because a shallower check is a second opinion that can
+// disagree with the writer. The cost is bounded: nothing per node asks for a
+// map's descriptor. ir/lower.go and ssagen/data.go ask for a *name*, and
+// driver/types.go asks for a descriptor once per type in a package's closure.
 func mapEmittable(t *ir.Type) error {
 	p, err := mapPlanOf(t)
 	if err != nil {

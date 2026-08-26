@@ -239,6 +239,12 @@ func TestMapGroupIsSpelledFromTheMap(t *testing.T) {
 		{"an array of slots", group.Fields[1].Type, true},
 		{"the slot", slot, true},
 		{"the control word", group.Fields[0].Type, false},
+		// Through a field, which is the branch the literal-struct work will
+		// reach: gc raises a struct to the mark from its contents.
+		{"an unmarked struct holding a marked field", layOut(t, &Type{Kind: Struct, Fields: []Field{
+			{Name: "g", Type: group},
+		}}), true},
+		{"an unmarked array of marked slots", layOut(t, &Type{Kind: Array, Len: 2, Elem: slot}), true},
 		{"the map itself", m, false},
 		{"a slice of the group", layOut(t, &Type{Kind: Slice, Elem: group}), false},
 	} {

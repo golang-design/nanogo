@@ -100,9 +100,14 @@ func funcParams(t *ir.Type, base int) ([]byte, []Reloc, []Symbol, error) {
 // built below the type boundary and never converted. A descriptor written from
 // it would claim func(), and reflect would report a function of no arguments
 // for one that takes three.
+//
+// It is reached for a *defined* function type and for that one only. A function
+// literal is refused earlier, by ir/rtype.go, because its spelling is the two
+// lists; a defined one is named by its name, so the encoder is the first thing
+// that needs them.
 func funcEmittable(t *ir.Type) error {
 	if t.Params == nil || t.Results == nil {
-		return fmt.Errorf("rtype: the signature of %s is not in the IR type", t)
+		return fmt.Errorf("rtype: the signature of %s is not in the IR type: its parameter and result lists are nil", t)
 	}
 	if len(t.Params) > funcMaxInCount {
 		return fmt.Errorf("rtype: %s takes %d parameters and InCount holds %d", t, len(t.Params), funcMaxInCount)
