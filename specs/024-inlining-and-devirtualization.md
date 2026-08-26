@@ -16,12 +16,15 @@ nowhere. `driver/flags.go` parses `gc`'s `-l` into `Config.NoInline`, and
 nothing reads it, so the flag that disables inlining and the inlining it
 disables are both absent.
 
-Neither pass can be built where it stands. Inlining rewrites the IR tree in
-place, and [020](020-ir.md)'s tree exists; what is missing under it is
-[015](015-export-data.md), which is the only way a body crosses a package
-boundary, and export data is not written either. Intra-package inlining is
-buildable now and is worth having for that reason: it is the half that needs
-nothing new.
+Only half of inlining can be built where it stands. Inlining rewrites the IR
+tree in place, and [020](020-ir.md)'s tree exists. What is missing under it is a
+body in export data, the only way a body crosses a package boundary:
+[015](015-export-data.md) is written and read, and it carries declarations only.
+`export/writer.go` sets the inlinable-body flag false for every function, and
+the reader is the types-only one, so cross-package inlining has nothing to
+inline.
+Intra-package inlining is buildable now and is worth having for that reason: it
+is the half that needs nothing new.
 
 The design below stands. It was reviewed and not disproved, only deferred.
 
@@ -43,9 +46,10 @@ nothing on the forbidden list.
 
 Cost is a weighted node count over the IR, walked once per function and cached.
 Ordinary nodes cost 1. A call costs 57 in the reference implementation against a
-budget of 80, which is the mechanism that stops a function containing two calls
-from being inlined. nanogo takes the same shape of number and tunes it against
-the corpus rather than inventing one.
+budget of 80, both in `cmd/compile/internal/inline/inl.go`, which is the
+mechanism that stops a function containing two calls from being inlined. nanogo
+takes the same shape of number and tunes it against the corpus rather than
+inventing one.
 
 The walk stops as soon as the budget is exceeded, so the common case of a large
 function is cheap to reject.
@@ -63,8 +67,11 @@ These make a function non-inlinable regardless of cost:
 | Direct recursion | Would not terminate |
 | `//go:noinline`, `//go:norace`, `//go:yeswritebarrierrec` | Directives, [016](016-directives-and-pragmas.md) |
 
-`defer` is allowed only in the shape [033](033-closures-defer-panic.md) can open-
-code, because inlining a `defer` into a caller changes which frame it belongs to.
+`defer` is allowed only in the shape [033](033-closures-defer-panic.md)
+specifies for open coding, because inlining a `defer` into a caller changes
+which frame it belongs to. That shape is a constraint on this pass and not a
+capability to lean on: [033](033-closures-defer-panic.md) does not open-code any
+`defer` today, and it writes no `FUNCDATA_OpenCodedDeferInfo`.
 
 ### Mechanism
 
@@ -104,7 +111,7 @@ call.
 | --- | --- |
 | A concrete value assigned to an interface variable in the same function | `var w io.Writer = &buf; w.Write(p)` |
 | A type assertion or type switch that dominates the call | `if f, ok := w.(*os.File); ok { f.Write(p) }` |
-| An interface with exactly one implementing type in the program | whole-program only; not implemented |
+| An interface with exactly one implementing type in the program | whole-program only; excluded by design, see below |
 
 The first two are the ones nanogo is to implement. Both are local reasoning over
 the IR: a use of an interface value whose definition in the same function is a
@@ -151,13 +158,20 @@ decision the compiler makes is one nobody can check:
 - Devirtualization corpus: each of the two sources above, asserted in generated
   code, plus a negative case where the type is genuinely unknown.
 
-## Deviations
+## What was wrong
 
 The spec said which of the three devirtualization sources nanogo implements and
-which it does not. It implements none. The state was found by grepping the whole
-repository for `Inlinable` and for `NoInline`: the first has three mentions, a
-doc comment, a declaration, and one assertion in `ir/node_test.go`, and the
-second is parsed by the flag table and read by nobody.
+which it does not. It implements none, so the table's rows say which are
+designed for and which is excluded, and none of them is a description of code.
+The state was found by grepping the whole repository for `Inlinable` and for
+`NoInline`: the first has three mentions, a doc comment, a declaration, and one
+assertion in `ir/node_test.go`, and the second is parsed by the flag table and
+read by nobody.
+
+The spec said export data is not written. It is written and read, by
+`export/writer.go` and `export/read.go`. What it does not carry is a function
+body, which is the thing cross-package inlining needs, and
+[015](015-export-data.md) states that gap in its own terms.
 
 The cost model's numbers, 57 for a call against a budget of 80, are the
 reference implementation's and are recorded as a starting point to tune from.
