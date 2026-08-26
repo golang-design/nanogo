@@ -93,7 +93,7 @@ that is not here is upstream's.
 | `base.FatalfAt`, `base.Fatalf` and `base.Assertf` become `panicf` and `assertf` | Same reason as `Decoder.Sync`. |
 | `enableAlias` and its branch are removed | It selects between the alias representations of two `go/types` releases. nanogo is pinned to one. |
 | `readerTypeBound` is removed | Unused upstream as well. |
-| `objIdx` keeps an object whose name no source can spell, and `ObjFunc` decodes the promoted generic method instead of asserting it cannot appear | See below. |
+| `ObjFunc` decodes a promoted generic method instead of asserting it cannot appear | See below. |
 
 ### The writer, `writer.go`
 
@@ -202,7 +202,7 @@ names against `go/internal/gcimporter`'s 16, the two extra being `(*List).Zip`
 and `Point.Map`. The type that declares the method decodes it a second time
 through `ObjType`, and that copy is the one in the method set.
 
-## What neither can read
+## What sync-marked export data costs both readers
 
 `gc` built with `-d=syncframes` writes a sync marker before every field.
 Reading such an archive works until the first object that stands in for a
