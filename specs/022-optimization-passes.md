@@ -155,7 +155,7 @@ designed before the first pass is written, not after:
   all passes off, over the whole corpus. A disagreement isolates to a pass by
   bisection over the flag set.
 
-## Deviations
+## What was wrong
 
 The spec said the list is ordered and complete. It is neither, and both were
 found by reading `driver/compile.go`, which is the only place the pass order is

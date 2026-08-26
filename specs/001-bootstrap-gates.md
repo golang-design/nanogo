@@ -194,7 +194,13 @@ What exists is the ladder's first rung. `gc` seeds the build, `go list` resolves
 the import graph ([014](014-package-loader.md)'s G1 half), and `go tool link`
 produces every executable the tests run.
 
-## Corrections
+## Order
+
+[003](003-sequencing.md) has the milestone order. The gates do not map one to
+one onto milestones: G1 is reached at the end of a run of milestones, and G2 and
+G3 are each reached inside one.
+
+## What was wrong
 
 **The G1 allowance named `go/types`, and nanogo does not import it.** The spec
 listed `go/types` as a standard-library package in nanogo's dependency set. The
@@ -204,9 +210,3 @@ against the import list of the non-test source: the only `go/*` packages the
 compiler imports are `go/build` in `loader/constraint.go` and `go/constant` and
 `go/token` inside the fork. The allowance still holds for the rest of the
 standard library, which is what the sentence now says.
-
-## Order
-
-[003](003-sequencing.md) has the milestone order. The gates do not map one to
-one onto milestones: G1 is reached at the end of a run of milestones, and G2 and
-G3 are each reached inside one.
