@@ -159,6 +159,12 @@ const (
 	// instruction and no block.
 	OpARM64LoweredNilCheck
 
+	// The read of the context register, which is one register move from R26.
+	// It is a machine operation and not a pseudo-operation because it emits
+	// an instruction: the allocator gives the value an ordinary home and this
+	// is the move into it.
+	OpARM64LoweredGetClosurePtr
+
 	// Group 6: floating point.
 	//
 	// The width follows the same convention as the integer forms: FADD covers
@@ -243,6 +249,7 @@ const (
 	encMemIdx                        // MemOp, rt, base, index, extend, scaled
 	encAddr                          // ADRP and ADD
 	encFrame                         // ADD from RSP
+	encGetClosure                    // a register move out of the closure register
 	encCondSet                       // CSET, with the condition in Aux
 	encBranchCond                    // B.cond
 	encCompareBranch                 // CBZ, CBNZ
@@ -402,6 +409,12 @@ var arm64Ops = [opARM64End - OpARM64ADD]arm64Op{
 	OpARM64RET - OpARM64ADD: ai("ARM64RET", -1, encRet).takes().makes(),
 
 	OpARM64LoweredNilCheck - OpARM64ADD: ai("ARM64LoweredNilCheck", 2, encMem).takes().m(arm64.LoadBU),
+
+	// Not marked constant, which would be a miscompile and not a missed
+	// optimisation: specs/026-register-allocation.md recomputes a constant at
+	// each use rather than holding it, and the closure register holds the
+	// closure only until the first call this function makes.
+	OpARM64LoweredGetClosurePtr - OpARM64ADD: ai("ARM64LoweredGetClosurePtr", 0, encGetClosure).w64(),
 
 	OpARM64FADD - OpARM64ADD:  ai("ARM64FADD", 2, encFArith).comm(),
 	OpARM64FSUB - OpARM64ADD:  ai("ARM64FSUB", 2, encFArith),
@@ -774,6 +787,8 @@ func ARM64Encode(v *Value, dst arm64.Reg, args []arm64.Reg, out []uint32) (int, 
 		return 2, true
 	case encFrame:
 		return oneIf(arm64.AddRegImm(arm64.Size64, dst, arm64.RSP, v.AuxInt))
+	case encGetClosure:
+		return one(arm64.MovRegReg(arm64.Size64, dst, arm64.RegClosure))
 	case encCondSet:
 		// Aux holds the condition, and it is the same value a conditional
 		// branch on the same comparison carries. specs/042 group 4 folds a

@@ -37,11 +37,31 @@ a different thing: an interface. `ir/lower.go` performs the rows and
 | open-coded `defer` and `FUNCDATA_OpenCodedDeferInfo` | **not built**; nanogo writes two funcdata indices and that is not one of them |
 | a heap `_defer` record built by the compiler | **not built**; `runtime.deferproc` builds it |
 
-**One thing the closure half turns on does not exist: the context register.**
-A closure reads a capture through it, and no SSA operation reads it, so every
-form that needs a capture is refused rather than miscompiled. That single gap
-is what the first four refusals above have in common, and closing it is the
-work that unblocks them.
+**The context register is read now, and the refusals above are what is left
+to build on top of it.** `ssa.OpGetClosurePtr` is the callee half: `ir.Func`
+carries a `Closure` object, `ssa.Build` materialises the operation in the entry
+block for a function that has one, and the arm64 rules lower it to
+`OpARM64LoweredGetClosurePtr`, one register move out of R26.
+
+The operation is not pre-coloured to R26 and it must not be. `ssa/regalloc.go`
+refuses a `Target.DefReg` answer that names a register outside the allocatable
+set, and R26 is outside it deliberately: `ssagen` writes the closure word into
+R26 at every indirect call site, outside the allocator's model, so a value the
+allocator parked there would be destroyed at that call. The operation is
+therefore an ordinary value with an ordinary home, and the move out of R26 is
+the instruction that fills it. It is defined in the entry block, which is what
+makes the move correct: the register holds the closure until the function's
+first call and no longer.
+
+**The stack-growth tail is part of the same answer.** A function that reads the
+register calls `runtime.morestack` and every other function calls
+`runtime.morestack_noctxt`. The two differ in one instruction:
+`morestack_noctxt` writes zero into R26 before it grows the stack and
+`morestack` saves R26 into `g.sched.ctxt`, which `gogo` restores. Calling the
+first from a closure resumes it with a nil closure object, and calling the
+second from a function with no closure puts whatever the caller left in R26
+into a field the collector scans. `ssa.Func.NeedCtxt` carries the answer from
+`ir.Func.Closure` to the code generator.
 
 **The `panic` and `recover` refusals are not that gap.** Both are the interface
 one. `panic("boom")` and `panic(1)` are refused at `ssa.Build`, on the

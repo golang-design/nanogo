@@ -97,6 +97,8 @@ func newARM64() *ssa.RuleSet {
 	v[ssa.OpTrunc] = lowerExt
 	v[ssa.OpBitcast] = lowerBitcast
 
+	v[ssa.OpGetClosurePtr] = lowerGetClosurePtr
+
 	// Group 2: loads and stores.
 	v[ssa.OpLoad] = lowerLoad
 	v[ssa.OpStore] = lowerStore
@@ -1034,6 +1036,17 @@ func isDeferSym(aux any) bool {
 	}
 	return o.Name == "runtime.deferproc" || o.Name == "deferproc" ||
 		o.Name == "runtime.deferprocStack" || o.Name == "deferprocStack"
+}
+
+// lowerGetClosurePtr moves the closure register into a register the allocator
+// chose.
+//
+// The value keeps no argument, and that is what fixes where the move may be
+// emitted: it is defined in the entry block, before the function makes a call,
+// and specs/030-abi.md leaves no register standing across a call.
+func lowerGetClosurePtr(v *ssa.Value, e *ssa.Edit) bool {
+	e.Set(v, ssa.OpARM64LoweredGetClosurePtr)
+	return true
 }
 
 // lowerClosureCall loads the entry point out of the closure.

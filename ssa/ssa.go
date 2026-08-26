@@ -305,6 +305,17 @@ type Func struct {
 	// collector and specs/030-abi.md gives them offsets. Neither is done here.
 	Frame []*ir.Object
 
+	// NeedCtxt records that the caller left a closure object in the context
+	// register for this function, which is true of a function literal that
+	// captures and of nothing else.
+	//
+	// Two consumers read it and neither can derive it. The code generator
+	// picks the stack-growth symbol from it, because
+	// runtime.morestack_noctxt clears the register and runtime.morestack
+	// saves it across the growth, and reading the graph instead would answer
+	// wrongly for a function whose context value became dead.
+	NeedCtxt bool
+
 	// ABI is where specs/030-abi.md puts this function's parameters and
 	// results. AssignABI fills it and it is nil until then.
 	//

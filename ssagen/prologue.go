@@ -648,9 +648,10 @@ func (e *emitter) growstack() {
 		e.argSpill(p, true)
 	}
 	e.word(arm64.MovRegReg(arm64.Size64, arm64.R3, arm64.RegLink))
-	c, ok := morestackCallee()
+	ctx := e.needCtxt()
+	c, ok := morestackCallee(ctx)
 	if !ok {
-		e.fail("%s is not in rtsym, so the stack-growth tail has no callee", morestackName)
+		e.fail("%s is not in rtsym, so the stack-growth tail has no callee", morestackName(ctx))
 		return
 	}
 	e.call(e.pc(), c)
@@ -670,6 +671,13 @@ func (e *emitter) growstack() {
 	// and the tail re-enters the function from its first instruction.
 	e.unsafe = append(e.unsafe, ssa.PCRange{Lo: int64(e.growPC), Hi: int64(e.pc())})
 }
+
+// needCtxt reports whether the caller left a closure object in the context
+// register for this function.
+//
+// The function is what carries the answer, and a synthesised prologue with no
+// function reads false: a prologue built without a graph belongs to no closure.
+func (e *emitter) needCtxt() bool { return e.f != nil && e.f.NeedCtxt }
 
 // argSpill stores an argument register to its slot in the argument area, or
 // loads it back.

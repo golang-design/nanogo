@@ -377,6 +377,27 @@ type Func struct {
 	// is imported, so the exporter decides and the importer obeys.
 	Inlinable bool
 
+	// Closure is the context parameter of a function literal that captures.
+	//
+	// specs/033-closures-defer-panic.md gives a closure one hidden parameter:
+	// the address of the closure object, which arrives in the context
+	// register (R26 on arm64, specs/030-abi.md) rather than in an argument
+	// register. The object is a code pointer followed by one word per
+	// capture, so a capture is a field read off this object.
+	//
+	// It is nil for every function that captures nothing, and a function with
+	// no capture must keep it nil: the register is read at the entry only
+	// where something reads it, and the stack-growth tail of
+	// specs/035-goroutines-and-stack-growth.md chooses its runtime symbol by
+	// the same field.
+	Closure *Object
+
+	// Captures lists the objects of the enclosing function that this function
+	// reads through Closure, in the order of the fields after the code
+	// pointer. It is the same list, in the same order, as the Args of the
+	// OClosure node that names this function.
+	Captures []*Object
+
 	// Bodyless records that the declaration had no body block at all.
 	//
 	// An empty body and an absent body both leave Body empty, and the two mean

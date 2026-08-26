@@ -1298,6 +1298,18 @@ b0:
   t5 = ARM64RET <mem> t4
   Ret t5
 `},
+		{"the closure register at the entry", func() *ssa.Func {
+			p := newBuilder()
+			ctx := p.val(ssa.OpGetClosurePtr, tPtr)
+			return p.ret(p.val(ssa.OpLoad, tI64, ctx, p.mem))
+		}, `
+b0:
+  t0 = InitMem <mem>
+  t1 = ARM64LoweredGetClosurePtr <*int>
+  t2 = ARM64MOVDload <int> [0] t1 t0
+  t3 = ARM64RET <mem> t2 t0
+  Ret t3
+`},
 		{"a deferred call", func() *ssa.Func {
 			p := newBuilder()
 			d := &ir.Object{Name: "runtime.deferproc", Type: tFn, Class: ir.ClassFunc}

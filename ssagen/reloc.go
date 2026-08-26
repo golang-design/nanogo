@@ -45,12 +45,26 @@ type callee struct {
 
 // morestackName is the runtime function the stack-growth tail calls.
 //
-// runtime.morestack_noctxt has no Go declaration: it exists only in
-// runtime/asm_<arch>.s. rtsym carries it with Assembly set, so the name is
+// Neither symbol has a Go declaration: both exist only in
+// runtime/asm_<arch>.s. rtsym carries them with Assembly set, so the names are
 // checked against the runtime's own source there rather than typed in here,
 // which is what specs/031-runtime-lowering.md requires of every runtime symbol
 // the compiler generates a call to.
-const morestackName = "runtime.morestack_noctxt"
+//
+// The choice between the two is a correctness one and not a name.
+// runtime.morestack_noctxt writes zero into the context register before it
+// grows the stack, so a function that reads a capture out of that register
+// resumes with a nil closure. runtime.morestack saves the register into
+// g.sched.ctxt and the resumed function finds its closure again. The reverse
+// is wrong for the same reason: g.sched.ctxt is scanned by the collector, and
+// a function with no closure leaves whatever its caller left in the register,
+// so it must call the form that clears it.
+func morestackName(needCtxt bool) string {
+	if needCtxt {
+		return "runtime.morestack"
+	}
+	return "runtime.morestack_noctxt"
+}
 
 // morestackCallee returns the callee record for the stack-growth call, and
 // reports whether rtsym has the symbol.
@@ -60,8 +74,8 @@ const morestackName = "runtime.morestack_noctxt"
 // so a reference under ABIInternal names a symbol that does not exist and the
 // call reaches nothing. Assembly is what justifies the ABI, so a table entry
 // without it is refused rather than called.
-func morestackCallee() (callee, bool) {
-	s := rtsym.Lookup(morestackName)
+func morestackCallee(needCtxt bool) (callee, bool) {
+	s := rtsym.Lookup(morestackName(needCtxt))
 	if s == nil || !s.Assembly {
 		return callee{}, false
 	}

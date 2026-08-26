@@ -29,7 +29,15 @@ const (
 	OpInvalid Op = iota
 
 	// Inputs and constants.
-	OpArg         // an incoming parameter. Aux is the *ir.Object
+	OpArg // an incoming parameter. Aux is the *ir.Object
+	// OpGetClosurePtr is the address of the closure object the caller left in
+	// the context register. It is the one operation of this set that names a
+	// register, and it names it because the convention and not the allocator
+	// decides where the value is: specs/030-abi.md passes the closure in R26
+	// on arm64 and passes it nowhere else. Aux is the *ir.Object of the
+	// context parameter. Entry block only, because the register holds the
+	// closure at the entry and a call overwrites it.
+	OpGetClosurePtr
 	OpConstBool   // AuxInt is 0 or 1
 	OpConstInt    // AuxInt is the value
 	OpConstFloat  // Aux is a float64
@@ -154,12 +162,13 @@ type opInfo struct {
 var opInfos = [opCount]opInfo{
 	OpInvalid: {name: "Invalid", argLen: 0},
 
-	OpArg:         {name: "Arg", argLen: 0},
-	OpConstBool:   {name: "ConstBool", argLen: 0, constant: true, hasAuxInt: true},
-	OpConstInt:    {name: "ConstInt", argLen: 0, constant: true, hasAuxInt: true},
-	OpConstFloat:  {name: "ConstFloat", argLen: 0, constant: true},
-	OpConstString: {name: "ConstString", argLen: 0, constant: true},
-	OpConstNil:    {name: "ConstNil", argLen: 0, constant: true},
+	OpArg:           {name: "Arg", argLen: 0},
+	OpGetClosurePtr: {name: "GetClosurePtr", argLen: 0},
+	OpConstBool:     {name: "ConstBool", argLen: 0, constant: true, hasAuxInt: true},
+	OpConstInt:      {name: "ConstInt", argLen: 0, constant: true, hasAuxInt: true},
+	OpConstFloat:    {name: "ConstFloat", argLen: 0, constant: true},
+	OpConstString:   {name: "ConstString", argLen: 0, constant: true},
+	OpConstNil:      {name: "ConstNil", argLen: 0, constant: true},
 
 	OpPhi:  {name: "Phi", argLen: -1},
 	OpCopy: {name: "Copy", argLen: 1},

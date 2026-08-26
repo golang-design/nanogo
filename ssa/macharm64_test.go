@@ -311,6 +311,12 @@ func TestARM64EncodeAgreesWithEncoder(t *testing.T) {
 		{"CBNZ", enc(OpARM64CBNZ, 0, nil, nil), mustEnc(arm64.Cbnz(arm64.Size64, arm64.R1, 0))},
 		{"CALLclosure", enc(OpARM64CALLclosure, 0, nil, nil), arm64.Blr(arm64.R1)},
 		{"RET", enc(OpARM64RET, 0, nil, nil), arm64.Ret(arm64.RegLink)},
+		// The read of the context register names the register, and it is the
+		// one row of the table where the source is not an operand. A move out
+		// of any other register would compile and hand the body the wrong
+		// closure.
+		{"LoweredGetClosurePtr", enc(OpARM64LoweredGetClosurePtr, 0, nil, nil),
+			arm64.MovRegReg(arm64.Size64, arm64.R0, arm64.RegClosure)},
 	}
 	for _, tc := range tests {
 		if tc.got != tc.want {

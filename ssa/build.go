@@ -56,6 +56,7 @@ func Build(fn *ir.Func) (*Func, error) {
 	b.f.Sym = fn.Sym
 	b.f.Type = fn.Type
 	b.f.Pos = fn.Pos
+	b.f.NeedCtxt = fn.Closure != nil
 
 	b.classify()
 	b.entry()
@@ -165,6 +166,7 @@ func (b *builder) classify() {
 		}
 	}
 	add(b.fn.Recv)
+	add(b.fn.Closure)
 	for _, p := range b.fn.Params {
 		add(p)
 	}
@@ -219,6 +221,21 @@ func (b *builder) entry() {
 			continue
 		}
 		b.write(p, e, arg)
+	}
+
+	// The context parameter arrives in a register the convention names and
+	// not in an argument register, so it is not one of the parameters above:
+	// OpGetClosurePtr is what reads it, and it is here rather than at the
+	// first use because a call overwrites the register
+	// (specs/033-closures-defer-panic.md).
+	if c := b.fn.Closure; c != nil {
+		ctx := e.NewValue(c.Pos, OpGetClosurePtr, c.Type)
+		ctx.Aux = c
+		if b.frame[c] {
+			b.store(b.localAddr(c, c.Pos), ctx, c.Type, c.Pos)
+		} else {
+			b.write(c, e, ctx)
+		}
 	}
 
 	// Go zeroes a result and a local before the body runs. A value-resident

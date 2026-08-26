@@ -24,14 +24,14 @@ import (
 // that the emitter reads that record, because a literal here would not move
 // when the runtime does.
 func TestMorestackComesFromRtsym(t *testing.T) {
-	s := rtsym.Lookup(morestackName)
+	s := rtsym.Lookup(morestackName(false))
 	if s == nil {
-		t.Fatalf("rtsym does not carry %s", morestackName)
+		t.Fatalf("rtsym does not carry %s", morestackName(false))
 	}
 	if !s.Assembly {
 		t.Errorf("%s is not marked Assembly, and only that justifies calling it at ABI0", s.Name)
 	}
-	c, ok := morestackCallee()
+	c, ok := morestackCallee(false)
 	if !ok {
 		t.Fatal("the emitter found no callee for the stack-growth tail")
 	}
@@ -42,6 +42,41 @@ func TestMorestackComesFromRtsym(t *testing.T) {
 	// looks up in the ABI0 table.
 	if c.abi != obj.ABI0 {
 		t.Errorf("the tail calls %s at ABI %d, want ABI0", c.name, c.abi)
+	}
+	comparisons++
+}
+
+// TestMorestackKeepsTheContextRegister checks the stack-growth symbol a
+// function that reads the context register calls.
+//
+// The two runtime symbols differ in one instruction and the difference is a
+// correctness one. runtime.morestack_noctxt writes zero into the register
+// before the growth, so a closure that grew its stack resumes with a nil
+// closure object and faults on its first capture. runtime.morestack saves the
+// register into g.sched.ctxt and the growth is invisible to the function. The
+// reverse is wrong for the same field: g.sched.ctxt is scanned by the
+// collector, so a function with no closure must call the form that clears it.
+func TestMorestackKeepsTheContextRegister(t *testing.T) {
+	const src = "package main\n\nfunc g(a int) int\n\nfunc f(a int) int { return g(a) }\n"
+	for _, tc := range []struct {
+		ctxt bool
+		want string
+	}{
+		{false, "runtime.morestack_noctxt"},
+		{true, "runtime.morestack"},
+	} {
+		c := compile(t, src, "f")
+		c.f.NeedCtxt = tc.ctxt
+		p := obj.NewPackage("main")
+		r := emit(t, c, p)
+		text := disassemble(t, r, p)
+		want := "R_CALLARM64:" + tc.want
+		if !strings.Contains(text, want) {
+			t.Errorf("NeedCtxt=%v: the disassembly does not hold %s:\n%s", tc.ctxt, want, text)
+		}
+		if tc.ctxt && strings.Contains(text, "R_CALLARM64:runtime.morestack_noctxt") {
+			t.Errorf("a function that reads the context register calls the form that clears it:\n%s", text)
+		}
 	}
 	comparisons++
 }
@@ -127,7 +162,7 @@ func TestCallRelocations(t *testing.T) {
 	// the type and the target are checked by the disassembler rather than by
 	// this package's own record of them.
 	text := disassemble(t, r, p)
-	for _, want := range []string{"R_CALLARM64:main.g", "R_CALLARM64:" + morestackName} {
+	for _, want := range []string{"R_CALLARM64:main.g", "R_CALLARM64:" + morestackName(false)} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the disassembly does not hold %s:\n%s", want, text)
 		}

@@ -2176,3 +2176,59 @@ func bcLogRefusals(t *testing.T, m map[string]int) {
 		t.Logf("refused %6d  %s", m[k], k)
 	}
 }
+
+// TestBuildReadsTheContextRegister is the callee half of
+// specs/033-closures-defer-panic.md's closure object.
+//
+// A function literal that captures reads its captures off an object whose
+// address the caller left in the context register. Construction is where that
+// address becomes a value: OpGetClosurePtr, in the entry block, because a call
+// overwrites the register.
+func TestBuildReadsTheContextRegister(t *testing.T) {
+	ctx := obj("ctx", tIntPtr, ir.ClassParam)
+	x := obj("x", tInt, ir.ClassLocal)
+	fn := fun("closure", []*ir.Object{x},
+		asn(local(x), deref(local(ctx), tInt)),
+		ret(local(x)),
+	)
+	fn.Closure = ctx
+	f := build(t, fn)
+	if !f.NeedCtxt {
+		t.Error("the function reads the context register and NeedCtxt is false")
+	}
+	if n := countOp(f, OpGetClosurePtr); n != 1 {
+		t.Fatalf("got %d GetClosurePtr values, want 1", n)
+	}
+	var got *Value
+	for _, v := range f.Entry.Values {
+		if v.Op == OpGetClosurePtr {
+			got = v
+		}
+	}
+	if got == nil {
+		t.Fatalf("GetClosurePtr is not in the entry block:\n%s", f)
+	}
+	if got.Aux != ctx {
+		t.Errorf("GetClosurePtr names %v, want the context parameter", got.Aux)
+	}
+	if got.Type != tIntPtr {
+		t.Errorf("GetClosurePtr is %v, want the context parameter's type", got.Type)
+	}
+	if len(got.Args) != 0 {
+		t.Errorf("GetClosurePtr takes %d arguments, want none", len(got.Args))
+	}
+}
+
+// TestBuildWithoutAContextRegister is the other half of the rule above. A
+// function with no closure must not read the register, because the caller left
+// nothing in it and the stack-growth tail is chosen by the same answer.
+func TestBuildWithoutAContextRegister(t *testing.T) {
+	x := obj("x", tInt, ir.ClassLocal)
+	f := build(t, fun("plain", []*ir.Object{x}, asn(local(x), cint("1")), ret(local(x))))
+	if f.NeedCtxt {
+		t.Error("a function with no closure reports NeedCtxt")
+	}
+	if n := countOp(f, OpGetClosurePtr); n != 0 {
+		t.Errorf("a function with no closure reads the context register %d times", n)
+	}
+}
