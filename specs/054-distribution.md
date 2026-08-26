@@ -30,10 +30,15 @@ Released as `nanogo<version>.darwin-arm64.tar.gz` with a `SHA256SUMS` file.
 
 Until this, the only way to get nanogo was `go install
 golang.design/x/nanogo/cmd/nanogo@latest`, which gives a binary with no standard
-library beside it and needs an installed Go toolchain to be useful at all. The
-tree here is what [050](050-driver.md)'s `driver.FindRoot` resolves, so a build
-takes its standard library from a directory the user can name and inspect
-rather than from whichever toolchain happened to be on the machine.
+library beside it. The tree here is what [050](050-driver.md)'s
+`driver.FindRoot` resolves, so a build takes its standard library from a
+directory the user can name and inspect rather than from whichever toolchain
+happened to be on the machine.
+
+What the tarball removes is the dependency on somebody else's standard library,
+and not the dependency on the `go` command. `nanogo build` still runs `go list`
+and `go tool link`, so an unpacked tree on a machine with no `go` on `PATH`
+builds nothing. That limit is stated in full under What this does not do.
 
 ## What is built
 
@@ -45,20 +50,43 @@ The measured facts, from a build of this commit on darwin/arm64:
 
 | | |
 | --- | --- |
-| Tarball | 24,195,096 bytes compressed, 88 MB unpacked, 4,432 files |
+| Tarball | 24,195,096 bytes compressed, 88 MB unpacked, 4,432 entries |
 | `src/` | 57 MB, the standard library without `cmd`, tests and testdata |
 | `pkg/darwin_arm64/` | 18 MB, 27 archives |
 | `bin/` | 12 MB, `nanogo` and `nanogo-dist` |
 | Compiled by nanogo | **0 of 27** |
 | Byte-reproducible | yes, across two build directories |
 
+Two of those figures move and neither is gated by `internal/hygiene`. The
+compressed size is this commit's, because `bin/` holds the two binaries a
+commit produces; a rebuild at another commit gives another number. The 4,432 is
+tar entries, which is what `find` over the unpacked tree counts and what
+`tar tzf` lists; regular files alone are fewer. Read both as a measurement of
+one build and not as a constant.
+
 The tally is the number this spec is written around, and the rest of it
 explains why a zero is worth building infrastructure for.
 
 ## The claim a distribution is not allowed to make
 
-nanogo compiles no package of the bootstrap closure. Not one. So every archive
-in the first tarball is `gc`'s work.
+Every archive in the first tarball is `gc`'s work. Two separate facts put it
+there, and a spec that states only the tally hides one of them.
+
+**The release path never asks nanogo.** `dist.Closure` builds the closure with
+the `go` command and takes every archive out of its build cache.
+`dist.Package.Producer` is the field a nanogo-compiled archive would arrive
+with set, and nothing in `cmd/nanogo-dist` sets it.
+
+**Most of the closure would refuse if it were asked.** Run directly,
+`nanogo build` compiles five of the 27, all of them small `internal` leaves:
+`internal/goos`, `internal/asan`, `internal/msan`, `internal/race` and
+`internal/runtime/math`. The rest refuse, most for a type descriptor
+([032](032-type-descriptors-and-itabs.md)) or for assembly
+([044](044-plan9-assembler.md)). [060](060-selfhost.md) owns that census, which
+is measured rather than gated and moves with each Go release.
+
+So the tally is a zero, and "nanogo can compile none of these" is not what the
+zero says.
 
 That is acceptable and it is honest. What is not acceptable is a tarball that
 ships `gc`-compiled archives under a nanogo name with nothing saying so, and
@@ -117,7 +145,7 @@ strictly parsed, and `dist.TallyTree` checks three things on every read:
 does not is `gc`'s, and the release it names is read out of *its own object
 header* rather than taken from the release job's belief about the toolchain.
 
-#### The record was inside the archive first, and could not stay there
+#### Why the record is beside the archive and not inside it
 
 The first design appended a `__.NANOGO` member to each archive, so that the
 producer travelled inside the file it described. It was verified against the two
@@ -192,11 +220,14 @@ nanogo 0
 gc 27
 ```
 
-`dist.VerifyTree` recomputes all three counts from the bytes of every archive
-and fails on a disagreement, and `dist.Build` runs it as its last act, so a tree
-that builds without an error is a tree whose `VERSION` has already been checked
-against its contents. A counter added later is one nobody trusts; this one
-cannot be written without being compared.
+`dist.VerifyTree` recomputes the package count and the nanogo count from the
+bytes of every archive and fails on a disagreement. The `gc` count is not
+recomputed and does not need to be: `dist.ParseVersion` requires the two
+producer counts to add up to the package count, so a `VERSION` whose `gc` line
+disagreed could not have been read at all. `dist.Build` runs the check as its
+last act, so a tree that builds without an error is a tree whose `VERSION` has
+already been checked against its contents. A counter added later is one nobody
+trusts. This one cannot be written without being compared.
 
 `VerifyTree` also requires every `gc`-produced archive to name the release
 `VERSION` pins. That is not hypothetical. `ci.yml` uses
@@ -245,7 +276,9 @@ nanogo ships `pkg/`. Three reasons, in order of weight:
    either the tree is not recognised, in which case `FindRoot` falls through to
    the ambient `GOROOT` and the download is inert, or an empty `pkg/` passes the
    predicate and every link fails.
-2. **nanogo compiles 0 of 27.** Building on first use would build nothing.
+2. **nanogo cannot build the closure.** Five of the 27 compile and the rest
+   refuse, so a tree that built on first use would stop partway and have no
+   archive for what it could not compile.
 3. **Building them with `gc` needs the toolchain the tarball exists to remove.**
    A distribution that requires an installed Go to become usable is the
    `go install` story with extra steps.
@@ -253,8 +286,10 @@ nanogo ships `pkg/`. Three reasons, in order of weight:
 Go's reasoning is sound for Go, and the difference is not philosophical: Go's
 compiler can build its own standard library and nanogo's cannot yet. The
 tradeoff is a 23 MB download instead of a 6 MB one, and 18 MB of that is
-archives that will be rebuilt by nanogo one at a time as
-[051](051-build-integration.md)'s allowlist grows. **This decision inverts at
+archives nanogo will write one at a time, as `dist.Build` starts being handed
+packages with `Package.Producer` set. The allowlist of
+[051](051-build-integration.md) does not reach this path: it governs
+`-toolexec` and nothing else. **This decision inverts at
 G3.** When nanogo compiles the closure, shipping sources and building on demand
 becomes the better answer, and the tally is what will say when that day arrives.
 
@@ -291,7 +326,7 @@ than nanogo's. What is checked is that the same inputs give the same tarball.
 
 ## The seam with the driver
 
-Two packages, one tree, and no import between them.
+Two packages, one tree, and one import, in one direction.
 
 ```mermaid
 flowchart LR
@@ -301,16 +336,19 @@ flowchart LR
   cmd --> driver
 ```
 
-`dist` imports nothing from `driver`, deliberately: an import either way would
-stop the driver from calling `dist.TallyLine`, which is the one function a
-`nanogo version -v` needs. The target directory is a string parameter rather
-than `driver.TargetDir()`, and the pin is defaulted in `cmd/nanogo-dist`, which
-may import both.
+`dist` imports nothing from this module and `driver` imports `dist`. The
+direction is the design. `driver/distribution.go` reads a tree's `VERSION` and
+its manifest through `dist.ReadVersion` and `dist.TallyTree` before a build
+against that tree starts, and `dist.TallyLine` is the function a
+`nanogo version` would call. An import the other way would make both a cycle.
+The target directory is a string parameter rather than `driver.TargetDir()`,
+and the pin is defaulted in `cmd/nanogo-dist`, which imports both.
 
 The rule is carried by `dist/seam_test.go`, which walks `dist`'s imports and
-fails on any path inside this module. A cycle would otherwise not appear until
-somebody added the call in `driver`, which is a different package and a
-different day, and the rule would read as a comment nobody had reason to keep.
+fails on any path inside this module. The calls in `driver` exist, so a new
+import in `dist` is already a cycle the compiler reports; the test is what
+names the rule, so that the next author reads a sentence rather than a
+`import cycle not allowed` from a package they were not editing.
 
 ## Testing
 
@@ -322,13 +360,16 @@ order a user meets them:
    the binary's own location, with nothing in the environment and no Go
    toolchain offered as a fallback. The consumer's own predicate is the
    assertion, so the seam is tested from the far side.
-3. The unpacked `bin/nanogo-dist` reports the tally with no argument.
+3. The unpacked `bin/nanogo-dist` checks the tree against its own `VERSION` and
+   reports the tally, both with no argument and with nothing else installed.
 4. A program compiles through the unpacked `bin/nanogo` and links against
    archives that come only from the tree, named one by one in an `-importcfg`,
    then runs and prints what it was meant to.
 5. `bin/nanogo build` compiles and links the same kind of program from a module
    outside this repository, with `GOROOT` and `NANOGOROOT` unset, and the
-   executable runs and prints the right answer.
+   executable runs and prints the right answer. `PATH` stays, because `go list`
+   resolves the program's own package and `go tool link` writes the
+   executable.
 
 The program uses `println` and not `fmt`, because `fmt` is not in the bootstrap
 closure and a distribution that held it would not be this one.
@@ -345,25 +386,64 @@ to name an archive under the tree's `pkg/GOOS_GOARCH`. A build that took one
 package from the `go` command's cache would print the same summary and pass
 every other assertion.
 
-**The delegation is asserted, not inferred.** nanogo compiles no package of this
-closure, so its log must record a delegation. A program that ran is not evidence
-that nanogo compiled it, and the test says so in the one place where a future
-reader might assume otherwise.
+**The delegation is asserted, not inferred.** Four compiles `main` through the
+`-toolexec` path with an empty allowlist, so nanogo has to delegate it, and the
+test reads `NANOGO_LOG` for that record instead of inferring compilation from a
+program that ran.
+
+**Five cannot delegate at all**, and that is structural rather than a
+convention worth trusting. `driver/driver.go` routes `build` to `RunBuild`
+before `-fallback` is parsed, and `driver/build.go` marks every package named
+on the command line with nanogo's own producer unconditionally.
+`NANOGO_ALLOWLIST` and `-fallback` govern the `-toolexec` path and nothing
+else. So the `1 of 28` in five's summary is the proof that nanogo compiled the
+program's own package, and a spec that described the allowlist as governing
+`nanogo build` would be wrong.
 
 ## What this does not do
 
-- **The two tool binaries still come from `GOROOT`.** The compile is driven
-  through the unpacked `bin/nanogo`, and every *archive* comes from the tree,
-  but `go tool compile` and `go tool link` are the toolchain's. That is
-  [061](061-toolchain-independence.md)'s work and [045](045-linker.md)'s, and
-  the test comment says so where a reader would otherwise assume the tree is
-  self-sufficient.
-- **`nanogo build` is not this spec.** [050](050-driver.md) owns the command
-  that consumes the tree. This spec produces it.
+- **The tree does not remove the `go` command.** The compile is driven through
+  the unpacked `bin/nanogo` and every *archive* comes from the tree, but
+  `go tool compile` and `go tool link` are the toolchain's binaries, and
+  `nanogo build` runs the `go` command three ways: `go list` resolves the
+  packages named on the command line, `go tool link` writes the executable, and
+  `go env GOROOT GOVERSION` identifies the toolchain. With no `go` on `PATH`
+  the build stops before it compiles anything and names the two jobs it wanted
+  the command for, from the tarball's `bin/nanogo` exactly as from a binary
+  built in this repository. What does answer with nothing else installed is
+  `nanogo version`, `nanogo-dist tally` and `nanogo-dist verify`: a downloaded
+  tree is self-describing and self-auditing, and not self-building. Removing
+  the two tools is [061](061-toolchain-independence.md)'s work and
+  [045](045-linker.md)'s.
+- **`nanogo build` is not this spec.** [051](051-build-integration.md) owns it
+  as the user's path and [050](050-driver.md) lists its command line. This spec
+  produces the tree they consume.
 - **One platform.** darwin/arm64, per [000](000-decisions.md) decision 9.
   `ci.yml`'s cross-compile job proves the compiler *builds* from any host; it
   does not make a second target exist, and a release naming one would be a
   download that compiles nothing.
-- **`nanogo version` does not print the tally yet.** `dist.TallyLine` is one
-  function and wiring it is one line, in `driver`, which this work does not
-  touch.
+- **`nanogo version` does not print the tally.** It prints the build identity,
+  the target and the pinned release, and nothing about the tree it is installed
+  in. `driver` already imports `dist` for the build path, so wiring
+  `dist.TallyLine` into that line is a call and not a dependency change.
+
+## What was wrong
+
+The design above is what the tree does. These are the claims this spec made
+that the code disproved. They are kept, because a limit that stops being stated
+is a limit the next reader finds by hitting it.
+
+| Claimed | What the code does |
+| --- | --- |
+| "nanogo compiles no package of the bootstrap closure. Not one." | Run directly, `nanogo build` compiles five of the 27. The zero is the release path's: `dist.Closure` takes every archive from the `go` command's build cache and nothing sets `dist.Package.Producer`. |
+| `go install` "needs an installed Go toolchain to be useful at all", as though the tarball did not | The tarball needs one too. `nanogo build` runs `go list`, `go tool link` and `go env`. What the tree removes is the ambient standard library. |
+| "Two packages, one tree, and no import between them." | `driver` imports `dist`. `driver/distribution.go` reads a tree through `dist.ReadVersion` and `dist.TallyTree`. The seam rule was always one-directional; only `dist` is constrained. |
+| `dist.VerifyTree` "recomputes all three counts" | It recomputes two. `dist.ParseVersion` fixes the third by requiring the producer counts to add up. |
+| "the one function a `nanogo version -v` needs" | `driver/driver.go` accepts `version` as a single word and parses no `-v` beside it. |
+| "[050](050-driver.md) owns the command that consumes the tree" | [050](050-driver.md) lists the command line and hands the command to [051](051-build-integration.md) as the user's path. |
+| "4,432 files" | 4,432 tar entries. Directories are entries, and the regular files are fewer. |
+| The 18 MB of archives will be rebuilt "as [051](051-build-integration.md)'s allowlist grows" | The allowlist governs `-toolexec` only. This path is `dist.Build`, and an archive becomes nanogo's when it is handed over with `Package.Producer` set. |
+
+How the difference was found: a build of this commit on darwin/arm64, then
+`nanogo build` over every entry of `go list -deps` for `func main() {}`, and the
+import graphs of `dist` and `driver` read from the source.
