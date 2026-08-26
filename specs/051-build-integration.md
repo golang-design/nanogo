@@ -53,10 +53,10 @@ get past SSA construction once [020](020-ir.md)'s lowering pass has run
 compiling, but lowering is not where the rest goes: on the corpus measured
 without that pass, 17,809 of the 17,905 functions that reach construction lower
 completely to arm64 operations. The two places that refuse are construction and
-code generation, and no corpus counts the second. `ssagen` has no
-floating-point encoder and no floating-point register allocation, so a function
-holding a `float64` parameter, local or constant is refused there. A package that imports is no
-longer refused: `export/` reads `gc`'s export data, and `internal/e2e` compiles
+code generation, and no corpus counts the second. A function holding a
+`float64` parameter, local or constant is no longer among them: `ssagen` emits
+the floating-point file, per [042](042-arm64-backend.md). A package that
+imports is no longer refused: `export/` reads `gc`'s export data, and `internal/e2e` compiles
 a package that imports one of its own and a package that imports `math/bits`
 and `strconv`. No allowlist file is committed, so a checkout still compiles
 nothing until a build names one.
@@ -399,6 +399,5 @@ lowering.
 
 **The reach of `driver.Compile` was stated as the fraction of distribution
 functions that get past SSA construction.** Getting past construction is not
-compiling. Lowering refuses more, and code generation refuses every function
-that touches floating point, which no corpus in [003](003-sequencing.md)
-counts.
+compiling. Lowering refuses more, and code generation refuses more still, which
+no corpus in [003](003-sequencing.md) counts.

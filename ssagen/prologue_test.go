@@ -456,11 +456,18 @@ func TestAssignFollowsTheConvention(t *testing.T) {
 		}
 	}
 
-	// A float has no encoder on this target, so it is named rather than
-	// placed into a register that no instruction can read.
+	// A float travels in the floating-point file and takes none of the
+	// integer registers, so the integer after it is still in R0.
 	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
-	if _, _, err := assignArgs([]*ir.Type{f64}); err == nil {
-		t.Error("a floating-point argument was placed, and no instruction can read it")
+	got, _, err = assignArgs([]*ir.Type{f64, word})
+	if err != nil {
+		t.Fatalf("a floating-point argument was refused: %v", err)
+	}
+	if !got[0].inReg || got[0].reg != arm64.F0 {
+		t.Errorf("the float is in %v (in a register: %v), want F0", got[0].reg, got[0].inReg)
+	}
+	if !got[1].inReg || got[1].reg != arm64.R0 {
+		t.Errorf("the integer after the float is in %v, want R0", got[1].reg)
 	}
 
 	// A value the register set cannot hold is refused rather than written into

@@ -12,7 +12,7 @@ depends_on:
 
 **This spec describes unbuilt work.** There is no `link` package. nanogo's
 objects are linked by `go tool link`, and that is the one external dependency
-this deck most depends on being kept: `ssagen`'s `TestLinkAndRun` calls it 18
+this deck most depends on being kept: `ssagen`'s `TestLinkAndRun` calls it 25
 times to turn compiled source into a running process, and
 [040](040-object-format.md)'s whole proof rests on it accepting the object.
 Every `nanogo build` says so on the way out, on success and on failure alike:

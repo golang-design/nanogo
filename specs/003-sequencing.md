@@ -183,7 +183,7 @@ its gate is not met.**
 ### What M3 reached, and what it did not
 
 The pipeline runs from source text to a `goobj` file. `ssagen`'s
-`TestLinkAndRun` takes 18 programs through all of it to a process that returns
+`TestLinkAndRun` takes 25 programs through all of it to a process that returns
 the right answer, and several of them call into or are called from
 `gc`-compiled code. That retired the milestone's stated risk: **`go tool link`
 links a nanogo-written object against the real Go runtime into a binary that
@@ -304,7 +304,7 @@ package:
 | `ir` | 94% | [020](020-ir.md); builds 536 packages of the distribution |
 | `ssa` | 96% | [021](021-ssa-construction.md), with the verifier of that spec |
 | `ssa/rules` | 97% | [025](025-lowering-and-rules.md), [042](042-arm64-backend.md) |
-| `ssagen` | 92% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |
+| `ssagen` | 91% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |
 | `obj` | 98% | [040](040-object-format.md) |
 | `obj/arm64` | 99% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
 | `rtsym` | 100% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |

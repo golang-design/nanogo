@@ -286,9 +286,9 @@ for the ones a test happens to try.
   value after the pass, and `driver/compile.go` runs `ssa.Verify` after it.
 - Per-rule tests: a minimal function whose lowered form is asserted exactly.
   Built, in `ssa/rules/arm64_test.go` and `ssa/rules/float_test.go`. A rule set
-  for the floating-point operations is not a compiler that emits them: a
-  function that needs a floating-point register is refused later, by `ssagen`
-  and by the allocation, per [042](042-arm64-backend.md).
+  for the floating-point operations is not a compiler that emits them. That a
+  function needing a floating-point register compiles, links and runs is
+  asserted by `ssagen` and not here, per [042](042-arm64-backend.md).
 - A rule-coverage report: which target-neutral operations have no rule for a
   target. Built, as `TestARM64RuleCoverage`. It fails on an operation with
   neither a rule nor an entry in `Deferred`, and it fails on an operation that

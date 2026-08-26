@@ -356,6 +356,9 @@ func (e *emitter) wordIf(w uint32, ok bool, format string, args ...any) {
 
 // mem appends a load or store with an offset the caller knows fits.
 func (e *emitter) mem(op arm64.MemOp, rt, base arm64.Reg, off int64) {
+	if !e.memClass(op, rt) {
+		return
+	}
 	w, ok := arm64.MemUnsignedOffset(op, rt, base, off)
 	e.wordIf(w, ok, "%v %v, %d(%v)", op, rt, off, base)
 }
@@ -363,8 +366,28 @@ func (e *emitter) mem(op arm64.MemOp, rt, base arm64.Reg, off int64) {
 // memIf appends a load or store built by one of obj/arm64's addressing forms.
 func (e *emitter) memIf(form func(arm64.MemOp, arm64.Reg, arm64.Reg, int64) (uint32, bool),
 	op arm64.MemOp, rt, base arm64.Reg, off int64) {
+	if !e.memClass(op, rt) {
+		return
+	}
 	w, ok := form(op, rt, base, off)
 	e.wordIf(w, ok, "%v %v, %d(%v)", op, rt, off, base)
+}
+
+// memClass checks that the transferred register is in the file the operation
+// transfers.
+//
+// obj/arm64 panics on the mismatch rather than returning false, because a
+// register of the wrong file is not an encoding that does not fit: it is a
+// caller that lost track of which class a value is in. This package is the
+// caller, so it makes the report itself, for the reason reg returns two
+// values: a panic out of the encoder names an instruction and not the value
+// or the pass that chose it.
+func (e *emitter) memClass(op arm64.MemOp, rt arm64.Reg) bool {
+	if op.IsFloat() == rt.IsFloat() {
+		return true
+	}
+	e.fail("%v transfers %v, which is in the other register file", op, rt)
+	return false
 }
 
 // markSP records the stack pointer delta in effect from the next instruction.
@@ -389,10 +412,9 @@ func (e *emitter) markLine(pos syntax.Pos) {
 
 // reg converts an allocator register number to obj/arm64's.
 //
-// ssa.Target numbers the integer registers exactly as obj/arm64 does, which is
-// what makes this a conversion rather than a table. A floating-point register
-// is above that range and has no encoder, so it is an error and not a wrong
-// instruction.
+// ssa.Target numbers both register files exactly as obj/arm64 does, which is
+// what makes this a conversion rather than a table: ssa.Arm64Reg is the
+// identity and ssa.Arm64FReg counts from arm64.F0.
 //
 // It reports whether the conversion happened, and every caller has to ask.
 // The earlier signature returned arm64.ZR for a register it had just refused,
@@ -411,19 +433,6 @@ func (e *emitter) reg(r ssa.Reg) (arm64.Reg, bool) {
 		return arm64.ZR, true
 	}
 	x := arm64.Reg(r)
-	// IsFloat is the test, and an earlier version of this line was
-	// `arm64.Reg(r) != x` with x already equal to arm64.Reg(r). That disjunct
-	// is always false, so the refusal this function promises never happened
-	// and a float register reached an integer encoder as its raw number.
-	if x.IsFloat() {
-		// The allocator has a floating-point free list and hands out F0 to
-		// F29, but nothing below it does: move copies with an integer MOV,
-		// spill stores with an integer store, and the parallel move breaks a
-		// cycle with an integer scratch register. So the refusal is the code
-		// generator's and not the encoder's, and it says so.
-		e.fail("the allocation puts a value in %v, and this target has no floating-point code generator", x)
-		return arm64.ZR, false
-	}
 	if !x.Valid() {
 		e.fail("register %d is not a register of this target", r)
 		return arm64.ZR, false
@@ -731,7 +740,7 @@ func (e *emitter) move(dst, src ssa.Loc, v *ssa.Value) {
 		if !dok || !sok {
 			return
 		}
-		e.word(arm64.MovRegReg(arm64.Size64, d, s))
+		e.copyReg(d, s)
 	case dst.Kind == ssa.LocReg && src.Kind == ssa.LocSlot:
 		d, ok := e.reg(dst.Reg)
 		if !ok {
@@ -766,8 +775,9 @@ func (e *emitter) move(dst, src ssa.Loc, v *ssa.Value) {
 		// Found by compiling `for _, x := range xs { n = add(n, x) }`, where
 		// the slice's base address is rematerialisable and lives across the
 		// call in the loop body.
-		e.remat(moveScratch, v)
-		e.store(moveScratch, dst.Slot, v.Type)
+		st := scratchFor(v.Type)
+		e.remat(st, v)
+		e.store(st, dst.Slot, v.Type)
 	default:
 		e.fail("v%d: no move from %v to %v", v.ID, src, dst)
 	}
@@ -869,27 +879,6 @@ func (e *emitter) incoming() error {
 		return errors.New("the function has no ABI assignment")
 	}
 	e.frame.in, e.frame.args = wordPlaces(abi.In), abi.ArgsSize
-	// A parameter that arrives in a floating-point register is refused here
-	// and not further down. The stack-growth tail spills every incoming
-	// register to the argument area, and it does that from the placement
-	// rather than from a value, so it is reached before any value of the
-	// function is emitted and it has no failure path of its own: argSpill
-	// carried the floating-point register into the integer store and
-	// obj/arm64 panicked on it. valuePlaces makes the same refusal for a call
-	// site and for a return, and this is the third door into the same gap.
-	for i := range abi.In {
-		av := &abi.In[i]
-		for j := range av.Parts {
-			if av.Parts[j].Reg == ssa.NoReg || !arm64.Reg(av.Parts[j].Reg).IsFloat() {
-				continue
-			}
-			name := "a parameter"
-			if av.Obj != nil {
-				name = "parameter " + av.Obj.Name
-			}
-			return fmt.Errorf("%s is %v, and this target has no floating-point code generator", name, av.Type)
-		}
-	}
 	for _, v := range e.f.Entry.Values {
 		if v.Op != ssa.OpArg {
 			continue
@@ -1044,7 +1033,7 @@ func (e *emitter) loadArg(v *ssa.Value) {
 		e.fail("v%d: no load for type %v", v.ID, v.Type)
 		return
 	}
-	reg := moveScratch
+	reg := scratchFor(v.Type)
 	if dst.Kind == ssa.LocReg {
 		r, ok := e.reg(dst.Reg)
 		if !ok {
@@ -1108,10 +1097,33 @@ func (e *emitter) transfer(x []xfer) {
 
 // permute realises a set of register-to-register moves that happen at once.
 //
+// The two register files are permuted separately. A move of an integer cannot
+// free a floating-point register and cannot block one, so a mixed set is two
+// parallel moves that share no register, and each needs the cycle breaking of
+// its own file: the integer scratch register cannot hold a float.
+func (e *emitter) permute(dst, src []arm64.Reg) {
+	var idst, isrc, fdst, fsrc []arm64.Reg
+	for i := range dst {
+		switch {
+		case dst[i].IsFloat() != src[i].IsFloat():
+			e.fail("a parallel move copies %v to %v, which crosses the register files", src[i], dst[i])
+			return
+		case dst[i].IsFloat():
+			fdst, fsrc = append(fdst, dst[i]), append(fsrc, src[i])
+		default:
+			idst, isrc = append(idst, dst[i]), append(isrc, src[i])
+		}
+	}
+	e.permuteFile(idst, isrc, moveScratch)
+	e.permuteFile(fdst, fsrc, fmoveScratch)
+}
+
+// permuteFile permutes one register file.
+//
 // A move whose destination is nobody's remaining source is safe to make now.
 // When none is, the moves that are left form a cycle, and one source is copied
 // to the scratch register so that the register it occupied can be written.
-func (e *emitter) permute(dst, src []arm64.Reg) {
+func (e *emitter) permuteFile(dst, src []arm64.Reg, scratch arm64.Reg) {
 	pending := make([]int, 0, len(dst))
 	for i := range dst {
 		if dst[i] != src[i] {
@@ -1133,9 +1145,7 @@ func (e *emitter) permute(dst, src []arm64.Reg) {
 				k++
 				continue
 			}
-			if dst[i] != src[i] {
-				e.word(arm64.MovRegReg(arm64.Size64, dst[i], src[i]))
-			}
+			e.copyReg(dst[i], src[i])
 			pending = append(pending[:k], pending[k+1:]...)
 			progress = true
 		}
@@ -1146,7 +1156,7 @@ func (e *emitter) permute(dst, src []arm64.Reg) {
 		// source breaks it.
 		i := -1
 		for _, j := range pending {
-			if src[j] != moveScratch {
+			if src[j] != scratch {
 				i = j
 				break
 			}
@@ -1158,10 +1168,10 @@ func (e *emitter) permute(dst, src []arm64.Reg) {
 			e.fail("a parallel move of %d registers has no order", len(pending))
 			return
 		}
-		e.word(arm64.MovRegReg(arm64.Size64, moveScratch, src[i]))
+		e.copyReg(scratch, src[i])
 		for _, j := range pending {
 			if src[j] == src[i] {
-				src[j] = moveScratch
+				src[j] = scratch
 			}
 		}
 	}
@@ -1174,6 +1184,51 @@ func (e *emitter) permute(dst, src []arm64.Reg) {
 // materialisation, so no value of the function is in it. The other one is the
 // allocator's, which is why this is the second and not the first.
 const moveScratch = arm64.RegTrampHi
+
+// fmoveScratch is moveScratch for the floating-point file.
+//
+// ssa.Target gives ClassFloat the pair F30 and F31, for the reason it gives
+// ClassInt R16 and R17, and this takes the second of the pair so that the
+// allocator keeps the first. A move of a float therefore never touches an
+// integer register and never disturbs the integer cycle breaking, which is
+// what makes a mixed parallel move two independent ones.
+const fmoveScratch = arm64.RegFScratchHi
+
+// scratchFor returns the materialisation register of the file a value of type
+// t lives in.
+func scratchFor(t *ir.Type) arm64.Reg {
+	if c, _ := ssa.ClassOfType(t); c == ssa.ClassFloat {
+		return fmoveScratch
+	}
+	return moveScratch
+}
+
+// copyReg copies one register to another of the same file.
+//
+// The file decides the instruction and the type does not, because a register
+// is a register: an integer copy is ORR with the zero register and a
+// floating-point one is FMOV. FMOV in the double form is used for a float32
+// too, because every single-precision operation zeroes bits 63 to 32, so the
+// wider copy moves the same bits and needs no type to choose.
+//
+// A copy between the two files is refused rather than encoded as FMOV general
+// to floating-point. Such a copy is a value whose class the allocation and the
+// convention disagree about, and a bitcast instruction here would turn that
+// disagreement into a program that computes an integer's bits as a float.
+func (e *emitter) copyReg(dst, src arm64.Reg) {
+	if dst == src {
+		return
+	}
+	if dst.IsFloat() != src.IsFloat() {
+		e.fail("a copy from %v to %v crosses the register files", src, dst)
+		return
+	}
+	if dst.IsFloat() {
+		e.word(arm64.FmovRegReg(arm64.Size64, dst, src))
+		return
+	}
+	e.word(arm64.MovRegReg(arm64.Size64, dst, src))
+}
 
 // callValue emits a call: the arguments into their registers, the call
 // itself, and the results out of theirs.
@@ -1276,7 +1331,7 @@ func (e *emitter) storeArg(a *ssa.Value, off int64) {
 		return
 	}
 	h := e.home(a)
-	src := moveScratch
+	src := scratchFor(a.Type)
 	switch h.Kind {
 	case ssa.LocReg:
 		r, rok := e.reg(h.Reg)
