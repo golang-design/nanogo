@@ -57,12 +57,16 @@
 //     Equal on a comparable type makes the runtime panic when a value of it is
 //     used as a map key.
 //   - A map, whose descriptor names the runtime's group type.
-//   - A channel, a function, and an interface with methods, each of which
-//     needs something an ir.Type does not carry: a direction, a signature, and
-//     the type of each method. Those three are refused by the naming function
-//     in ir/rtype.go before they reach this package, and emittable answers for
-//     them anyway, because a refusal that depends on which check runs first is
-//     a refusal nobody has checked.
+//   - A function, and an interface with methods, each of which needs something
+//     an ir.Type does not carry: a signature, and the type of each method.
+//     Both are refused by the naming function in ir/rtype.go before they reach
+//     this package, and emittable answers for them anyway, because a refusal
+//     that depends on which check runs first is a refusal nobody has checked.
+//
+// A channel is written. Its direction is in the IR type now, so a defined
+// channel type gets a descriptor. A channel *literal* is still refused, and
+// the refusal is ir/rtype.go's rather than this package's: the naming function
+// spells no direction, so chan int and chan<- int would share one symbol.
 //
 // # One known divergence from gc, in the pointer bitmask of an interface
 //
@@ -324,7 +328,7 @@ func Referenced(t *ir.Type) ([]*ir.Type, error) {
 		return nil, fmt.Errorf("rtype: the references of a nil type")
 	}
 	switch t.Kind {
-	case ir.Ptr, ir.Slice:
+	case ir.Ptr, ir.Slice, ir.Chan:
 		return []*ir.Type{t.Elem}, nil
 	case ir.Array:
 		st, err := SliceOf(t.Elem)
@@ -411,7 +415,7 @@ func emittable(t *ir.Type) error {
 	}
 	switch t.Kind {
 	case ir.Chan:
-		return fmt.Errorf("rtype: a channel's direction is not in the IR type")
+		return chanEmittable(t)
 	case ir.FuncKind:
 		return fmt.Errorf("rtype: a function's signature is not in the IR type")
 	case ir.Map:
@@ -614,6 +618,8 @@ func kindTailSize(t *ir.Type) int {
 		return 8
 	case ir.Array:
 		return 24
+	case ir.Chan:
+		return chanTailSize
 	case ir.Interface:
 		return 32
 	case ir.Struct:
@@ -666,6 +672,9 @@ func kindTail(t *ir.Type, self string, dataOff int) ([]byte, []Reloc, []Symbol, 
 		// The three words of the slice are its pointer, length and capacity,
 		// and all three are zero.
 		return make([]byte, 32), nil, nil, nil
+
+	case ir.Chan:
+		return chanTail(t)
 
 	case ir.Struct:
 		return structTail(t, self, dataOff)

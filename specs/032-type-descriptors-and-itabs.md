@@ -89,6 +89,7 @@ name:
 | --- | --- |
 | a channel's direction | `chan int` and `chan<- int` |
 | a function's signature | `func(int)` and `func(string)` |
+
 | a literal interface's method signatures | `interface{ M() }` and `interface{ M(int) }` |
 | an embedded field renamed through a type alias | `struct{ int }` and `struct{ Int = int }` |
 
@@ -109,9 +110,9 @@ one name. Nothing in an `ir.Type` can detect it. The fix is in `convert.go`'s
 
 ### What `rtype` can fill in
 
-A predeclared basic type, a slice, an array, a pointer, a struct and a defined
-type over any of those, with the `UncommonType` tail and the `StructType`
-header and field array that each needs. `ir.Type.Methods` is what makes the
+A predeclared basic type, a slice, an array, a pointer, a struct, a **channel**
+and a defined type over any of those, with the `UncommonType` tail and the
+`StructType` or `ChanType` header and field array that each needs. `ir.Type.Methods` is what makes the
 tail writable: a defined type's method set, sorted by name and set for every
 defined type with the empty set included, so an empty set is a fact rather than
 an absence. `TFlagUncommon` and the tail are one decision, because `gc` gives a
@@ -124,7 +125,7 @@ Four things stop a descriptor, and each names itself in the refusal:
 | --- | --- |
 | a method | the method's signature, for the `Mtyp` offset, and the two ABI wrappers `gc` generates beside every method |
 | a struct or an array whose parts do not compare as one region of memory | the generated equality function this spec owes |
-| a map, a channel, a function, or a literal interface with methods | the group type, the direction, and the signature that [020](020-ir.md)'s type boundary drops |
+| a map, a function, or a literal interface with methods | the group type and the signature that [020](020-ir.md)'s type boundary drops |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
 Writing a tail that claims a type has no methods is the failure the first row
@@ -443,6 +444,32 @@ an unexported field compiles. The stop list names the pointer-mask limit in its
 place, and the paragraph below the table says what the unexported field is
 not, because the shape reads like a stop and a reader who skips the paragraph
 will assume it is one.
+
+### A channel's direction crossed the boundary
+
+The table above listed a channel beside a map and a function, on the grounds
+that [020](020-ir.md)'s type boundary drops the direction. `ir.Type` carries
+`ChanDir` now, populated by `Converter` from the checker, and `rtype/chan.go`
+writes the `ChanType` header: an element pointer and the direction as a full
+word, which is what `internal/abi` spells it as.
+
+The zero value is `InvalidDir` and **not** `chan T`. A channel type built below
+the boundary by hand carries no direction, and the encoder refuses it by name
+rather than defaulting to bidirectional, because a default is the field being
+supplied by the encoder instead of by the checker and that is what the second
+rule at the top of `ir/type.go` forbids. What it would cost is the failure this
+spec already names: `<-chan int` written under `chan int`'s name, one symbol
+for two types, merged by the linker without a diagnostic.
+
+**A channel *literal* is still refused, and the refusal moved.** It is now
+`ir/rtype.go`'s and not `rtype`'s. `typeName` spells no direction, so
+`chan int` and `chan<- int` would still share one name, and `Descriptor` asks
+for the name before it asks whether the bytes can be filled in. What the naming
+function needs is three lines: the direction's spelling before the element's,
+which `ir.ChanDir.String` already returns in the form that precedes an element
+(`chan`, `chan<-`, `<-chan`). A **defined** channel type is exempt, as every
+defined type is, because its name is its identity, so `type Signal chan int`
+compiles to a descriptor today.
 
 ### `PtrToThis` was blamed on a relocation that exists
 

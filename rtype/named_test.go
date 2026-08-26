@@ -87,6 +87,17 @@ type List []Flags
 
 type Buf [4]int64
 
+// Signal, Send and Recv are the three channel directions. They are one type to
+// the machine and three types to the language, and the descriptor is where
+// that stops being a distinction without a difference: the three have three
+// link strings, three hashes and three descriptors, and a compiler that
+// carried no direction would emit one symbol for all three.
+type Signal chan int
+
+type Send chan<- int
+
+type Recv <-chan Flags
+
 var namedCorpus = []struct {
 	src string
 	rt  reflect.Type
@@ -98,6 +109,9 @@ var namedCorpus = []struct {
 	{"Tagged", reflect.TypeOf(Tagged{})},
 	{"List", reflect.TypeOf(List(nil))},
 	{"Buf", reflect.TypeOf(Buf{})},
+	{"Signal", reflect.TypeOf(Signal(nil))},
+	{"Send", reflect.TypeOf(Send(nil))},
+	{"Recv", reflect.TypeOf(Recv(nil))},
 }
 
 // namedRefusals are the rows that must be refused, with the words the refusal
@@ -148,6 +162,12 @@ type Label struct {
 type List []Flags
 
 type Buf [4]int64
+
+type Signal chan int
+
+type Send chan<- int
+
+type Recv <-chan Flags
 
 // Counter is not in the corpus. It is the type whose descriptor must be
 // refused, because a method needs two things this compiler does not have.
@@ -263,6 +283,8 @@ func TestUncommonTypeCarriesThePackagePath(t *testing.T) {
 				b += 8
 			case reflect.Array:
 				b += 24
+			case reflect.Chan:
+				b += 16
 			}
 			if got := binary.LittleEndian.Uint16(d.Data[b+4:]); got != uint16(c.rt.NumMethod()) {
 				t.Errorf("Mcount %d, want %d", got, c.rt.NumMethod())
@@ -621,4 +643,127 @@ func gcObjectSymbols(t *testing.T) map[string]int64 {
 		t.Skip("go tool nm reported nothing")
 	}
 	return syms
+}
+
+// TestChanTypeHeaderAgainstReflect checks the ChanType header field by field.
+//
+// The direction is the whole reason a channel's descriptor was refused.
+// specs/032-type-descriptors-and-itabs.md records the failure it prevents: two
+// types sharing one symbol, which the linker merges silently, so the program
+// reads one channel type's descriptor for the other's values.
+func TestChanTypeHeaderAgainstReflect(t *testing.T) {
+	types, _ := namedTypes(t)
+	for i, c := range namedCorpus {
+		if c.rt.Kind() != reflect.Chan {
+			continue
+		}
+		t.Run(c.src, func(t *testing.T) {
+			syms, err := rtype.Descriptor(types[i])
+			if err != nil {
+				t.Fatalf("descriptor: %v", err)
+			}
+			d := syms[0]
+
+			// Elem is a pointer to the element's descriptor, at the start of
+			// the header.
+			r, ok := reloc(d, rtype.TypeSize)
+			if !ok {
+				t.Fatal("no element reference")
+			}
+			want := "type:" + c.rt.Elem().String()
+			if c.rt.Elem().PkgPath() != "" {
+				want = "type:" + c.rt.Elem().PkgPath() + "." + c.rt.Elem().Name()
+			}
+			if r.Target != want {
+				t.Errorf("element is %s, want %s", r.Target, want)
+			}
+			if r.Size != 8 {
+				t.Errorf("element reference is %d bytes, want a pointer", r.Size)
+			}
+
+			// Dir is a full word, because internal/abi spells it as an int.
+			got := binary.LittleEndian.Uint64(d.Data[rtype.TypeSize+8:])
+			if got != uint64(c.rt.ChanDir()) {
+				t.Errorf("Dir %d, want %d", got, c.rt.ChanDir())
+			}
+			if got > 3 || got == 0 {
+				t.Errorf("Dir %d is not one of internal/abi's three directions", got)
+			}
+		})
+	}
+}
+
+// TestChanDirectionsDoNotShareASymbol is the failure the direction exists to
+// stop, stated as a test.
+func TestChanDirectionsDoNotShareASymbol(t *testing.T) {
+	types, _ := namedTypes(t)
+	var chans []*ir.Type
+	for i, c := range namedCorpus {
+		if c.rt.Kind() == reflect.Chan {
+			chans = append(chans, types[i])
+		}
+	}
+	if len(chans) < 3 {
+		t.Fatalf("the corpus holds %d channel types, want the three directions", len(chans))
+	}
+	// A defined channel type is named by its own name, so the three differ
+	// there already. What must also differ is the header, because two
+	// packages declaring the same channel type must produce one descriptor
+	// and two different ones must not.
+	seen := make(map[uint64]bool)
+	for _, ct := range chans {
+		syms, err := rtype.Descriptor(ct)
+		if err != nil {
+			t.Fatalf("%s: %v", ct, err)
+		}
+		dir := binary.LittleEndian.Uint64(syms[0].Data[rtype.TypeSize+8:])
+		if seen[dir] {
+			t.Errorf("%s writes direction %d, which another channel already wrote", ct, dir)
+		}
+		seen[dir] = true
+	}
+}
+
+// TestChanWithNoDirectionIsRefused is type.go's second rule at the encoder: a
+// fact the checker did not supply is refused by name and never filled in.
+func TestChanWithNoDirectionIsRefused(t *testing.T) {
+	byHand := &ir.Type{Kind: ir.Chan, Name: "p.C", PkgPath: "p", Elem: &ir.Type{Kind: ir.Int64, Name: "int", Basic: "int"}, Methods: []ir.Method{}}
+	if err := ir.Layout(byHand); err != nil {
+		t.Fatal(err)
+	}
+	_, err := rtype.Descriptor(byHand)
+	if err == nil {
+		t.Fatal("a channel with no direction produced a descriptor")
+	}
+	if !strings.Contains(err.Error(), "channel direction") {
+		t.Errorf("the refusal is %q and does not name the direction", err)
+	}
+	// With the direction it is emitted, so the refusal above is about the
+	// missing fact and not about channels.
+	byHand.ChanDir = ir.SendRecv
+	if _, err := rtype.Descriptor(byHand); err != nil {
+		t.Errorf("a channel with a direction was still refused: %v", err)
+	}
+}
+
+// TestReferencedFollowsAChannel checks the edge cmd/link walks.
+//
+// A package that emits a descriptor owes every descriptor that one reaches.
+// cmd/link's defgotype follows the element pointer to build a DWARF entry, and
+// an element nobody emitted surfaces as an undefined go:info target that names
+// neither the package that owes it nor the fix.
+func TestReferencedFollowsAChannel(t *testing.T) {
+	types, _ := namedTypes(t)
+	for i, c := range namedCorpus {
+		if c.rt.Kind() != reflect.Chan {
+			continue
+		}
+		got, err := rtype.Referenced(types[i])
+		if err != nil {
+			t.Fatalf("%s: %v", c.src, err)
+		}
+		if len(got) != 1 || got[0] != types[i].Elem {
+			t.Errorf("%s reaches %v, want its element", c.src, got)
+		}
+	}
 }
