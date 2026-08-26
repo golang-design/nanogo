@@ -36,12 +36,12 @@ not encode is empty.
 `ssa/rules/arm64.go` stop at the same place, so no operation exists that no
 encoder can take.
 
-Group 6 is the one place where the encoder is ahead of what a program can
-reach. `obj/arm64/float.go` encodes the floating-point forms and the sweep below
-compares them, and `ssagen` refuses every floating-point value before one is
-emitted, which [042](042-arm64-backend.md) states, counts and owns. A reader who
-takes an encoder's existence as a working construct is reading this spec for a
-claim it does not make.
+Group 6 was the one place where the encoder was ahead of what a program could
+reach. `obj/arm64/float.go` encodes the floating-point forms, the sweep below
+compares them, and `ssagen` now emits them: a float reaches an object, links
+and runs, which [042](042-arm64-backend.md) states, counts and owns. An
+encoder's existence is still not a working construct, and 042 and not this
+spec is where the reach of one is stated.
 
 ## Structure
 
