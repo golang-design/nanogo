@@ -2281,6 +2281,25 @@ func TestRematerialisationIntoASlotStoresIt(t *testing.T) {
 	if got := e.text[len(e.text)-1]; got == 0 {
 		t.Errorf("the store is not encoded")
 	}
+
+	// The same move for a floating-point constant. It has to stage through
+	// the floating-point materialisation register and store with the
+	// floating-point store, because the integer pair holds neither the value
+	// nor the instruction that writes it.
+	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
+	e.text = nil
+	fc := f.Entry.NewValue(0, ssa.OpARM64FMOVconst, f64)
+	fc.AuxInt = int64(math.Float64bits(1.5))
+	e.move(ssa.SlotLoc(0), ssa.Loc{}, fc)
+	imm, ok := arm64.FmovImm(arm64.Size64, fmoveScratch, 1.5)
+	if !ok {
+		t.Fatal("1.5 is not an FMOV immediate")
+	}
+	store, ok := arm64.MemUnsignedOffset(arm64.StoreF64, fmoveScratch, arm64.RSP, 8)
+	if !ok {
+		t.Fatal("a floating-point store into a slot does not encode")
+	}
+	mustEmit(t, e, imm, store)
 }
 
 // TestFloatRegistersReachTheEncoder covers the three paths a floating-point
