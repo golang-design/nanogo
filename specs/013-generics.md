@@ -117,8 +117,7 @@ symbol per instantiation, a way to pass them that the ABI must accommodate, a
 rule for what goes in them, and a story for methods reached through them. In
 `gc` this is a substantial part of the generics implementation.
 
-Under [000](000-decisions.md) decision 10 that subsystem has to justify itself
-against a line budget, and what it buys is binary size.
+That subsystem has to justify itself, and what it buys is binary size.
 
 ### 3. It is correct by construction
 

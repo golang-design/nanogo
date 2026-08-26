@@ -75,7 +75,7 @@ integers, control flow, and function calls.
 `go build -toolexec=nanogo` while `gc` compiles everything else, links and runs
 with its tests passing.
 
-Hosted mode ([000](000-decisions.md) decision 11) is what makes this gate
+Hosted mode ([000](000-decisions.md) decision 10) is what makes this gate
 narrow. The runtime, the standard library, and the linker are all `gc`'s. The
 only new thing in the binary is one package's worth of nanogo code generation,
 so a crash has one suspect.
@@ -158,11 +158,10 @@ Risks are listed with the milestone that retires them, not with a probability.
 | Risk | Retired at | How it is retired |
 | --- | --- | --- |
 | The object format seam does not work | M3 | The first binary either runs or it does not. This is why M3 is narrow and early. |
-| `gc` object compatibility is unmaintainable across a release | M3 | Detected the first time the pin is bumped. The fallback is whole-world mode, stated in [000](000-decisions.md) decision 11. |
+| `gc` object compatibility is unmaintainable across a release | M3 | Detected the first time the pin is bumped. The fallback is whole-world mode, stated in [000](000-decisions.md) decision 10. |
 | GC metadata is wrong in a way that only shows under load | M4 | Allocation stress with `GOGC=1` and `GODEBUG=gccheckmark=1`, not a unit test. |
 | The forked type checker cannot be re-pointed at nanogo's syntax tree cheaply | M2 | [012](012-type-checking.md) names the interface it is re-pointed through. If the fork resists, the fallback is to keep `go/ast` under the checker and translate, at a cost stated in that spec. |
 | Generics instantiation is a rewrite rather than a port | M5 | Deferred deliberately: nanogo's own source uses generics, so M6 cannot be reached without it, and M5 is where it is confronted with the corpus available. |
-| The v1 line budget is exceeded | M4 | **Fired once, and the budget moved.** The tree passed the original 40,000 lines, `internal/hygiene` failed on it, and [000](000-decisions.md) decision 10 raised the number to 60,000 with the reasoning written down. That decision also says it may not happen twice: the next overrun is answered by naming what to give up. The two recovery points are [022](022-optimization-passes.md) and [024](024-inlining-and-devirtualization.md). |
 | `//go:linkname` and `//go:nosplit` semantics are subtler than documented | M9 | The runtime is the only consumer that cares, and M9 is where it is compiled. |
 
 ## Where the work stands

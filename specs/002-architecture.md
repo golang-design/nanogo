@@ -69,8 +69,8 @@ A single IR would have to be both, and each half would pay. Escape analysis
 needs to see that a value is assigned to a field of a heap object, which is a
 statement about Go's object graph. Register allocation needs to see that a value
 is live across a call, which is a statement about a machine. Encoding both in
-one representation is the design that makes compilers unreadable, and
-[000](000-decisions.md) decision 10 is a budget that will not survive it.
+one representation is the design that makes compilers unreadable, and a
+compiler nobody can read end to end is one nobody can correct.
 
 The cost is one lowering step that must be complete: every Go construct has to
 be gone before SSA construction. [020](020-ir.md) carries the list with a state
@@ -125,7 +125,7 @@ with the passes.
 **`ssagen/` was not in the layout at all.** The stage between the last SSA pass
 and the object writer, which encodes instructions, builds the prologue, emits
 relocations and attaches stack maps, had no package and no spec. It is 2,634
-lines. [000](000-decisions.md) decision 10 records the same gap in its budget.
+lines. Three audits of the deck found the same gap independently.
 
 **The IR passes of [023](023-escape-analysis.md) and
 [024](024-inlining-and-devirtualization.md) do not exist**, so `ir/` holds the

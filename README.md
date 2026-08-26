@@ -279,9 +279,9 @@ decision below.
 - **The objects are compatible with `gc`.** That is why one package can be
   compiled by nanogo inside a build the Go toolchain otherwise owns, and why a
   failure has one suspect. [`specs/051`](specs/051-build-integration.md)
-- **The size is a budget, not an adjective.** The compiler is meant to be read
-  end to end, and [`specs/000`](specs/000-decisions.md) states the line budget,
-  the accounting, and the two places to recover it if it runs out.
+- **It is meant to be read end to end.** Every stage is one package with one
+  job, and every spec states what its design gives up as well as what it buys.
+  [`specs/002`](specs/002-architecture.md)
 
 Generics will be fully stenciled rather than passed a dictionary. The language
 guarantees that terminates. [`specs/013`](specs/013-generics.md)

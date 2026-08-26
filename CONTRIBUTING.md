@@ -184,7 +184,7 @@ disagreeing with something concrete. Every spec ends with what it leaves open.
 
 **Break a spike.** The spikes under [`spikes/`](spikes/) are the evidence for
 [decision 3](specs/000-decisions.md) and
-[decision 11](specs/000-decisions.md). If one of them measures the wrong thing,
+[decision 10](specs/000-decisions.md). If one of them measures the wrong thing,
 a decision built on it is wrong too.
 
 **Prior art.** If another compiler solved one of the open questions well,
@@ -235,9 +235,7 @@ real `go build -toolexec=nanogo`, and runs the program that comes out.
 
 Every design choice states what it gives up, not only what it buys. This is
 already the house style of the deck:
-[decision 10](specs/000-decisions.md) records what the compiler measures against
-its own line budget, with the rows where the estimate was wrong, and
-[decision 11](specs/000-decisions.md) lists what object compatibility with `gc`
+[decision 10](specs/000-decisions.md) lists what object compatibility with `gc`
 costs before it lists what it buys.
 
 Reviewers will ask for the cost sentence. A spec that reads as pure gain is a
@@ -305,7 +303,7 @@ would do instead.
 
 For a bug, send the smallest program that shows it and what `gc` does with the
 same input. That last part is the whole story more often than not: nanogo is
-object-compatible with `gc` by [decision 11](specs/000-decisions.md), so a
+object-compatible with `gc` by [decision 10](specs/000-decisions.md), so a
 difference from `gc` is a nanogo bug until proven otherwise. The target is
 `darwin/arm64`; nanogo emits arm64 machine code and refuses a build for any
 other `GOARCH` by name.
