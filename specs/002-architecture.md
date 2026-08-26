@@ -115,7 +115,8 @@ The two rows reading `none` are gaps, not omissions. No spec names
 `internal/audit`, and `internal/hygiene` is cited as a gate by
 [051](051-build-integration.md) and [054](054-distribution.md) without either
 owning it. Both are the shape [000](000-decisions.md) decision 5 names for
-`ssagen`: a part of the tree that works and that nothing specifies.
+`ssagen`: a part of the tree that works, that CI runs, and that nothing
+specifies.
 
 Planned and not written. Each is named here so that a reader who looks for the
 package and does not find it knows which spec owns the absence:
@@ -215,6 +216,32 @@ the old gloss is still there, with the writer half beside it.
 without saying that nothing runs concurrently: nanogo has no `go` statement in
 its non-test source. The rule stays, as the rule it is, and the sentence after
 it says the parallelism is not there yet.
+
+**`internal/audit` is a gate with no spec, which is `ssagen`'s shape again.**
+`internal/audit/testdata/probes` holds 95 directories, one Go construct each.
+Every probe is compiled and run twice, once by nanogo and once by `gc`, and the
+two runs are compared, so no probe carries a hand-written expected value that
+can go stale: `gc` is the oracle. `internal/audit/testdata/ratchet.txt` records
+each probe's class, and the classes are totally ordered, `ok` above `refused`
+above `wrong` above `broken`. A class that falls fails the build whatever the
+pair. A class that rises does not fail and is reported loudly, because a
+refusal becoming an `ok` is the moment a sentence in the documentation stops
+being true. A `probes` job in `.github/workflows/ci.yml` runs it.
+
+It exists for a reason the deck should carry. The README spent a day telling
+users that nanogo does not run package initialization, which had been fixed
+hours earlier, and no gate could see the difference: `internal/hygiene` checks
+numbers, and nothing checked a claim about what the compiler can do. The probe
+corpus is the answer to that, and it is the same failure the "planned and not
+written" block below is for: a reader who wants to know what the compiler
+accepts has no spec to open.
+
+[004](004-conformance.md) is where this belongs. It already owns the
+differential method of [000](000-decisions.md) decision 6, the corpora,
+`internal/gotest`'s ratchet and `internal/covercheck`'s floor, and the probe
+corpus is a fourth conformance level below `test/` rather than a new kind of
+thing. This spec cannot add it, because [004](004-conformance.md) is not this
+spec's to edit. Naming the absence here is what this block is for.
 
 **The layout was missing every package the distribution work added.** `dist/`
 builds and audits a distribution tree and owns its manifest and tally,
