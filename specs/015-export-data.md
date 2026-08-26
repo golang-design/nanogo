@@ -309,6 +309,17 @@ change underneath it.
 An unknown directive is an error. A new one in a new Go release must be a build
 failure, not a line nanogo skips.
 
+**Reading a `modinfo` line is not the same as writing one, and `nanogo build`
+writes none.** `driver/build.go` calls `go tool link -importcfg <cfg> -o <out>
+<archive>`, and the config it writes holds `packagefile` lines and nothing
+else. `cmd/link` sets `runtime.modinfo` from a `modinfo` line
+(`ld/ld.go`'s `addstrdata1`), so a program nanogo built gets an empty one and
+`runtime/debug.ReadBuildInfo` returns `ok == false` where the same program
+built by `go build` reads ten settings. Nothing is said at compile time or at
+link time. The parser above is the half that is built; the writer belongs to
+whoever assembles that link, which is [051](051-build-integration.md)'s
+`nanogo build` today and [045](045-linker.md)'s linker in the end.
+
 ## Determinism
 
 Export data is part of a compiled package's bytes, so [053](053-determinism.md)
