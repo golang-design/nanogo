@@ -9,27 +9,49 @@ depends_on:
 
 # Optimization passes
 
-**Nothing in this spec is built.** No optimization pass exists in `ssa/` or in
-`ir/`. Rows 1 to 9, 11 and 12 of the list below have no code anywhere in the
-repository, and no flag turns a pass off because there is no pass to turn off.
-Rows 10, 13 and 14 exist and are owned by [025](025-lowering-and-rules.md),
-[026](026-register-allocation.md) and [027](027-liveness-and-stackmaps.md),
-which is where they are gated.
+**No pass in this spec is built as a pass.** Rows 1 to 9, 11 and 12 of the
+list below exist nowhere as a pass the driver runs, and no flag turns one off
+because there is none to turn off. Rows 10, 13 and 14 exist and are owned by
+[025](025-lowering-and-rules.md), [026](026-register-allocation.md) and
+[027](027-liveness-and-stackmaps.md), which is where they are gated.
+
+Three narrow pieces of rows 1 and 3 do exist, each inside a pass that needs it
+for its own correctness or its own output, and each says so in a comment that
+cites this spec:
+
+- `ssa/build.go`'s `removeUnreachable` deletes the blocks the entry cannot
+  reach. Construction produces them, `InvReachable` forbids them, and row 1 is
+  not allowed to be required for correctness, so the graph has to satisfy the
+  invariant before construction hands it over.
+- `ssa/lower.go`'s `deadValues` removes the values a rule's fold orphaned. An
+  address computation a load absorbed has no user left, and leaving it would
+  cost a register and make the lowered form impossible to assert against.
+- `ssa/rules/arm64.go` collapses a chain of constant offsets and folds a
+  constant operand into an immediate form. That is
+  [025](025-lowering-and-rules.md)'s address-mode work, in the target's own
+  rule file, and it folds an address rather than an expression.
+
+None of the three is the target-neutral pass its row names, and the boundary
+matters: a pass here may be deleted, and each of those three may not.
 
 This is a design that has held up rather than a design that shipped, and it
 costs nothing yet: the governing rule below is exactly why. What is missing is
 speed in the generated code, not correctness.
 
-The pipeline that runs today is in `driver/compile.go` and is six calls:
+The pipeline that runs today is `driver/compile.go`'s per-function pass list.
+It is nine stages, and it opens and closes outside this spec: with
+[020](020-ir.md)'s `ir.Lower`, which performs the lowering table before
+construction can refuse it, and with `ssagen.Emit`. Between them are six `ssa`
+calls:
 
     ssa.Build, ssa.Decompose, ssa.AssignABI, ssa.Lower,
     ssa.SplitCriticalEdges, ssa.Allocate
 
-`ssa.Verify` runs after `AssignABI` and after `Lower`. Three of those passes are
-not in the ordered list below and have to be: decomposition and the ABI
-assignment split values wider than a register, per
-[025](025-lowering-and-rules.md) and [030](030-abi.md), and
-`SplitCriticalEdges` prepares the graph for
+`ssa.Verify` runs after `AssignABI` and after `Lower`, as its own stage each
+time, so a violation names the pass that made it. Three of the six are not in
+the ordered list below and have to be: decomposition and the ABI assignment
+split values wider than a register, per [025](025-lowering-and-rules.md) and
+[030](030-abi.md), and `SplitCriticalEdges` prepares the graph for
 [026](026-register-allocation.md)'s phi resolution. The list below is a plan for
 the optional work, and it was never the whole pass order.
 
@@ -161,9 +183,22 @@ found by reading `driver/compile.go`, which is the only place the pass order is
 written down in code. It runs three passes this list never named, and none of
 the fourteen it did name except lowering, allocation and liveness.
 
-The spec is also cited by two files that assume its passes exist.
-`ssa/build.go` inserts a bounds check "specs/022 removes the ones prove can
-discharge", and `ssa/dom.go` computes the dominator tree "by the verifier and by
-prove, cse and nilcheckelim in specs/022". The checks are inserted and the tree
-is computed. Nothing removes a check, and no pass named in either comment
+The spec said it is cited by two files that assume its passes exist. It is
+cited by five, at eight sites: `ssa/build.go` three times, `ssa/op.go` twice,
+and `ssa/dom.go`, `ssa/lower.go` and `ir/node.go` once each. `ssa/build.go`
+inserts a bounds check "specs/022 removes the ones prove can discharge",
+`ssa/dom.go` computes the dominator tree "by the verifier and by prove, cse and
+nilcheckelim in specs/022", `ssa/op.go` marks an operation commutative for "cse
+and the rewrite rules", and `ir/node.go` gives a constant a numeric reader
+because "the constant folding of specs/022 cannot fold what it cannot read".
+The checks are inserted, the tree is computed, the flag is set and the reader
+exists. Nothing removes a check, and no pass named in any of those comments
 exists.
+
+The opening of this spec said nothing in it is built and that rows 1 to 9, 11
+and 12 have no code anywhere in the repository. The second half was too strong.
+`ssa/build.go`'s `removeUnreachable`, `ssa/lower.go`'s `deadValues` and
+`ssa/rules/arm64.go`'s constant-offset folds each do a narrow part of row 1 or
+row 3, inside a pass that cannot delete it. The correction is above rather than
+here, because a reader who greps for `deadcode` finds those three and needs the
+distinction before the list, not after it.
