@@ -73,16 +73,17 @@ const ratchetHeader = `# What the probe corpus proved about nanogo, on the day t
 # README.md, doc.go or driver/help.go has just become false, and it has to be
 # corrected in the same change that lifted the refusal.
 #
-# The three wrong rows are recorded, not hidden. They are real bugs with no fix
-# yet, and all three are documented:
+# The wrong rows are recorded, not hidden. They are real bugs with no fix yet,
+# and every one of them is documented:
 #
-#	buildinfo-named   nanogo writes no modinfo line, so
-#	                  runtime/debug.ReadBuildInfo finds nothing
 #	embed-directive   go:embed compiles and the variable is empty at run time
 #	panic-fires       panic on an operand that is already an interface dies
 #	                  with "runtime: name offset out of range"
 #
-# The last two, and the compiler crash that keeps struct-return-wide refused,
+# buildinfo-named was the third and is fixed: nanogo build writes the modinfo
+# line, so runtime/debug.ReadBuildInfo answers. It is an ok row now.
+#
+# The two above, and the compiler crash that keeps struct-return-wide refused,
 # are pinned as exact strings in driver/help_test.go: "go:embed", "name offset
 # out of range" and "wider than four machine registers". That coupling is
 # deliberate. Fixing one of these bugs fails that test, which forces the

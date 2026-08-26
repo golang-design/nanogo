@@ -309,16 +309,56 @@ change underneath it.
 An unknown directive is an error. A new one in a new Go release must be a build
 failure, not a line nanogo skips.
 
-**Reading a `modinfo` line is not the same as writing one, and `nanogo build`
-writes none.** `driver/build.go` calls `go tool link -importcfg <cfg> -o <out>
-<archive>`, and the config it writes holds `packagefile` lines and nothing
-else. `cmd/link` sets `runtime.modinfo` from a `modinfo` line
-(`ld/ld.go`'s `addstrdata1`), so a program nanogo built gets an empty one and
-`runtime/debug.ReadBuildInfo` returns `ok == false` where the same program
-built by `go build` reads ten settings. Nothing is said at compile time or at
-link time. The parser above is the half that is built; the writer belongs to
-whoever assembles that link, which is [051](051-build-integration.md)'s
-`nanogo build` today and [045](045-linker.md)'s linker in the end.
+**`nanogo build` writes the `modinfo` line as well as reading one.** The line
+goes into the link configuration only, never the compile one, because the
+directive belongs to the linker. `cmd/link` sets `runtime.modinfo` from it
+(`ld/ld.go`'s `addstrdata1`) and `runtime/debug.ReadBuildInfo` reads nothing
+else, so a link without the line produced a program that returned
+`ok == false` where the same program built by `go build` read ten settings,
+with nothing said at compile time or at link time. `driver/modinfo.go` is the
+writer. It belongs to whoever assembles the link, which is
+[051](051-build-integration.md)'s `nanogo build` today and
+[045](045-linker.md)'s linker in the end.
+
+The blob is `cmd/go`'s: the sixteen sentinel bytes of `modload.ModInfoData`,
+the rendering of a `debug.BuildInfo`, and the closing sixteen. Both sentinels
+are copied byte for byte, because `debug/buildinfo` scans an executable for
+the opening one and finds no blob bracketed any other way. The line is written
+as `modinfo %q`, since `cmd/link` reads the argument with `strconv.Unquote`.
+
+$$
+\texttt{runtime.modinfo} = \underbrace{S_{16}}_{\text{start}} \;\Vert\;
+\texttt{BuildInfo.String()} \;\Vert\; \underbrace{E_{16}}_{\text{end}}
+$$
+
+The contents come from `go list`, which is the only thing that has the answer
+module resolution gave: the main package's path, the module behind it, and one
+entry per module beneath it with its version, its checksum and its replacement.
+`GoVersion` is left empty on purpose. The linker stores the toolchain version
+separately and `ReadBuildInfo` overwrites the field with `runtime.Version()`,
+so a version written into the blob would be encoded twice and could disagree
+with itself. `cmd/go`'s `load.setBuildInfo` is the shape this follows.
+
+Five build settings are recorded: `-buildmode`, `-compiler`, `CGO_ENABLED`,
+`GOARCH` and `GOOS`. `gc` records more, and each one left out is left out
+because recording it would be a claim about an executable nanogo did not
+produce:
+
+| Absent | Why |
+| --- | --- |
+| `DefaultGODEBUG` | the `go` command computes it and then passes `-X runtime.godebugDefault` to the linker. nanogo passes no such `-X`, so the executable holds the runtime's own defaults |
+| `GOARM64`, and the feature level of every other `GOARCH` | nanogo emits baseline arm64 whatever the level says |
+| `GOEXPERIMENT`, `CGO_CFLAGS`, `CGO_CPPFLAGS`, `CGO_CXXFLAGS`, `CGO_LDFLAGS` | `cmd/go` records the raw environment variable and `go env` answers with the effective value. An unset `CGO_CFLAGS` is recorded empty by `gc` and printed as `-O2 -g` by `go env`, so `go env`'s answer would disagree with `gc`'s record of the same build |
+| `vcs`, `vcs.revision`, `vcs.time`, `vcs.modified` | nanogo runs no version control command and stamps nothing |
+
+`-buildmode` is `exe` because `nanogo build` passes no `-buildmode` to
+`go tool link`, so the linker's default is what the executable gets. That is
+what `cmd/go` records for its own default build too. `-compiler` is `gc`
+because the key names the toolchain flag, which selects an object format, an
+archive layout and a linker; nanogo writes `gc` objects, reads `gc` archives
+and links with `gc`'s linker. Which binary compiled which package is a
+different question, and the report `nanogo build` prints is where it is
+answered.
 
 ## Determinism
 

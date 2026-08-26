@@ -50,12 +50,15 @@ func TestHelpStatesTheLimits(t *testing.T) {
 		"wider than four machine registers",
 		"go:embed",
 		"name offset out of range",
-		// The corpus records three probes as wrong, and this is the
-		// third. probes/buildinfo-named compiles and then disagrees
-		// with gc, so it is a wrong answer like the two above and it
-		// needs the same pin. Without it, writing the modinfo line
-		// would fail no documentation test and this sentence would be
-		// left describing a limitation that had gone.
+		// This pin used to hold a limitation and now holds a
+		// capability. probes/buildinfo-named was recorded wrong until
+		// nanogo build started writing the modinfo line, and the pin
+		// is what failed then and made the sentence above it be
+		// rewritten in the same change. It stays for the same reason
+		// in the other direction: the help now says which build
+		// settings the line carries and which it leaves out, and a
+		// link that stopped writing it would leave that paragraph
+		// claiming something nanogo no longer does.
 		"modinfo",
 		// nanogo build, and the three limits a user must not discover by
 		// hitting them: one architecture, whose standard library it is,

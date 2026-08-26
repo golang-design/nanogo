@@ -48,6 +48,16 @@ nanogo build:
 	The executable is written by go tool link. nanogo has no linker:
 	specs/045-linker.md is G2 work and unbuilt.
 
+	The link configuration carries a modinfo line, so
+	runtime/debug.ReadBuildInfo answers: the package path, the main
+	module, every dependency module with its version and checksum, and
+	the settings nanogo can state as fact, which are -buildmode,
+	-compiler, CGO_ENABLED, GOARCH and GOOS. gc records more.
+	DefaultGODEBUG, the GOARCH feature level such as GOARM64,
+	GOEXPERIMENT and the vcs settings are absent, because nanogo passes
+	none of them to anything and a recorded value would describe a
+	program it did not build.
+
 	So every build prints how many packages nanogo compiled, how many the
 	toolchain did, and which tree the standard library came from. A build
 	in which nanogo compiled one package of twenty-eight must not read as
@@ -171,18 +181,15 @@ One refusal that reads as a crash:
 
 What nanogo does not announce:
 
-	Three failures produce a program that behaves differently from the one
+	Two failures produce a program that behaves differently from the one
 	gc builds, with nothing said at compile time. They are what the probe
-	corpus found, and a corpus is a sample, so there may be a fourth.
+	corpus found, and a corpus is a sample, so there may be a third.
 
 	go:embed is accepted and the variable is empty at run time.
 
 	panic of a value that is already an interface compiles, and the
 	runtime then dies with "runtime: name offset out of range" instead of
 	printing the panic. The type descriptor it reaches for is wrong.
-
-	runtime/debug.ReadBuildInfo compiles and finds nothing, because nanogo
-	writes no modinfo line into the executable.
 
 What a nanogo-compiled package cannot do:
 

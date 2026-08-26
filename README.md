@@ -207,20 +207,19 @@ machine registers stops the build with `panic: ssa: lower: Store: no arm64
 rule lowered this operation` and a Go stack trace, naming no position in your
 source. No program comes out, so it is a refusal, but it is a poor one.
 
-### Three failures nanogo does not announce
+### Two failures nanogo does not announce
 
 These cost more than any refusal, because nothing is said at compile time and
 a program comes out that behaves differently from the one `gc` builds. They
 are what the probe corpus found, and a corpus is a sample, so there may be a
-fourth.
+third.
 
 | What you write | What happens |
 | --- | --- |
 | `//go:embed` | it compiles, and the variable is empty at run time |
 | `panic(err)` where the operand is already an interface | it compiles, and the runtime dies with `runtime: name offset out of range` instead of printing the panic |
-| `runtime/debug.ReadBuildInfo` | it compiles, and finds nothing, because nanogo writes no modinfo line |
 
-All three are bugs with no fix yet. Until there is one, do not put a
+Both are bugs with no fix yet. Until there is one, do not put a
 nanogo-compiled package into a program you care about.
 
 ## What nanogo does not do
@@ -231,7 +230,14 @@ reads the export data `gc` wrote. The count nanogo prints on every build is
 how much of the program that is.
 
 **It does not link.** `go tool link` writes the executable. nanogo has no
-linker yet. See [`specs/045-linker.md`](specs/045-linker.md).
+linker yet. See [`specs/045-linker.md`](specs/045-linker.md). `nanogo build`
+does write the `modinfo` line the linker turns into `runtime.modinfo`, so
+`runtime/debug.ReadBuildInfo` and `go version -m` report the package path,
+the main module and every dependency module with its checksum. The build
+settings recorded are `-buildmode`, `-compiler`, `CGO_ENABLED`, `GOARCH` and
+`GOOS`. `DefaultGODEBUG`, the `GOARCH` feature level such as `GOARM64`,
+`GOEXPERIMENT` and the `vcs` settings are absent: nanogo passes none of them
+to anything, so recording one would describe a program it did not build.
 
 **It has one architecture.** nanogo emits arm64 machine code, and a build for
 another `GOARCH` is refused before anything is compiled:

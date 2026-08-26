@@ -284,7 +284,7 @@ func (b *builder) run() error {
 	pkgs := make([]buildPackage, 0, len(targets)+len(depPkgs))
 	pkgs = append(pkgs, depPkgs...)
 
-	compileCfg, err := b.writeImportCfg("importcfg", depPaths, deps, nil)
+	compileCfg, err := b.writeImportCfg("importcfg", depPaths, deps, nil, "")
 	if err != nil {
 		return err
 	}
@@ -326,15 +326,11 @@ func (b *builder) run() error {
 // toolchain asks the go command for the two facts a build needs about it: the
 // root it was installed in and the release it is.
 func (b *builder) toolchain() (goroot, goversion string, err error) {
-	out, err := b.runGo("env", "GOROOT", "GOVERSION")
+	v, err := b.goEnvValues("GOROOT", "GOVERSION")
 	if err != nil {
 		return "", "", err
 	}
-	lines := strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n")
-	if len(lines) < 2 {
-		return "", "", fmt.Errorf("go env GOROOT GOVERSION answered %q", out)
-	}
-	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), nil
+	return v[0], v[1], nil
 }
 
 // targets resolves the patterns to the packages nanogo compiles, and reports
@@ -611,13 +607,24 @@ func archivePaths(pkgs []buildPackage) ([]string, map[string]string) {
 //
 // The order is the caller's slice order and never a map's, per
 // specs/053-determinism.md.
-func (b *builder) writeImportCfg(name string, paths []string, archives map[string]string, extra []buildPackage) (string, error) {
+//
+// modinfo is the runtime.modinfo blob, and an empty one writes no modinfo
+// line. Only the link configuration carries one: the directive is the
+// linker's, per the table in specs/015-export-data.md, and the compiler has
+// no use for it.
+func (b *builder) writeImportCfg(name string, paths []string, archives map[string]string, extra []buildPackage, modinfo string) (string, error) {
 	var buf bytes.Buffer
 	for _, p := range paths {
 		fmt.Fprintf(&buf, "packagefile %s=%s\n", p, archives[p])
 	}
 	for _, e := range extra {
 		fmt.Fprintf(&buf, "packagefile %s=%s\n", e.Path, e.Archive)
+	}
+	if modinfo != "" {
+		// %q, because cmd/link reads the argument with strconv.Unquote. The
+		// blob's sentinels are not valid UTF-8 and fmt writes them as \xNN,
+		// which Unquote restores byte for byte.
+		fmt.Fprintf(&buf, "modinfo %q\n", modinfo)
 	}
 	file := filepath.Join(b.work, name)
 	if err := os.WriteFile(file, buf.Bytes(), 0o600); err != nil {
@@ -632,14 +639,32 @@ func (b *builder) writeImportCfg(name string, paths []string, archives map[strin
 // executable is written by go tool link, which is the same call
 // ssagen/ssagen_test.go makes to turn a compiled function into a running
 // process.
+//
+// Each link configuration carries a modinfo line. cmd/link turns it into
+// runtime.modinfo, which is the only thing runtime/debug.ReadBuildInfo reads,
+// so a link without one produces a program that cannot describe its own build.
+// The blob is assembled per main package, because the module set is the one
+// beneath that package.
 func (b *builder) link(mains []*loader.Package, depPaths []string, deps, own map[string]string) error {
+	if len(mains) == 0 {
+		return nil
+	}
+	mods, err := b.modules()
+	if err != nil {
+		return err
+	}
+	settings, err := b.buildSettings()
+	if err != nil {
+		return err
+	}
 	for i, t := range mains {
 		archive := own[t.ImportPath]
 		// The main package's own entry, which is what the go command writes.
 		// The linker takes the object positionally and reads this for the
 		// package's identity.
 		cfg, err := b.writeImportCfg(fmt.Sprintf("importcfg.link.%d", i), depPaths, deps,
-			[]buildPackage{{Path: t.ImportPath, Archive: archive}})
+			[]buildPackage{{Path: t.ImportPath, Archive: archive}},
+			modInfoData(buildInfo(t, mods, settings).String()))
 		if err != nil {
 			return err
 		}

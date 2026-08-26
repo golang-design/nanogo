@@ -374,7 +374,7 @@ func TestWriteImportCfgKeepsTheGivenOrder(t *testing.T) {
 	b, _ := testBuilder(t, &buildOptions{})
 	paths := []string{"b", "a"}
 	archives := map[string]string{"a": "/cache/a.a", "b": "/cache/b.a"}
-	file, err := b.writeImportCfg("importcfg", paths, archives, []buildPackage{{Path: "m", Archive: "/work/0.a"}})
+	file, err := b.writeImportCfg("importcfg", paths, archives, []buildPackage{{Path: "m", Archive: "/work/0.a"}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,6 +385,24 @@ func TestWriteImportCfgKeepsTheGivenOrder(t *testing.T) {
 	want := "packagefile b=/cache/b.a\npackagefile a=/cache/a.a\npackagefile m=/work/0.a\n"
 	if string(got) != want {
 		t.Errorf("importcfg =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// The compile configuration carries no modinfo line. The directive is the
+// linker's (specs/015-export-data.md), and a compile that received one would
+// be reading a file the go command never writes that way.
+func TestWriteImportCfgOmitsModInfoWhenThereIsNone(t *testing.T) {
+	b, _ := testBuilder(t, &buildOptions{})
+	file, err := b.writeImportCfg("importcfg", nil, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "modinfo") {
+		t.Errorf("the compile configuration carries a modinfo line:\n%s", got)
 	}
 }
 
@@ -455,8 +473,14 @@ func newFakeBuild(t *testing.T, opts *buildOptions) *fakeBuild {
 	dir := f.b.dir
 	f.b.runGo = func(args ...string) ([]byte, error) {
 		switch {
-		case args[0] == "env":
+		case args[0] == "env" && args[1] == "GOROOT":
 			return []byte("/usr/local/go\ngo1.27.0\n"), nil
+		case args[0] == "env" && args[1] == "CGO_ENABLED":
+			return []byte("0\narm64\ndarwin\n"), nil
+		case args[0] == "list" && args[1] == "-deps":
+			// The module listing, in the form modulesFormat asks for:
+			// the main module has no version, math/bits has no module.
+			return []byte("math/bits\nexample.com/hello\texample.com/hello\t\t\n"), nil
 		case args[0] == "list":
 			return []byte("example.com/hello\t1.27\n"), nil
 		case args[0] == "tool" && args[1] == "link":
