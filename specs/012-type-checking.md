@@ -200,7 +200,11 @@ than a copy:
    from source, because upstream imports through `cmd/compile/internal/importer`
    over gc export data and nanogo has none yet ([015](015-export-data.md)). It
    is the heavier importer, and it is also the better test: importing `fmt`
-   this way type-checks `fmt`.
+   this way type-checks `fmt`. Three more hand-written files support these two:
+   `harness_test.go` holds the parse-and-check helpers the ported tests share,
+   which upstream keeps in the two test files that are not ported whole;
+   `testenv_test.go` holds the pieces of `internal/testenv` those tests reach
+   for; and `e2e_test.go` is the gate below.
 3. **A drift test over the whole port.** Every rewrite must state its reason,
    every upstream test file must be either ported or listed as skipped with a
    reason, and regeneration must be idempotent.
