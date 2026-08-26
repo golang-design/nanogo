@@ -188,6 +188,12 @@ Inside a package, functions are independent from SSA construction onward. That
 is the parallelism boundary, and [053](053-determinism.md) constrains it: results
 are merged in declaration order, never in completion order.
 
+Neither boundary is exploited yet. nanogo compiles a package's functions in
+declaration order in one goroutine, and its non-test source holds no `go`
+statement at all ([001](001-bootstrap-gates.md)'s coverage row). The merge rule
+is stated before the parallelism exists so that it is not decided later by
+whichever pass is made concurrent first.
+
 ## What was wrong
 
 **`export/` was in both layout blocks at once.** It was listed as what exists,
@@ -198,6 +204,11 @@ planned entry was a claim about a package that had already been built, so it is
 gone from that block and the surviving entry says the package does both
 directions. Nothing was removed to settle the contradiction: the reader half of
 the old gloss is still there, with the writer half beside it.
+
+**Parallelism read as built.** The boundary and the merge rule were stated
+without saying that nothing runs concurrently: nanogo has no `go` statement in
+its non-test source. The rule stays, as the rule it is, and the sentence after
+it says the parallelism is not there yet.
 
 **The layout was missing every package the distribution work added.** `dist/`
 builds and audits a distribution tree and owns its manifest and tally,
