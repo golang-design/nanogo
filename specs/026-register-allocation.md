@@ -54,9 +54,9 @@ For each value in order:
    and give the spilled value a stack slot.
 
 Graph colouring would produce better allocations and needs an interference graph,
-a coalescing phase, and a spill-cost model. Under
-[000](000-decisions.md) decision 10, linear scan is the version nanogo can afford
-to have and to read.
+a coalescing phase, and a spill-cost model. Linear scan is the version of this
+pass a reader can hold in their head, which is what
+[002](002-architecture.md) arranges the pipeline for.
 
 ### Rematerialisation
 

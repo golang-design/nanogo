@@ -146,7 +146,7 @@ one package compiled by nanogo, because nanogo compiles what is named. None of
 these figures is gated by `internal/hygiene`, so each moves with a Go release.
 [060](060-selfhost.md) owns the census.
 
-What holds the other 19 back is four separate gaps, and the largest is not the
+What holds the other 19 back is five separate gaps, and the largest is not the
 only one:
 
 | Refused by | Packages |

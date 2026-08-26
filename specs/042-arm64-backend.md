@@ -35,9 +35,8 @@ The distinction matters for [000](000-decisions.md) decision 5. A rule set and
 an encoder are what a second target is supposed to supply. `ssagen` sits above
 the target boundary and holds target-specific code anyway, so
 [043](043-amd64-backend.md) has to edit it, and decision 5 does not predict
-that. The line accounting shows the same gap from the other side: `ssagen` is
-2,634 lines and decision 10 budgeted none of them, so they are spent and
-unbudgeted. Decision 10 now carries a row that records the omission.
+that. [002](002-architecture.md) records the same gap from the other side: `ssagen`
+is 3,241 non-test lines and was in no package layout and no spec.
 
 ## Register description
 

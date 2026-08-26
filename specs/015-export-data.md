@@ -103,8 +103,8 @@ declares it.
 What that costs, measured: of the 27 packages with export data in the closure
 of an empty `main`, 18 declare a defined type. Three of the 18 compile
 (`internal/goarch`, `internal/goexperiment`, `internal/profilerecord`), eight
-are refused before this check reaches them, seven of those for assembly, and
-seven are what this check refuses. [060](060-selfhost.md) owns that census and
+are refused for another reason, seven of them for assembly, and seven are what
+this check refuses. [060](060-selfhost.md) owns that census and
 names the seven. The cost shrinks as `rtype` grows and it has already shrunk once:
 `internal/goarch` was refused here until the `UncommonType` tail was written,
 and it is on the allowlist above now.

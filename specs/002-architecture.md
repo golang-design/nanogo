@@ -124,8 +124,8 @@ with the passes.
 
 **`ssagen/` was not in the layout at all.** The stage between the last SSA pass
 and the object writer, which encodes instructions, builds the prologue, emits
-relocations and attaches stack maps, had no package and no spec. It is 2,634
-lines. Three audits of the deck found the same gap independently.
+relocations and attaches stack maps, had no package and no spec. It is 3,241
+non-test lines. Three audits of the deck found the same gap independently.
 
 **The IR passes of [023](023-escape-analysis.md) and
 [024](024-inlining-and-devirtualization.md) do not exist**, so `ir/` holds the

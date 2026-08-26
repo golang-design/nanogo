@@ -97,7 +97,8 @@ sealed. Redundant phis are removed as they are created.
 **nanogo uses the on-the-fly algorithm.** It needs no dominator tree, no
 dominance frontiers, and no separate placement pass, and it produces minimal SSA
 for reducible graphs, which is what Go's grammar generates except through `goto`.
-For a compiler meant to be read end to end, removing the dominator computation from the
+For a compiler meant to be read end to end, removing the dominator computation
+from the
 critical path of construction is worth more than the marginal phi quality.
 
 The dominator tree is still needed afterwards, and `ssa/dom.go` computes it with

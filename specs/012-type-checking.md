@@ -158,8 +158,9 @@ by reading `gen.go`'s `dropped` map, which is empty, and by listing `types2`.
 Carrying them is the cheaper choice and the spec's reasoning did not survive
 contact with the generator. A deletion is not free. It is a patch that has to
 keep matching across upstream revisions, and what it buys is lines in a package
-that [000](000-decisions.md) decision 10 already excludes from the budget. Dead
-code in an excluded package costs less than a patch that must be maintained.
+nobody reads as nanogo's: the fork is upstream's source, carried so that a
+re-port is a copy ([000](000-decisions.md) decision 1). Dead code in it costs
+less than a patch that must be maintained.
 
 ## What nanogo adds
 

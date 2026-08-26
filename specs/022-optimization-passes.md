@@ -33,8 +33,8 @@ assignment split values wider than a register, per
 [026](026-register-allocation.md)'s phi resolution. The list below is a plan for
 the optional work, and it was never the whole pass order.
 
-The governing rule comes from [000](000-decisions.md) decision 10 and is stated
-first because it decides every argument in this spec:
+The governing rule follows from the compiler being meant to be read end to end,
+and it is stated first because it decides every argument in this spec:
 
 **No optimization may be required for correctness.** Deleting the whole pass list
 must produce a compiler that is slower and still right. A pass that cannot be
@@ -90,9 +90,8 @@ bound from the loop condition, and the check is removed.
 
 nanogo is to implement the dominator-tree fact propagation and no more. Loop
 induction analysis beyond the direct comparison, and the full integer relation
-lattice, are excluded by design. The budget in
-[000](000-decisions.md) decision 10 buys the simple version of this pass and not
-the complete one.
+lattice, are excluded by design. A pass a reader can follow in one sitting is
+the simple version of this one, not the complete one.
 
 ### deadstore
 
@@ -137,8 +136,8 @@ will otherwise find a counterexample to, in the hardest possible package.
 | Profile-guided anything | No profile input |
 | Interprocedural analysis beyond inlining | Conservative escape results at call boundaries |
 
-Each is a real cost in generated code speed. [000](000-decisions.md) decision 10
-accepts all of them.
+Each is a real cost in generated code speed. This spec accepts all of them, and
+the governing rule above is why none of them is a correctness cost.
 
 ## Testing
 
