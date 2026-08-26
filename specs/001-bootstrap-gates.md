@@ -179,10 +179,13 @@ Each gate is defined by what is no longer present. This table is the checklist.
 | Language coverage | what nanogo's own source uses | same | all of it |
 
 The "what nanogo's own source uses" row is the one that hides work. It is a
-large subset, because nanogo is a compiler: it uses generics, interfaces,
-closures, `defer`, maps, slices, goroutines, and `unsafe` in its object writer.
-It is not the whole language. It has no reflection-heavy code, little `select`,
-and no assembly of its own.
+large subset, because nanogo is a compiler: it uses generics in the `types2`
+fork, and interfaces, closures, `defer`, maps, slices and `unsafe` in its
+object writer. It is not the whole language. Measured over the non-test source
+it has no reflection-heavy code, no assembly of its own, and neither a `go`
+statement nor a `select`: nanogo compiles one package in one process today. The
+per-function parallelism [002](002-architecture.md) plans will put both back on
+this row, and the row is what nanogo's source uses, not what it is allowed to.
 
 ## What the seed means
 
@@ -267,6 +270,12 @@ exists, which was written before export data moved in both directions and
 before [054](054-distribution.md)'s tree. Both are added, and both are marked
 as what they are, work under the first rung rather than progress along the
 ladder.
+
+**The language-coverage row said nanogo's source uses goroutines.** It does
+not. There is no `go` statement and no `select` in the non-test source of any
+package, `types2` included, so the row named work that the gate does not
+actually require yet. Both are struck from the list of what is used and stated
+as what is absent, with the reason they will return.
 
 **The G1 allowance did not say where the standard library comes from.** It
 reads out of a nanogo distribution's `pkg` tree when one resolves and out of the
