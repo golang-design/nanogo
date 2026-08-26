@@ -650,8 +650,19 @@ func TestABIPlacesACallsOperands(t *testing.T) {
 	if r, ok := tg.UseReg(ind, 2); !ok || r != tg.ArgRegs[ClassInt][0] {
 		t.Errorf("the one argument of an indirect call is read from %v (%v)", r, ok)
 	}
-	if _, ok := tg.UseReg(ind, 0); ok {
-		t.Error("the entry point of an indirect call was placed as an argument")
+	// The entry point is not an argument and the convention still fixes where
+	// it is read from. It is the first scratch register: no argument uses one
+	// and no value has one as a home, so the branch cannot land on a register
+	// the arguments have already overwritten.
+	er, eok := tg.UseReg(ind, 0)
+	if !eok || er != tg.Scratch[ClassInt][0] {
+		t.Errorf("the entry point of an indirect call is read from %v (%v), want %v",
+			er, eok, tg.Scratch[ClassInt][0])
+	}
+	for _, ar := range tg.ArgRegs[ClassInt] {
+		if er == ar {
+			t.Errorf("the entry point of an indirect call is read from %v, which is an argument register", er)
+		}
 	}
 
 	// A return's values are placed by the result walk.

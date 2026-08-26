@@ -89,7 +89,6 @@ name:
 | --- | --- |
 | a channel's direction | `chan int` and `chan<- int` |
 | a function's signature | `func(int)` and `func(string)` |
-
 | a literal interface's method signatures | `interface{ M() }` and `interface{ M(int) }` |
 | an embedded field renamed through a type alias | `struct{ int }` and `struct{ Int = int }` |
 
@@ -112,10 +111,10 @@ one name. Nothing in an `ir.Type` can detect it. The fix is in `convert.go`'s
 
 A predeclared basic type, a slice, an array, a pointer, a struct, a **channel**
 and a defined type over any of those, with the `UncommonType` tail and the
-`StructType` or `ChanType` header and field array that each needs. `ir.Type.Methods` is what makes the
-tail writable: a defined type's method set, sorted by name and set for every
-defined type with the empty set included, so an empty set is a fact rather than
-an absence. `TFlagUncommon` and the tail are one decision, because `gc` gives a
+`StructType` or `ChanType` header and field array that each needs.
+`ir.Type.Methods` is what makes the tail writable: a defined type's method set,
+set for every defined type with the empty set included, so an empty set is a
+fact rather than an absence. `TFlagUncommon` and the tail are one decision, because `gc` gives a
 tail to every type that has a name and a flag without a tail makes the runtime
 read past the end of the descriptor.
 

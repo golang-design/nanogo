@@ -175,9 +175,13 @@ the evidence: `0x91000400` is `ADD X0, X0, #1` and `0xd65f03c0` is `RET`, which
 are the two instructions of `inc`. So the value handed across the call boundary
 is `inc`'s entry address where a `funcval` was expected, and the indirect call
 loads a code pointer from it and jumps into the instruction stream read as
-data. `ssagen`'s indirect call has a guard for the register collision above and
-none for this, because the collision is visible in the allocation and this is
-not.
+data. That register collision is gone. specs/030-abi.md now fixes where an indirect
+call reads its entry point: the first scratch register of the class, which no
+argument and no result uses and which is never a value's home. The entry point
+moves there with the arguments, in the one parallel move the call site already
+makes, so no source is destroyed and no allocation can put the branch target in
+a register the arguments have overwritten. `ssagen` had a guard for the
+collision and it is not needed any more.
 
 It is the third failure of this spec's kind that says nothing at compile time,
 beside `panic` of a non-nil interface value above. The refusal in the middle row

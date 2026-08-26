@@ -1198,7 +1198,25 @@ func (e *emitter) callValue(v *ssa.Value) {
 	}
 	args = args[lo:]
 
-	x := make([]xfer, 0, len(args)+1)
+	x := make([]xfer, 0, len(args)+2)
+	var entryReg arm64.Reg
+	if indirect {
+		// The entry point is read from the register specs/030-abi.md fixes
+		// for it, which the allocation names. It is moved with the arguments
+		// and not before them, because the move is one instant: a source of
+		// one move may be the destination of another.
+		regs := e.a.Args[v.ID]
+		if len(regs) == 0 || regs[0] == ssa.NoReg {
+			e.fail("v%d: the allocation gives the entry point of an indirect call no register", v.ID)
+			return
+		}
+		r, ok := e.reg(regs[0])
+		if !ok {
+			return
+		}
+		entryReg = r
+		x = append(x, xfer{dst: ssa.RegLoc(regs[0]), src: e.home(entry), v: entry})
+	}
 	if v.Op == ssa.OpARM64CALLclosure {
 		// The closure travels in the closure register, not in the argument
 		// sequence: the callee reads its captured variables through it
@@ -1223,26 +1241,7 @@ func (e *emitter) callValue(v *ssa.Value) {
 
 	at := e.pc()
 	if indirect {
-		// The entry point is in a register the allocation chose, and the
-		// argument registers are already loaded, so it must not be one of
-		// them. The allocator does not know that yet, which is why this is
-		// checked rather than assumed.
-		r := e.home(entry)
-		if r.Kind != ssa.LocReg {
-			e.fail("v%d: the entry point of an indirect call is not in a register", v.ID)
-			return
-		}
-		reg, ok := e.reg(r.Reg)
-		if !ok {
-			return
-		}
-		for _, p := range places {
-			if p.inReg && p.reg == reg {
-				e.fail("v%d: the entry point is in %v, which is also an argument register", v.ID, reg)
-				return
-			}
-		}
-		e.word(arm64.Blr(reg))
+		e.word(arm64.Blr(entryReg))
 	} else {
 		c, err := callTarget(v.Aux)
 		if err != nil {

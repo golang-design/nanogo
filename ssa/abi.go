@@ -1279,6 +1279,9 @@ func ABIUseReg(t *Target, v *Value, i int) (Reg, bool) {
 	if t == nil || v == nil || i < 0 || i >= len(v.Args) {
 		return NoReg, false
 	}
+	if r, ok := abiIndirectEntryReg(t, v, i); ok {
+		return r, ok
+	}
 	var out []ABIValue
 	var lo int
 	var err error
@@ -1298,6 +1301,33 @@ func ABIUseReg(t *Target, v *Value, i int) (Reg, bool) {
 		return NoReg, false
 	}
 	return av.Parts[0].Reg, true
+}
+
+// abiIndirectEntryReg returns the register the entry point of an indirect call
+// is read from.
+//
+// The entry point is not an argument and the convention places it nowhere, so
+// before this it kept whatever home the allocator gave it. That home may be an
+// argument register of the same call, and the arguments are loaded before the
+// branch, so the branch would jump to an argument. The code generator saw the
+// collision and refused, which turned a program the allocator could have
+// placed into a compiler error.
+//
+// The first scratch register of the class is the answer, and it is not a
+// choice of convenience. Every register the convention uses for an argument or
+// a result is excluded by construction, a scratch register is never any
+// value's home, and the parallel move at the call site writes it in the same
+// instant as the argument registers, so no source is destroyed. It is also
+// what a scratch register is already for: an operand read into a register at
+// the instruction that uses it.
+func abiIndirectEntryReg(t *Target, v *Value, i int) (Reg, bool) {
+	if i != 0 || (v.Op != OpARM64CALLclosure && v.Op != OpARM64CALLinter) {
+		return NoReg, false
+	}
+	if len(t.Scratch[ClassInt]) == 0 {
+		return NoReg, false
+	}
+	return t.Scratch[ClassInt][0], true
 }
 
 // abiOperandAt returns the placement of operand k, skipping the values that

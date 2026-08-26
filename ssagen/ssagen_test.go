@@ -2013,24 +2013,32 @@ func TestCallFailuresAreNamed(t *testing.T) {
 		t.Errorf("an indirect call with nothing to call gave %v", e.err())
 	}
 
-	// An indirect call whose entry point has no register.
+	// An indirect call the allocation named no entry register for. The
+	// convention fixes that register (specs/030-abi.md), so an allocation
+	// without it is an allocation this call cannot be emitted from.
 	e = newEmitter(f, 32)
 	entry := b.NewValue(0, ssa.OpARM64MOVDload, typeInt, mem)
 	clo := b.NewValue(0, ssa.OpArg, typeInt)
 	e.value(b.NewValue(0, ssa.OpARM64CALLinter, ssa.MemType, entry, clo, mem))
-	if err := e.err(); err == nil || !strings.Contains(err.Error(), "not in a register") {
+	if err := e.err(); err == nil || !strings.Contains(err.Error(), "no register") {
 		t.Errorf("an indirect call through nothing gave %v", e.err())
 	}
 
-	// An indirect call whose entry point is in an argument register, which
-	// the arguments have already overwritten by the time the call runs.
+	// An indirect call whose entry point lives in an argument register of the
+	// same call. The arguments overwrite it before the branch, so the branch
+	// must not read it there: the entry moves into the fixed register with
+	// them, in the same instant, and the branch reads that register.
 	e = newEmitter(f, 32)
 	call := b.NewValue(0, ssa.OpARM64CALLinter, ssa.MemType, entry, clo, clo, mem)
 	e.a.Home[entry.ID] = ssa.RegLoc(ssa.Reg(arm64.R0))
 	e.a.Home[clo.ID] = ssa.RegLoc(ssa.Reg(arm64.R1))
+	e.a.Args[call.ID] = []ssa.Reg{ssa.Reg(arm64.RegTrampLo), ssa.NoReg, ssa.NoReg, ssa.NoReg}
 	e.value(call)
-	if err := e.err(); err == nil || !strings.Contains(err.Error(), "argument register") {
-		t.Errorf("an entry point in an argument register gave %v", e.err())
+	if err := e.err(); err != nil {
+		t.Errorf("an entry point in an argument register gave %v", err)
+	}
+	if got := e.text[len(e.text)-1]; got != arm64.Blr(arm64.RegTrampLo) {
+		t.Errorf("the branch is %#08x, want BLR %v", got, arm64.RegTrampLo)
 	}
 
 	// A call whose results are not all named leaves a register unaccounted
