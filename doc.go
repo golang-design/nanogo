@@ -4,41 +4,54 @@
 
 // Package nanogo is a small compiler for the Go programming language.
 //
-// nanogo compiles Go source to native arm64 machine code and writes the object
-// files the Go toolchain writes, so go tool link links its output against the
-// real Go runtime into a program that runs.
+// nanogo compiles Go source to arm64 machine code and writes the object files
+// the Go toolchain writes, so go tool link links its output against the real
+// Go runtime into a program that runs.
+//
+// nanogo is under construction. It compiles a small part of Go, so for most
+// programs the answer today is that it cannot compile them, and it says so by
+// name rather than emitting code it cannot emit correctly.
 //
 // # Use
 //
 //	go install golang.design/x/nanogo/cmd/nanogo@latest
 //	nanogo build .
 //
-// nanogo compiles the packages named on the command line and nothing else. The
-// standard library and the runtime come from the installed Go toolchain, and
-// go tool link writes the executable. A build reports the split, because a
-// build in which nanogo compiled one package of fifty must not read as though
-// nanogo built the program.
+// There is no tagged release. The command above installs the current commit.
+// go list and go tool link must be on PATH: the go command resolves the
+// packages, and go tool link writes the executable.
 //
-// Run "nanogo help" for the accepted subset and the flags. The build
-// subcommand is not in a tagged release yet, so build cmd/nanogo from a clone
-// of the repository until it is.
+// nanogo compiles the packages named on the command line and nothing else.
+// The standard library and the runtime come from the installed Go toolchain,
+// and go tool link writes the executable. Every build reports that split,
+// because a build in which nanogo compiled one package of twenty-eight must
+// not read as though nanogo built the program.
 //
 // # Scope
 //
-// nanogo accepts a part of Go. Integer arithmetic, comparisons, numeric
-// conversions, calls including variadic and recursive calls, the control
-// statements, slices, range, and a struct type declared in the package being
-// compiled all compile. A capturing closure, defer, panic, append, a type
-// assertion, a type switch, a conversion to an interface, and every map and
-// channel operation are refused, each with a message that names the function,
-// the position and the construct.
+// Run "nanogo help" for the list this paragraph summarises. Integer
+// arithmetic, comparisons, numeric conversions, calls including variadic,
+// recursive and method calls, the control statements, slices, strings,
+// range over a slice or an integer, a struct type declared in the package
+// being compiled, package-level variables, init functions, defer and go of a
+// declared function that takes no arguments, print and println, and a closure
+// that captures nothing all compile.
 //
-// Four limits have no such diagnostic and matter most. A program nanogo
-// compiles does not initialize the packages it imports, so a package variable
-// such as os.Stdout is nil at run time. The archive nanogo writes holds no
-// export data, so no package may import a package nanogo compiled. Floating
-// point reaches the arm64 encoder and panics there. The target is darwin/arm64
-// and no other.
+// A closure that captures a variable, defer or go whose call has an argument,
+// append, a conversion to an interface, a type assertion, a type switch,
+// every map and channel operation, range over a string, floating point, and
+// generics are refused, each with a message that names the function, the
+// position and the construct.
+//
+// Three failures have no such diagnostic, and they cost more than any
+// refusal. A function that returns a value wider than four machine registers
+// crashes the compiler. A go:embed variable is accepted and is empty at run
+// time. A panic of a value that is already an interface compiles and the
+// runtime then dies reading a type descriptor. "nanogo help" describes each
+// one, and internal/audit/testdata/probes reproduces them.
+//
+// nanogo emits arm64 machine code, and a build for another GOARCH is refused
+// before anything is compiled. darwin/arm64 is the target the tests run on.
 //
 // Nothing here is stable. Do not put a nanogo-compiled package into a program
 // you care about.
