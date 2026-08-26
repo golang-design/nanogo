@@ -194,10 +194,6 @@ func partPlace(v *ssa.ABIValue, p *ssa.ABIPart) place {
 // splits every such value that travels in registers, so one that reaches here
 // travels in the argument area whole, and the code generator has no form that
 // writes it there.
-//
-// A value a floating-point register would carry is refused too. obj/arm64's
-// floating-point encoder is specs/042 group 6 and the rules that need it are
-// not written, so such a value would be placed correctly and never encoded.
 func valuePlaces(vals []ssa.ABIValue) ([]place, error) {
 	out := make([]place, 0, len(vals))
 	for i := range vals {
@@ -209,9 +205,6 @@ func valuePlaces(vals []ssa.ABIValue) ([]place, error) {
 			// A value of no width occupies no register and no word.
 			out = append(out, place{off: v.Off, typ: v.Type})
 			continue
-		}
-		if c, _ := ssa.ClassOfType(v.Parts[0].Type); c == ssa.ClassFloat {
-			return nil, fmt.Errorf("value %d is %v, and this target has no floating-point encoder", i, v.Type)
 		}
 		out = append(out, partPlace(v, &v.Parts[0]))
 	}
@@ -692,12 +685,20 @@ func (e *emitter) argSpill(p place, store bool) {
 // A store writes the low bits and has no signedness. A load has one, and the
 // wrong choice is a value that compares equal to the right one half the time,
 // so the load comes from ssa rather than from a switch here.
+//
+// The type and not the width decides both directions, because the register
+// file is part of the answer: a float64 in F0 is stored by STR (D) and an
+// int64 in R0 by STR (X), and the two have different encodings for the same
+// eight bytes. This asked ssa.ARM64StoreOp, which takes a size and therefore
+// only knows the integer file, so every float spill and every float argument
+// the stack-growth tail saves reached obj/arm64 as an integer store with a
+// float register in it, and obj/arm64 panicked.
 func memOpFor(t *ir.Type, store bool) (arm64.MemOp, bool) {
 	if t == nil {
 		return 0, false
 	}
 	if store {
-		op, ok := ssa.ARM64StoreOp(t.Size)
+		op, ok := ssa.ARM64StoreOpForType(t)
 		if !ok {
 			return 0, false
 		}

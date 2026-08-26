@@ -1565,6 +1565,28 @@ func TestEmitterRejectsBadInput(t *testing.T) {
 	if _, ok := memOpFor(&ir.Type{Kind: ir.Int64, Size: 3, Align: 1}, false); ok {
 		t.Error("a load of three bytes was accepted")
 	}
+
+	// The type and not the width picks the file. Both directions of both
+	// widths, because a store that asks only for eight bytes gives STR (X)
+	// for a float64 and obj/arm64 panics on the float register in it.
+	for _, c := range []struct {
+		kind  ir.Kind
+		size  int64
+		store bool
+		want  arm64.MemOp
+	}{
+		{ir.Float64, 8, true, arm64.StoreF64},
+		{ir.Float64, 8, false, arm64.LoadF64},
+		{ir.Float32, 4, true, arm64.StoreF32},
+		{ir.Float32, 4, false, arm64.LoadF32},
+		{ir.Int64, 8, true, arm64.StoreX},
+		{ir.Int64, 8, false, arm64.LoadX},
+	} {
+		got, ok := memOpFor(&ir.Type{Kind: c.kind, Size: c.size, Align: c.size}, c.store)
+		if !ok || got != c.want {
+			t.Errorf("memOpFor(%v, store=%v) = %v, %v, want %v", c.kind, c.store, got, ok, c.want)
+		}
+	}
 }
 
 // TestBranchOutOfRangeIsReported checks the failure specs/041 leaves to the
@@ -1908,13 +1930,19 @@ func TestTheAssignmentHasToBeThere(t *testing.T) {
 		t.Errorf("an argument outside its parameter gave %v", err)
 	}
 
-	// A result a floating-point register would carry is refused, because
-	// obj/arm64's encoder for it is specs/042 group 6 and the rules that need
-	// it are not written.
+	// A floating-point result is placed in the floating-point file, and the
+	// integer result beside it takes R0 rather than being pushed along by it.
 	e := &emitter{opt: Options{Sym: "test.f"}, a: &ssa.Alloc{Target: ssa.NewArm64Target()}}
 	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
-	if _, err := e.resultPlaces([]*ir.Type{f64}); err == nil {
-		t.Error("a floating-point result was placed, and no instruction writes it")
+	pl, err := e.resultPlaces([]*ir.Type{f64, typeInt})
+	if err != nil {
+		t.Fatalf("a floating-point result was refused: %v", err)
+	}
+	if !pl[0].inReg || pl[0].reg != arm64.F0 {
+		t.Errorf("the float result is in %v, want F0", pl[0].reg)
+	}
+	if !pl[1].inReg || pl[1].reg != arm64.R0 {
+		t.Errorf("the integer result is in %v, want R0", pl[1].reg)
 	}
 	// A result of no width takes no register and is not an error.
 	empty := &ir.Type{Kind: ir.Struct, Size: 0, Align: 1, Name: "struct{}"}
@@ -2119,27 +2147,30 @@ func TestStackArgumentsAreReadWhereTheyAreDefined(t *testing.T) {
 	t.Logf("frame %d, %d arguments in registers and %d in the area", r.Frame, fixed, n-fixed)
 }
 
-// TestRegRefusesAFloatRegister guards a check that was dead.
+// TestRegCarriesBothRegisterFiles pins what reg() converts.
 //
-// reg() promises to refuse anything that is not an integer register of this
-// target. It used to test `arm64.Reg(r) != x` with x already assigned
-// arm64.Reg(r), which is always false, so a float register reached an integer
-// encoder as its raw number and encoded as some unrelated integer register.
-func TestRegRefusesAFloatRegister(t *testing.T) {
+// ssa.Target numbers both files as obj/arm64 does, so the conversion is the
+// identity in both. reg() refused every floating-point register while the
+// code generator had no form that could name one; that refusal is gone and
+// the number has to arrive unchanged, because a float register that came back
+// as an integer one would encode as an unrelated register rather than fail.
+func TestRegCarriesBothRegisterFiles(t *testing.T) {
 	var e emitter
-	e.reg(ssa.Reg(arm64.F0))
-	if e.err() == nil {
-		t.Error("a float register passed the integer register check")
+	for _, want := range []arm64.Reg{arm64.R5, arm64.F0, arm64.F15, arm64.F31} {
+		got, ok := e.reg(ssa.Reg(want))
+		if !ok || got != want {
+			t.Errorf("reg(%v) = %v, %v, want %v, true", want, got, ok, want)
+		}
+	}
+	if err := e.err(); err != nil {
+		t.Errorf("a register of this target was refused: %v", err)
 	}
 
-	// An integer register still passes, or the guard is too broad and every
-	// function stops compiling.
-	var ok emitter
-	if got, good := ok.reg(ssa.Reg(arm64.R5)); !good || got != arm64.R5 {
-		t.Errorf("reg(R5) = %v, %v, want R5, true", got, good)
-	}
-	if err := ok.err(); err != nil {
-		t.Errorf("an integer register was refused: %v", err)
+	// A number outside both files is still refused, or the check is gone
+	// rather than widened.
+	var bad emitter
+	if _, ok := bad.reg(ssa.Reg(1000)); ok || bad.err() == nil {
+		t.Error("a number that is no register of this target was accepted")
 	}
 }
 
@@ -2204,23 +2235,20 @@ func TestRematerialisationIntoASlotStoresIt(t *testing.T) {
 	}
 }
 
-// TestFloatRegisterRefusalDoesNotReachTheEncoder covers the three paths that
-// carried a refused register into obj/arm64 and crashed there.
+// TestFloatRegistersReachTheEncoder covers the three paths a floating-point
+// register takes through this package.
 //
-// reg() refused a floating-point register, recorded the refusal and then
-// returned arm64.ZR. ZR is a real register, so every caller went on with it
-// and reached an encoder that wanted the floating-point file. regF panics on
-// an integer register by design, so the compiler died with
+// It was the assertion of a refusal. reg() refused a floating-point register,
+// recorded the refusal and then returned arm64.ZR, and ZR is a real register,
+// so every caller went on with it and reached an encoder that wanted the
+// floating-point file:
 //
 //	panic: arm64: ZR used where the encoding means a floating-point register
 //
-// instead of reporting. Go's own test corpus crashed nanogo on align.go,
-// float_lit.go, literal.go and rune.go this way, one panic per path: the
-// rematerialisation of a floating-point constant, the destination of a
-// floating-point load, and the operand of a floating-point compare.
-//
-// A compiler may decline to compile a program. It may not crash on one.
-func TestFloatRegisterRefusalDoesNotReachTheEncoder(t *testing.T) {
+// Go's own test corpus crashed nanogo on align.go, float_lit.go, literal.go
+// and rune.go this way, one panic per path. The paths are the same three and
+// each now emits the instruction the register belongs to.
+func TestFloatRegistersReachTheEncoder(t *testing.T) {
 	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
 
 	newEmitter := func(f *ssa.Func, n int) *emitter {
@@ -2258,7 +2286,11 @@ func TestFloatRegisterRefusalDoesNotReachTheEncoder(t *testing.T) {
 		c := f.Entry.NewValue(0, ssa.OpARM64FMOVconst, f64)
 		c.AuxInt = int64(math.Float64bits(1.5))
 		e.move(ssa.RegLoc(ssa.Reg(arm64.F1)), ssa.Loc{}, c)
-		mustRefuseFloat(t, e)
+		want, ok := arm64.FmovImm(arm64.Size64, arm64.F1, 1.5)
+		if !ok {
+			t.Fatal("1.5 is not an FMOV immediate")
+		}
+		mustEmit(t, e, want)
 	})
 
 	// align.go: the destination of a floating-point load.
@@ -2273,55 +2305,87 @@ func TestFloatRegisterRefusalDoesNotReachTheEncoder(t *testing.T) {
 		e.a.Args[ld.ID] = []ssa.Reg{ssa.Reg(arm64.R0), ssa.NoReg}
 		e.a.Result[ld.ID] = ssa.Reg(arm64.F0)
 		e.value(ld)
-		mustRefuseFloat(t, e)
+		want, ok := arm64.MemUnsignedOffset(arm64.LoadF64, arm64.F0, arm64.R0, 0)
+		if !ok {
+			t.Fatal("a floating-point load at offset zero does not encode")
+		}
+		mustEmit(t, e, want)
 	})
 
-	// literal.go: an operand of a floating-point compare.
+	// literal.go: an operand of a floating-point compare. The operands are in
+	// registers other than the ones the compare reads them from, so this is
+	// also the register-to-register copy of a float.
 	t.Run("operand", func(t *testing.T) {
 		f := ssa.NewFunc("f")
 		e := newEmitter(f, 8)
 		x := f.Entry.NewValue(0, ssa.OpArg, f64)
 		y := f.Entry.NewValue(0, ssa.OpArg, f64)
 		cmp := f.Entry.NewValue(0, ssa.OpARM64FCMPD, typeInt, x, y)
+		e.a.Home[x.ID] = ssa.RegLoc(ssa.Reg(arm64.F3))
+		e.a.Home[y.ID] = ssa.RegLoc(ssa.Reg(arm64.F4))
 		e.a.Args[cmp.ID] = []ssa.Reg{ssa.Reg(arm64.F1), ssa.Reg(arm64.F2)}
-		if _, ok := e.operands(cmp); ok {
-			t.Error("operands accepted a floating-point register")
+		regs, ok := e.operands(cmp)
+		if !ok {
+			t.Fatalf("operands refused a floating-point register: %v", e.err())
 		}
-		mustRefuseFloat(t, e)
+		if regs[0] != arm64.F1 || regs[1] != arm64.F2 {
+			t.Errorf("the compare reads %v, want F1 and F2", regs)
+		}
+		mustEmit(t, e,
+			arm64.FmovRegReg(arm64.Size64, arm64.F1, arm64.F3),
+			arm64.FmovRegReg(arm64.Size64, arm64.F2, arm64.F4))
+	})
+
+	// A copy across the two files is a class the allocation and the
+	// convention disagree about. FMOV general-to-floating-point would encode
+	// it and compute an integer's bits as a float, so it is reported.
+	t.Run("across the files", func(t *testing.T) {
+		f := ssa.NewFunc("f")
+		e := newEmitter(f, 8)
+		e.copyReg(arm64.F0, arm64.R0)
+		if e.err() == nil {
+			t.Error("a copy from an integer register to a floating-point one was encoded")
+		}
+		if len(e.text) != 0 {
+			t.Errorf("%d instructions reached the text after a refusal", len(e.text))
+		}
 	})
 }
 
-// mustRefuseFloat asserts that the emitter reported a floating-point register
-// it cannot generate code for, and emitted nothing.
-func mustRefuseFloat(t *testing.T, e *emitter) {
+// mustEmit asserts that the emitter reported nothing and that the words it
+// produced end with the given ones.
+func mustEmit(t *testing.T, e *emitter, want ...uint32) {
 	t.Helper()
-	err := e.err()
-	if err == nil {
-		t.Fatal("a floating-point register was accepted")
+	if err := e.err(); err != nil {
+		t.Fatalf("the emitter reported %v", err)
 	}
-	if !strings.Contains(err.Error(), "floating-point") {
-		t.Errorf("the refusal does not name the construct: %v", err)
+	if len(e.text) < len(want) {
+		t.Fatalf("%d instructions, want at least %d", len(e.text), len(want))
 	}
-	if len(e.text) != 0 {
-		t.Errorf("%d instructions reached the text after a refusal", len(e.text))
+	got := e.text[len(e.text)-len(want):]
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("instruction %d is %#08x, want %#08x", i, got[i], want[i])
+		}
 	}
 }
 
-// TestIncomingRefusesAFloatParameter covers the third door into the
-// floating-point gap.
+// TestGrowstackSpillsAFloatParameter covers the fourth path a floating-point
+// register takes, which no value of the function passes through.
 //
-// valuePlaces refuses a floating-point value at a call site and at a return,
-// and reg refuses one the allocation put in a register. Neither covers a
-// parameter: the stack-growth tail spills every incoming register to the
-// argument area, it reads the placement rather than a value of the function,
-// and argSpill has no failure path. So a floating-point parameter reached
-// obj/arm64's integer store and it panicked:
+// The stack-growth tail saves every incoming argument register to the argument
+// area and reloads it, because the function is re-entered from its first
+// instruction. It works from the placement and not from a value, so incoming
+// refused a floating-point parameter outright: argSpill asked memOpFor for a
+// store, memOpFor asked for the store of eight bytes rather than of the type,
+// and obj/arm64 panicked on the integer store of F0:
 //
 //	panic: arm64: F0 used where the encoding means an integer register
 //
 // Go's own test corpus reaches it on test/torture.go, whose determinant takes
-// a [4][4]float64 whose first word arrives in F0.
-func TestIncomingRefusesAFloatParameter(t *testing.T) {
+// a [4][4]float64 whose first word arrives in F0. The store the tail writes is
+// the assertion, because a store of the wrong file is what crashed.
+func TestGrowstackSpillsAFloatParameter(t *testing.T) {
 	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
 	obj := &ir.Object{Name: "x"}
 
@@ -2334,13 +2398,24 @@ func TestIncomingRefusesAFloatParameter(t *testing.T) {
 		}},
 	}
 	e := &emitter{f: f, opt: Options{Sym: "test.f"}}
-	err := e.incoming()
-	if err == nil {
-		t.Fatal("a floating-point parameter was accepted")
+	if err := e.incoming(); err != nil {
+		t.Fatalf("a floating-point parameter was refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "floating-point") || !strings.Contains(err.Error(), "x") {
-		t.Errorf("the refusal names neither the construct nor the parameter: %v", err)
+	if n := len(e.frame.in); n != 1 || !e.frame.in[0].inReg || e.frame.in[0].reg != arm64.F0 {
+		t.Fatalf("the placement is %v, want one word in F0", e.frame.in)
 	}
+
+	e.argSpill(e.frame.in[0], true)
+	e.argSpill(e.frame.in[0], false)
+	store, ok := arm64.MemUnsignedOffset(arm64.StoreF64, arm64.F0, arm64.RSP, 8)
+	if !ok {
+		t.Fatal("a floating-point store into the argument area does not encode")
+	}
+	load, ok := arm64.MemUnsignedOffset(arm64.LoadF64, arm64.F0, arm64.RSP, 8)
+	if !ok {
+		t.Fatal("a floating-point load out of the argument area does not encode")
+	}
+	mustEmit(t, e, store, load)
 
 	// An integer parameter still passes, or no function compiles.
 	f.ABI.In[0].Type = typeInt

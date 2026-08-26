@@ -188,9 +188,8 @@ order they are worth writing:
    becomes a call operation. It becomes a static call to `runtime.deferproc`
    and one to `runtime.deferreturn`, which
    [033](033-closures-defer-panic.md) owns.
-6. Floating point. Written as rules and encoders, and refused by `ssagen`
-   below. The two things in it that are not a transcription of the integer
-   rules are the constant, whose immediate reaches 256 values
+6. Floating point. The two things in it that are not a transcription of the
+   integer rules are the constant, whose immediate reaches 256 values
    and nothing else, and the condition codes, which are not the integer ones:
    `FCMP` has four outcomes and an IEEE 754 comparison has to be false in the
    unordered one, so `<` is `MI` and `<=` is `LS` where the integer rules use
@@ -206,33 +205,40 @@ Groups 1 to 6 are written and groups 7 and 8 are not. `ssa/rules/arm64.go`,
 `ssa/macharm64.go` and `obj/arm64` all stop at the same place, which is what
 keeps an unencodable operation from existing.
 
-**Group 6 is written as far as the encoder and no floating-point value reaches
-an object.** `ssagen` refuses one at three doors, and a reader who takes
-"written" for a working construct is reading more than the rules claim.
-`incoming` and `reg` are in `ssagen/ssagen.go`, and `valuePlaces` is in
-`ssagen/prologue.go`:
+**Group 6 reaches an object.** `ssagen` refused a floating-point value at three
+doors, `incoming` and `reg` in `ssagen/ssagen.go` and `valuePlaces` in
+`ssagen/prologue.go`, and none of the three remains. What each needed is the
+class of a register or of a type where the code generator had assumed the
+integer file:
 
-| Door | Refuses | Message |
-| --- | --- | --- |
-| `incoming` | a parameter the ABI places in a floating-point register | `parameter a is float64, and this target has no floating-point code generator` |
-| `valuePlaces` | a call-site operand and a result | `value 0 is float64, and this target has no floating-point encoder` |
-| `reg` | any value the allocator puts in a floating-point register | `the allocation puts a value in F30, and this target has no floating-point code generator` |
+| Was refused | Now |
+| --- | --- |
+| a parameter the ABI places in a floating-point register | `memOpFor` takes the type rather than the width, so the stack-growth tail saves F0 with `STR (D)` |
+| a call-site operand and a result | `valuePlaces` places a floating-point word like any other; only a value of more than one word is still refused |
+| any value the allocator puts in a floating-point register | `reg` converts both files, `copyReg` copies with `FMOV`, and `spill` and `load` use the store and the load of the type |
 
-`reg` is the door that makes the refusal total rather than a call-boundary
-limit: the allocator has a floating-point free list, and nothing below it does,
-so a move copies with an integer `MOV` and a spill stores with an integer store.
-A function with a float local and no float in its signature is refused there,
-and so is a package-level float variable, because the initialisation function
-[040](040-object-format.md) describes assigns it.
+Three places in the code generator carry a register file rather than a width.
+`copyReg` picks `FMOV` or `MOV` from the register and refuses a copy across the
+files, because such a copy is a class the allocation and the convention
+disagree about and `FMOVgpfp` here would compute an integer's bits as a float.
+`permute` splits a parallel move into one per file and breaks each cycle with
+that file's own scratch register, F31 for `ClassFloat` as R17 is for
+`ClassInt`, since an integer register cannot hold a float. `memOpFor` asks
+`ssa.ARM64StoreOpForType` rather than `ssa.ARM64StoreOp`, which is the single
+answer for a spill, a reload, an outgoing argument and the stack-growth tail.
+`mem` also checks that the transferred register is in the file the operation
+transfers, because obj/arm64 panics on the mismatch rather than reporting it.
 
-The gating stops at the same place. The rules, the machine operations and the
-encoders are covered: `ssa/macharm64_test.go`'s `TestARM64Encoders` puts every
-operation through `ARM64Encode`, and `obj/arm64/float_test.go` compares 99,368
-floating-point encodings against `go tool asm`. What no test does is emit a
-floating-point instruction through `ssagen` into an object.
-`TestIncomingRefusesAFloatParameter`, `TestRegRefusesAFloatRegister` and
-`TestFloatRegisterRefusalDoesNotReachTheEncoder` assert the three refusals, not
-an emission.
+The gating follows. `ssa/macharm64_test.go`'s `TestARM64Encoders` puts every
+operation through `ARM64Encode` and `obj/arm64/float_test.go` compares 99,368
+floating-point encodings against `go tool asm`, as before.
+`TestFloatRegistersReachTheEncoder` and `TestGrowstackSpillsAFloatParameter`
+now assert the emission where they asserted the refusal, and seven of
+`TestLinkAndRun`'s cases compute in floating point, link against the real
+linker and run: arithmetic with no float in the signature, a constant `FMOV`'s
+immediate cannot name, a `float64` and a `float32` parameter and result, floats
+between integers, a float live across a call, and a float through a call gc
+compiled.
 
 One target-neutral operation has no rule at all. `ssa/rules/arm64.go`'s
 `Deferred` list names `OpConstString`, because a string constant is two words
