@@ -54,11 +54,6 @@ The `go` command must still be installed, and the build says why on every run:
 executable. Its release has to be the one the tarball was built with, because
 nanogo copies the object header from it.
 
-> [!WARNING]
-> `nanogo0.1.0` is the exception. Its `nanogo build` refuses every program,
-> because it could not read its own `pkg/darwin_arm64` tree. Use a clone of this
-> repository until the next release: `go build -o nanogo ./cmd/nanogo`.
-
 ## Compile a program
 
 The examples below import `os`, which is outside the 27 packages a release
