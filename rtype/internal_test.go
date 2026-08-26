@@ -279,3 +279,117 @@ func TestEqualClosureRefusesASymbolRtsymDoesNotHold(t *testing.T) {
 		t.Errorf("the reason is %q", err)
 	}
 }
+
+// TestPathToPrefixEscapes covers the case no standard library path reaches.
+//
+// It is cmd/internal/objabi.PathToPrefix, and the symbol names it builds are
+// read by the object reader and by every tool that prints one, so a dot in the
+// last element of a path has to be escaped or it is read as the separator
+// between the path and the identifier after it.
+func TestPathToPrefixEscapes(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"internal/goarch", "internal/goarch"},
+		{"", ""},
+		// A dot before the last slash is part of a host name and is left
+		// alone; one after it would be read as the separator.
+		{"gopkg.in/yaml.v3", "gopkg.in/yaml%2ev3"},
+		{"a.b", "a%2eb"},
+		{`p/with"quote`, "p/with%22quote"},
+		{"p/with space", "p/with%20space"},
+		{"p/with%pct", "p/with%25pct"},
+		{"p/é", "p/%c3%a9"},
+	} {
+		if got := pathToPrefix(tc.in); got != tc.want {
+			t.Errorf("pathToPrefix(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if isExportedName("") {
+		t.Error("the empty name is exported")
+	}
+}
+
+// TestStructPkgPathRefusesWhatItCannotAttribute covers the two shapes that
+// cannot come from the checker.
+//
+// ir.Converter sets Field.Pkg on every unexported field, and the language puts
+// the fields of one struct literal in one file, so both of these mean the IR
+// was built by hand and wrongly. A descriptor written from one would send
+// reflect to the wrong package for a field name, or to none at all.
+func TestStructPkgPathRefusesWhatItCannotAttribute(t *testing.T) {
+	i64 := &ir.Type{Kind: ir.Int64, Name: "int64", Basic: "int64"}
+	noPkg := structOf(t, ir.Field{Name: "hidden", Type: i64})
+	if _, err := structPkgPath(noPkg); err == nil {
+		t.Error("an unexported field with no package was attributed")
+	}
+	two := structOf(t,
+		ir.Field{Name: "a", Type: i64, Pkg: "p"},
+		ir.Field{Name: "b", Type: i64, Pkg: "q"})
+	if _, err := structPkgPath(two); err == nil {
+		t.Error("unexported fields from two packages were attributed")
+	}
+	// A blank field is skipped, as gc skips it, and it does not decide the
+	// path even though its name is not exported.
+	blank := structOf(t,
+		ir.Field{Name: "_", Type: i64},
+		ir.Field{Name: "n", Type: i64, Pkg: "p"})
+	got, err := structPkgPath(blank)
+	if err != nil || got != "p" {
+		t.Errorf("a blank field gave %q (%v), want p", got, err)
+	}
+}
+
+// TestUncommonPkgPathOfAComposite covers gc's rule for a type with no name.
+//
+// gc takes the package from the element's symbol for a pointer, a slice, an
+// array and a channel. It is unreachable through Descriptor while a type with
+// a method is refused, because a composite with no name has no UncommonType
+// unless it has methods, and it can only have methods through a defined
+// element. It is the answer for the day methods are written.
+func TestUncommonPkgPathOfAComposite(t *testing.T) {
+	elem := &ir.Type{Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int"}
+	for _, tc := range []struct {
+		what string
+		typ  *ir.Type
+		want string
+	}{
+		{"the type's own path", &ir.Type{Name: "p.T", PkgPath: "p"}, "p"},
+		{"a predeclared type", &ir.Type{Kind: ir.Int64, Name: "int"}, ""},
+		{"a pointer to a defined type", &ir.Type{Kind: ir.Ptr, Elem: elem}, "p"},
+		{"a slice of one", &ir.Type{Kind: ir.Slice, Elem: elem}, "p"},
+		{"an array of one", &ir.Type{Kind: ir.Array, Elem: elem}, "p"},
+		{"a channel of one", &ir.Type{Kind: ir.Chan, Elem: elem}, "p"},
+		{"a pointer to nothing", &ir.Type{Kind: ir.Ptr}, ""},
+		{"a literal struct", &ir.Type{Kind: ir.Struct}, ""},
+	} {
+		if got := uncommonPkgPath(tc.typ); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.what, got, tc.want)
+		}
+	}
+}
+
+// TestMethodRefusalQualifiesAnUnexportedName checks that the refusal names one
+// method the way the language names it.
+//
+// Two packages may declare an unexported method of the same name and they are
+// different methods, so the refusal has to say which.
+func TestMethodRefusalQualifiesAnUnexportedName(t *testing.T) {
+	typ := &ir.Type{Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int"}
+	err := methodRefusal(typ, []ir.Method{{Name: "hidden", Pkg: "p"}, {Name: "Visible"}})
+	if err == nil {
+		t.Fatal("no refusal")
+	}
+	if !strings.Contains(err.Error(), "p.hidden") {
+		t.Errorf("the refusal is %q, want it to qualify the unexported name", err)
+	}
+	if !strings.Contains(err.Error(), "2 method") {
+		t.Errorf("the refusal is %q, want it to count the methods", err)
+	}
+}
+
+// TestSliceOfRefusesAnElementThatDoesNotLayOut covers the error an array's
+// header returns when it cannot build the slice type it names.
+func TestSliceOfRefusesAnElementThatDoesNotLayOut(t *testing.T) {
+	if _, err := SliceOf(&ir.Type{Kind: ir.Invalid}); err == nil {
+		t.Error("a slice of an element that does not lay out was built")
+	}
+}

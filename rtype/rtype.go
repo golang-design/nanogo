@@ -5,7 +5,7 @@
 // Package rtype encodes type descriptors.
 //
 // specs/032-type-descriptors-and-itabs.md owns the layout, and the layout is
-// internal/abi's exactly, by specs/000-decisions.md decision 11. The runtime
+// internal/abi's exactly, by specs/000-decisions.md decision 10. The runtime
 // this compiler links against is gc's own, so a descriptor that differs from
 // gc's by one byte is read by gc's code with gc's field offsets.
 //
@@ -480,17 +480,6 @@ func defined(t *ir.Type) bool {
 	}
 	k, ok := predeclaredKinds[t.Name]
 	return !ok || k != t.Kind
-}
-
-// definedIn returns the import path a defined type's descriptor is owed by.
-//
-// It is empty for a type this package cannot attribute, which is a type built
-// below the type boundary by hand.
-func definedIn(t *ir.Type) string {
-	if !defined(t) {
-		return ""
-	}
-	return t.PkgPath
 }
 
 // abiKinds maps an IR kind to internal/abi.Kind, for the kinds where one IR
