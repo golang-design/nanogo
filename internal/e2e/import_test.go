@@ -470,6 +470,15 @@ var linkingShapes = []linkShape{
 		main: "\tvar c lib.Code = 42\n\tos.Exit(int(c))\n",
 	},
 	{
+		// A declared array, whose descriptor names two other descriptors: its
+		// element and the slice type of that element, which nothing in the
+		// program mentions. A nested array names a third, so this is also the
+		// check that the closure does not stop at one level.
+		name: "a declared array",
+		lib:  "type Buf [4]int64\n\ntype Grid [2][3]byte\n",
+		main: "\tvar b lib.Buf\n\tvar g lib.Grid\n\tb[0] = 40\n\tg[1][2] = 2\n\tos.Exit(int(b[0]) + int(g[1][2]))\n",
+	},
+	{
 		// A struct whose field names carry a tag, an embedded field and an
 		// unexported name. All three are in the field array, and the
 		// unexported one is why the descriptor carries a package path of its
