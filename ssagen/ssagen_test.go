@@ -2400,6 +2400,51 @@ func TestFloatRegistersReachTheEncoder(t *testing.T) {
 	})
 }
 
+// TestPermuteBreaksACycleInEachFile covers the parallel move over two
+// register files.
+//
+// A cycle needs a register outside the cycle to break it, and the two files
+// share none: an integer register cannot hold a float, so a float cycle broken
+// with R17 is a float read back as an integer's bits. The move list is
+// therefore split and each half is permuted with its own scratch register.
+//
+// The two cycles here are swaps, one per file, in one list. The assertion is
+// the register each swap stages through, because breaking both with the
+// integer scratch produces the same instruction count and the wrong bits.
+func TestPermuteBreaksACycleInEachFile(t *testing.T) {
+	e := &emitter{opt: Options{Sym: "test.f"}}
+	e.permute(
+		[]arm64.Reg{arm64.R0, arm64.R1, arm64.F0, arm64.F1},
+		[]arm64.Reg{arm64.R1, arm64.R0, arm64.F1, arm64.F0})
+	if err := e.err(); err != nil {
+		t.Fatalf("a parallel move over both files gave %v", err)
+	}
+	// Three instructions break a swap: into the scratch register, the move
+	// the scratch register freed, and out of it.
+	if len(e.text) != 6 {
+		t.Fatalf("%d instructions, want three per swap", len(e.text))
+	}
+	want := []uint32{
+		arm64.MovRegReg(arm64.Size64, moveScratch, arm64.R1),
+		arm64.MovRegReg(arm64.Size64, arm64.R1, arm64.R0),
+		arm64.MovRegReg(arm64.Size64, arm64.R0, moveScratch),
+		arm64.FmovRegReg(arm64.Size64, fmoveScratch, arm64.F1),
+		arm64.FmovRegReg(arm64.Size64, arm64.F1, arm64.F0),
+		arm64.FmovRegReg(arm64.Size64, arm64.F0, fmoveScratch),
+	}
+	for i := range want {
+		if e.text[i] != want[i] {
+			t.Errorf("instruction %d is %#08x, want %#08x", i, e.text[i], want[i])
+		}
+	}
+
+	// The scratch registers are the second of each reserved pair, so neither
+	// is one the allocator hands out.
+	if moveScratch != arm64.RegTrampHi || fmoveScratch != arm64.RegFScratchHi {
+		t.Errorf("the scratch pair is %v and %v, want R17 and F31", moveScratch, fmoveScratch)
+	}
+}
+
 // mustEmit asserts that the emitter reported nothing and that the words it
 // produced end with the given ones.
 func mustEmit(t *testing.T, e *emitter, want ...uint32) {
