@@ -260,6 +260,43 @@ It is placed last and drawn with a dashed arrow back to L3 to make one point:
 construct it does not use, or that miscompiles it reproducibly, passes L4. The
 levels above it are the ones that find that bug.
 
+### The probe corpus, which the four levels do not cover
+
+`internal/audit` holds 95 probes, one Go construct each. Every probe is
+compiled and run twice, once by nanogo and once by `gc`, and the two are
+compared, so no probe carries a written expected value. `gc` is the oracle by
+decision 6, which is L3's method applied to one construct rather than to one
+program.
+
+**What it catches is not a miscompilation. It is a documentation claim that
+stopped being true.** A probe's class is recorded in
+`internal/audit/testdata/ratchet.txt`, the classes are ordered
+`ok > refused > wrong > broken`, and any fall fails the build. A rise does not
+fail, and is reported loudly, because a construct that moves from refused to
+working is the moment a sentence in `README.md`, `doc.go` or `driver/help.go`
+becomes false. The `probes` job in CI raises that line as a warning.
+
+The corpus exists because that failure happened. For one day `README.md` told
+a reader that nanogo does not run package initialization, that `os.Stdout` is
+therefore nil, and that this is the one failure nanogo does not announce, with
+a pasted segfault. All of it had been fixed hours earlier. No gate could see
+it: `internal/hygiene` checks the numbers a document states against
+`testdata/facts.json` and nothing checked what a document said the compiler
+could do.
+
+Three probes are classed `wrong` today, and each is a program that compiles and
+behaves differently from `gc`'s build of it: `buildinfo-named`,
+`embed-directive` and `panic-fires`. Each is pinned as an exact string in
+`driver/help_test.go`, so fixing one fails that test and forces the sentence
+describing it to be corrected in the same change. That coupling is the point:
+the compiler and the documentation move together or the build stops.
+
+**This is a fifth level and the diagram above has four.** It is recorded here
+rather than drawn, because renumbering L1 to L4 across the deck would cost more
+than it buys, and because it is not a level in the same sense: L1 to L4 are
+ordered by what each catches that the one above cannot, and this one catches
+something none of them look at.
+
 ## Metadata that no output check can see
 
 Three properties are invisible to every level above, because a program can
