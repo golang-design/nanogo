@@ -98,6 +98,16 @@ type Send chan<- int
 
 type Recv <-chan Flags
 
+// Handler, Nullary and Variadic are function types. The descriptor's tail is
+// two counts and an array of parameter and result descriptors, and the top bit
+// of the result count is the variadic flag, so these three cover the counts,
+// the order of the array and the flag.
+type Handler func(n int, s string) error
+
+type Nullary func()
+
+type Variadic func(head Flags, rest ...*Ident) (int, error)
+
 var namedCorpus = []struct {
 	src string
 	rt  reflect.Type
@@ -112,6 +122,9 @@ var namedCorpus = []struct {
 	{"Signal", reflect.TypeOf(Signal(nil))},
 	{"Send", reflect.TypeOf(Send(nil))},
 	{"Recv", reflect.TypeOf(Recv(nil))},
+	{"Handler", reflect.TypeOf(Handler(nil))},
+	{"Nullary", reflect.TypeOf(Nullary(nil))},
+	{"Variadic", reflect.TypeOf(Variadic(nil))},
 }
 
 // namedRefusals are the rows that must be refused, with the words the refusal
@@ -168,6 +181,12 @@ type Signal chan int
 type Send chan<- int
 
 type Recv <-chan Flags
+
+type Handler func(n int, s string) error
+
+type Nullary func()
+
+type Variadic func(head Flags, rest ...*Ident) (int, error)
 
 // Counter is not in the corpus. It is the type whose descriptor must be
 // refused, because a method needs two things this compiler does not have.
@@ -285,6 +304,8 @@ func TestUncommonTypeCarriesThePackagePath(t *testing.T) {
 				b += 24
 			case reflect.Chan:
 				b += 16
+			case reflect.Func:
+				b += 8
 			}
 			if got := binary.LittleEndian.Uint16(d.Data[b+4:]); got != uint16(c.rt.NumMethod()) {
 				t.Errorf("Mcount %d, want %d", got, c.rt.NumMethod())
@@ -764,6 +785,139 @@ func TestReferencedFollowsAChannel(t *testing.T) {
 		}
 		if len(got) != 1 || got[0] != types[i].Elem {
 			t.Errorf("%s reaches %v, want its element", c.src, got)
+		}
+	}
+}
+
+// TestFuncTypeHeaderAgainstReflect checks the FuncType header and the array
+// that follows it, against the descriptor gc emitted for the same type.
+//
+// The array is one array for both lists, split by the two counts. reflect
+// reads In(i) from the first InCount entries and Out(i) from the rest, so an
+// array written in the wrong order reports a function's results as its
+// parameters and nothing about the bytes says so.
+func TestFuncTypeHeaderAgainstReflect(t *testing.T) {
+	types, _ := namedTypes(t)
+	for i, c := range namedCorpus {
+		if c.rt.Kind() != reflect.Func {
+			continue
+		}
+		t.Run(c.src, func(t *testing.T) {
+			syms, err := rtype.Descriptor(types[i])
+			if err != nil {
+				t.Fatalf("descriptor: %v", err)
+			}
+			d := syms[0]
+
+			in := binary.LittleEndian.Uint16(d.Data[rtype.TypeSize:])
+			if int(in) != c.rt.NumIn() {
+				t.Errorf("InCount %d, want %d", in, c.rt.NumIn())
+			}
+			raw := binary.LittleEndian.Uint16(d.Data[rtype.TypeSize+2:])
+			out := raw &^ (1 << 15)
+			if int(out) != c.rt.NumOut() {
+				t.Errorf("OutCount %d, want %d", out, c.rt.NumOut())
+			}
+			if variadic := raw&(1<<15) != 0; variadic != c.rt.IsVariadic() {
+				t.Errorf("the variadic bit is %v, want %v", variadic, c.rt.IsVariadic())
+			}
+
+			// The array starts after the UncommonType, because a defined type
+			// has one and Moff is measured past it.
+			base := rtype.TypeSize + 8 + 16
+			for j := 0; j < c.rt.NumIn()+c.rt.NumOut(); j++ {
+				var want reflect.Type
+				if j < c.rt.NumIn() {
+					want = c.rt.In(j)
+				} else {
+					want = c.rt.Out(j - c.rt.NumIn())
+				}
+				r, ok := reloc(d, int32(base+j*8))
+				if !ok {
+					t.Errorf("entry %d has no reference", j)
+					continue
+				}
+				if got := r.Target; got != linkSymbol(want) {
+					t.Errorf("entry %d is %s, want %s", j, got, linkSymbol(want))
+				}
+				if r.Size != 8 {
+					t.Errorf("entry %d is %d bytes, want a pointer", j, r.Size)
+				}
+			}
+		})
+	}
+}
+
+// linkSymbol is the descriptor symbol of a reflect.Type.
+//
+// It is the "type:" prefix and the link string. The link string qualifies a
+// defined type by its import path rather than by its package name, which is
+// the one difference from reflect.Type.String, so a composite type has to be
+// spelled out rather than taken from String.
+func linkSymbol(rt reflect.Type) string { return "type:" + linkString(rt) }
+
+func linkString(rt reflect.Type) string {
+	if rt.Name() != "" {
+		if rt.PkgPath() != "" {
+			return rt.PkgPath() + "." + rt.Name()
+		}
+		return rt.Name()
+	}
+	switch rt.Kind() {
+	case reflect.Pointer:
+		return "*" + linkString(rt.Elem())
+	case reflect.Slice:
+		return "[]" + linkString(rt.Elem())
+	case reflect.Array:
+		return "[" + strconv.Itoa(rt.Len()) + "]" + linkString(rt.Elem())
+	}
+	return rt.String()
+}
+
+// TestFuncWithNoSignatureIsRefused is the gap the encoder refuses by name.
+//
+// ir.Converter sets Params and Results on every function type, the empty list
+// included, so a nil list means the type was built below the boundary. A
+// descriptor written from it would claim func(), and reflect would report a
+// function of no arguments for one that takes three.
+func TestFuncWithNoSignatureIsRefused(t *testing.T) {
+	byHand := &ir.Type{Kind: ir.FuncKind, Name: "p.F", PkgPath: "p", Methods: []ir.Method{}}
+	if err := ir.Layout(byHand); err != nil {
+		t.Fatal(err)
+	}
+	_, err := rtype.Descriptor(byHand)
+	if err == nil {
+		t.Fatal("a function with no signature produced a descriptor")
+	}
+	if !strings.Contains(err.Error(), "signature") {
+		t.Errorf("the refusal is %q and does not name the signature", err)
+	}
+	byHand.Params = []*ir.Type{}
+	byHand.Results = []*ir.Type{}
+	if _, err := rtype.Descriptor(byHand); err != nil {
+		t.Errorf("a function with an empty signature was still refused: %v", err)
+	}
+	// The variadic bit says the last parameter is a ... parameter. With no
+	// parameters, reflect reads In(-1).
+	byHand.Variadic = true
+	if _, err := rtype.Descriptor(byHand); err == nil {
+		t.Error("a variadic function with no parameters produced a descriptor")
+	}
+}
+
+// TestReferencedFollowsAFunction checks the edges cmd/link walks.
+func TestReferencedFollowsAFunction(t *testing.T) {
+	types, _ := namedTypes(t)
+	for i, c := range namedCorpus {
+		if c.rt.Kind() != reflect.Func {
+			continue
+		}
+		got, err := rtype.Referenced(types[i])
+		if err != nil {
+			t.Fatalf("%s: %v", c.src, err)
+		}
+		if len(got) != c.rt.NumIn()+c.rt.NumOut() {
+			t.Errorf("%s reaches %d types, want %d", c.src, len(got), c.rt.NumIn()+c.rt.NumOut())
 		}
 	}
 }

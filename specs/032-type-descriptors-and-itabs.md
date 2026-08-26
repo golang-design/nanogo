@@ -109,9 +109,10 @@ one name. Nothing in an `ir.Type` can detect it. The fix is in `convert.go`'s
 
 ### What `rtype` can fill in
 
-A predeclared basic type, a slice, an array, a pointer, a struct, a **channel**
-and a defined type over any of those, with the `UncommonType` tail and the
-`StructType` or `ChanType` header and field array that each needs.
+A predeclared basic type, a slice, an array, a pointer, a struct, a **channel**,
+a **function** and a defined type over any of those, with the `UncommonType`
+tail and the `StructType`, `ChanType` or `FuncType` header and array that each
+needs.
 `ir.Type.Methods` is what makes the tail writable: a defined type's method set,
 set for every defined type with the empty set included, so an empty set is a
 fact rather than an absence. `TFlagUncommon` and the tail are one decision, because `gc` gives a
@@ -124,7 +125,7 @@ Four things stop a descriptor, and each names itself in the refusal:
 | --- | --- |
 | a method | the method's signature, for the `Mtyp` offset, and the two ABI wrappers `gc` generates beside every method |
 | a struct or an array whose parts do not compare as one region of memory | the generated equality function this spec owes |
-| a map, a function, or a literal interface with methods | the group type and the signature that [020](020-ir.md)'s type boundary drops |
+| a map, or a literal interface with methods | the group type and the type of each method, which [020](020-ir.md)'s type boundary drops |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
 Writing a tail that claims a type has no methods is the failure the first row
@@ -469,6 +470,30 @@ which `ir.ChanDir.String` already returns in the form that precedes an element
 (`chan`, `chan<-`, `<-chan`). A **defined** channel type is exempt, as every
 defined type is, because its name is its identity, so `type Signal chan int`
 compiles to a descriptor today.
+
+### A function's signature crossed the boundary
+
+`ir.Type` carries `Params`, `Results` and `Variadic`, and `rtype/func.go`
+writes the `FuncType` header and the array that follows it. A defined function
+type gets a descriptor.
+
+The array is **one** array for both lists, split by the two counts, and the
+receiver would come first if there were one. `reflect` reads `In(i)` from the
+first `InCount` entries and `Out(i)` from the rest, so an array written in the
+wrong order reports a function's results as its parameters and nothing in the
+bytes says so. The variadic flag is the top bit of `OutCount`, which is why
+`OutCount` holds one bit fewer than `InCount`.
+
+The header is eight bytes for four bytes of content. The padding is not slack:
+what follows is an array of `*Type` addressed from the end of the header, so a
+four-byte header would put every pointer in it at an offset that is not
+pointer-aligned.
+
+A function *literal* is still refused, by `ir/rtype.go` and not here, for the
+reason a channel literal is: the naming function spells no signature, so
+`func(int)` and `func(string)` would share one symbol. What that file needs is
+the spelling `func(` plus each parameter, `, ...` for a variadic last one, and
+the results, which is a walk over the two lists it can now see.
 
 ### `PtrToThis` was blamed on a relocation that exists
 
