@@ -636,14 +636,25 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 	}
 	for _, p := range passes {
 		if err := p.run(); err != nil {
-			return nil, nil, &UnsupportedError{
-				Package: cfg.Package,
-				What:    "function " + fn.Name + " at " + position(fset, fn.Pos, fn.Name),
-				Detail:  p.name + ": " + err.Error(),
-			}
+			return nil, nil, unsupportedFunc(cfg, fset, fn, p.name, err)
 		}
 	}
 	return r, needed, nil
+}
+
+// unsupportedFunc is the refusal every pass of compileFunc reports.
+//
+// One function and not one per pass, because the shape is the content: the
+// message names the pass, so a reader knows which spec deck owns the gap, and
+// it names the function and the position, because the allowlist entry that let
+// the package through names only the package. A refusal that named only the
+// package would send a reader to a file rather than to a line.
+func unsupportedFunc(cfg *Config, fset *syntax.FileSet, fn *ir.Func, pass string, err error) error {
+	return &UnsupportedError{
+		Package: cfg.Package,
+		What:    "function " + fn.Name + " at " + position(fset, fn.Pos, fn.Name),
+		Detail:  pass + ": " + err.Error(),
+	}
 }
 
 // verify runs the SSA invariant checks and turns a finding into an error.

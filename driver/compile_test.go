@@ -617,23 +617,56 @@ func symbolsOf(t *testing.T, archive string) string {
 	return string(out)
 }
 
-// TestCompileReportsAnEmitFailure covers the last stage of the pipeline.
+// TestCompileReportsAPassFailure covers what a refusal from any pass says.
 //
-// A floating-point constant has no encoder on this target
-// (specs/042-arm64-backend.md's group 6 is unbuilt), so the emitter has no
-// instruction to write. The message has to name the function, because the
-// allowlist entry that produced it names only a package.
+// The message names the pass, the function and the position. The pass tells a
+// reader which spec deck owns the gap, and the function and the position are
+// needed because the allowlist entry that let the package through names only
+// the package.
 //
-// It used to be a string constant, which needed a data symbol nothing wrote.
-// That gap is closed, so the case moved to a construct that is still open.
-func TestCompileReportsAnEmitFailure(t *testing.T) {
+// This drove a construct the last stage could not emit, and the construct
+// rotted twice: first a string constant, which needed a data symbol nothing
+// wrote, then a floating-point constant, which specs/042 group 6 could not
+// encode. Both gaps are closed. What the test is for is the shape of the
+// message and not which construct is open this month, so it asserts the shape
+// on the pass name that is hardest to reach and drives the loop that builds it
+// with a construct that is refused today.
+func TestCompileReportsAPassFailure(t *testing.T) {
+	// The last stage. No construct reaches a refusal there any more, so the
+	// error is the emitter's own and the assertion is what the driver wraps
+	// it in.
+	fset := syntax.NewFileSet()
+	src := "package main\n\nfunc f() int { return 0 }\n"
+	file := fset.AddFile("a.go", len(src))
+	off := 0
+	for i, c := range src {
+		if c == '\n' {
+			file.AddLine(i + 1)
+		}
+		if strings.HasPrefix(src[i:], "func f") {
+			off = i + len("func ")
+		}
+	}
+	fn := &ir.Func{Name: "f", Sym: "main.f", Pos: file.Pos(off)}
+	err := unsupportedFunc(&Config{Package: "main"}, fset, fn, "ssagen.Emit",
+		errors.New("v3: MOVD does not encode"))
+	for _, want := range []string{"function f", "a.go:3:6", "ssagen.Emit", "MOVD does not encode"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message does not carry %q:\n%v", want, err)
+		}
+	}
+
+	// The same shape out of Compile, so the loop that wraps every pass is
+	// covered and not only the wrapping. A conversion to an interface is what
+	// ssa.Build refuses today; when that closes, this half moves to whatever
+	// is open and the half above does not.
 	arm64Only(t)
 	needGoCommand(t)
-	_, err := compileSource(t, "package main\n\nfunc f() float64 { return 1.5 }\n", nil)
+	_, err = compileSource(t, "package main\n\nfunc f() any { return 1 }\n", nil)
 	if err == nil {
-		t.Fatal("Compile emitted a function that returns a floating-point constant")
+		t.Fatal("Compile accepted a conversion to an interface")
 	}
-	for _, want := range []string{"function f", "a.go:3:6", "ssagen.Emit"} {
+	for _, want := range []string{"function f", "a.go:3:6", "ssa.Build"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the message does not carry %q:\n%v", want, err)
 		}
