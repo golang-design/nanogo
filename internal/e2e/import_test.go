@@ -278,10 +278,14 @@ func TestNanogoImportsWhatNanogoWrote(t *testing.T) {
 // twenty-eight packages of the build against the export data nanogo wrote,
 // runtime included. The program then runs.
 //
-// internal/goarch is the same shape and is not here, because it declares one
-// defined type, ArchFamilyType, and a package that declares one is refused:
-// see TestNanogoRefusesATypeAnImporterCouldNotLinkAgainst for what the
-// refusal is about.
+// internal/goarch is here too, and it is the one that says the type descriptor
+// writer works against the real runtime. It declares ArchFamilyType, a defined
+// type over int, so the object carries type:internal/goarch.ArchFamilyType with
+// the UncommonType that names the package and with the abi kind Int rather than
+// Int64. cmd/link resolves the runtime's own reference to that symbol, and the
+// DWARF pass builds go:info.internal/goarch.ArchFamilyType out of it. Until the
+// method set crossed the type boundary the package was refused, which is what
+// this line used to say.
 //
 // This is what specs/015-export-data.md's missing writer was blocking, and
 // these two packages are where it was most visible: the driver refused them
@@ -293,15 +297,17 @@ func TestNanogoCompilesAStandardLibraryPackage(t *testing.T) {
 	h := setup(t, map[string]string{
 		"go.mod":  "module nanogo.example/goarch\n\ngo 1.27\n",
 		"main.go": stdlibProgram,
-	}, []string{"internal/goos"})
+	}, []string{"internal/goos", "internal/goarch"})
 
 	out, err := h.build(t, "-o", "prog", ".")
 	if err != nil {
 		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
 	}
 	lines := h.decisions(t)
-	if !compiled(lines, "internal/goos") {
-		t.Fatalf("nanogo delegated internal/goos:\n%s", strings.Join(lines, "\n"))
+	for _, pkg := range []string{"internal/goos", "internal/goarch"} {
+		if !compiled(lines, pkg) {
+			t.Fatalf("nanogo delegated %s:\n%s", pkg, strings.Join(lines, "\n"))
+		}
 	}
 	if compiled(lines, "runtime") {
 		t.Fatalf("nanogo compiled the runtime, so the test says nothing about importing:\n%s",
@@ -437,6 +443,41 @@ var linkingShapes = []linkShape{
 		lib:  "const (\n\tA = 40\n\tB = 2\n)\n",
 		main: "\tos.Exit(lib.A + lib.B)\n",
 	},
+	// The four shapes below were in refusedShapes until the type boundary
+	// carried a method set. Each declares a type, and each importer puts that
+	// type on a *local variable*, which is the shape that made the link fail:
+	// gc emits a DWARF reference for such a variable and cmd/link builds the
+	// entry out of the type descriptor, so the library owes
+	// type:<path>.<Type> whether the importer's code reads it or not.
+	{
+		name: "a struct",
+		lib:  "type Point struct{ X, Y int }\n",
+		main: "\tvar p lib.Point\n\tp.X, p.Y = 40, 2\n\tos.Exit(p.X + p.Y)\n",
+	},
+	{
+		name: "a struct with a pointer field",
+		lib:  "type Node struct {\n\tN *Node\n\tV int\n}\n",
+		main: "\tvar n lib.Node\n\tn.V = 42\n\tn.N = &n\n\tos.Exit(n.N.V)\n",
+	},
+	{
+		name: "a named slice",
+		lib:  "type List []int\n",
+		main: "\tvar l lib.List = []int{20, 22}\n\tos.Exit(l[0] + l[1])\n",
+	},
+	{
+		name: "a named basic type",
+		lib:  "type Code int\n",
+		main: "\tvar c lib.Code = 42\n\tos.Exit(int(c))\n",
+	},
+	{
+		// A struct whose field names carry a tag, an embedded field and an
+		// unexported name. All three are in the field array, and the
+		// unexported one is why the descriptor carries a package path of its
+		// own.
+		name: "a struct with a tag and an unexported field",
+		lib:  "type Inner struct{ A int }\n\ntype Outer struct {\n\tInner\n\tB int `json:\"b\"`\n\tc int\n}\n",
+		main: "\tvar o lib.Outer\n\to.A, o.B = 40, 2\n\tos.Exit(o.A + o.B)\n",
+	},
 }
 
 // TestGcLinksAndRunsAgainstWhatNanogoWrote is the cross-read carried one step
@@ -495,14 +536,14 @@ func shapeModule(s linkShape) map[string]string {
 // variable of that type names go:info.<path>.<Type>. cmd/link builds the DWARF
 // entry out of the descriptor, so both come back to the one symbol the
 // defining package owes and nanogo cannot write, type:<path>.<Type>.
+// The list is what is left of it. A declared type whose descriptor nanogo can
+// write is in linkingShapes above and is linked and run rather than refused.
 var refusedShapes = []linkShape{
-	{name: "a struct", lib: "type Point struct{ X, Y int }\n", main: "Point"},
-	{name: "a struct with a pointer field", lib: "type Node struct {\n\tN *Node\n\tV int\n}\n", main: "Node"},
-	{name: "a named slice", lib: "type List []int\n", main: "List"},
 	{name: "a named map", lib: "type M map[string]int\n", main: "M"},
 	{name: "an interface", lib: "type I interface{ F() int }\n", main: "I"},
-	{name: "a named basic type", lib: "type Code int\n", main: "Code"},
 	{name: "a type with a method", lib: "type Code int\n\nfunc (c Code) V() int { return int(c) }\n", main: "Code"},
+	{name: "a struct that compares field by field", lib: "type Label struct{ Key, Value string }\n", main: "Label"},
+	{name: "a struct holding a map", lib: "type Table struct{ M map[string]int }\n", main: "Table"},
 }
 
 // TestNanogoRefusesATypeAnImporterCouldNotLinkAgainst is the other half of the
@@ -550,5 +591,135 @@ func TestNanogoRefusesATypeAnImporterCouldNotLinkAgainst(t *testing.T) {
 				t.Errorf("the build reached the linker, so the refusal did not fire:\n%s", out)
 			}
 		})
+	}
+}
+
+// The library whose descriptors a gc-compiled importer reflects over.
+//
+// Every declaration here is one nanogo writes the runtime type descriptor for,
+// and nothing else in the link writes them: gc's writeType emits a descriptor
+// for a type declared in another package only when it is compiling that
+// package, so the bytes reflect reads below are nanogo's.
+const reflectLibrary = `package lib
+
+type Inner struct{ A int64 }
+
+type Point struct {
+	Inner
+	X int
+	Y int ` + "`json:\"y\"`" + `
+	n int
+}
+
+type Code int
+
+type List []Point
+
+func Sink(p Point) int { return p.X + p.Y + p.n + int(p.A) }
+`
+
+// The importer, which asks reflect what nanogo wrote and exits 42 when every
+// answer agrees.
+//
+// A distinct exit status per question, so a failure says which field of the
+// descriptor is wrong rather than that something is.
+const reflectProgram = `package main
+
+import (
+	"os"
+	"reflect"
+
+	"nanogo.example/shape/lib"
+)
+
+func check(ok bool, code int) {
+	if !ok {
+		os.Exit(code)
+	}
+}
+
+func main() {
+	t := reflect.TypeOf(lib.Point{})
+	// Str, the name string, which is qualified by the package name and not by
+	// the import path.
+	check(t.String() == "lib.Point", 1)
+	check(t.Name() == "Point", 2)
+	// The UncommonType's package path.
+	check(t.PkgPath() == "nanogo.example/shape/lib", 3)
+	check(t.NumMethod() == 0, 4)
+	// The StructType's field array.
+	check(t.NumField() == 4, 5)
+	check(t.Field(0).Name == "Inner" && t.Field(0).Anonymous, 6)
+	check(t.Field(1).Name == "X" && !t.Field(1).Anonymous, 7)
+	check(string(t.Field(2).Tag) == ` + "`json:\"y\"`" + `, 8)
+	// The struct's own package path, which is the one an unexported field
+	// name is reached through.
+	check(t.Field(3).Name == "n" && t.Field(3).PkgPath == "nanogo.example/shape/lib", 9)
+	// The offsets, which the descriptor carries per field.
+	check(t.Field(0).Offset == 0 && t.Field(1).Offset == 8, 10)
+	check(t.Size() == 32 && t.Align() == 8, 11)
+
+	// Equal and Hash, read through an interface and through a map. A wrong
+	// Equal makes these compare unequal or panic; a wrong Hash makes the map
+	// miss.
+	var a any = lib.Point{X: 1, Y: 2}
+	var b any = lib.Point{X: 1, Y: 2}
+	check(a == b, 12)
+	m := map[any]int{a: 40}
+	check(m[b] == 40, 13)
+	check(lib.Sink(lib.Point{X: 1, Y: 1}) == 2, 14)
+
+	// A defined type over a predeclared one. internal/abi distinguishes Int
+	// from Int64 and the IR does not, so this is the check on ir.Type.Basic.
+	c := reflect.TypeOf(lib.Code(0))
+	check(c.Kind() == reflect.Int, 15)
+	check(c.String() == "lib.Code" && c.PkgPath() == "nanogo.example/shape/lib", 16)
+
+	// A defined slice, whose descriptor names the element's.
+	l := reflect.TypeOf(lib.List(nil))
+	check(l.Kind() == reflect.Slice && l.Elem() == t, 17)
+	check(l.String() == "lib.List", 18)
+
+	os.Exit(42)
+}
+`
+
+// TestGcReflectsOverATypeNanogoDescribed reads the descriptor back with the
+// runtime's own decoder.
+//
+// rtype's unit tests compare nanogo's bytes with gc's field by field, which
+// says the two agree. This says the runtime agrees: the program links against
+// the descriptor nanogo wrote, and reflect walks it the way the runtime walks
+// every descriptor. The name string, the package path, the field array with
+// its tags and its embedded and unexported names, the equality closure and the
+// type hash are each read here through the accessor that reads them in a real
+// program.
+//
+// specs/032-type-descriptors-and-itabs.md asks for exactly this and calls it
+// hosted mode.
+func TestGcReflectsOverATypeNanogoDescribed(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":     "module nanogo.example/shape\n\ngo 1.27\n",
+		"lib/lib.go": reflectLibrary,
+		"main.go":    reflectProgram,
+	}, []string{"nanogo.example/shape/lib"})
+
+	out, err := h.build(t, "-o", "prog", ".")
+	if err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if !compiled(h.decisions(t), "nanogo.example/shape/lib") {
+		t.Fatalf("nanogo delegated the library, so reflect read gc's descriptors:\n%s",
+			strings.Join(h.decisions(t), "\n"))
+	}
+	b, err := exec.Command(filepath.Join(h.mod, "prog")).CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("the program did not run: %v\n%s", err, b)
+	}
+	if code != 42 {
+		t.Fatalf("the program exited %d, want 42; the number is the check that failed\n%s", code, b)
 	}
 }
