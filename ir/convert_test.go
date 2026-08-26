@@ -1037,3 +1037,128 @@ func TestChanDirIsInvalidUntilItIsSet(t *testing.T) {
 		}
 	}
 }
+
+// TestConvertCarriesALiteralInterfacesMethods is the gap that stopped every
+// non-empty interface descriptor.
+//
+// A defined interface reached the boundary through the Named case, which asks
+// the checker for the method set. A literal one is not a *types2.Named, so
+// that case never ran and it arrived with no methods at all: EmptyIface said
+// "this has methods" and Methods said there were none.
+func TestConvertCarriesALiteralInterfacesMethods(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Named interface {
+	Read(p []byte) (int, error)
+	priv() int
+}
+
+var Lit interface {
+	Read(p []byte) (int, error)
+	priv() int
+}
+
+var Any interface{}
+
+type NamedEmpty interface{}
+`)
+	c := NewConverter()
+	conv := func(name string) *Type {
+		t.Helper()
+		out, err := c.Convert(pkg.Scope().Lookup(name).Type())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Kind != Interface {
+			t.Fatalf("%s has kind %s, want interface", name, out.Kind)
+		}
+		return out
+	}
+
+	// The two spellings of one interface produce one method list. They are two
+	// types to the linker, because one has a name, and the contents of the
+	// method array have to agree or reflect reports two different interfaces.
+	named, lit := conv("Named"), conv("Lit")
+	if len(lit.Methods) != 2 {
+		t.Fatalf("the literal interface carries %d methods, want 2", len(lit.Methods))
+	}
+	if !reflect.DeepEqual(methodShapes(named.Methods), methodShapes(lit.Methods)) {
+		t.Errorf("the named form carries %+v and the literal form %+v",
+			methodShapes(named.Methods), methodShapes(lit.Methods))
+	}
+	for _, m := range lit.Methods {
+		if m.Sig == nil {
+			t.Errorf("the literal interface's %s carries no signature", m.Name)
+		}
+		if m.PtrOnly {
+			t.Errorf("%s is marked pointer-only; an interface has no receiver form to promote", m.Name)
+		}
+	}
+	// The unexported method is qualified by the package that declared it. Two
+	// packages may declare priv() and they are different methods.
+	if got := lit.Methods[1]; got.Name != "priv" || got.Pkg != "p" {
+		t.Errorf("the unexported method is %q in %q, want priv in p", got.Name, got.Pkg)
+	}
+
+	// An empty interface has an empty set and not a missing one, in both
+	// spellings, which is what makes a descriptor's zero method count a fact.
+	for _, name := range []string{"Any", "NamedEmpty"} {
+		got := conv(name)
+		if !got.EmptyIface {
+			t.Errorf("%s is empty and EmptyIface says otherwise", name)
+		}
+		if got.Methods == nil || len(got.Methods) != 0 {
+			t.Errorf("%s carries %v, want a non-nil empty set", name, got.Methods)
+		}
+	}
+}
+
+// TestConvertFlattensAnEmbeddedInterface checks that embedding is the
+// checker's answer here too.
+//
+// types2.Interface.NumMethods is the complete set, so a walk that collected
+// the embedded interface's methods a second time would double them.
+func TestConvertFlattensAnEmbeddedInterface(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Reader interface{ Read() int }
+
+var Both interface {
+	Reader
+	Close() error
+}
+`)
+	c := NewConverter()
+	out, err := c.Convert(pkg.Scope().Lookup("Both").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []methodShape{{Name: "Close"}, {Name: "Read"}}
+	if got := methodShapes(out.Methods); !reflect.DeepEqual(got, want) {
+		t.Errorf("the embedded set is %+v, want %+v", got, want)
+	}
+}
+
+// TestConvertRecursiveInterface checks that an interface naming itself
+// terminates.
+//
+// The cache entry is installed before the recursion, and a defined
+// interface's method set is built while that entry is still empty, so a method
+// returning the interface reaches the entry rather than converting it again.
+func TestConvertRecursiveInterface(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Chain interface{ Next() Chain }
+`)
+	c := NewConverter()
+	out, err := c.Convert(pkg.Scope().Lookup("Chain").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Methods) != 1 {
+		t.Fatalf("Chain has %d methods, want 1", len(out.Methods))
+	}
+	if got := out.Methods[0].Sig.Results[0]; got != out {
+		t.Errorf("Next returns %s, want the interface itself", got)
+	}
+}

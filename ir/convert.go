@@ -304,6 +304,19 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 		// wrong one reads a function pointer at the wrong offset. See the field
 		// comment in type.go.
 		out.EmptyIface = t.NumMethods() == 0
+		if out.Methods != nil {
+			// A defined interface arrives here through Named, which set the
+			// set already, from the checker's own lookup. Recomputing it would
+			// be a second answer to a question that is already answered, and
+			// the two would differ on exactly the interfaces that are hard to
+			// write.
+			return nil
+		}
+		ms, err := c.interfaceMethods(t)
+		if err != nil {
+			return err
+		}
+		out.Methods = ms
 		return nil
 
 	case *types2.TypeParam:
@@ -408,6 +421,49 @@ func (c *Converter) methodSig(fn *types2.Func) (*Type, error) {
 		return nil, fmt.Errorf("ir: the method %s has type %T and not a signature", fn.Name(), fn.Type())
 	}
 	return c.convert(sig)
+}
+
+// interfaceMethods returns a literal interface's method set, sorted by name.
+//
+// It exists because a literal interface is not a *types2.Named, so the Named
+// case above never runs for one and it reached the boundary with no methods at
+// all. An InterfaceType descriptor is an array of Imethod, one per method,
+// each holding the method's name and a TypeOff to its signature, so an
+// interface with no method list is an interface with no descriptor.
+//
+// No walk over embedded interfaces, unlike a defined type's method set.
+// types2.Interface.NumMethods is the *complete* set: the checker flattens
+// embedding when it completes the interface, so an embedded interface's
+// methods are already here and collecting them again would double them.
+//
+// PtrOnly is false on every entry, and that is a fact about interfaces rather
+// than a default. A method is in the set of an interface and of a pointer to
+// it alike, because there is no receiver form to promote.
+func (c *Converter) interfaceMethods(t *types2.Interface) ([]Method, error) {
+	out := make([]Method, 0, t.NumMethods())
+	for i := 0; i < t.NumMethods(); i++ {
+		f := t.Method(i)
+		path := ""
+		if !isExportedName(f.Name()) && f.Pkg() != nil {
+			path = f.Pkg().Path()
+		}
+		sig, err := c.methodSig(f)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Method{Name: f.Name(), Pkg: path, Sig: sig})
+	}
+	// The same order the defined case sorts into, so that one interface
+	// written twice, once with a name and once as a literal, produces one
+	// list. specs/053-determinism.md needs an order; this is the one the rest
+	// of the boundary already uses.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Pkg < out[j].Pkg
+	})
+	return out, nil
 }
 
 // methodSet returns the method set of a pointer to t, sorted by name.

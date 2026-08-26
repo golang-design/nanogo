@@ -350,6 +350,15 @@ type Type struct {
 	// one of those, empty set included. That is what makes an empty method set
 	// knowable, which is what a descriptor with no UncommonType methods
 	// claims.
+	//
+	// An interface is the one type with no declared methods that carries a set
+	// anyway, and it goes somewhere else in the descriptor. An interface's
+	// methods are its own rather than declared on it, and they are written as
+	// the InterfaceType header's Imethod array rather than as an
+	// UncommonType's, so a descriptor writer reads this field from an
+	// interface for that section and not for the tail. Converter sets it for a
+	// defined interface and for a literal one alike, and PtrOnly is false on
+	// every entry, because an interface has no receiver form to promote.
 	Methods []Method
 }
 
