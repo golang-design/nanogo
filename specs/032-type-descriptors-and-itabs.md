@@ -124,12 +124,27 @@ Four things stop a descriptor, and each names itself in the refusal:
 | --- | --- |
 | a method | the method's signature, for the `Mtyp` offset, and the two ABI wrappers `gc` generates beside every method |
 | a struct or an array whose parts do not compare as one region of memory | the generated equality function this spec owes |
-| a struct with an unexported field | the package that declared the field, which the IR type does not say for every field |
 | a map, a channel, a function, or a literal interface with methods | the group type, the direction, and the signature that [020](020-ir.md)'s type boundary drops |
+| a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
 Writing a tail that claims a type has no methods is the failure the first row
 exists to stop: `reflect` would report an empty method set, and an itab built
 against it would find no functions.
+
+A struct with an unexported field is **not** a stop, and it is worth saying
+because the shape looks like one. `gc` puts the declaring package's path in the
+struct descriptor's own `PkgPath`, once for the whole struct rather than once
+per field, and `ir.Converter` sets `Field.Pkg` on every unexported field, so
+`rtype/name.go` has what it needs. The two refusals that file carries, a field
+with no package and fields from two packages, are unreachable from the checker,
+because the fields of one struct literal are declared in one file. They guard
+an IR built by hand.
+
+One stop is above `rtype` rather than in it. A type parameter has no run-time
+representation, so `ir/convert.go` refuses the conversion before a descriptor
+is asked for, and the refusal names `ir` and not `rtype`. It closes with
+[013](013-generics.md)'s stenciler, which replaces the parameter with the
+argument, and not with anything here.
 
 **An itab needs both sides and has one.** The concrete side is
 `ir.Type.Methods`. The interface side is absent: an interface's `ir.Type`
@@ -418,6 +433,16 @@ blocked on the same thing; the prediction that did not is that closing it would
 finish both. A descriptor's `Method` still needs a signature, and an itab still
 needs an interface's method list, so the boundary owes the same field twice
 over.
+
+**One of the four was already closed when it was written down.** The stop list
+carried "a struct with an unexported field", on the reasoning that the IR type
+does not say which package declared each field. The same boundary work that
+added `Methods` added `Field.Pkg`, so the converter sets it on every unexported
+field and `rtype/name.go` reads it. A package declaring an exported struct with
+an unexported field compiles. The stop list names the pointer-mask limit in its
+place, and the paragraph below the table says what the unexported field is
+not, because the shape reads like a stop and a reader who skips the paragraph
+will assume it is one.
 
 ### `PtrToThis` was blamed on a relocation that exists
 
