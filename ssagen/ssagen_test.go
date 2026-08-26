@@ -2403,18 +2403,49 @@ func TestFloatRegistersReachTheEncoder(t *testing.T) {
 			arm64.FmovRegReg(arm64.Size64, arm64.F2, arm64.F4))
 	})
 
-	// A copy across the two files is a class the allocation and the
-	// convention disagree about. FMOV general-to-floating-point would encode
-	// it and compute an integer's bits as a float, so it is reported.
-	t.Run("across the files", func(t *testing.T) {
-		f := ssa.NewFunc("f")
-		e := newEmitter(f, 8)
-		e.copyReg(arm64.F0, arm64.R0)
-		if e.err() == nil {
-			t.Error("a copy from an integer register to a floating-point one was encoded")
+	// A register in one file and an instruction that transfers the other is
+	// not an encoding that does not fit: it is a lost class. obj/arm64 panics
+	// on it, so each of the three places that can build one reports instead.
+	// FMOV general-to-floating-point would encode the copy and compute an
+	// integer's bits as a float, which is why the copy is refused and not
+	// bitcast.
+	for _, c := range []struct {
+		name string
+		emit func(*emitter)
+	}{
+		{"a copy across the files", func(e *emitter) { e.copyReg(arm64.F0, arm64.R0) }},
+		{"a load into the other file", func(e *emitter) { e.mem(arm64.LoadF64, arm64.R0, arm64.RSP, 0) }},
+		{"a store from the other file", func(e *emitter) {
+			e.memIf(arm64.MemUnsignedOffset, arm64.StoreX, arm64.F0, arm64.RSP, 0)
+		}},
+		{"a parallel move across the files", func(e *emitter) {
+			e.permute([]arm64.Reg{arm64.F0}, []arm64.Reg{arm64.R0})
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEmitter(ssa.NewFunc("f"), 8)
+			c.emit(e)
+			if e.err() == nil {
+				t.Error("a register of the other file was encoded")
+			}
+			if len(e.text) != 0 {
+				t.Errorf("%d instructions reached the text after a refusal", len(e.text))
+			}
+		})
+	}
+
+	// A copy of a register to itself is no instruction and no refusal, in
+	// either file. move and permute both filter it, so this is the guard and
+	// not a case they reach.
+	t.Run("a register to itself", func(t *testing.T) {
+		e := newEmitter(ssa.NewFunc("f"), 8)
+		e.copyReg(arm64.F7, arm64.F7)
+		e.copyReg(arm64.R7, arm64.R7)
+		if err := e.err(); err != nil {
+			t.Errorf("a copy of a register to itself gave %v", err)
 		}
 		if len(e.text) != 0 {
-			t.Errorf("%d instructions reached the text after a refusal", len(e.text))
+			t.Errorf("%d instructions for a copy of a register to itself", len(e.text))
 		}
 	})
 }
