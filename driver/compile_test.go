@@ -627,50 +627,60 @@ func symbolsOf(t *testing.T, archive string) string {
 // This drove a construct the last stage could not emit, and the construct
 // rotted twice: first a string constant, which needed a data symbol nothing
 // wrote, then a floating-point constant, which specs/042 group 6 could not
-// encode. Both gaps are closed. What the test is for is the shape of the
-// message and not which construct is open this month, so it asserts the shape
-// on the pass name that is hardest to reach and drives the loop that builds it
-// with a construct that is refused today.
+// encode. Both gaps are closed, and no construct reaches an ssagen.Emit
+// refusal today.
+//
+// The rot is over because the wrapping is now unsupportedFunc, a function of
+// the pass name and nothing else, and compileFunc's loop hands it the name of
+// whichever pass failed. The shape of any pass's message is therefore asserted
+// once, on the pass whose refusal is hardest to reach, with no construct in
+// the way. The second half is the loop and the position, which need a real
+// compilation, and it takes whatever construct is refused today.
 func TestCompileReportsAPassFailure(t *testing.T) {
-	// The last stage. No construct reaches a refusal there any more, so the
-	// error is the emitter's own and the assertion is what the driver wraps
-	// it in.
-	fset := syntax.NewFileSet()
-	src := "package main\n\nfunc f() int { return 0 }\n"
-	file := fset.AddFile("a.go", len(src))
-	off := 0
-	for i, c := range src {
-		if c == '\n' {
-			file.AddLine(i + 1)
+	// The shape, on the pass name a construct can no longer reach. The error
+	// is the emitter's own kind and what is asserted is what the driver wraps
+	// it in. This half needs neither the host nor the go command.
+	t.Run("the shape", func(t *testing.T) {
+		fset := syntax.NewFileSet()
+		src := "package main\n\nfunc f() int { return 0 }\n"
+		file := fset.AddFile("a.go", len(src))
+		off := 0
+		for i, c := range src {
+			if c == '\n' {
+				file.AddLine(i + 1)
+			}
+			if strings.HasPrefix(src[i:], "func f") {
+				off = i + len("func ")
+			}
 		}
-		if strings.HasPrefix(src[i:], "func f") {
-			off = i + len("func ")
+		fn := &ir.Func{Name: "f", Sym: "main.f", Pos: file.Pos(off)}
+		err := unsupportedFunc(&Config{Package: "main"}, fset, fn, "ssagen.Emit",
+			errors.New("v3: MOVD does not encode"))
+		for _, want := range []string{"function f", "a.go:3:6", "ssagen.Emit", "MOVD does not encode"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the message does not carry %q:\n%v", want, err)
+			}
 		}
-	}
-	fn := &ir.Func{Name: "f", Sym: "main.f", Pos: file.Pos(off)}
-	err := unsupportedFunc(&Config{Package: "main"}, fset, fn, "ssagen.Emit",
-		errors.New("v3: MOVD does not encode"))
-	for _, want := range []string{"function f", "a.go:3:6", "ssagen.Emit", "MOVD does not encode"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the message does not carry %q:\n%v", want, err)
-		}
-	}
+	})
 
-	// The same shape out of Compile, so the loop that wraps every pass is
-	// covered and not only the wrapping. A conversion to an interface is what
-	// ssa.Build refuses today; when that closes, this half moves to whatever
-	// is open and the half above does not.
-	arm64Only(t)
-	needGoCommand(t)
-	_, err = compileSource(t, "package main\n\nfunc f() any { return 1 }\n", nil)
-	if err == nil {
-		t.Fatal("Compile accepted a conversion to an interface")
-	}
-	for _, want := range []string{"function f", "a.go:3:6", "ssa.Build"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the message does not carry %q:\n%v", want, err)
+	// The same shape out of Compile, which is what proves the loop calls the
+	// wrapper and that the position is the function's own and not the file's.
+	// A conversion to an interface is what ssa.Build refuses today, and when
+	// that closes this subtest takes the next construct and the one above does
+	// not move.
+	t.Run("out of Compile", func(t *testing.T) {
+		arm64Only(t)
+		needGoCommand(t)
+		_, err := compileSource(t, "package main\n\nfunc f() any { return 1 }\n", nil)
+		if err == nil {
+			t.Fatal("Compile accepted a conversion to an interface")
 		}
-	}
+		for _, want := range []string{"function f", "a.go:3:6", "ssa.Build"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the message does not carry %q:\n%v", want, err)
+			}
+		}
+	})
 }
 
 // TestCompileCapsTheErrorReport checks the bound on how many errors one
