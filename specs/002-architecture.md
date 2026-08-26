@@ -82,15 +82,17 @@ What exists today:
 
 ```
 golang.design/x/nanogo
-├── cmd/nanogo/            the process boundary                 050
+├── cmd/
+│   ├── nanogo/            the process boundary                 050
+│   └── nanogo-dist/       builds and audits a distribution     054
 ├── driver/                gc-compatible flags, toolexec        050 051
 ├── syntax/                positions, scanner, parser, AST      010 011
 ├── types2/                forked type checker                  012 013
 │   ├── errors/            vendored error codes                 012
 │   └── gen/               the generator that ports the fork    012
 ├── loader/                build tags, import graph, go list    014
-├── export/                reader for gc's export data          015
-│   └── pkgbits/           the bit stream it decodes            015
+├── export/                gc's export data, read and written   015
+│   └── pkgbits/           the bit stream it codes              015
 ├── ir/                    typed tree IR, type layout, lowering 020
 ├── ssa/                   SSA values, blocks, passes, ABI      021 025 026 027 030
 │   └── rules/             lowering rules per target            025 042
@@ -99,14 +101,20 @@ golang.design/x/nanogo
 ├── obj/                   goobj container writer               040
 │   └── arm64/             encoder                              041 042
 ├── ssagen/                SSA to machine code, prologues       027 035 041
-└── internal/              covercheck, hygiene, e2e: the gates
+├── dist/                  distribution tree, manifest, tally   054
+└── internal/              the gates
+    ├── audit/             the probe corpus                     004
+    ├── gotest/            Go's own test corpus                 004
+    ├── e2e/               install, go build -toolexec, run     051
+    ├── release/           a tarball is the release it claims   054
+    ├── covercheck/        the per-package coverage floor
+    └── hygiene/           checks over this repository's source
 ```
 
 Planned and not written. Each is named here so that a reader who looks for the
 package and does not find it knows which spec owns the absence:
 
 ```
-├── export/                package export data                  015
 ├── obj/amd64/             encoder                              041 043
 ├── asm/                   Plan 9 assembler (G3)                044
 ├── link/                  linker (G2)                          045
@@ -179,3 +187,24 @@ import graph with one nanogo process per package
 Inside a package, functions are independent from SSA construction onward. That
 is the parallelism boundary, and [053](053-determinism.md) constrains it: results
 are merged in declaration order, never in completion order.
+
+## What was wrong
+
+**`export/` was in both layout blocks at once.** It was listed as what exists,
+as a reader, and again as planned and not written. The package exists, reads
+`gc`'s export data and writes nanogo's, and `gc` reads back what it wrote for
+275 of the 375 standard library packages ([015](015-export-data.md)). The
+planned entry was a claim about a package that had already been built, so it is
+gone from that block and the surviving entry says the package does both
+directions. Nothing was removed to settle the contradiction: the reader half of
+the old gloss is still there, with the writer half beside it.
+
+**The layout was missing every package the distribution work added.** `dist/`
+builds and audits a distribution tree and owns its manifest and tally,
+`cmd/nanogo-dist/` is the command over it, and `internal/` had grown `audit`,
+`gotest` and `release` since the line that named only `covercheck`, `hygiene`
+and `e2e`. A reader looking for one of them found no entry and no spec named as
+owning the absence, which is the failure the "planned and not written" block
+exists to prevent. All are listed with their specs, and `cmd/` is drawn as a
+directory with two commands under it rather than as one path, and `internal/`
+as one with its six.
