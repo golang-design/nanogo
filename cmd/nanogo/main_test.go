@@ -191,12 +191,15 @@ func TestToolexecPassthrough(t *testing.T) {
 // package, so a construct nanogo cannot compile is an error and never a silent
 // hand back to gc.
 //
-// The construct is a conversion to an interface, which ssa.Build refuses. It
-// has been two constructs before: the string constant Message returns, which
-// needed a data symbol nothing wrote, and a floating-point constant, which
-// specs/042-arm64-backend.md group 6 had no encoder for. Both gaps are closed.
-// What this test asserts is where the build stops and what the message names,
-// so the construct is whichever one is open and never the point.
+// The construct is a slice of a type with a method, which rtype refuses: a
+// descriptor for such a type names the method's signature, and no pass writes
+// a signature descriptor yet. It has been two constructs before: the string
+// constant Message returns, which needed a data symbol nothing wrote, and a
+// floating-point constant, which specs/042-arm64-backend.md group 6 had no
+// encoder for. Both gaps are closed. What this test asserts is where the build
+// stops and what the message names, so the construct is whichever one is open
+// and never the point. It is taken as deep in the pipeline as one is open, so
+// that the build exercises the passes above it on the way.
 func TestToolexecAllowlisted(t *testing.T) {
 	goBin := needGo(t)
 	dir := t.TempDir()
@@ -205,7 +208,9 @@ func TestToolexecAllowlisted(t *testing.T) {
 	mod := filepath.Join(dir, "mod")
 	writeModule(t, mod)
 	if err := os.WriteFile(filepath.Join(mod, "greet", "refuse.go"),
-		[]byte("package greet\n\nfunc boxed() any { return 1 }\n"), 0o644); err != nil {
+		[]byte("package greet\n\ntype counter struct{ n int }\n\n"+
+			"func (c counter) get() int { return c.n }\n\n"+
+			"func many(n int) []counter { return make([]counter, n) }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
