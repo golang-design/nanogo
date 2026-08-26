@@ -136,30 +136,32 @@ list because it is mechanical:
 
 The allowlist's length still reads zero, because no list is committed. What
 nanogo can compile does not. A `func main() {}` needs 27 dependency packages,
-and 5 of them reach for no construct nanogo refuses: `internal/goos`,
+and 8 of them reach for no construct nanogo refuses: `internal/goarch`,
+`internal/goexperiment`, `internal/goos`, `internal/profilerecord`,
 `internal/runtime/math`, `internal/asan`, `internal/msan` and `internal/race`.
-The main package itself compiles too, so 6 of the 28 compile when each is named
+The main package itself compiles too, so 9 of the 28 compile when each is named
 on its own command line. Each figure comes from running `nanogo build` on that
 one import path, so it is a census and not what one build does: a build reports
 one package compiled by nanogo, because nanogo compiles what is named. None of
 these figures is gated by `internal/hygiene`, so each moves with a Go release.
 [060](060-selfhost.md) owns the census.
 
-What holds the other 22 back is four separate gaps, and the largest is not the
+What holds the other 19 back is four separate gaps, and the largest is not the
 only one:
 
 | Refused by | Packages |
 | --- | --- |
-| [032](032-type-descriptors-and-itabs.md)'s method set gap, on a declared type an importer would need a descriptor for | 11 |
 | [030](030-abi.md)'s missing wrapper, for a package with assembly in it | 8 |
+| [032](032-type-descriptors-and-itabs.md)'s encoder, on a declared type an importer would need a descriptor for | 7 |
+| the register allocator's output, which `ssagen` cannot emit | 2 |
 | a package-level variable of type `error`, which needs a function's signature in the IR type (`math/bits`) | 1 |
-| a function body no pass accepts | 2 |
+| a row of [020](020-ir.md)'s lowering table, `append` in `internal/byteorder` | 1 |
 
-The last row holds the one that fits no other bucket. `internal/byteorder` is
-an ordinary lowering gap, on `append`. `internal/stringslite` is a register
-allocator failure, `no move from s6 to s4` in `Index`, which is neither a
-descriptor, an assembly, a data nor a lowering gap
-([026](026-register-allocation.md) owns it).
+The third row holds the two that fit no other bucket, and neither is a
+construct in the source. `internal/stringslite` asks for an edge move between
+two spill slots, `no move from s6 to s4` in `Index`; `internal/runtime/gc` asks
+for three integer scratch registers on an indexed store where the target
+reserves two. [026](026-register-allocation.md) owns both.
 
 The corpus counts in [004](004-conformance.md) are the second measure, one
 level below a package: 536 packages of the distribution reach the IR builder,
@@ -380,17 +382,20 @@ one nanogo could be handed. Enforcing the rule in `Has` would have left nanogo
 compiling nothing. That reason is gone, and the rule is stated above as what it
 is, a constraint on the file.
 
-**The package census read 5 compiled and 23 refused, of 28.** Re-measured on
-go1.27.0 darwin/arm64 by running `nanogo build` on each import path, it is 5 of
-27 dependencies compiled and 22 refused, with the main package compiling as
-well. The composition moved in two directions at once, which the total
-concealed: the descriptor row went from 10 to 11 and the function-body row from
-4 to 2.
+**The package census read 5 compiled and 23 refused, of 28.** Re-measured
+twice on go1.27.0 darwin/arm64 by running `nanogo build` on each import path, it
+is 8 of 27 dependencies compiled and 19 refused, with the main package compiling
+as well. Neither re-measurement moved the total in one direction only. The first
+took the descriptor row from 10 to 11 while the function-body row fell from 4 to
+2; the second, after `rtype` learned the `UncommonType` tail, took the
+descriptor row from 11 to 7. [060](060-selfhost.md) carries the composition, and
+the total on its own carries none of it.
 
 **The four-row taxonomy had no bucket for a register allocator failure.**
-`internal/stringslite` is refused by [026](026-register-allocation.md) and not
-by a descriptor, an assembly, a data or a lowering gap. The row above names it
-rather than filing it under lowering.
+`internal/stringslite` and `internal/runtime/gc` are refused by
+[026](026-register-allocation.md) and not by a descriptor, an assembly, a data
+or a lowering gap. The row above names them rather than filing them under
+lowering.
 
 **The reach of `driver.Compile` was stated as the fraction of distribution
 functions that get past SSA construction.** Getting past construction is not

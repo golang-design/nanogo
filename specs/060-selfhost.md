@@ -20,9 +20,9 @@ what `driver.Compile` refuses, and nanogo's own packages trip it:
 | Refused | Why | Owner |
 | --- | --- | --- |
 | a package with assembly | an assembly definition is ABI0 and needs a wrapper | [030](030-abi.md) |
-| a declared type an importer would need a descriptor for | an `ir.Type` carries no method set | [032](032-type-descriptors-and-itabs.md) |
+| a declared type an importer would need a descriptor for | `rtype` cannot fill the bytes in: a method's signature and the two ABI wrappers beside it, a generated equality function, or a distinction [020](020-ir.md)'s type boundary drops | [032](032-type-descriptors-and-itabs.md) |
 | a package-level variable whose type holds a pointer and whose descriptor `rtype` cannot build | the collector reads a data symbol's pointer map through its type descriptor | [032](032-type-descriptors-and-itabs.md) |
-| a function whose allocated values need a move `ssagen` cannot emit | there is no case for an edge move between two spill slots | `ssagen`, which [000](000-decisions.md) decision 5 records has no spec of its own |
+| a function the register allocator's output asks `ssagen` for a move or a scratch register it does not have | there is no case for an edge move between two spill slots, and the target reserves two integer scratch registers where an indexed store wants three | `ssagen`, which [000](000-decisions.md) decision 5 records has no spec of its own |
 
 The second row is the one nanogo's own packages hit first. `driver/types.go`
 walks a package's scope in sorted order and refuses on the first declared type
@@ -32,21 +32,29 @@ names `Class`, `obj` names `Aux`, `rtsym` names `Group`, and `driver` names
 `Allowlist`. The count of nanogo packages that nanogo compiles is zero, and no
 arithmetic over the language subset changes that.
 
-What is left is [032](032-type-descriptors-and-itabs.md)'s method set gap, which
+What is left is [032](032-type-descriptors-and-itabs.md)'s encoder gap, which
 rows two and three above both name, [030](030-abi.md)'s wrapper, and the fourth
 row, which belongs to no spec. Measured over the 28 packages a `func main() {}`
-needs, nanogo compiles 6 and refuses 22:
+needs, nanogo compiles 9 and refuses 19:
 
 | Packages | Refused for |
 | --- | --- |
-| 11 | a declared type's descriptor |
 | 8 | assembly |
+| 7 | a declared type's descriptor |
+| 2 | the register allocator's output, in `internal/stringslite` and `internal/runtime/gc` |
 | 1 | a package-level variable of type `error`, `math/bits` |
 | 1 | a row of [020](020-ir.md)'s lowering table, `append` in `internal/byteorder` |
-| 1 | the slot-to-slot edge move, in `internal/stringslite` |
 
-The 6 that compile are the `main` package itself, `internal/goos`,
+The 9 that compile are the `main` package itself, `internal/goarch`,
+`internal/goexperiment`, `internal/goos`, `internal/profilerecord`,
 `internal/asan`, `internal/msan`, `internal/race` and `internal/runtime/math`.
+The seven descriptor refusals split four ways, which is why the row is one
+count and not one reason: three want the generated equality function
+`internal/coverage/rtcov`, `internal/godebugs` and
+`internal/runtime/pprof/label` each need, two want a method's signature
+(`internal/strconv`, `internal/trace/tracev2`), one a function's signature
+(`internal/runtime/exithook`) and one a type parameter's run-time
+representation (`internal/runtime/gc/scan`).
 None of these counts is in `internal/hygiene/testdata/facts.json`, so nothing
 gates them and each Go release moves them. They are a reading of one toolchain,
 `go1.27.0` on `darwin/arm64`, which is `driver.PinnedGoVersion` and
@@ -181,13 +189,24 @@ that reason alone.
 
 **The package census was stale in two directions at once and the totals hid
 it.** It read 5 of 28 compiling and 23 refused, split 10 for a descriptor, 8 for
-assembly, 1 for data and 4 in a function body. Re-measured on `go1.27.0`
-`darwin/arm64` it is 6 and 22, and the two moved rows moved opposite ways: the
-descriptor row is 11 and the function-body row is 2. A sum alone would have read
-as one package's worth of progress.
+assembly, 1 for data and 4 in a function body. Two re-measurements later it is 9
+and 19, and no re-measurement moved the total in one direction only: the first
+took the descriptor row from 10 to 11 while the function-body row fell from 4 to
+2, and the second, after `rtype` learned the `UncommonType` tail and the struct
+field array, took the descriptor row from 11 to 7. A sum alone would have read
+the first of those as one package's worth of progress. State every row, not the
+total.
 
-**The refusal taxonomy had four categories and needs five.** One of the two
-remaining function-body refusals is not a language gap. `internal/stringslite`
-is refused by `ssagen` for an edge move between two spill slots, which is the
-register allocator's output and not a construct in the source, so it has a row
-of its own in both tables above.
+**The refusal taxonomy had four categories and needs five.** Two of the
+refusals are not a language gap. `internal/stringslite` is refused by `ssagen`
+for an edge move between two spill slots, and `internal/runtime/gc` for an
+indexed store wanting three integer scratch registers where the target reserves
+two. Both are the register allocator's output and not a construct in the source,
+so they share a row of their own in both tables above.
+
+**The descriptor row's reason was `ir.Type` carrying no method set.** It
+carries one now ([032](032-type-descriptors-and-itabs.md)), and the row survived
+because the count did. Three of the seven packages it still holds want the
+generated equality function that spec owes, and only two want anything to do
+with a method. A reason stated once and never re-read outlives the fact it was
+taken from.

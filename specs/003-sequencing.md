@@ -206,7 +206,7 @@ language, and each one is there for a claim:
 | a package that imports `math/bits` and `strconv` | the same, against archives the toolchain ships |
 | a library nanogo compiled and an importer `gc` compiled | `gc` reads the export data nanogo *wrote* ([015](015-export-data.md)) |
 | a library that declares no function at all | the archive is export data and nothing else, so nothing but the format is under test |
-| `internal/goos` on the allowlist | nanogo compiles a package the closure of every Go program contains, and `gc` compiles the other 32 packages of that build against it, the runtime included |
+| `internal/goos` and `internal/goarch` on the allowlist | nanogo compiles two packages the closure of every Go program contains, and `gc` compiles the other 31 packages of that build against them, the runtime included. `internal/goarch` declares a type, so the object carries `type:internal/goarch.ArchFamilyType` and `cmd/link` resolves the runtime's reference to it ([032](032-type-descriptors-and-itabs.md)) |
 | six library shapes, each linked and run | the seam holds one step past the cross-read, where a symbol the library owes is first observable |
 | seven type declarations, each refused by name | a package an importer could not link against fails at compile time and not at link time ([032](032-type-descriptors-and-itabs.md)) |
 | a variadic call | the slice literal allocates, and the descriptor `rtype` emitted is one `mallocgc` accepts |
@@ -225,8 +225,9 @@ frame in the traceback.
 
 The gate's last clause is unmet. It says "with its tests passing", and nothing
 runs `go test -toolexec`, so no package's own tests have been compiled by
-nanogo. Past the gate, and belonging to M4 rather than to M3, five packages of
-the bootstrap closure compile and the rest are refused: `internal/goos`,
+nanogo. Past the gate, and belonging to M4 rather than to M3, eight packages of
+the bootstrap closure compile and the rest are refused: `internal/goarch`,
+`internal/goexperiment`, `internal/goos`, `internal/profilerecord`,
 `internal/asan`, `internal/msan`, `internal/race` and `internal/runtime/math`
 reach for no construct nanogo refuses. [060](060-selfhost.md) owns that census
 and the refusal each of the others gives.
@@ -322,10 +323,13 @@ plan stays honest instead of staying accurate.
 **The distribution was built before any package of it could be nanogo's.**
 [054](054-distribution.md) was not in any milestone. It was built because
 `go install` gives a binary with no standard library beside it, and because the
-moment a tarball exists it can be cited, mirrored, and believed. nanogo compiles
-0 of the 27 packages in the bootstrap closure, so every archive in the first
-tarball is `gc`'s work, and the point of building the packaging now rather than
-later is that the counter which says so is built into the format from the start.
+moment a tarball exists it can be cited, mirrored, and believed. The tally on the first
+tarball is 0 of 27, so every archive in it is `gc`'s work, and the point of
+building the packaging now rather than later is that the counter which says so
+is built into the format from the start. The zero is the release path's and not
+a capability: `dist.Closure` takes every archive from the `go` command's build
+cache and nothing sets a nanogo producer, while `nanogo build` run directly
+compiles eight of those 27 ([054](054-distribution.md) separates the two).
 A tally added after the first release is a tally nobody has reason to trust.
 
 The reason it needed a record at all is worth carrying here, because it is not

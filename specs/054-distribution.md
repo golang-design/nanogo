@@ -78,12 +78,14 @@ the `go` command and takes every archive out of its build cache.
 with set, and nothing in `cmd/nanogo-dist` sets it.
 
 **Most of the closure would refuse if it were asked.** Run directly,
-`nanogo build` compiles five of the 27, all of them small `internal` leaves:
-`internal/goos`, `internal/asan`, `internal/msan`, `internal/race` and
-`internal/runtime/math`. The rest refuse, most for a type descriptor
-([032](032-type-descriptors-and-itabs.md)) or for assembly
-([044](044-plan9-assembler.md)). [060](060-selfhost.md) owns that census, which
-is measured rather than gated and moves with each Go release.
+`nanogo build` compiles eight of the 27, all of them small `internal` leaves:
+`internal/goarch`, `internal/goexperiment`, `internal/goos`,
+`internal/profilerecord`, `internal/asan`, `internal/msan`, `internal/race` and
+`internal/runtime/math`. The rest refuse, most for assembly
+([044](044-plan9-assembler.md)) or for a type descriptor
+([032](032-type-descriptors-and-itabs.md)). [060](060-selfhost.md) owns that
+census, which is measured rather than gated and moves with each Go release and
+with each descriptor `rtype` learns to write.
 
 So the tally is a zero, and "nanogo can compile none of these" is not what the
 zero says.
@@ -435,7 +437,7 @@ is a limit the next reader finds by hitting it.
 
 | Claimed | What the code does |
 | --- | --- |
-| "nanogo compiles no package of the bootstrap closure. Not one." | Run directly, `nanogo build` compiles five of the 27. The zero is the release path's: `dist.Closure` takes every archive from the `go` command's build cache and nothing sets `dist.Package.Producer`. |
+| "nanogo compiles no package of the bootstrap closure. Not one." | Run directly, `nanogo build` compiles eight of the 27. The zero is the release path's: `dist.Closure` takes every archive from the `go` command's build cache and nothing sets `dist.Package.Producer`. |
 | `go install` "needs an installed Go toolchain to be useful at all", as though the tarball did not | The tarball needs one too. `nanogo build` runs `go list`, `go tool link` and `go env`. What the tree removes is the ambient standard library. |
 | "Two packages, one tree, and no import between them." | `driver` imports `dist`. `driver/distribution.go` reads a tree through `dist.ReadVersion` and `dist.TallyTree`. The seam rule was always one-directional; only `dist` is constrained. |
 | `dist.VerifyTree` "recomputes all three counts" | It recomputes two. `dist.ParseVersion` fixes the third by requiring the producer counts to add up. |
