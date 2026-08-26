@@ -128,7 +128,15 @@ func TestSweepClassifies(t *testing.T) {
 // without this the gate would burn the runner's whole budget saying nothing.
 func TestSweepKillsAProbeThatHangs(t *testing.T) {
 	opts := fakeCorpus(t, map[string][2]string{"hangs": {"sleep 120", "exit 0"}})
-	opts.Timeout = 300 * time.Millisecond
+	// Five seconds, not a few hundred milliseconds. The timeout has to
+	// separate a probe that hangs from a machine that is busy, and it applies
+	// to the gc run as well as to the nanogo one. At 300ms a loaded runner
+	// took longer than that to run `exit 0`, gc produced no oracle, and the
+	// verdict came back "broken" rather than "wrong": the test failed for the
+	// one reason it is not about. The probe here sleeps for 120 seconds and
+	// the assertion below allows 30, so any timeout well inside that proves
+	// the kill works.
+	opts.Timeout = 5 * time.Second
 	start := time.Now()
 	rep, err := Sweep(opts)
 	if err != nil {
