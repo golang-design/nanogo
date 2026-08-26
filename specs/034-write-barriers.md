@@ -18,31 +18,43 @@ those stores observable.
 A missing write barrier does not fail a test. It frees a live object under
 concurrent marking, some of the time.
 
-## Nothing here is built
+## Nothing here is built, and the absence is a defect
 
-**nanogo emits no write barrier.** Not one, anywhere, under any condition. The
-word does not appear in the compiler outside this spec: no pass reads
-`runtime.writeBarrier`, no lowering rule builds the diamond, and
+**nanogo emits no write barrier.** Not one, anywhere, under any condition. No
+pass reads `runtime.writeBarrier`, no lowering rule builds the diamond, and
 `runtime.gcWriteBarrier` is not in `rtsym`, which is the table
 [031](031-runtime-lowering.md) requires every generated call to come from.
 `rtsym` has a write barrier group and the group has no members.
 
-The three directives are not read either. `//go:nowritebarrier`,
-`//go:nowritebarrierrec` and `//go:yeswritebarrierrec` reach no check, which is
-consistent: a check that rejects a barrier has nothing to reject.
+The three directives reach no check. `driver/pragma.go` recognises
+`//go:nowritebarrier`, `//go:nowritebarrierrec` and `//go:yeswritebarrierrec`
+and stores a bit for each, with `nowritebarrierrec` implying `nowritebarrier`.
+Nothing reads those bits, which is consistent: a check that rejects a barrier
+has nothing to reject.
 
-This is safe today, and only because of what nanogo compiles. The barrier is a
-rule about a pointer store to a heap location, and nanogo emits no such store.
-The assignment statement is refused by SSA construction, and so is every form
-that allocates, so the only stores that reach the code generator are the ones
-the compiler introduces itself: a spill to a frame slot, a copy into an
-argument area, a block move between them. Every destination is the stack.
+The condition this spec sets for itself is the first pointer store to a heap
+location that nanogo emits, and **nanogo emits them today**. Two rows of the
+table below that the design marks *required* are already reachable:
 
-The condition to watch is therefore narrow and it is not "the runtime
-compiles". The first pointer store to a heap location that nanogo emits is the
-point at which this spec stops being a plan and starts being a defect.
+- **A pointer into a global.** `var sink []int` with `sink = make([]int, 3)`
+  compiles, and the header's pointer word reaches `main.sink` as a plain `MOVD`
+  into the symbol's address, with no flag test before it.
+- **A pointer into a heap object.** `make([]*int, 2)` lowers to
+  `runtime.makeslice` (`ir/lower.go`), and `ps[0] = &n` stores the pointer into
+  the memory it returned, again unconditionally. `new(T)` and the address of a
+  composite literal lower to `runtime.newobject` in the same file, and nothing
+  elides either call.
 
-The rest of this spec is the design, unchanged.
+So this spec is a plan for the design and a record of a live defect for the
+code. Every program nanogo compiles that allocates and then stores a pointer
+runs with the barrier missing. What hides it is the size of the programs nanogo
+compiles: the failure needs a collection to run concurrently with such a store,
+and a program small enough to compile at all rarely reaches one. The absence is
+silent, not harmless.
+
+The elision rules at the end of this spec have no analysis behind them either.
+[023](023-escape-analysis.md) is `draft`, so nothing decides whether a variable
+escapes, and both provable cases below are unavailable.
 
 ## When a barrier is required
 
@@ -139,3 +151,17 @@ spec.
 - The directive checks, positive and negative, including a transitive case where
   the barrier appears three calls deep.
 - The runtime itself at M9, which is the only complete test.
+
+## What was wrong
+
+- This spec said the missing barrier was safe, because "the assignment
+  statement is refused by SSA construction, and so is every form that
+  allocates", which left the stack as the only destination of any store. All
+  three claims were false. Assignment to a local, to a global, to a struct
+  field, to a slice element and through a pointer all compile; `make` lowers to
+  `runtime.makeslice` and `new` to `runtime.newobject`; and a store into a
+  package-level pointer targets the symbol's address. The section above names
+  the reachable rows instead.
+- It said the word did not appear in the compiler outside this spec. The pragma
+  parser names all three directives. What is true is narrower: nothing reads
+  the bits the parser stores.
