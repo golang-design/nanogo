@@ -629,6 +629,24 @@ func TestLinkAndRun(t *testing.T) {
 			"run(Big20{A: 7}, 9)",
 			big20Type + "func g(s Big20, n int) int { return s.A*100 + n }",
 			"func run(s Big20, n int) int", 709},
+		// A five-field struct coming back from a call, which is the caller's
+		// half of the same bound: gc returns it in five result registers and
+		// decomposition stopped at four, so the assignment pass reads five
+		// results at the call site. gc writes the registers and nanogo reads
+		// them, so a disagreement is the wrong number rather than a crash.
+		{"struct returned by a call",
+			bigType + "func mk() Big\n\nfunc run(a, b int) int { s := mk(); return s.A*10000 + s.B*1000 + s.C*100 + s.D*10 + s.E }",
+			"run(0, 0)",
+			bigType + "func mk() Big { return Big{1, 2, 3, 4, 5} }", "", 12345},
+		// A wide result followed by a narrow one. The struct occupies result
+		// words 0 to 4, so the integer is word 5 and comes back in the sixth
+		// result register. Decomposition numbered the struct as one word, and
+		// a call site that kept that numbering would read the integer out of
+		// the struct's second field.
+		{"a result after a struct returned by a call",
+			bigType + "func mk() (Big, int)\n\nfunc run(a, b int) int { s, n := mk(); return s.A*1000 + s.E*100 + n }",
+			"run(0, 0)",
+			bigType + "func mk() (Big, int) { return Big{1, 2, 3, 4, 5}, 6 }", "", 1506},
 		// A string is two words, so the integer after it is in the fourth
 		// argument register and not in the third. A walk that counted the
 		// string as one word would read it from the wrong place, and the
