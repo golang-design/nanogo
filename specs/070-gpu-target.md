@@ -12,12 +12,14 @@ depends_on:
 
 Post-v1 and unscheduled, and nothing in this spec is built: there is no shader
 target, no second consumer of the SSA, and no target-neutral pass list for one
-to attach to. It is specified now for one reason: to fix where it attaches, so
-that no earlier decision is taken to suit it.
+to attach to, since [022](022-optimization-passes.md) records that rows 1 to 9
+of its list have no code anywhere in the repository. This spec is written now
+for one reason: to fix where a shader target attaches, so that no earlier
+decision is taken to suit it.
 
 [000](000-decisions.md) decision 5 states the constraint and it is the governing
-sentence of this spec: **a GPU backend is a consumer of the SSA and never a
-driver of it. No decision in this deck may be taken to suit this target.**
+sentence of this spec: a GPU backend is a consumer of the SSA and never a driver
+of it, and **no decision in this deck may be taken to suit the GPU target.**
 
 ## The context
 
@@ -58,6 +60,11 @@ That is the entire attachment. If a GPU requirement ever needs a change above
 that line, [000](000-decisions.md) decision 5 refuses it and the requirement is
 met some other way.
 
+Of the CPU leg only arm64 is built. [043](043-amd64-backend.md) is unbuilt and a
+build for amd64 is refused by name, so the diagram's `arm64 / amd64` box is one
+target today. That does not change the attachment point, which is above the
+target boundary and the same for one target as for three.
+
 ## What a shader target cannot have
 
 The subset is narrower than Go, and the exclusions are structural rather than
@@ -90,5 +97,7 @@ in the deck at all.
 
 ## Status
 
-Unscheduled, M10 in [003](003-sequencing.md), and dependent on nothing before
-G1. Nothing in the deck blocks on it and nothing in the deck is shaped by it.
+Unscheduled. [003](003-sequencing.md) places it at M10, after M9, and therefore
+after all three gates of [001](001-bootstrap-gates.md). Nothing in the deck
+blocks on it and nothing in the deck is shaped by it, which is why the
+frontmatter's `gate` reads `post-v1` and names none of the three.
