@@ -5,6 +5,8 @@
 package ssa
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"golang.design/x/nanogo/ir"
@@ -757,6 +759,319 @@ func TestAssignABISplitsALargeCallOperand(t *testing.T) {
 		if v == load {
 			t.Error("the whole load survived beside its parts")
 		}
+	}
+}
+
+// abiCallReturning builds the shape specs/021-ssa-construction.md gives an
+// aggregate a call returns: the result read once and stored into a frame slot
+// of its own.
+func abiCallReturning(typs ...*ir.Type) (*Func, *Value) {
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	call := b.NewValue(0, OpStaticCall, MemType, mem)
+	call.Aux = &ir.Object{Name: "main.g"}
+
+	// Every result is read before any destination is written, which is the
+	// order construction builds and the order the verifier requires: a SelectN
+	// reads the memory the call produced.
+	sel := make([]*Value, 0, len(typs))
+	for i, typ := range typs {
+		v := b.NewValue(0, OpSelectN, typ, call)
+		v.AuxInt = int64(i)
+		sel = append(sel, v)
+	}
+	m := call
+	for i, typ := range typs {
+		o := &ir.Object{Name: fmt.Sprintf("v%d", i), Type: typ, Class: ir.ClassLocal}
+		f.Frame = append(f.Frame, o)
+		addr := b.NewValue(0, OpLocalAddr, abiPtrTo(typ), m)
+		addr.Aux = o
+		st := b.NewValue(0, OpStore, MemType, addr, sel[i], m)
+		st.AuxInt = typ.Size
+		m = st
+	}
+	b.Control = b.NewValue(0, OpMakeResult, MemType, m)
+	return f, call
+}
+
+// abiResultWords describes a call's results as the code generator reads them:
+// one entry per machine word of the result area, in index order.
+func abiResultWords(f *Func, call *Value) []*ir.Type {
+	var out []*ir.Type
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpSelectN || len(v.Args) == 0 || v.Args[0] != call {
+				continue
+			}
+			for int(v.AuxInt) >= len(out) {
+				out = append(out, nil)
+			}
+			out[v.AuxInt] = v.Type
+		}
+	}
+	return out
+}
+
+// TestAssignABISplitsAWideCallResult is the caller's half of a result wider
+// than MaxDecomposeParts, and the shape that used to reach lowering as a
+// forty-byte store no rule has.
+//
+// The convention returns a five-field struct in five registers, so the call
+// site reads five results and writes five words. The callee's half is
+// splitOperands, which turns the same value into five operands of the return.
+func TestAssignABISplitsAWideCallResult(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiStruct("s5", 5, abiTInt)
+	f, call := abiCallReturning(typ)
+	Decompose(f)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+
+	words := abiResultWords(f, call)
+	if len(words) != 5 {
+		t.Fatalf("the call site reads %d words of the result area, want five\n%s", len(words), f)
+	}
+	for i, w := range words {
+		if w != abiTInt {
+			t.Errorf("word %d is %v, want int\n%s", i, w, f)
+		}
+	}
+	// Five stores, each of one word, and the whole read is gone: reading it
+	// as well would leave the store no rule lowers.
+	if n := abiCountOp(f, OpStore); n != 5 {
+		t.Errorf("the split made %d stores, want five\n%s", n, f)
+	}
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpStore && v.AuxInt != abiTInt.Size {
+				t.Errorf("v%d stores %d bytes, and every word is %d", v.ID, v.AuxInt, abiTInt.Size)
+			}
+			if v.Op == OpSelectN && Multiword(v.Type) {
+				t.Errorf("v%d is still %v, which does not fit one register", v.ID, v.Type)
+			}
+		}
+	}
+	// The words come back in the first five result registers, which is where
+	// the callee's return leaves them.
+	out, _, err := ABIResults(tg, words)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range out {
+		if !out[i].InReg || out[i].Parts[0].Reg != tg.ResultRegs[ClassInt][i] {
+			t.Errorf("word %d comes back in %v, want %v", i, out[i].Parts[0].Reg, tg.ResultRegs[ClassInt][i])
+		}
+	}
+}
+
+// TestAssignABIRenumbersTheResultsAfterAWideOne is why the walk takes a call's
+// whole result list or none of it.
+//
+// The index of a SelectN is the machine word of the result area it reads, and
+// decomposition counted a result it left whole as one word. Splitting it into
+// five moves every result after it by four, and a slice read at word 1 would
+// otherwise read the second word of the struct.
+func TestAssignABIRenumbersTheResultsAfterAWideOne(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiStruct("s5", 5, abiTInt)
+	f, call := abiCallReturning(typ, abiTSlice)
+	Decompose(f)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+
+	words := abiResultWords(f, call)
+	want := []*ir.Type{abiTInt, abiTInt, abiTInt, abiTInt, abiTInt, abiTPtr, abiTInt, abiTInt}
+	if len(words) != len(want) {
+		t.Fatalf("the call site reads %d words, want %d\n%s", len(words), len(want), f)
+	}
+	for i := range want {
+		if words[i] == nil || words[i].Kind != want[i].Kind {
+			t.Errorf("word %d is %v, want %v\n%s", i, words[i], want[i], f)
+		}
+	}
+	// The slice starts at word 5, which is where the callee's return leaves
+	// it once the struct ahead of it is five operands rather than one.
+	if words[5].Kind != ir.Ptr {
+		t.Errorf("the slice does not start at word 5\n%s", f)
+	}
+}
+
+// TestAssignABIRefusesAResultTheRegistersCannotHold is the case the caller's
+// half is not built for.
+//
+// gc puts a result the sixteen result registers cannot hold in the incoming
+// argument area of the callee, after the arguments the registers could not
+// hold. rewriteResults writes it there, and nothing reads it back at the call
+// site. A refusal that names the function is what the pass produces instead of
+// a store no rule lowers.
+func TestAssignABIRefusesAResultTheRegistersCannotHold(t *testing.T) {
+	tg := NewArm64Target()
+	f, _ := abiCallReturning(abiStruct("s20", 20, abiTInt))
+	Decompose(f)
+	err := AssignABI(f, tg)
+	if err == nil {
+		t.Fatalf("a twenty-word result was accepted at the call site\n%s", f)
+	}
+	if !strings.Contains(err.Error(), "the result registers cannot hold it") {
+		t.Errorf("the refusal is %q, and it has to say why", err)
+	}
+}
+
+// TestAssignABIRefusesAWideResultWithNowhereToPutIt covers a wide result the
+// call site does not write to one place, which is the forwarding return
+// "return g()".
+//
+// The words come back in five registers and the pass has no destination to
+// write them to, so it refuses rather than leaving a value the code generator
+// meets as one register.
+func TestAssignABIRefusesAWideResultWithNowhereToPutIt(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiStruct("s5", 5, abiTInt)
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	call := b.NewValue(0, OpStaticCall, MemType, mem)
+	call.Aux = &ir.Object{Name: "main.g"}
+	sel := b.NewValue(0, OpSelectN, typ, call)
+	b.Control = b.NewValue(0, OpMakeResult, MemType, sel, call)
+
+	err := AssignABI(f, tg)
+	if err == nil {
+		t.Fatalf("a forwarded wide result was accepted\n%s", f)
+	}
+	if !strings.Contains(err.Error(), "does not write it to one place") {
+		t.Errorf("the refusal is %q, and it has to say why", err)
+	}
+}
+
+// TestAssignABILeavesANarrowResultListAlone is the other half of the survey.
+//
+// Decomposition splits every result of up to MaxDecomposeParts already, so the
+// pass has nothing to finish and must not renumber a list that is right.
+func TestAssignABILeavesANarrowResultListAlone(t *testing.T) {
+	tg := NewArm64Target()
+	f, call := abiCallReturning(abiTStr, abiTInt)
+	Decompose(f)
+	before := abiResultWords(f, call)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	after := abiResultWords(f, call)
+	if len(before) != 3 || len(after) != len(before) {
+		t.Fatalf("the call reads %d words and read %d before\n%s", len(after), len(before), f)
+	}
+	for i := range before {
+		if before[i] != after[i] {
+			t.Errorf("word %d was %v and is %v", i, before[i], after[i])
+		}
+	}
+}
+
+// TestAssignABIRefusesAWideResultItCannotMeasure covers the lists the walk
+// cannot renumber.
+//
+// The index of a SelectN is the word of the result area it reads, and the word
+// a result starts at is the sum of the widths of the results before it. A list
+// with a gap in it, one that reads a result twice, or one spread over two
+// blocks gives no such sum. The pass refuses rather than guess, but only when
+// the list holds a result that would otherwise reach lowering as a store no
+// rule has: a list of single-word results is one this pass never touches.
+func TestAssignABIRefusesAWideResultItCannotMeasure(t *testing.T) {
+	tg := NewArm64Target()
+	// An unnamed type, so the refusal has to describe it by its width.
+	wide := abiStruct("", 5, abiTInt)
+
+	build := func(shape string) *Func {
+		f := NewFunc("f")
+		b := f.Entry
+		b.Kind = BlockRet
+		mem := b.NewValue(0, OpInitMem, MemType)
+		call := b.NewValue(0, OpStaticCall, MemType, mem)
+		call.Aux = &ir.Object{Name: "main.g"}
+		sel := b.NewValue(0, OpSelectN, wide, call)
+		read := b
+		switch shape {
+		case "a result read twice":
+			b.NewValue(0, OpSelectN, wide, call)
+		case "a result nothing reads":
+			sel.AuxInt = 1
+		case "a result read in another block":
+			read = f.NewBlock(BlockRet)
+			b.Kind = BlockPlain
+			b.Succs = append(b.Succs, read)
+			read.Preds = append(read.Preds, b)
+			sel.Block = read
+			b.Values = b.Values[:len(b.Values)-1]
+			read.Values = append(read.Values, sel)
+		}
+		o := &ir.Object{Name: "v", Type: wide, Class: ir.ClassLocal}
+		f.Frame = append(f.Frame, o)
+		addr := read.NewValue(0, OpLocalAddr, abiPtrTo(wide), call)
+		addr.Aux = o
+		st := read.NewValue(0, OpStore, MemType, addr, sel, call)
+		st.AuxInt = wide.Size
+		if shape == "a result stored twice" {
+			st2 := read.NewValue(0, OpStore, MemType, addr, sel, st)
+			st2.AuxInt = wide.Size
+			st = st2
+		}
+		read.Control = read.NewValue(0, OpMakeResult, MemType, st)
+		return f
+	}
+
+	for _, shape := range []string{
+		"a result read twice",
+		"a result nothing reads",
+		"a result read in another block",
+		"a result stored twice",
+	} {
+		t.Run(shape, func(t *testing.T) {
+			f := build(shape)
+			err := AssignABI(f, tg)
+			if err == nil {
+				t.Fatalf("the pass placed a list it cannot measure\n%s", f)
+			}
+			if !strings.Contains(err.Error(), "a 40-byte value") {
+				t.Errorf("the refusal is %q, and it has to name the value", err)
+			}
+		})
+	}
+}
+
+// TestAssignABIIgnoresACallItDoesNotTouch is the other half of the survey.
+//
+// A call whose results are each one word is a call this pass has nothing to
+// finish, so a result list it cannot measure is not a fault: the indices are
+// decomposition's and they are already right.
+func TestAssignABIIgnoresACallItDoesNotTouch(t *testing.T) {
+	tg := NewArm64Target()
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	call := b.NewValue(0, OpStaticCall, MemType, mem)
+	call.Aux = &ir.Object{Name: "main.g"}
+	// One result of two read, which is a list with a gap in it.
+	sel := b.NewValue(0, OpSelectN, abiTInt, call)
+	sel.AuxInt = 1
+	b.Control = b.NewValue(0, OpMakeResult, MemType, sel, call)
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatalf("a call of single-word results was refused: %v\n%s", err, f)
+	}
+	if sel.AuxInt != 1 {
+		t.Errorf("the result was renumbered to %d, and nothing here moved it", sel.AuxInt)
 	}
 }
 

@@ -639,6 +639,9 @@ func (a *abiPass) run() error {
 	a.rewriteArgs()
 	a.rewriteResults()
 	a.rewriteBoundaries()
+	if err := a.rewriteCallResults(); err != nil {
+		return err
+	}
 	a.compact()
 	return nil
 }
@@ -1126,6 +1129,252 @@ func (a *abiPass) loadParts(user, arg *Value, av *ABIValue) []*Value {
 	}
 	a.kill(arg)
 	return out
+}
+
+// rewriteCallResults makes a call's results readable at the call site.
+//
+// It is the mirror of rewriteArgs. Decomposition splits a call result into one
+// value per machine word up to MaxDecomposeParts and leaves a wider one whole,
+// so the call site holds
+//
+//	v1 = SelectN <T> [0] call
+//	v2 = LocalAddr <*T> {x} mem
+//	v3 = Store <mem> [size] v2 v1 mem
+//
+// with T wider than any store the machine has. The convention gives the result
+// one register per word, so the read becomes one SelectN per register and the
+// store becomes one store per word, which is the work decomposition stopped
+// short of. The callee's half is already done: splitOperands turns the same
+// value into one operand of the return per word.
+//
+// The index of a SelectN is the machine word of the result area it reads, so
+// splitting one result renumbers every result after it. The walk therefore
+// takes a call's whole result list or none of it, and the list has to be
+// complete for the reason decomposition needs it complete: the word a result
+// starts at is the sum of the widths of the results before it.
+func (a *abiPass) rewriteCallResults() error {
+	for _, b := range a.f.Blocks {
+		for _, v := range b.Values {
+			if a.isDead(v) || !v.Op.IsCall() {
+				continue
+			}
+			if err := a.callResults(v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// callResults splits and renumbers the results of one call.
+//
+// It reports an error for a result the call site cannot read, rather than
+// leaving a store no rule lowers. Lowering panics on such a store by the
+// design of specs/025-lowering-and-rules.md, so the choice here is between a
+// refusal that names the function and a crash that names nothing.
+func (a *abiPass) callResults(call *Value) error {
+	sel, ok := a.resultReads(call)
+	if !ok {
+		return a.unreadableResult(call, "the call site does not read one value per result")
+	}
+	types := make([]*ir.Type, 0, len(sel))
+	for _, v := range sel {
+		types = append(types, v.Type)
+	}
+	place, _, err := ABIResults(a.t, types)
+	if err != nil || len(place) != len(sel) {
+		return a.unreadableResult(call, "the convention does not place the call's results")
+	}
+
+	// The survey runs first, because a result the walk below cannot place has
+	// to stop the function rather than renumber half of a list.
+	split := false
+	for i := range place {
+		av := &place[i]
+		if !Multiword(sel[i].Type) {
+			continue
+		}
+		switch {
+		case len(av.Parts) < 2:
+			// One word or none, which every store the machine has can write.
+		case !av.InReg:
+			return a.resultRefusal(sel[i], "the result registers cannot hold it, and reading it back from the frame is not built")
+		case a.resultStore(sel[i]) == nil:
+			return a.resultRefusal(sel[i], "the call site does not write it to one place, so its words have nowhere to go")
+		default:
+			split = true
+		}
+	}
+	if !split {
+		// Decomposition placed every result already, and renumbering would
+		// move each index onto itself.
+		return nil
+	}
+
+	word := int64(0)
+	for i := range place {
+		av := &place[i]
+		v := sel[i]
+		if Multiword(v.Type) && av.InReg && len(av.Parts) >= 2 {
+			a.splitResult(v, a.resultStore(v), av, word)
+			word += int64(len(av.Parts))
+			continue
+		}
+		// A result this pass leaves whole is one value and one word, which is
+		// the width decomposition counted for it.
+		v.AuxInt = word
+		word++
+	}
+	return nil
+}
+
+// resultReads returns a call's results in index order, or false when the list
+// is not one live SelectN per result in the call's own block.
+//
+// The block matters: the code generator names a call's results by walking the
+// call's block, so a result read anywhere else is a result it cannot place.
+func (a *abiPass) resultReads(call *Value) ([]*Value, bool) {
+	if int(call.ID) >= len(a.users) {
+		return nil, false
+	}
+	var sel []*Value
+	for _, u := range a.users[call.ID] {
+		if a.isDead(u) || u.Op != OpSelectN || len(u.Args) == 0 || u.Args[0] != call {
+			continue
+		}
+		if u.Block != call.Block {
+			return nil, false
+		}
+		sel = append(sel, u)
+	}
+	if len(sel) == 0 {
+		return nil, false
+	}
+	out := make([]*Value, len(sel))
+	for _, v := range sel {
+		i := v.AuxInt
+		if i < 0 || int(i) >= len(out) || out[i] != nil {
+			return nil, false
+		}
+		out[i] = v
+	}
+	return out, true
+}
+
+// resultStore returns the store that writes a whole call result into one
+// place, or nil when the result is read any other way.
+//
+// The match is the one selfStore makes for an incoming parameter: the result
+// has exactly one reader, that reader is a store of the whole value, and the
+// two are in one block so that the words are written where the result is read.
+func (a *abiPass) resultStore(sel *Value) *Value {
+	if int(sel.ID) >= len(a.users) {
+		return nil
+	}
+	var st *Value
+	for _, u := range a.users[sel.ID] {
+		if a.isDead(u) {
+			continue
+		}
+		if st != nil {
+			return nil
+		}
+		st = u
+	}
+	if st == nil || st.Op != OpStore || len(st.Args) != 3 || st.Args[1] != sel {
+		return nil
+	}
+	if sel.Type == nil || st.AuxInt != sel.Type.Size || st.Block != sel.Block {
+		return nil
+	}
+	return st
+}
+
+// splitResult replaces one whole call result by one result per register.
+//
+// The original store stays and becomes the store of the last word, so every
+// value that read the memory it produced still reads the same value and no
+// memory chain has to be repaired. base is the word of the result area the
+// result starts at, which is what the index of a SelectN means from here on.
+//
+// Every read is made before any store, and both halves of that matter. A
+// SelectN reads the memory the call produced, so one placed after a store of
+// this chain would read a memory that store has already superseded, which is
+// the one-memory-per-point invariant the verifier checks. The reads take the
+// place of the read they replace, and the stores take the place of the store.
+func (a *abiPass) splitResult(sel, st *Value, av *ABIValue, base int64) {
+	call := sel.Args[0]
+	b := sel.Block
+	dst, mem := st.Args[0], st.Args[2]
+	parts := make([]*Value, 0, len(av.Parts))
+	for i := range av.Parts {
+		p := &av.Parts[i]
+		part := a.mk(sel, b, sel.Pos, OpSelectN, p.Type, call)
+		part.AuxInt = base + int64(i)
+		parts = append(parts, part)
+	}
+	m := mem
+	for i := range av.Parts {
+		p := &av.Parts[i]
+		addr := a.partAddr(st, b, sel.Pos, dst, p)
+		if i == len(av.Parts)-1 {
+			// The last store is the original one, so its identifier and its
+			// readers are untouched.
+			setArgs(st, addr, parts[i], m)
+			st.AuxInt = p.Type.Size
+			break
+		}
+		s := a.mk(st, b, sel.Pos, OpStore, MemType, addr, parts[i], m)
+		s.AuxInt = p.Type.Size
+		m = s
+	}
+	a.kill(sel)
+}
+
+// unreadableResult turns a call whose result list this pass cannot measure
+// into an error, but only when the list holds a result that would reach
+// lowering as a store no rule has.
+//
+// A call whose results are each one word is untouched by this pass, so a list
+// it cannot measure is then not a fault. It becomes one as soon as one result
+// is wider than a register, because the word a later result reads then depends
+// on a width nothing here can establish.
+func (a *abiPass) unreadableResult(call *Value, why string) error {
+	if int(call.ID) >= len(a.users) {
+		return nil
+	}
+	for _, u := range a.users[call.ID] {
+		if a.isDead(u) || u.Op != OpSelectN || len(u.Args) == 0 || u.Args[0] != call {
+			continue
+		}
+		if !Multiword(u.Type) {
+			continue
+		}
+		if parts, complete := ABILeaves(u.Type); complete && len(parts) < 2 {
+			continue
+		}
+		return a.resultRefusal(u, why)
+	}
+	return nil
+}
+
+// resultRefusal names the function, the value and the type of a result the
+// call site cannot read.
+func (a *abiPass) resultRefusal(sel *Value, why string) error {
+	return fmt.Errorf("ssa: abi: %s: v%d: a call returns %s and %s",
+		a.f.Name, sel.ID, abiTypeName(sel.Type), why)
+}
+
+// abiTypeName names a type in a refusal, in the user's terms where the type
+// has a name.
+func abiTypeName(t *ir.Type) string {
+	if t == nil {
+		return "no type"
+	}
+	if t.Name != "" {
+		return t.Name
+	}
+	return fmt.Sprintf("a %d-byte value", t.Size)
 }
 
 // abiCallPrefix returns the number of operands in front of a call's arguments.
