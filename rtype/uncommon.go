@@ -162,28 +162,58 @@ func uncommonPkgPath(t *ir.Type) string {
 
 // methodRefusal names the first method that stops the descriptor.
 //
-// Two things a method needs are not here, and the refusal says both rather
-// than the first, because closing one alone changes nothing:
+// A descriptor's Method holds four fields and this compiler can write two of
+// them. The refusal says which of the other two is missing, and the two are
+// not the same kind of gap:
 //
 //   - Mtyp is a TypeOff to the descriptor of the method's type with the
-//     receiver removed, and a function's signature is not in the IR type. Zero
-//     is a legal Mtyp meaning "unexported, reflect may not call it", so a zero
-//     written for a gap would be read as a fact.
-//   - Ifn and Tfn are TextOffs to the two ABI wrappers. Tfn is the method
-//     itself when the receiver is a value. Ifn takes a one-word receiver, so
-//     for a type that is not stored directly in an interface it is a wrapper
-//     on the pointer, which gc generates in the declaring package and nanogo
-//     does not generate at all.
+//     receiver removed. ir.Method.Sig carries that type now, so this is a gap
+//     only for a method built below the type boundary by hand. Zero is a legal
+//     Mtyp meaning "unexported, reflect may not call it", so a zero written
+//     for an absent signature would be read as a fact.
+//   - Ifn and Tfn are TextOffs to the two ABI wrappers, and no signature
+//     closes them. Tfn is the method itself when the receiver is a value.
+//     Ifn takes a one-word receiver, so for a type that is not stored directly
+//     in an interface it is a wrapper on the pointer. gc generates both in the
+//     declaring package, as code, and nanogo generates neither: rtype returns
+//     data symbols and a wrapper is a text symbol with a body.
+//
+// So the message names the wrappers, and names the signature as well only when
+// one is actually absent. The clause was unconditional and is now false for
+// every type the converter produced, and a refusal that states a fact that is
+// no longer true sends the next reader to the wrong file.
 //
 // The set is sorted, so the method named is the same one on every run
 // (specs/053-determinism.md).
 func methodRefusal(t *ir.Type, ms []ir.Method) error {
 	m := ms[0]
+	if gap := firstWithoutSignature(ms); gap != nil {
+		m = *gap
+	}
 	name := m.Name
 	if m.Pkg != "" {
 		name = m.Pkg + "." + m.Name
 	}
+	if m.Sig == nil {
+		return fmt.Errorf("rtype: %s has %d method(s) and a descriptor for one needs "+
+			"its signature, which %s does not carry, and the two ABI wrappers, "+
+			"which nanogo does not generate; the first is %s", t, len(ms), t, name)
+	}
 	return fmt.Errorf("rtype: %s has %d method(s) and a descriptor for one needs "+
-		"its signature, which is not in the IR type, and the two ABI wrappers, "+
-		"which nanogo does not generate; the first is %s", t, len(ms), name)
+		"the two ABI wrappers Ifn and Tfn, which nanogo does not generate; "+
+		"the first is %s", t, len(ms), name)
+}
+
+// firstWithoutSignature returns the first method with no signature, or nil.
+//
+// The set is sorted, so the one returned is the same on every run. A method
+// with no signature is named ahead of one that has one, because it is the
+// gap the reader can close and the wrappers are not.
+func firstWithoutSignature(ms []ir.Method) *ir.Method {
+	for i := range ms {
+		if ms[i].Sig == nil {
+			return &ms[i]
+		}
+	}
+	return nil
 }

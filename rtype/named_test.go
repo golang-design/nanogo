@@ -455,6 +455,11 @@ func TestStructPkgPathIsTheUnexportedFieldsPackage(t *testing.T) {
 
 // TestDescriptorRefusesAMethod checks that a type with a method is refused by
 // name rather than described with an empty method set.
+//
+// The refusal names the two ABI wrappers and no longer names the signature.
+// ir.Method.Sig carries the method's type now, so a refusal that still said
+// the signature was absent would send the next reader to a file with nothing
+// left to fix in it.
 func TestDescriptorRefusesAMethod(t *testing.T) {
 	_, pkg := namedTypes(t)
 	c := ir.NewConverter()
@@ -462,14 +467,20 @@ func TestDescriptorRefusesAMethod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if counter.Methods[0].Sig == nil {
+		t.Fatal("Counter.String carries no signature, so this test cannot tell the two gaps apart")
+	}
 	_, err = rtype.Descriptor(counter)
 	if err == nil {
 		t.Fatal("a type with a method was described")
 	}
-	for _, want := range []string{"String", "signature", "ABI wrappers"} {
+	for _, want := range []string{"String", "ABI wrappers", "Ifn", "Tfn"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal is %q, want it to name %q", err, want)
 		}
+	}
+	if strings.Contains(err.Error(), "signature") {
+		t.Errorf("the refusal is %q and still claims the signature is missing", err)
 	}
 	// The pointer's set is the larger one, so a pointer to it is refused too.
 	ptr := &ir.Type{Kind: ir.Ptr, Elem: counter}
@@ -478,6 +489,46 @@ func TestDescriptorRefusesAMethod(t *testing.T) {
 	}
 	if _, err := rtype.Descriptor(ptr); err == nil {
 		t.Error("a pointer to a type with a method was described")
+	}
+}
+
+// TestMethodWithNoSignatureIsRefusedByName is the other half of the same
+// refusal, and it is the half that is still a boundary gap.
+//
+// A method built below the type boundary carries no signature. The descriptor
+// needs it for Mtyp, and zero is a legal Mtyp meaning "unexported, reflect may
+// not call it", so a zero written for the gap would be read as a fact. The
+// refusal has to name the signature for that method and not for one that has
+// one, which is why the two messages are separate.
+func TestMethodWithNoSignatureIsRefusedByName(t *testing.T) {
+	byHand := &ir.Type{
+		Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int64",
+		Methods: []ir.Method{{Name: "M"}},
+	}
+	if err := ir.Layout(byHand); err != nil {
+		t.Fatal(err)
+	}
+	_, err := rtype.Descriptor(byHand)
+	if err == nil {
+		t.Fatal("a method with no signature produced a descriptor")
+	}
+	if !strings.Contains(err.Error(), "signature") || !strings.Contains(err.Error(), "M") {
+		t.Errorf("the refusal is %q, want it to name the signature and the method", err)
+	}
+
+	// A set where one method has a signature and one does not names the one
+	// that does not, because that is the gap a reader can close.
+	sig := &ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}}
+	if err := ir.Layout(sig); err != nil {
+		t.Fatal(err)
+	}
+	byHand.Methods = []ir.Method{{Name: "A", Sig: sig}, {Name: "Z"}}
+	_, err = rtype.Descriptor(byHand)
+	if err == nil {
+		t.Fatal("a method with no signature produced a descriptor")
+	}
+	if !strings.Contains(err.Error(), "Z") {
+		t.Errorf("the refusal is %q, want it to name Z, the method with no signature", err)
 	}
 }
 

@@ -123,7 +123,7 @@ Four things stop a descriptor, and each names itself in the refusal:
 
 | Stop | What is missing |
 | --- | --- |
-| a method | the method's signature, for the `Mtyp` offset, and the two ABI wrappers `gc` generates beside every method |
+| a method | the two ABI wrappers `Ifn` and `Tfn` that `gc` generates beside every method |
 | a struct or an array whose parts do not compare as one region of memory | the generated equality function this spec owes |
 | a map, or a literal interface with methods | the group type and the type of each method, which [020](020-ir.md)'s type boundary drops |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
@@ -131,6 +131,16 @@ Four things stop a descriptor, and each names itself in the refusal:
 Writing a tail that claims a type has no methods is the failure the first row
 exists to stop: `reflect` would report an empty method set, and an itab built
 against it would find no functions.
+
+**The first row lost half its reason.** It read "the method's signature, for
+the `Mtyp` offset, and the two ABI wrappers". `ir.Method.Sig` carries the
+signature now, so `Mtyp` is writable and only the wrappers are left. They are
+not a boundary gap and no field closes them: `Ifn` and `Tfn` are `TextOff`s to
+generated *code*, `Tfn` being the method itself for a value receiver and `Ifn`
+a wrapper taking a one-word receiver, and `rtype` returns data symbols. The
+refusal names the wrappers now, and names the signature only for a method built
+below the boundary that genuinely has none, because a message that states a gap
+that is already closed sends the next reader to the wrong file.
 
 A struct with an unexported field is **not** a stop, and it is worth saying
 because the shape looks like one. `gc` puts the declaring package's path in the
@@ -147,14 +157,20 @@ is asked for, and the refusal names `ir` and not `rtype`. It closes with
 [013](013-generics.md)'s stenciler, which replaces the parameter with the
 argument, and not with anything here.
 
-**An itab needs both sides and has one.** The concrete side is
-`ir.Type.Methods`. The interface side is absent: an interface's `ir.Type`
-carries only `EmptyIface`, so there is no method list to build a `Fun` array
-from and no way to name a non-empty interface. `ir.Method` carries no signature
-either, and a descriptor's `Method` needs an `Mtyp` offset to the method's type
-with the receiver removed. Those two belong to [020](020-ir.md); the writer
-belongs here. A conversion to an interface is refused above them both, at
-`ssa.Build`, so no program reaches an itab today whatever this spec builds.
+**An itab needs both sides and has one and a half.** The concrete side is
+`ir.Type.Methods`, and it carries each method's signature now, so a
+descriptor's `Method` has its `Mtyp`. What an itab still lacks is the `Fun`
+array, which holds the same `Ifn` wrappers the method rows above are refused
+for, and the interface side for a **literal** interface, which carries no
+method names because it is not a `*types2.Named`.
+
+What is above them is not `ssa.Build`. `OTypeAssert` and `OTypeSwitch` are in
+`ir.goSpecificOps` and have no row in the lowering table, so `ir/lower.go`
+refuses each with "no row of the lowering table is built for it yet" and the
+node never reaches SSA construction. No program reaches an itab today whatever
+this spec builds. The distinction matters to anyone measuring what a change
+buys: a row refused in the lowering pass is not evidence about SSA
+construction, and this spec named the wrong pass.
 
 ## The type descriptor
 
