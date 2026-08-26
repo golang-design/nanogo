@@ -55,6 +55,7 @@ func mkslice() []int { return gs }
 func none()        {}
 func use(int)      {}
 func useAny(any)   {}
+func useFn(func()) {}
 func one() int         { return 1 }
 func two() (int, int)  { return 1, 2 }
 `
@@ -866,6 +867,75 @@ func TestLowerUnsafeAddRow(t *testing.T) {
 	if len(lowerCalls(fn)) != 0 {
 		t.Errorf("unsafe.Add reached the runtime: %v", lowerCalls(fn))
 	}
+}
+
+// TestLowerFuncSymbolInAValuePosition is the row specs/033-closures-defer-panic.md
+// records as a miscompile: a declared function used as a func value.
+//
+// "inc" in a value position is a funcval and not inc's entry address. Both are
+// one word, so nothing below the IR can tell them apart, and an indirect call
+// through the entry address loads a code pointer out of inc's first
+// instruction and branches into the instruction stream read as data. The
+// lowering of the value is what stops it, and the assertion is that the value
+// reaches the runtime allocator and holds the address of the function.
+func TestLowerFuncSymbolInAValuePosition(t *testing.T) {
+	for _, tc := range []struct{ row, body string }{
+		{"an argument", `func f() { useFn(none) }`},
+		{"a result", `func f() func() { return none }`},
+		{"an assignment", `func f() { h := none; h() }`},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if !lowerCalled(fn, "runtime.newobject") {
+				t.Errorf("the func value did not reach the allocator: %v\n%s",
+					lowerCalls(fn), buildDump(fn))
+			}
+			if !namesFuncAddress(fn, "none") {
+				t.Errorf("the funcval does not hold the address of none:\n%s", buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerDirectCallKeepsItsSymbol is the other half of the rule above. A
+// call to a declared function names a symbol and not a value, and turning that
+// symbol into a funcval would make every direct call an indirect one.
+func TestLowerDirectCallKeepsItsSymbol(t *testing.T) {
+	fn := lowerOK(t, `func f() { none() }`)
+	if lowerCalled(fn, "runtime.newobject") {
+		t.Errorf("a direct call allocated a func value:\n%s", buildDump(fn))
+	}
+	found := false
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OCall && n.X != nil && n.X.Op == OGlobal &&
+				n.X.Obj != nil && n.X.Obj.Name == "p.none" {
+				found = true
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Errorf("the call no longer names its callee:\n%s", buildDump(fn))
+	}
+}
+
+// namesFuncAddress reports whether the tree takes the address of the named
+// function.
+func namesFuncAddress(fn *Func, name string) bool {
+	found := false
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op != OAddr || n.X == nil || n.X.Op != OGlobal || n.X.Obj == nil {
+				return true
+			}
+			if n.X.Obj.Class == ClassFunc && strings.HasSuffix(n.X.Obj.Name, "."+name) {
+				found = true
+			}
+			return true
+		})
+	}
+	return found
 }
 
 // TestLowerRefusals is the other half of the table: the rows that are not

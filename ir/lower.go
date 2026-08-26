@@ -791,10 +791,28 @@ func (l *lowerer) expr(n Expr) Expr {
 		return l.deferStmt(n, "runtime.newproc")
 	}
 
-	n.X = l.expr(n.X)
+	if n.Op == OCall && isFuncSymbol(n.X) {
+		// The callee of a direct call names a symbol and not a value, so it
+		// is left alone. Every other position a function symbol appears in is
+		// a value, and the case below turns it into one.
+		l.flush(n.X)
+	} else {
+		n.X = l.expr(n.X)
+	}
 	n.Y = l.expr(n.Y)
 	for i := range n.Args {
 		n.Args[i] = l.expr(n.Args[i])
+	}
+
+	if isFuncSymbol(n) {
+		// A declared function used as a value. The value of "inc" is a
+		// funcval and not inc's entry address, and the two are one word
+		// apiece, so nothing below the IR could tell them apart: an indirect
+		// call would load a code pointer out of inc's first instruction and
+		// jump into the instruction stream read as data. That is the failure
+		// specs/033-closures-defer-panic.md records, and this row is what
+		// stops it.
+		return l.funcValue(n, n.Obj, n.Type)
 	}
 
 	switch n.Op {
@@ -1756,6 +1774,16 @@ func (l *lowerer) funcValue(n Expr, o *Object, t *Type) Expr {
 		&Node{Op: ODeref, Pos: pos, Type: lowerUintptr, X: ref(p, pos)},
 		&Node{Op: OConvert, Pos: pos, Type: lowerUintptr, X: entry}))
 	return &Node{Op: OConvert, Pos: pos, Type: t, X: ref(p, pos)}
+}
+
+// isFuncSymbol reports whether n names a function rather than a value of
+// function type.
+//
+// It is the one shape ssa.Build turns into a direct call, and it is also the
+// shape that must not survive anywhere else: a function symbol in a value
+// position is a funcval.
+func isFuncSymbol(n Expr) bool {
+	return n != nil && n.Op == OGlobal && n.Obj != nil && n.Obj.Class == ClassFunc
 }
 
 // deferStmt lowers defer and go into the runtime call that takes a funcval.

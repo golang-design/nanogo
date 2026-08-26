@@ -25,7 +25,7 @@ a different thing: an interface. `ir/lower.go` performs the rows and
 | Feature | State |
 | --- | --- |
 | a function literal that captures nothing | built; a heap-allocated one-word `funcval` holding the code pointer |
-| a **declared** function used as a func value | split three ways, and one of them is a miscompile: see below |
+| a **declared** function used as a func value | built; the same heap-allocated one-word `funcval` |
 | a method value, or a literal with a capture list | **refused**; a capture is read through the context register and no SSA operation reads one |
 | `defer f()` with no arguments and no captures | built; `runtime.deferproc`, plus the single exit below |
 | `defer` with arguments | **refused**; an argument becomes a capture |
@@ -161,40 +161,41 @@ every func value `ir/lower.go` builds is a heap allocation and a store, where
 `gc` has neither. That is the cost and it is correct.
 
 **A declared function used as a func value is the case this spec never
-separated from a literal, and it does not behave like one.** Measured on
-`go1.27.0` `darwin/arm64` at the commit this paragraph was written:
+separated from a literal, and it did not behave like one.** `apply(inc)` and
+`return inc` compiled, linked, and faulted with `unexpected fault address
+0xd65f03c091000400`. The address is the evidence: `0x91000400` is
+`ADD X0, X0, #1` and `0xd65f03c0` is `RET`, the two instructions of `inc`. The
+value handed across the call boundary was `inc`'s entry address where a
+`funcval` was expected, and the indirect call loaded a code pointer from it and
+branched into the instruction stream read as data. `f := inc` then `f(1)` was
+refused instead, with `the entry point is in R0, which is also an argument
+register`, which was a second failure with a second cause.
 
-| What is written | What happens |
-| --- | --- |
-| `f := func(n int) int { ... }`, then `f(1)` | compiles and runs |
-| `f := inc`, a declared `inc`, then `f(1)` | refused: `ssagen: main.main: v5: the entry point is in R0, which is also an argument register` |
-| `apply(inc)`, or `return inc` from a `func() func(int) int` | compiles, links, and faults at run time |
+Both are fixed and the causes were separate.
 
-The fault is `unexpected fault address 0xd65f03c091000400`, and the address is
-the evidence: `0x91000400` is `ADD X0, X0, #1` and `0xd65f03c0` is `RET`, which
-are the two instructions of `inc`. So the value handed across the call boundary
-is `inc`'s entry address where a `funcval` was expected, and the indirect call
-loads a code pointer from it and jumps into the instruction stream read as
-data. That register collision is gone. specs/030-abi.md now fixes where an indirect
-call reads its entry point: the first scratch register of the class, which no
-argument and no result uses and which is never a value's home. The entry point
-moves there with the arguments, in the one parallel move the call site already
-makes, so no source is destroyed and no allocation can put the branch target in
-a register the arguments have overwritten. `ssagen` had a guard for the
-collision and it is not needed any more.
+A function symbol in a value position is now a `funcval`, built by the same
+lowering row as a captureless literal. `ir/lower.go` builds it wherever a
+function symbol is not the callee of a direct call, which is one rule and not a
+list of positions: an argument, a result, an assignment, an element of a
+composite literal, and whatever else the grammar allows all reach it.
 
-It is the third failure of this spec's kind that says nothing at compile time,
-beside `panic` of a non-nil interface value above. The refusal in the middle row
-is the behaviour the other two rows should have until a `funcval` is built for a
-declared function, which is the missing lowering rule below.
+The register collision was the ABI's. specs/030-abi.md now fixes where an
+indirect call reads its entry point: the first scratch register of the class,
+which no argument and no result uses and which is never a value's home. The
+entry point moves there with the arguments, in the one parallel move the call
+site already makes, so no source is destroyed and no allocation can put the
+branch target in a register the arguments have overwritten. `ssagen` had a
+guard for the collision and it is not needed any more.
 
-A captureless `funcval` is the separable half of it. It is one word of
-read-only data and needs no escape judgement at all, because it captures
-nothing and outlives everything. Its writer exists: `ssagen/data.go` emits a
-data symbol with its contents and its relocations, and `ssagen/reloc.go`
-defines the bytes of a string constant the same way. What is missing is the
-lowering rule that names such a symbol instead of allocating, which is this
-spec's and is unbuilt.
+**The read-only `funcval` symbol is still unbuilt, and the row above is a heap
+allocation because of it.** gc emits one word of read-only data per function
+used as a value, `dupok`, so the value is a link-time constant. That needs a
+channel from `ir.Lower` to the object writer for a data symbol, and there is
+none: `ir.LowerAndCollect` returns type descriptors and nothing else, and the
+symbol has to be defined once per package rather than once per function that
+names it, which is a place no pass owns yet. It is the same missing channel a
+string constant reaching `runtime.printstring` wants. Until it exists, every
+evaluation of `inc` as a value allocates one word, which is correct and slow.
 
 ## Defer
 
