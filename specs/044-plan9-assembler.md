@@ -12,9 +12,8 @@ depends_on:
 
 **This spec describes unbuilt work.** There is no `asm` package. Nothing in the
 tree parses Plan 9 syntax, and the only thing that reads it is a test helper:
-`ssagen`'s prologue test writes assembly text and hands it to `go tool asm` as
-an oracle, which is the reverse of what this spec builds. This was found by
-listing the tree against [002](002-architecture.md)'s package layout.
+`ssagen/prologue_test.go` writes assembly text and hands it to `go tool asm` as
+an oracle, which is the reverse of what this spec builds.
 
 The dependency this retires is therefore still live.
 [000](000-decisions.md) decision 4 lists `go tool asm` as retired at G3 by this
@@ -29,9 +28,16 @@ Until G3, `gc` and the `go` command assemble those files in hosted mode
 
 ## What has to be assembled
 
-The scope is the distribution's assembly, not the syntax's full generality. For
-`darwin/arm64` and `linux/amd64` that is the runtime, `internal/bytealg`,
-`sync/atomic`, `math`, `crypto`, and a handful of others.
+The scope is the distribution's assembly, not the syntax's full generality.
+
+The nearest measurement of that scope is the bootstrap closure, the 27 archives
+a `func main() {}` needs and the archives a nanogo distribution ships
+([054](054-distribution.md)). Eight of the 27 are refused today for their
+assembly alone: `internal/abi`, `internal/cpu`, `internal/bytealg`,
+`internal/chacha8rand`, `internal/runtime/atomic`, `internal/runtime/sys`,
+`internal/runtime/maps` and `runtime`. Those eight are the assembler's first
+corpus, and the full distribution adds `math`, `crypto` and a handful of others
+above them.
 
 That is still a real assembler. The runtime's assembly uses nearly everything the
 syntax offers, because it is where the syntax's features exist for.
@@ -75,9 +81,7 @@ assembly bug, which is a frame offset that was right before a signature changed.
 
 nanogo will implement the check. It is cheap, it needs the type information the
 front end already has, and skipping it means a class of runtime bug with no
-diagnostic. The spec said "nanogo implements the check", in the present tense,
-which reads as a statement about the code. Nothing implements it. The tense is
-corrected rather than the decision.
+diagnostic.
 
 ## Structure
 
@@ -117,3 +121,15 @@ a symbol. It mattered in [040](040-object-format.md) because the *compiler* must
 - The argument name checker against a corpus of deliberately wrong offsets.
 - The generated prologue compared against the compiler's for the same frame size,
   which must be identical.
+
+## What was wrong
+
+- The argument name checker was written in the present tense, "nanogo
+  implements the check", which reads as a statement about the code. Nothing
+  implements it, because nothing parses the syntax it would check. The tense is
+  corrected and the decision is not.
+- The scope named `sync/atomic` among the packages to assemble first. It is not
+  in the bootstrap closure. The eight packages above are, and they are the ones
+  a G3 attempt meets first.
+- The absence of an `asm` package was found by listing the tree against
+  [002](002-architecture.md)'s package layout.

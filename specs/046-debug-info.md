@@ -55,15 +55,13 @@ contribution:
 | Frame size, argument size | [030](030-abi.md) | yes |
 | `PCDATA_UnsafePoint`, `PCDATA_StackMapIndex` | [027](027-liveness-and-stackmaps.md) | yes |
 
-The emitted column is a correction. The spec listed five items as the
-compiler's contribution and nanogo writes four. There is no
-`PCDATA_InlTreeIndex` stream and no inline tree, because
-[024](024-inlining-and-devirtualization.md) is unbuilt and there is nothing to
-index. This was found by reading the pc-value index constants in
-`ssa/stackmap.go`, which declares two, against this table.
-[040](040-object-format.md) carries the same correction on its own table.
+Four of the five are written. There is no `PCDATA_InlTreeIndex` stream and no
+inline tree, because [024](024-inlining-and-devirtualization.md) is unbuilt and
+there is nothing to index: `ssa/stackmap.go` declares two pc-value index
+constants, `PCDATA_UnsafePoint` and `PCDATA_StackMapIndex`, and those two are
+the whole set.
 
-The file table has a narrower shape than the words above imply. `ssagen` writes
+The file table is narrower than a Go file table generally is. `ssagen` writes
 one file entry per function rather than a stream, so a function whose
 instructions come from more than one file is attributed to the first. That is
 correct for every function nanogo compiles today, because only inlining and
@@ -84,13 +82,13 @@ the result useful rather than merely present:
    this and here is where the consequence appears: a zero line makes a debugger
    step into nothing and a profile attribute time to nowhere.
 
-   `ssagen`'s `markLine` holds the rule by a different mechanism than the one
-   this spec described. It does not require every node to carry a position. It
-   falls back to the function's own line when a position is unknown, so a
-   synthesised instruction is attributed to the function rather than to line
-   zero. The outcome is the one the rule wants and the guarantee is weaker: a
-   whole prologue attributed to the function's line is right, and a body
-   instruction that lost its position is wrong in a way nothing reports.
+   `ssagen`'s `markLine` holds the rule by falling back to the function's own
+   line when a position is unknown, rather than by requiring every node to carry
+   one. A synthesised instruction is therefore attributed to the function and
+   never to line zero. The guarantee is weaker than the rule: a whole prologue
+   attributed to the function's line is right, and a body instruction that lost
+   its position is attributed to the function too, which is wrong in a way
+   nothing reports.
 2. **Attribute a statement's first instruction to the statement.** The `is_stmt`
    marking in the line table is what lets a debugger stop at a line once rather
    than several times. **Not implemented.** `markLine` writes a line number and
@@ -126,7 +124,13 @@ shape and the gap upstream was never reached.
 
 ## DWARF
 
-Version 4, which is what the Go tools emit and what `delve` reads.
+Version 4 on `darwin` and version 5 elsewhere, because that is what the Go
+toolchain emits and the section above turns on the same split:
+`internal/buildcfg` puts the `dwarf5` experiment in the baseline for every
+target except darwin, ios and aix. `delve` reads both. nanogo's only target is
+`darwin/arm64` ([043](043-amd64-backend.md) owns the second), so version 4 is
+what this milestone produces first and version 5 is what `linux/amd64` needs on
+the day that target exists.
 
 | Emitted | Contents |
 | --- | --- |
@@ -134,6 +138,11 @@ Version 4, which is what the Go tools emit and what `delve` reads.
 | `.debug_line` | the line table, derived from the same positions as `pclntab`'s |
 | `.debug_frame` | unwinding rules, from the frame layout of [027](027-liveness-and-stackmaps.md) |
 | `.debug_loc` | variable locations, which change as the register allocator moves values |
+
+The section names are version 4's. Version 5 renames `.debug_loc` to
+`.debug_loclists` and adds `.debug_addr`, which is the section the pass above
+builds and the reason the empty subprogram symbol is mandatory before any of
+this table exists.
 
 `.debug_loc` is the expensive one and the one that degrades gracefully. A
 variable with no location entry shows as optimised out; a variable with a *wrong*
@@ -188,3 +197,20 @@ Not written, and each waits on something this spec does not own:
   parameter, step over a call. This is the DWARF gate, and it is a manual test
   that is worth writing down as a checklist rather than automating badly. It
   waits on DWARF itself, which is unwritten.
+
+## What was wrong
+
+- The compiler's contribution was listed as five items and nanogo writes four.
+  Found by reading `ssa/stackmap.go`'s pc-value index constants, of which there
+  are two, against the table. [040](040-object-format.md) carries the same
+  correction on its own copy of that table.
+- The file table was described as a stream of file entries. `ssagen` writes one
+  entry per function.
+- Rule 1 was written as a requirement that every node carry a position.
+  `markLine` reaches the same outcome by a fallback instead, which is a weaker
+  guarantee and is stated as one above.
+- The DWARF section said version 4 is what the Go tools emit. Since the `dwarf5`
+  experiment entered the baseline that holds on darwin, ios and aix only, and
+  the empty subprogram symbol above exists precisely because of the other side
+  of that split. Saying version 4 without the split contradicted the section
+  that names it.
