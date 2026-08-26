@@ -273,7 +273,7 @@ What is gated today:
   count, printed by its `TestMain`, and never a sum of the per-test log lines.
 - **Source text to a running process.** `ssagen`'s `TestLinkAndRun` compiles a
   function with nanogo, links it against the real Go runtime with
-  `go tool link`, and runs it. 18 cases.
+  `go tool link`, and runs it. 25 cases, seven of them in floating point.
 - **The prologue against the assembler.** `TestPrologueMatchesTheAssembler`,
   above.
 - **Stack growth.** `TestStackGrowthCopiesNanogoFrames` recurses 200,000 frames

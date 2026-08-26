@@ -354,7 +354,7 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | [`ssa/rules`](ssa/rules/) | 97% | the arm64 rule set, checked by lowering the corpus and by a verifier after every rule |
 | [`export`](export/) | 96% | reads gc's export data for all 375 packages of the standard library, 13,518 declarations, and for a fixture carrying every encoding the format has, checked declaration by declaration |
 | [`export/pkgbits`](export/pkgbits/) | 93% | the container, ported from `internal/pkgbits` and exercised by every archive the reader above reads |
-| [`ssagen`](ssagen/) | 92% | emits machine code that **links and runs**, and stack maps a real collector honours |
+| [`ssagen`](ssagen/) | 91% | emits machine code that **links and runs**, and stack maps a real collector honours |
 | [`rtsym`](rtsym/) | 100% | 70 runtime signatures checked against the runtime's own source |
 | [`rtype`](rtype/) | 96% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
 | [`driver`](driver/) | 96% | a real `go build -toolexec` completes |
@@ -365,13 +365,13 @@ is a fork, and the gate that replaces coverage is upstream's own test suite,
 ported with the sources.
 
 The back end is proved by running programs. `ssagen`'s `TestLinkAndRun` is the
-proof: 18 programs go from source text through the whole pipeline to a process
+proof: 25 programs go from source text through the whole pipeline to a process
 that returns the right answer, and several of them call into, or are called
 from, code the Go toolchain compiled, so the calling convention is checked
-across the toolchain boundary. The stack maps are proved by a collector: an object
-reachable only from a nanogo frame slot survives a collection, the same object
-with the slot killed is freed, and 200,000 frames are grown, copied and
-unwound.
+across the toolchain boundary. Seven compute in floating point. The stack maps
+are proved by a collector: an object reachable only from a nanogo frame slot
+survives a collection, the same object with the slot killed is freed, and
+200,000 frames are grown, copied and unwound.
 
 ## How far it reaches
 
