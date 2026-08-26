@@ -67,6 +67,13 @@ import (
 // the field the IR does not carry. A defined type is exempt from all of them,
 // because its name is its identity: type S func(int) is named main.S and no
 // signature is needed to say so.
+//
+// A generic instantiation is the exception to that exemption, and it is the
+// fourth refusal. Its name is not its identity: Converter's name drops the type
+// arguments, so atomic.Pointer[int] and atomic.Pointer[string] both come out as
+// sync/atomic.Pointer. specs/032 records it as the case that neither the naming
+// function nor the encoder refused, which was true only because every defined
+// type was refused for a different reason first.
 
 // maxNameDepth bounds the recursion of the two spellings.
 //
@@ -186,6 +193,11 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 		return fmt.Errorf("ir: the name of %s nests deeper than %d", t.Kind, maxNameDepth)
 	}
 	if name, ok := definedName(t); ok {
+		if t.Instantiated {
+			// Two instantiations of one generic type would share this name,
+			// and the linker deduplicates by name.
+			return fmt.Errorf("ir: %s is a generic instantiation and its type arguments are not in the IR type", name)
+		}
 		if !link {
 			name = shortenPath(name)
 		}

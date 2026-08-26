@@ -79,6 +79,14 @@ type Label struct {
 	Value string
 }
 
+// List and Buf put the two remaining kind-specific header sizes under the
+// oracle: eight bytes for a slice and twenty-four for an array. Without them
+// the UncommonType is only ever placed after a header of zero or thirty-two
+// bytes, and a header the encoder sizes wrongly would go unnoticed.
+type List []Flags
+
+type Buf [4]int64
+
 var namedCorpus = []struct {
 	src string
 	rt  reflect.Type
@@ -88,6 +96,8 @@ var namedCorpus = []struct {
 	{"Flags", reflect.TypeOf(Flags{})},
 	{"Record", reflect.TypeOf(Record{})},
 	{"Tagged", reflect.TypeOf(Tagged{})},
+	{"List", reflect.TypeOf(List(nil))},
+	{"Buf", reflect.TypeOf(Buf{})},
 }
 
 // namedRefusals are the rows that must be refused, with the words the refusal
@@ -134,6 +144,10 @@ type Label struct {
 	Key   string
 	Value string
 }
+
+type List []Flags
+
+type Buf [4]int64
 
 // Counter is not in the corpus. It is the type whose descriptor must be
 // refused, because a method needs two things this compiler does not have.
@@ -242,8 +256,13 @@ func TestUncommonTypeCarriesThePackagePath(t *testing.T) {
 			// B is where the UncommonType starts: the end of
 			// internal/abi.Type plus the kind-specific header.
 			b := rtype.TypeSize
-			if c.rt.Kind() == reflect.Struct {
+			switch c.rt.Kind() {
+			case reflect.Struct:
 				b += 32
+			case reflect.Slice:
+				b += 8
+			case reflect.Array:
+				b += 24
 			}
 			if got := binary.LittleEndian.Uint16(d.Data[b+4:]); got != uint16(c.rt.NumMethod()) {
 				t.Errorf("Mcount %d, want %d", got, c.rt.NumMethod())

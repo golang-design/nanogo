@@ -111,6 +111,7 @@ pass rejected runtime.go
 pass rejected shift1.go
 pass matched sigchld.go
 pass rejected slice3err.go
+pass matched slicecap.go
 pass rejected switch2.go
 pass rejected switch3.go
 pass rejected switch4.go

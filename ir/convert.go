@@ -196,6 +196,9 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 		if obj := t.Obj(); obj != nil && obj.Pkg() != nil {
 			out.PkgPath = obj.Pkg().Path()
 		}
+		// The name above is the generic type's, without the arguments, so an
+		// instantiation has to be marked as one. See the field's comment.
+		out.Instantiated = t.TypeArgs().Len() > 0
 		ms, err := methodSet(t)
 		if err != nil {
 			return err

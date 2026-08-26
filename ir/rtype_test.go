@@ -248,3 +248,69 @@ func TestTypeNameIsAFunctionOfTheTypeAlone(t *testing.T) {
 		t.Errorf("the name is %q", names[0])
 	}
 }
+
+// TestNameRefusesAGenericInstantiation covers the case
+// specs/032-type-descriptors-and-itabs.md records as refused by neither half.
+//
+// Converter's name for an instantiation is the generic type's, without the
+// arguments, so two instantiations of one generic type share one name. The
+// linker deduplicates by name, so a descriptor under that name would be one
+// symbol for two different types and the runtime would read one
+// instantiation's descriptor for the other's values.
+//
+// It was unreachable while every defined type was refused for having a method
+// set the IR did not carry. It is reachable now, which is why the refusal is
+// explicit rather than incidental.
+func TestNameRefusesAGenericInstantiation(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Box[T any] struct{ V T }
+
+var (
+	ints    Box[int]
+	strings Box[string]
+)
+`)
+	c := NewConverter()
+	conv := func(name string) *Type {
+		t.Helper()
+		out, err := c.Convert(pkg.Scope().Lookup(name).Type())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	a, b := conv("ints"), conv("strings")
+	if !a.Instantiated || !b.Instantiated {
+		t.Fatalf("Box[int] and Box[string] are not marked as instantiations (%v, %v)",
+			a.Instantiated, b.Instantiated)
+	}
+	// The two would be one symbol, which is the failure the refusal prevents.
+	if a.Name != b.Name {
+		t.Fatalf("the names already differ (%s, %s), so this test proves nothing", a.Name, b.Name)
+	}
+	for _, tc := range []struct {
+		what string
+		typ  *Type
+	}{
+		{"Box[int]", a},
+		{"Box[string]", b},
+		{"a pointer to one", layOut(t, &Type{Kind: Ptr, Elem: a})},
+		{"a slice of one", layOut(t, &Type{Kind: Slice, Elem: a})},
+	} {
+		if _, err := TypeSymbol(tc.typ); err == nil {
+			t.Errorf("%s was given a symbol", tc.what)
+		} else if !strings.Contains(err.Error(), "generic instantiation") {
+			t.Errorf("%s: the refusal is %q", tc.what, err)
+		}
+	}
+}
+
+// layOut lays out a composite built over a corpus type.
+func layOut(t *testing.T, typ *Type) *Type {
+	t.Helper()
+	if err := Layout(typ); err != nil {
+		t.Fatal(err)
+	}
+	return typ
+}

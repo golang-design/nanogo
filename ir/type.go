@@ -242,6 +242,19 @@ type Type struct {
 	// there makes reflect report Int64 for an int.
 	Basic string
 
+	// Instantiated reports whether the type is an instantiation of a generic
+	// type.
+	//
+	// Name drops the type arguments: atomic.Pointer[int] and
+	// atomic.Pointer[string] both come out as sync/atomic.Pointer, and nothing
+	// else in an ir.Type tells the two apart. gc spells the arguments, so a
+	// descriptor written under the shortened name would be one symbol for two
+	// different types, and the linker would merge them.
+	// specs/032-type-descriptors-and-itabs.md records the case as the one that
+	// neither the name nor the encoder refused. The naming function refuses it
+	// now, and this is the field it reads.
+	Instantiated bool
+
 	// Methods is the method set of the *pointer* to this type, sorted by name.
 	//
 	// The pointer's set, because it is the larger of the two: a method with a
