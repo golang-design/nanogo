@@ -213,6 +213,39 @@ table above reports, because every probe it would break is refused for some
 other reason first. It belongs with the miscompiles and not with the unbuilt
 rows.
 
+## The critical path to G1, which is longer than the graph suggests
+
+The graph above orders the language work. G1 is not gated by the language as a
+whole, only by what nanogo's own source uses, and that subset has one item in it
+far larger than the others.
+
+| Blocker | Owner | Size |
+| --- | --- | --- |
+| Descriptor encoder: a method's signature, a generated equality function, a function's signature | [032](032-type-descriptors-and-itabs.md) | in progress |
+| An SSA operation that reads the context register | [033](033-closures-defer-panic.md) | in progress |
+| **Export data body reader, and a generic stenciler** | [015](015-export-data.md), [013](013-generics.md) | **not started, two subsystems** |
+| ABI0 wrappers for a package with assembly | [030](030-abi.md) | not started |
+| The register allocator's scratch row | [026](026-register-allocation.md) | not started |
+
+The generics row is the one to plan around. `export/writer.go` refuses a generic
+declaration on purpose, and the reason it gives is the whole problem: stenciling
+an instantiation in an importing package needs the function bodies that
+[015](015-export-data.md)'s body reader would carry, and nanogo writes
+declarations only. So G1 needs a body reader in export data before a stenciler
+can exist, and nanogo's own `types2` fork is full of generic declarations.
+
+Of the 28 packages a `func main() {}` needs, nanogo compiles 9 and refuses 19:
+8 for assembly, 7 for a declared type's descriptor, 2 for register allocator
+output, 1 for a package-level `error` variable, and 1 for `append`. The count of
+nanogo's own packages that nanogo compiles is zero.
+
+One caveat [001](001-bootstrap-gates.md) states about its own gate, repeated
+here because it decides how much G1 is worth: $N_2 = N_3$ is necessary and not
+sufficient. A compiler that miscompiles a construct it does not itself use
+reaches the fixed point while being wrong, and so does one whose miscompile
+reproduces stably. The three `wrong` probes are exactly that failure mode, and
+so is every missing write barrier.
+
 ## What is not decided
 
 `asm-package` is deferred to G3 by [044](044-plan9-assembler.md). **cgo has no
