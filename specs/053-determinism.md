@@ -70,8 +70,8 @@ fixed point to break, and that judgement stands.
 
 ### Concurrency
 
-Functions are compiled concurrently ([002](002-architecture.md)). Results merged
-in completion order are ordered by scheduling.
+The architecture of [002](002-architecture.md) compiles functions concurrently.
+Results merged in completion order are then ordered by scheduling.
 
 **Rule: results are merged in declaration order.** Each function's output is
 written to a slot indexed by its position in the package, and the slots are
@@ -79,10 +79,9 @@ concatenated after the wait. Never a channel drained into a list.
 
 Nothing is concurrent yet. The non-test source starts no goroutine, and
 `driver.emitPackage` walks the function list in declaration order and adds each
-symbol as it goes, so the rule holds by construction rather than by design. It
-is written here as a rule and not as a description because the day
-[002](002-architecture.md)'s concurrent compile arrives is the day the order
-stops being free.
+symbol as it goes, so the order is free today. The rule is written as a rule and
+not as a description because the day [002](002-architecture.md)'s concurrent
+compile arrives is the day it stops being free.
 
 ### Pointer values
 
@@ -117,7 +116,7 @@ constantly.
 
 | Check | When | State |
 | --- | --- | --- |
-| Compile every package twice in one process; compare object bytes | every CI run | built one level down, on the object writer and on each SSA pass, not on a package compile |
+| Compile a package twice in one process; compare object bytes | every CI run | built, `driver/compile_test.go`, and one level down on the object writer and on each SSA pass |
 | Compile in two processes with different environments and working directories; compare | every CI run | built, `obj/write_test.go` |
 | Compile with `-c 1` and with `-c 8`; compare | every CI run | vacuous today: `-c` is parsed into `Config.Concurrency`, nothing reads it, and the compile is sequential |
 | The G1 fixed point, $N_2 = N_3$ | from M6 | not reachable, per [060](060-selfhost.md) |
@@ -140,13 +139,17 @@ a build rather than in a test.
 determinism first, by compiling the same source twice with $N_1$. Only if that
 passes is the failure a miscompile.
 
-## Corrections
+## What was wrong
 
-**The checking table read as though it ran, and three of its five rows do not.**
-The rows are unchanged, because they are what the compiler owes, and each now
-carries the state it is in. Found by this audit, reading each row against the
-tests and against `.github/workflows/ci.yml`.
+**The checking table read as though every row ran.** Three of the five did not.
+No row was removed, because each is what the compiler owes; each carries the
+state it is in instead. Found by reading each row against the tests and against
+`.github/workflows/ci.yml`.
+
+**The first row of that table said a package compile was not checked.**
+`driver/compile_test.go` compiles the same source twice and compares the bytes,
+so the row was stale in the direction an audit usually does not look.
 
 **The concurrency section described the compiler as concurrent.** It is not, in
 any package: a search of the non-test source finds no goroutine. The rule is
-kept and the description is now marked as the future it is.
+kept and the description is marked as the future it is.

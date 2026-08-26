@@ -417,9 +417,15 @@ func emittable(t *ir.Type) error {
 // kind is checked as well as the name, so that a defined type that shadows a
 // predeclared name in some future spelling cannot pass for one.
 //
-// byte and rune are absent because they are aliases: ir.Converter unaliases
-// before it names, so the name here is always uint8 or int32.
+// byte and rune are in it, with the kind of the type each one names. They are
+// aliases and ir.Converter does not rewrite them: types2 declares each as a
+// basic type of its own carrying the alias spelling, and it is the naming
+// function in ir/rtype.go that writes uint8 for byte. So a type reaches here
+// named "byte", and a table without it answers that byte is a defined type
+// that might have methods.
 var predeclaredKinds = map[string]ir.Kind{
+	"byte":           ir.Uint8,
+	"rune":           ir.Int32,
 	"bool":           ir.Bool,
 	"int":            ir.Int64,
 	"int8":           ir.Int8,

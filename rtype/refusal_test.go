@@ -422,3 +422,40 @@ func names(syms []rtype.Symbol) []string {
 	}
 	return out
 }
+
+// TestDescriptorOfAnAlias checks the two predeclared aliases.
+//
+// types2 declares byte and rune as basic types of their own carrying the alias
+// spelling, so a type reaches this package named "byte" and not "uint8". A
+// table of predeclared names without them answers that byte is a defined type,
+// which is a type that might have methods, and the descriptor of []byte is
+// refused because its element is.
+func TestDescriptorOfAnAlias(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind ir.Kind
+		want string
+	}{
+		{"byte", ir.Uint8, "type:uint8"},
+		{"rune", ir.Int32, "type:int32"},
+	} {
+		alias := lay(t, &ir.Type{Kind: tc.kind, Name: tc.name})
+		syms, err := rtype.Descriptor(alias)
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if syms[0].Name != tc.want {
+			t.Errorf("%s is described as %s, want %s", tc.name, syms[0].Name, tc.want)
+		}
+		if rtype.RuntimeOwned(alias) != true {
+			t.Errorf("%s is not recognised as a type the runtime owns", tc.name)
+		}
+		// The slice is what the corpus reaches: a descriptor for []byte names
+		// its element, so an element that cannot be described stops it.
+		slice := lay(t, &ir.Type{Kind: ir.Slice, Elem: alias})
+		if _, err := rtype.Descriptor(slice); err != nil {
+			t.Errorf("[]%s: %v", tc.name, err)
+		}
+	}
+}

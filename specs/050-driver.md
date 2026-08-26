@@ -14,8 +14,8 @@ depends_on:
 
 The one this spec is mostly about is `go tool compile`'s, because
 [051](051-build-integration.md) substitutes nanogo for `go tool compile`
-through `-toolexec` and the `go` command constructs the arguments. This is not
-a nicety. If the flags differ, the substitution does not work, and the bring-up
+through `-toolexec` and the `go` command constructs the arguments. Every flag
+has to match: if one differs, the substitution does not work, and the bring-up
 strategy of [000](000-decisions.md) decision 11 is gone.
 
 The other is for a person.
@@ -30,25 +30,32 @@ that is one of those three is a person typing, and cannot be the `go` command.
 | Command line | Who sends it | What it does |
 | --- | --- | --- |
 | `nanogo <tool> [args]` | the `go` command, through `-toolexec` | compiles one package, or execs the real tool. The rest of this spec. |
-| `nanogo build [-o out] [-v] [-work] [packages]` | a person | resolves the package graph itself, compiles what it can with the same `Compile`, and links. [051](051-build-integration.md) owns it under whole-world mode. |
+| `nanogo build [-o out] [-v] [-work] [packages]` | a person | resolves the package graph itself, compiles every package named with the same `Compile` or fails naming it, takes the rest of the graph from the toolchain, and links. [051](051-build-integration.md) owns it as the user's path. |
 | `nanogo help` | a person | what nanogo compiles today and what it refuses |
 | `nanogo version` | a person | the pinned release and this build's identity |
 
-`nanogo help` is not decoration. A driver whose limits are discoverable only by
-hitting them wastes a reader's afternoon, and nanogo's limits are the subject:
-the help text names the constructs it compiles and the constructs it refuses.
+`nanogo help` states the limits before the features, because nanogo compiles a
+small part of Go and a user who finds that out by hitting an error has already
+spent the afternoon. Every construct it names is one that was compiled and run,
+and each is backed by a probe program that re-runs it. Prose does not re-run, so
+a claim in that text with no probe behind it is a claim that will be wrong
+within a month.
 
-`-fallback` is nanogo's only driver flag, and it is accepted before the tool
-path and inside the compile flag set, because the `go` command puts it in both
-places.
+`-fallback` is the only flag nanogo adds to a `compile` command line, and it is
+accepted before the tool path and inside the compile flag set, because the `go`
+command puts it in both places. It governs the `-toolexec` path only. So does
+`NANOGO_ALLOWLIST`: `nanogo build` reaches `RunBuild` before either is read, and
+a package it names and cannot compile is an error rather than a package handed
+to `gc`.
 
 ## What is built
 
 The command line is built. `driver` parses every flag in the tables below,
 answers `-V=full`, reads `-importcfg`, and dispatches per invocation: a tool
 other than `compile`, a package off the allowlist, or a command line it cannot
-parse goes to `gc` ([051](051-build-integration.md)). `cmd/nanogo` is 34 lines
-over `driver.Run`.
+parse goes to `gc` ([051](051-build-integration.md)). `cmd/nanogo` is 45 lines
+over `driver.Run`, 13 of them code, so every claim in this spec is testable in
+process.
 
 `driver.Compile` runs the pipeline, in the order below, and refuses by name
 everything the compiler cannot do yet.
@@ -57,17 +64,16 @@ everything the compiler cannot do yet.
 | --- | --- |
 | parse, type check, build the typed tree | [011](011-parser-and-ast.md), [012](012-type-checking.md), [020](020-ir.md) |
 | `ir.Lower`, which also collects the descriptors the tree names | [020](020-ir.md), [032](032-type-descriptors-and-itabs.md) |
-| `ssa.Build`, lowering, decomposition, register allocation | [021](021-ssa-construction.md), [025](025-lowering-and-rules.md), [026](026-register-allocation.md) |
+| `ssa.Build`, then decomposition | [021](021-ssa-construction.md) |
+| the ABI assignment, then lowering to arm64 operations, with the verifier run after each | [030](030-abi.md), [025](025-lowering-and-rules.md), [021](021-ssa-construction.md) |
+| register allocation | [026](026-register-allocation.md) |
 | `ssagen`, then the text symbols and the descriptors into the object | [041](041-instruction-encoding.md), [040](040-object-format.md) |
 
-`ir.Lower` runs first because `ssa.Build` refuses every Go-specific node. An
-earlier pass list started at `ssa.Build`, so the lowering pass never ran in a
-real compile, and [032](032-type-descriptors-and-itabs.md) records what that
-cost.
+`ir.Lower` runs first because `ssa.Build` refuses every Go-specific node.
 
 | Refused | Because |
 | --- | --- |
-| a host that is not `arm64` | there is one backend ([043](043-amd64-backend.md) is unbuilt) |
+| a build whose target `GOARCH` is not `arm64` | there is one backend ([043](043-amd64-backend.md) is unbuilt). `checkTarget` reads the target and not the host, so `GOARCH=amd64` on an arm64 host is refused by name rather than mis-compiled |
 | `-+` | the runtime rules of [034](034-write-barriers.md) and [035](035-goroutines-and-stack-growth.md) are unbuilt |
 | `-embedcfg` | see [`go:embed`](#goembed) below |
 | a package with an assembly definition in `-symabis` | the ABI wrapper of [030](030-abi.md) is unbuilt |
@@ -130,19 +136,16 @@ Ignoring any of these produces a wrong build, silently.
 | `-dynlink` | dynamic linking is out of scope ([045](045-linker.md)) |
 | `-race`, `-msan`, `-asan` | no instrumentation |
 
-**`-shared` is not in the rejected list, and an earlier draft of this spec put it
-there.** The spike shows it is sent on *every* invocation on `darwin/arm64`,
-because the platform requires position-independent code. A compiler that rejects
-it rejects every build on the first target. This is the clearest example of why
-the table is measured.
+**`-shared` is accepted and not rejected.** The spike shows it is sent on
+*every* invocation on `darwin/arm64`, because the platform requires
+position-independent code. A compiler that rejects it rejects every build on the
+first target.
 
-**`-trimpath` is a list, and this spec wrote it as one rewrite.** The row said
-`old=>new`. The `go` command joins several rewrites with `;`, and the last one
-has an empty new side because it erases the build's temporary directory
-(`cmd/go/internal/work.(*Action).trimpath`). A parser that requires a non-empty
-new side rejects every real build. This was found by writing the parser against
-a logged command line, and `driver/flags.go` and `driver.TrimPath` carry the
-shape.
+**`-trimpath` takes a list and not one rewrite.** The `go` command joins several
+rewrites with `;`, and the last one has an empty new side because it erases the
+build's temporary directory (`cmd/go/internal/work.(*Action).trimpath`). A
+parser that requires a non-empty new side rejects every real build.
+`driver/flags.go` and `driver.TrimPath` carry the shape.
 
 `-symabis` and `-asmhdr` exist because a package with assembly is compiled in two
 passes: the assembler runs first to discover which symbols it defines and with
@@ -174,8 +177,7 @@ changed. Without it, a nanogo change would reuse objects built by the previous
 nanogo, and [051](051-build-integration.md)'s claim that the cache is correct in
 hosted mode would be false.
 
-Two rules that the first draft of this spec left unstated, and that a build gets
-wrong silently if they are not followed:
+Two rules, each of which a build gets wrong silently when it is not followed:
 
 1. **Only `compile` is answered.** For `asm`, `link` and every other tool,
    nanogo execs the real tool and lets it answer for itself. Answering on their
@@ -194,9 +196,8 @@ wrong silently if they are not followed:
    string `unknown` when the build carries no VCS stamp, `VersionLine` reports
    `X:nanogo-unknown`, and `driver.Run` compiles anyway. That is exactly the
    constant identity the rule forbids, so an unstamped build reuses objects
-   across nanogo changes for ever. This was found by reading `driver/version.go`
-   and `driver.run` against the rule: nothing between them tests the identity.
-   The rule stands; the gap is in the code and is the check `run` has to grow.
+   across nanogo changes for ever. The rule stands; the gap is in the code, and
+   closing it is a check `run` has to grow.
 
 ## Flags nanogo defines
 
@@ -235,15 +236,14 @@ That is what an unrecognised flag does: `ParseCompile` returns a `FlagError`,
 `-dynlink`, `-race`, `-msan` and `-asan` are rejected by name so that the
 message says why rather than "not recognised".
 
-**The rule and the flag table above contradict each other, and the table is the
-side that is wrong today.** `-S` and `-m` are recognised, counted into
-`driver.Config`, and read by nothing, so a build that asked for a listing gets
-silence and a zero exit status. `-N`, `-l`, `-d` and `-c` are in the same state,
-but they differ in consequence: there is no optimizer, no inliner and no
-concurrency, so ignoring them is not yet distinguishable from honouring them.
-`-S` and `-m` promise output. Until [052](052-diagnostics.md) produces it, they
-are the two flags this section forbids. This was found by auditing the flag
-table against the uses of each `Config` field, which for these six is none.
+**Six flags break the rule today, and the rule is the side that is right.**
+`-N`, `-l`, `-S`, `-m`, `-d` and `-c` are recognised and parsed into
+`driver.Config`, and no code reads those six fields. `-N`, `-l`, `-d` and `-c`
+are harmless for now: there is no optimizer, no inliner and no concurrency, so
+ignoring them is not distinguishable from honouring them. `-S` and `-m` promise
+output, so a build that asks for a listing gets silence and a zero exit status.
+Until [052](052-diagnostics.md) produces that output, they are the two flags
+this section forbids.
 
 ## `go:embed`
 
@@ -256,11 +256,12 @@ a string or byte slice or `embed.FS` structure. It is listed here so it is not
 forgotten, since a standard library package uses it and G3 needs it.
 
 None of it is written. `checkSupported` refuses `-embedcfg` outright, which is
-the honest state. The data symbol an embedded file needs is no longer the
-missing piece: `ssagen.AddGlobals` binds a data symbol to a package-level
-variable and `ssagen`'s string constants write read-only bytes. What is missing
-is the front end, which reads the config, resolves the patterns and builds the
-`embed.FS` structure.
+the state to keep until the front end exists. The data symbol an embedded file
+needs is not the missing piece: `ssagen.AddGlobals` binds a data symbol to a
+package-level variable and `ssagen`'s string constants write read-only bytes.
+What is missing is the front end, which reads the config, resolves the patterns
+and builds the `embed.FS` structure. `checkSupported`'s message still says the
+data emitter is what is missing, and that message is the part to correct next.
 
 ## Exit status and output
 
@@ -280,7 +281,7 @@ What runs today:
   parses the line itself and a malformed one is fatal to the build.
 - The same file drives a build with a package on the allowlist and asserts the
   failure names the package.
-- `internal/e2e` installs the binary the way a user installs it and drives six
+- `internal/e2e` installs the binary the way a user installs it and drives real
   builds through it, from the command line to a process that returns the answer
   it computed. Nothing in it calls into nanogo's packages, because the claim is
   about the command line and a test that reached inside would not be testing
@@ -295,3 +296,45 @@ What is still owed:
   release then fails a test rather than a build.
 - `-N` and `-l` builds of the whole corpus, per
   [022](022-optimization-passes.md), which needs passes to disable first.
+
+## What was wrong
+
+**`nanogo help` named `defer`, `println` and an empty function body as
+refused**, for weeks after each of them started working. That is why the help
+text is backed by probe programs rather than by this spec.
+
+**`-shared` was in the rejected table.** The spike measured it on every
+invocation on `darwin/arm64`, so rejecting it would have rejected every build on
+the first target. It is the clearest reason the flag tables are measured against
+a logged command line rather than transcribed from `go tool compile -h`.
+
+**`-trimpath` was written as one `old=>new` rewrite.** The parser was then
+written against a logged command line, which carries several rewrites joined by
+`;` with an empty new side on the last.
+
+**The pass list started at `ssa.Build`.** `ir.Lower` never ran in a real
+compile; [032](032-type-descriptors-and-itabs.md) records what that cost.
+
+**The architecture check read `runtime.GOARCH`.** That is the host's
+architecture, so `GOARCH=amd64` on an arm64 host passed the check and nanogo
+emitted arm64 code for an amd64 build. `go tool link` then reported an unknown
+relocation, which names neither the cause nor the fix. `checkTarget` now reads
+the target.
+
+**The `-V=full` section stated neither rule above.** Answering for `asm` and
+`link` as well as `compile`, and reporting a constant identity, are both silent
+cache faults, and neither was written down until a reader asked what the section
+required.
+
+**The flag table and the rejection rule were audited against each other**, by
+reading each `Config` field against its uses. Six fields have none, which is how
+the `-S` and `-m` violation above was found.
+
+**The `-V=full` identity gap was found the same way**, by reading
+`driver/version.go` and `driver.run` against rule 2: nothing between them tests
+the identity.
+
+**The pass table listed lowering before decomposition and omitted the ABI
+assignment and the two verifier runs.** `driver.compileFunc` holds the real
+list, and it names each pass in the error it produces, so a spec that misorders
+it misreads every refusal message.

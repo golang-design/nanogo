@@ -21,7 +21,7 @@ that produce messages today, and it is about a third of this spec:
 | Section | State |
 | --- | --- |
 | Error format | built; `-trimpath` reaches the object's line table and not the messages |
-| Ordering | not built, and not yet reachable: nothing in the compiler is concurrent |
+| Ordering | built as `driver.diagnostics`, which sorts by raw position before the limit is applied |
 | The ten-error limit | built as `driver.maxReportedErrors`, without the `too many errors` line |
 | `-C` and `-e` | **not accepted at all**; see below |
 | Cascades | built in the parser, which returns `Bad*` nodes and never nil, and inherited from the fork in the checker |
@@ -55,10 +55,9 @@ the build handed to the compiler.
 [051](051-build-integration.md)'s selection sends the package to `gc`. The
 consequence is worse than a missing feature: a build that passes `-C` or `-e`
 turns nanogo off for every allowlisted package and says nothing, which is the
-silent failure [050](050-driver.md)'s rejection rule exists to make loud. Found
-by this audit, comparing this section against `driver/flags.go`'s `knownFlags`.
-Either the flags are implemented or this section drops them, and implementing
-them is cheap.
+silent failure [050](050-driver.md)'s rejection rule exists to make loud. Both
+flags stay specified here, and both are cheap: `-C` drops the column from the
+format above, `-e` removes the ten-message limit below.
 
 Positions are **reported** positions, so `//line` directives apply. This is the
 distinction [010](010-scanner-and-positions.md) draws between raw and reported,
@@ -67,10 +66,12 @@ and diagnostics are the reason it exists.
 ### Ordering and limits
 
 Errors are printed in source position order, not in discovery order. Discovery
-order depends on the order packages and functions were processed, which is
-concurrent, so printing in discovery order would make the output
-non-deterministic, a violation of [053](053-determinism.md) that a user would
-see directly.
+order is the order the checker met each mistake, which is not source order: it
+reports a duplicate label where it meets it and an unused label only when it has
+finished the function body. Once functions are compiled concurrently
+([002](002-architecture.md)), discovery order also stops being a fixed order at
+all, which is the [053](053-determinism.md) violation a user would see
+directly.
 
 At most ten errors are printed, then `too many errors`, unless `-e` is given.
 This matches `gc` and it matters for [004](004-conformance.md)'s L1 comparison,
@@ -84,13 +85,12 @@ so one comparison orders by file and then by offset. A message with no position
 sorts last, because an error the compiler could not locate must not displace the
 one the user can act on.
 
-Discovery order is not source order, and the corpus proved it rather than the
-reasoning. types2 reports a duplicate label where it meets it and an unused
-label only when it has finished the function body, so `test/label.go` came out
-with line 31 first and line 16 sixth. `test/import1.go`, `test/method1.go` and
-`test/method2.go` inverted the same way. All four were rejected for the right
-reason at the wrong first line until the sort was added. gc sorts in
-`base.FlushErrors` for this reason.
+The corpus is what proves discovery order is not source order. `test/label.go`
+comes out of the checker with line 31 first and line 16 sixth, and
+`test/import1.go`, `test/method1.go` and `test/method2.go` invert the same way.
+Unsorted, all four are rejected for the right reason at the wrong first line,
+which [004](004-conformance.md)'s L1 comparison reads as a disagreement with
+`gc`. gc sorts in `base.FlushErrors` for the same reason.
 
 The limit is `driver.maxReportedErrors`, which is ten. It is applied after the
 sort, so the ten messages kept are the ten the user reads first rather than the
@@ -162,8 +162,10 @@ turns that corpus into a test of nanogo's analyses. This is stated in
 it is the reason this section exists.
 
 Unbuilt on both sides. There is no escape analysis and no inliner, so there is
-no decision to print, and [004](004-conformance.md) records that Go's `test/`
-corpus is read by nothing.
+no decision to print. `internal/gotest` sweeps Go's `test/` corpus and
+classes the escape and inline files as recipes it cannot carry out, because
+their recipes pass flags nanogo has no equivalent of. A `-m` implementation is
+what turns that class into a test ([004](004-conformance.md)).
 
 ## Internal errors
 
@@ -191,16 +193,43 @@ to whoever gets the message, and only the second one is worth reporting.
 
 ## Testing
 
-None of the four checks below exists. They are what the sections above need,
-and each one waits on the feature it measures rather than on a harness:
+What runs today:
 
-- `errorcheck` from Go's `test/` corpus, which pins positions and patterns.
+- `errorcheck` from Go's `test/` corpus. `internal/gotest` sweeps 356 files and
+  74 of them are rejected at the annotated line, with zero at a wrong position
+  and zero accepted that should have been rejected. That is the check that made
+  the sort above necessary, and `internal/gotest/testdata/ratchet.txt` records
+  each file by name so a file that stops passing is a diff. The full sweep runs
+  under `NANOGO_REQUIRE_CORPUS=1`; a plain `go test ./...` runs a named subset,
+  so an unattended run does not prove this row.
+- The fork's 375-entry `errorcheck` corpus, which pins the checker's messages
+  and positions against the checker it came from ([012](012-type-checking.md)).
+  It says nothing about the driver's own output.
+
+What is still owed, each waiting on the feature it measures rather than on a
+harness:
+
 - Cascade tests: a corpus of single mistakes, each asserted to produce exactly
   one message.
-- Ordering: compile a package with errors in several files concurrently, and
-  assert the output is identical across runs.
+- Ordering under concurrency: compile a package with errors in several files
+  concurrently, and assert the output is identical across runs. Nothing in the
+  compiler is concurrent yet, so this one waits on
+  [002](002-architecture.md).
 - `-m` output against Go's escape and inline corpora.
+- `-C` and `-e`, which are not parsed, so no test can reach them.
 
-What covers diagnostics today is upstream's: the fork's 375-entry `errorcheck`
-corpus pins the checker's messages and positions against the checker it came
-from ([012](012-type-checking.md)). It says nothing about the driver's output.
+## What was wrong
+
+**The ordering rule was justified by concurrency, and nothing in the compiler
+is concurrent.** The non-test source starts no goroutine. The rule holds anyway,
+because a sequential checker's discovery order is not source order either, and
+Go's `test/` corpus proved it: four files were rejected at the wrong first line
+until `driver.diagnostics` sorted. Concurrency is a second reason and it arrives
+with [002](002-architecture.md)'s concurrent compile.
+
+**This spec's own state table read `Ordering: not built`** while the sort was
+already in `driver/diagnostics.go` and the prose below the table said so.
+
+**`-C` and `-e` were specified as accepted flags.** They are not in
+`driver/flags.go`'s `knownFlags`, so each one silently turns nanogo off for the
+whole build. Found by reading this section against that table.
