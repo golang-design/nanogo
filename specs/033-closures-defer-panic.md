@@ -29,7 +29,7 @@ a different thing: an interface. `ir/lower.go` performs the rows and
 | `defer f()` with no arguments and no captures | built; `runtime.deferproc`, plus the single exit below |
 | `defer` with arguments | **refused**; an argument becomes a capture |
 | `go f()` on the same terms | built; `runtime.newproc` takes the same one word |
-| `panic` of a value that is already an interface | built; `runtime.gopanic`, and a deferred call runs off the chain while panicking |
+| `panic` of a value that is already an interface | reaches `runtime.gopanic` and runs the deferred chain; the runtime then prints the value, and for a non-nil operand that print is a fatal error, so this row is a miscompile and not a feature |
 | `panic` of anything else | **refused**; the operand converts to an interface and `ssa.Build` builds no such conversion |
 | `recover()` whose value nobody reads | built; `runtime.gorecover`, which is the shape of the idiom |
 | `recover()` whose value is read | **refused**; the result is an interface and nothing below the IR decomposes one |
@@ -43,11 +43,29 @@ is what the first four refusals above have in common, and closing it is the
 work that unblocks them.
 
 **The `panic` and `recover` refusals are not that gap.** Both are the interface
-one. `panic(v)` compiles when `v` is already an interface value, which in
-practice means a parameter of interface type or `nil`, and it runs: the
-deferred chain runs, the runtime prints the trace, the process exits 2.
-`panic("boom")` and `panic(1)` are refused at `ssa.Build`, on the conversion of
-the operand, and so is every `recover` whose result is read. A conversion to an
+one. `panic("boom")` and `panic(1)` are refused at `ssa.Build`, on the
+conversion of the operand, and so is every `recover` whose result is read.
+
+**What `panic` of an interface value does is worse than a refusal, and this is
+the one row in the table that names a miscompile.** `panic(v)` compiles when
+`v` is already an interface value, which in practice means a parameter of
+interface type or `nil`. `runtime.gopanic` is reached and the deferred chain
+runs, both observable. `panic(nil)` then ends as `gc`'s does, with `panic:
+runtime error: panic called with nil argument` and exit 2, because the runtime
+special-cases a nil operand before it reads the operand's type. A non-nil
+operand is read, and the read fails:
+
+```
+panic: runtime: nameOff 0x4310388 out of range 0x104304b00 - 0x104318a80
+fatal error: runtime: name offset out of range
+```
+
+`runtime.printpanicval` resolves the value's type name through the eface's type
+word, so the eface nanogo built carries a type word the runtime cannot follow.
+Nothing is said at compile time, which makes this the worse failure of the two:
+a refusal names a gap and this prints a runtime crash naming none. It belongs
+to the same interface gap as the refusals, and it is not fixed by the
+conversion alone, because this operand needed no conversion. A conversion to an
 interface in `ssa.Build`, and the descriptor and itab writers
 [032](032-type-descriptors-and-itabs.md) owes it, are what unblock that half.
 
@@ -257,3 +275,11 @@ three also made an open-coded defer table look like one more entry, and
 The table said `panic` was built, which is true of the lowering row and false
 of nearly every `panic` a Go program writes. A `panic` whose operand is not
 already an interface is refused at `ssa.Build`. The row is now two rows.
+
+**The row that was left said the surviving case runs, and it does not.** The
+spec read "the deferred chain runs, the runtime prints the trace, the process
+exits 2", which was measured on `panic(nil)` and generalised. A non-nil
+interface operand dies in `runtime.printpanicval` with `name offset out of
+range` and prints no panic value. The section above states both cases
+separately, because the difference between them is a special case in the
+runtime and not anything this spec's lowering does.
