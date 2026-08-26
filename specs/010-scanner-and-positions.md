@@ -28,10 +28,10 @@ and a compiler holds millions.
 A position is a single `uint32`.
 
 ```go
-type Pos uint32   // an index into the Fileset's coordinate space; 0 means unknown
+type Pos uint32   // an index into the FileSet's coordinate space; 0 means unknown
 ```
 
-The `Fileset` assigns each file a half-open range of the `uint32` space, sized to
+The `FileSet` assigns each file a half-open range of the `uint32` space, sized to
 the file's byte length. A `Pos` is `base + byteOffset`. Resolving a `Pos` to a
 file is a binary search over bases; resolving to a line is a binary search over
 that file's line-start table, which the scanner fills as it consumes newlines.
@@ -72,7 +72,7 @@ printing uses reported, and no API returns both from one call.
 
 ### Unknown positions
 
-`Pos(0)` is the unknown position. Synthesised nodes get the position of whatever
+`Pos(0)` is the unknown position, and `syntax.NoPos` is its name. Synthesised nodes get the position of whatever
 they were synthesised for, never `0`, because a `0` in a line table produces a
 debugger that steps into nothing. [046](046-debug-info.md) states the consequence.
 
@@ -92,27 +92,16 @@ The ASCII byte is decoded inline and `utf8.DecodeRune` runs only where a
 multibyte rune is possible. This is the hottest loop in the front end and the
 branch is worth it.
 
-The spec said decoding is by hand rather than through `utf8.DecodeRune`. The
-code calls `utf8.DecodeRune` in `skipCh` and in `atIdentChar` and decodes only
-the ASCII byte itself. This was found when the scanner was read for this audit.
-The sentence was absolute where the code is a split, and the code's own comment
-already stated the split correctly.
-
 ### Token set
 
 The specification's token set, unchanged: identifiers, keywords, operators and
 punctuation, and four literal kinds. A token is a small integer plus, for
 literals and identifiers, the text as a `string`.
 
-**The spec claimed two optimisations that the code does not have.** It said the
-token text is a subslice of the input with no allocation per token, and that
-identifiers are interned into a string table so that later comparison is
-pointer comparison. Neither is true. `Scanner.Lit` is a `string`, and both the
-producers build it with `string(s.src[s.tokOff:s.off])`, which allocates:
-`ident` for a name, `setLit` for every literal. No string table exists anywhere
-in `syntax`. This was found by reading `ident` for this audit.
-The claims are removed rather than turned into work, because the corpus gate
-passes without them and neither has been measured as a cost.
+`Scanner.Lit` is that string. Both producers build it the same way, with
+`string(s.src[s.tokOff:s.off])`: `ident` for a name, `setLit` for every
+literal. A token that carries text therefore costs one allocation, and there is
+no string table, so comparing two identifiers compares two strings.
 
 ### Semicolon insertion
 
@@ -160,18 +149,25 @@ one changes the meaning of the next declaration:
 | `//go:` directives, `//go:build` among them | [016](016-directives-and-pragmas.md) |
 | `// +build` | the same handler, by a second prefix |
 
-A `//go:` comment binds to the next declaration and is attached by the parser,
-so the scanner's job is only to hand it over with its position rather than drop
-it.
-
-**The table used to route `//export`, `// +build` and `//go:build` to
-[014](014-package-loader.md).** Two of those three rows were wrong. `lineComment`
-has no case for `//export`, and the loader never reads the scanner. It reads a
-file's header comments itself, in `parseFileHeader` in `loader/constraint.go`,
-because it decides which files are in a package before anything is parsed.
 `lineComment` routes exactly two prefixes to the pragma handler, `go:` and
-` +build`. This was found by reading `lineComment` against the loader for this
-audit.
+` +build`. Build constraints reach [014](014-package-loader.md) by a different
+road: the loader decides which files are in a package before anything is
+parsed, so it reads a file's header comments itself, in `parseFileHeader` in
+`loader/constraint.go`, and never reads the scanner.
+
+A `//go:` comment binds to the declaration that follows it and is attached by
+the parser ([011](011-parser-and-ast.md)); one before the package clause binds
+to the `File`. The scanner hands the comment over with its position and with
+one fact only it holds: whether anything preceded the comment on its line. That
+is `Scanner.blank`, and it is the only thing that separates `//go:noinline` on
+a line of its own from the same text trailing a statement, because the text
+reaching the handler is identical either way.
+
+Whether a directive in a given place is an error is not decided here, and not
+in the parser either. [016](016-directives-and-pragmas.md) gives that decision
+to the driver, and `driver/pragma.go` takes it: it records the verb and the
+position of every directive a declaration collects and reports the ones that
+declaration has no use for.
 
 ### Errors
 
@@ -197,3 +193,31 @@ sets
   `/*line*/`.
 - A rejection corpus of invalid literals, invalid UTF-8, and misplaced
   separators, each pinned to an exact position.
+
+## What was wrong
+
+**The spec said the scanner decodes by hand rather than through
+`utf8.DecodeRune`.** The code calls `utf8.DecodeRune` in `skipCh` and in
+`atIdentChar` and decodes only the ASCII byte itself. The sentence was absolute
+where the code is a split, and the code's own comment already stated the split
+correctly.
+
+**The spec claimed two optimisations the code does not have.** It said the
+token text is a subslice of the input with no allocation per token, and that
+identifiers are interned into a string table so that later comparison is
+pointer comparison. Neither is true, and neither has been measured as a cost,
+so the claims are gone rather than turned into work. The corpus gate passes
+without them.
+
+**The comment table routed `//export`, `// +build` and `//go:build` to
+[014](014-package-loader.md).** Two of the three rows were wrong. `lineComment`
+has no case for `//export`, and the loader never reads the scanner: it reads a
+file's header comments itself, because it decides which files are in a package
+before anything is parsed.
+
+**The spec said the scanner's job is only to hand a directive over rather than
+drop it, and stopped there.** That was true of the code on the day it was
+written, when `pragmaHandler` returned nil and every directive was dropped. It
+is not the whole scanner's job: `Scanner.blank` is the scanner's record that
+nothing preceded the directive on its line, and the misplacement rule cannot be
+enforced without it. The rule itself is enforced in `driver`, not in `syntax`.
