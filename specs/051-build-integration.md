@@ -50,12 +50,12 @@ What that build compiles is small, and the size is set above the driver.
 every pass narrows the set. Of the Go distribution's 39,947 functions, 24,508
 get past SSA construction once [020](020-ir.md)'s lowering pass has run
 ([003](003-sequencing.md) counts them). Getting past construction is not
-compiling. On the corpus measured without that pass, 17,905 functions reach
-construction and 17,809 of them lower completely to arm64 operations, so
-lowering is where the next refusals are. Code generation narrows it again and
-no corpus counts that: `ssagen` has no floating-point encoder and no
-floating-point register allocation, so a function holding a `float64`
-parameter, local or constant is refused there. A package that imports is no
+compiling, but lowering is not where the rest goes: on the corpus measured
+without that pass, 17,809 of the 17,905 functions that reach construction lower
+completely to arm64 operations. The two places that refuse are construction and
+code generation, and no corpus counts the second. `ssagen` has no
+floating-point encoder and no floating-point register allocation, so a function
+holding a `float64` parameter, local or constant is refused there. A package that imports is no
 longer refused: `export/` reads `gc`'s export data, and `internal/e2e` compiles
 a package that imports one of its own and a package that imports `math/bits`
 and `strconv`. No allowlist file is committed, so a checkout still compiles
@@ -338,7 +338,8 @@ What runs today:
 - `internal/e2e` installs the binary and drives real builds through it, each
   one a module nobody wrote for a harness, and runs the program that comes out.
   That is the mechanism and the payload together, which is the pairing the four
-  unwired passes of [032](032-type-descriptors-and-itabs.md) got past.
+  wiring changes of [032](032-type-descriptors-and-itabs.md) needed and did not
+  have.
 - `cmd/nanogo/main_test.go` builds the real binary and runs
   `go build -toolexec=nanogo ./...` over a module, then runs the program. The
   passthrough path is therefore gated end to end.

@@ -16,7 +16,7 @@ asked about itself.
 ## What is built
 
 There is no diagnostics package. What exists is spread across the two places
-that produce messages today, and it is about a third of this spec:
+that produce messages today, and the table says which parts:
 
 | Section | State |
 | --- | --- |
@@ -162,10 +162,11 @@ turns that corpus into a test of nanogo's analyses. This is stated in
 it is the reason this section exists.
 
 Unbuilt on both sides. There is no escape analysis and no inliner, so there is
-no decision to print. `internal/gotest` sweeps Go's `test/` corpus and
-classes the escape and inline files as recipes it cannot carry out, because
-their recipes pass flags nanogo has no equivalent of. A `-m` implementation is
-what turns that class into a test ([004](004-conformance.md)).
+no decision to print. `internal/gotest` sweeps Go's `test/` corpus and records
+no pass for any escape or inline file: their recipes pass flags nanogo has no
+equivalent of, so the sweep classes them as recipes it cannot carry out. A `-m`
+implementation is what turns that class into a test
+([004](004-conformance.md)).
 
 ## Internal errors
 
