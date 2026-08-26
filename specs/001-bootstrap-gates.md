@@ -45,7 +45,10 @@ nanogo compiles its own source, and the compiler that results is stable.
 Allowed at G1: `go tool link` produces the executable. `go list` resolves the
 import graph. Any standard-library package is in nanogo's own dependency set.
 The build runs in **hosted mode** ([000](000-decisions.md) decision 10), so `gc`
-still compiles the runtime and the packages nanogo has not reached. Only
+still compiles the runtime and the packages nanogo has not reached. The
+standard library may come as archives out of a nanogo distribution's own `pkg`
+tree ([054](054-distribution.md)) rather than out of the installed toolchain;
+that is where the archives are read from and not who compiled them. Only
 `darwin/arm64` works.
 
 The hosted-mode allowance is what separates G1 from G3. G1 asks whether nanogo
@@ -69,13 +72,16 @@ its own rather than a paragraph.
 
 ### G3: distribution-compiling
 
-nanogo compiles `~/dev/go.dev/go`, in the `CGO_ENABLED=0` configuration, and the
-result passes the distribution's own tests.
+nanogo compiles a checkout, the `src` tree of a Go distribution, in the
+`CGO_ENABLED=0` configuration, and the result passes the distribution's own
+tests. The checkout is an argument and this deck names no path to one
+([062](062-distribution-build.md)).
 
-The scale here is different in kind from G1. The runtime is 112,977 lines, and
-some of it is not Go. Every `//go:` pragma the runtime relies on must be
-honoured exactly, `//go:nosplit` must actually be enforced, write barriers must
-be elided in the places the runtime requires and present everywhere else, and
+The scale here is different in kind from G1. The runtime is 112,977 lines of
+Go, with the hand-written assembly of the paragraph above beside that and not
+in the figure. Every `//go:` pragma the runtime relies on must be honoured
+exactly, `//go:nosplit` must actually be enforced, write barriers must be
+elided in the places the runtime requires and present everywhere else, and
 `//go:linkname` must resolve across package boundaries.
 
 ## The fixed point
@@ -151,6 +157,13 @@ reproduces stably also reaches it. This is the reason
 point, and the reason [004](004-conformance.md) is a foundation spec and not a
 testing appendix.
 
+This is not a hypothetical. `internal/audit`'s probe corpus compiles each probe
+twice, once with nanogo and once with `gc`, runs both and compares, and three
+probes are classed `wrong` today: `buildinfo-named`, `embed-directive` and
+`panic-fires`. `internal/audit/testdata/ratchet.txt` names each with its
+symptom. Every one is a construct nanogo's own source does not depend on, which
+is exactly the shape of bug the fixed point cannot see.
+
 ## The dependency retirement ladder
 
 Each gate is defined by what is no longer present. This table is the checklist.
@@ -186,13 +199,36 @@ establishes.
 
 No gate is reached, and none has a mechanical test in the repository. The
 three-stage build above is a procedure nobody can run yet, for the reason
-[060](060-selfhost.md) records: nanogo refuses a package with assembly in it,
-and one whose declared types or package-level variables need a run-time type
-descriptor [032](032-type-descriptors-and-itabs.md) cannot write.
+[060](060-selfhost.md) records: the number of nanogo's own packages that nanogo
+compiles is zero. The refusals are the ones [060](060-selfhost.md) lists, led by
+a package with assembly in it and by a declared type whose run-time descriptor
+[032](032-type-descriptors-and-itabs.md) cannot write; a package-level variable
+no longer refuses a package by itself, but one of type `error` still does.
+[060](060-selfhost.md) carries the census over the 27 packages the closure of a
+`func main() {}` holds, and the total on its own carries none of the
+composition.
 
-What exists is the ladder's first rung. `gc` seeds the build, `go list` resolves
-the import graph ([014](014-package-loader.md)'s G1 half), and `go tool link`
-produces every executable the tests run.
+What exists is the ladder's first rung, and it is wider than the rung was.
+`gc` seeds the build, `go list` resolves the import graph
+([014](014-package-loader.md)'s G1 half), and `go tool link` produces every
+executable the tests run. Two things have been added under that rung without
+moving a gate:
+
+- **Export data goes both ways** ([015](015-export-data.md)). nanogo reads
+  `gc`'s and writes its own, and `gc` reads back what nanogo wrote for 275 of
+  the 375 standard library packages, refusing none of the 275. The 100 it will
+  not write are refused for a generic declaration. So a nanogo-compiled package
+  and a `gc`-compiled one can import each other, which is what hosted mode
+  needs.
+- **A distribution is a tree nanogo can build against** ([054](054-distribution.md)).
+  `nanogo build` reads the standard library archive by archive out of a nanogo
+  distribution's `pkg/GOOS_GOARCH` tree when one resolves. That changes where
+  the archives come from and not who compiled them: the tally line a build
+  prints reads 0 of 27 packages compiled by nanogo, and until that number moves
+  the distribution is `gc`'s work under a nanogo name.
+
+Neither is a gate. G1 needs nanogo to compile nanogo, and `go list` and
+`go tool link` are still on the machine for G2 to retire.
 
 ## Order
 
@@ -210,3 +246,30 @@ against the import list of the non-test source: the only `go/*` packages the
 compiler imports are `go/build` in `loader/constraint.go` and `go/constant` and
 `go/token` inside the fork. The allowance still holds for the rest of the
 standard library, which is what the sentence now says.
+
+**G3 named one machine's path.** The gate read "nanogo compiles
+`~/dev/go.dev/go`". Nothing in this repository holds that checkout or any
+other, and [062](062-distribution-build.md) had already recorded the same
+defect against itself. The gate names the tree by what it is.
+
+**The runtime's 112,977 lines were said to be partly not Go.** The figure is
+the runtime package's non-test Go files and nothing else. The hand-written
+assembly the sentence was reaching for is real, is why G3 needs
+[044](044-plan9-assembler.md), and is not in the count.
+[000](000-decisions.md) decision 4 carried the same wording and is corrected
+with it.
+
+**"Where the gates stand" was a rung behind the tree.** It gave the G1 blocker
+as a refusal of packages with assembly and of package-level variables, and
+`ssagen` writes a package-level variable's data symbol now, so that half of the
+reason had gone. It also listed only `gc`, `go list` and `go tool link` as what
+exists, which was written before export data moved in both directions and
+before [054](054-distribution.md)'s tree. Both are added, and both are marked
+as what they are, work under the first rung rather than progress along the
+ladder.
+
+**The G1 allowance did not say where the standard library comes from.** It
+reads out of a nanogo distribution's `pkg` tree when one resolves and out of the
+installed toolchain otherwise, and a reader who saw only the second could take
+the first for a gate violation. It is not one: the archives in that tree are
+`gc`'s.
