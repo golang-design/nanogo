@@ -636,6 +636,54 @@ func TestLinkAndRun(t *testing.T) {
 		{"a string between a pointer and an integer",
 			"func run(p *int, s string, n int) int { return n * 3 }",
 			`run(new(int), "abcd", 7)`, "", "func run(p *int, s string, n int) int", 21},
+
+		// The floating-point file, which no program reached before: the
+		// allocator handed out F0 to F29 and this package copied with an
+		// integer MOV, spilled with an integer store and broke a cycle with
+		// an integer scratch register.
+		//
+		// The signature holds no float, so every floating-point register in
+		// the function is the allocator's own choice. This is the case that
+		// reg() refused.
+		{"float arithmetic", "func run(a, b int) int { return int(float64(a)*2.5 + float64(b)) }",
+			"run(20, 3)", "", "", 53},
+		// A constant FMOV's immediate cannot name. specs/025's lowering
+		// builds the bit pattern in an integer register and moves it across
+		// with FMOV, so this is the one instruction that touches both files.
+		{"a float constant with no immediate", "func run(a, b int) int { return int(float64(a) * 3.14) }",
+			"run(100, 0)", "", "", 314},
+		// A floating-point parameter and result, which crosses the toolchain
+		// boundary: gc puts the argument in F0 and reads the result out of
+		// F0, so the two agree about the floating-point half of
+		// specs/030-abi.md or the program prints a different number.
+		{"a float parameter and result", "func run(x float64) float64 { return x / 2 }",
+			"int(run(14.0))", "", "func run(x float64) float64", 7},
+		// The two register counters are independent, so the second integer is
+		// in R1 and not in R2. A walk that shared one counter would read each
+		// float from the wrong register.
+		{"floats between integers",
+			"func run(a int, x float64, b int, y float64) int { return a*1000 + int(x)*100 + b*10 + int(y) }",
+			"run(1, 2.0, 3, 4.0)", "",
+			"func run(a int, x float64, b int, y float64) int", 1234},
+		// float32 is the other width. Its store and its load are the single
+		// forms, and a double store here would write four bytes of the next
+		// word.
+		{"a float32 parameter and result", "func run(x float32) float32 { return x * 4 }",
+			"int(run(2.5))", "", "func run(x float32) float32", 10},
+		// A float live across a call has a slot as well as a register,
+		// because the call clobbers every register. That is the float spill
+		// and the float reload, which is the path memOpFor took as an integer
+		// store of eight bytes.
+		{"a float live across a call",
+			"func twice(n int) int\n\nfunc run(x float64) int { return twice(3) + int(x) }",
+			"run(5.0)", "func twice(n int) int { return n * 2 }",
+			"func run(x float64) int", 11},
+		// nanogo calls gc with a float and returns what gc returned, so the
+		// convention is exercised in both directions in one program.
+		{"a float through a call",
+			"func scale(x float64) float64\n\nfunc run(x float64) float64 { return scale(x) + 1 }",
+			"int(run(20.0))", "func scale(x float64) float64 { return x * 2 }",
+			"func run(x float64) float64", 41},
 	}
 	for _, tc2 := range tests {
 		t.Run(tc2.name, func(t *testing.T) {
