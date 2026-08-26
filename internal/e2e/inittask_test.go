@@ -276,20 +276,18 @@ func main() { os.Exit(n) }
 	}
 }
 
-// TestBuildRefusesAPackageLevelVariableByNameAndPosition is the half of that
-// boundary that is still refused.
+// TestBuildRunsAPackageLevelInterfaceVariable is the row that left the refusal
+// below.
 //
 // A variable whose type holds a pointer needs its type descriptor, because
-// cmd/link reads the pointer map of a data symbol through it. rtype cannot
-// build the descriptor of an interface with methods, so the variable is
-// refused rather than emitted where the collector would misread it. It is
-// refused before any function is compiled: a record that listed an init which
-// assigns to a symbol that does not exist would produce a program that runs
-// and is wrong. The message names the variable and where it is declared,
-// because those are what say what to do next.
-func TestBuildRefusesAPackageLevelVariableByNameAndPosition(t *testing.T) {
+// cmd/link reads the pointer map of a data symbol through it. An interface with
+// methods had no descriptor while a function literal had no canonical name, so
+// this program was refused. Both spellings are written now, so it builds and
+// runs, and the exit status says the variable holds the value the
+// initialisation gave it.
+func TestBuildRunsAPackageLevelInterfaceVariable(t *testing.T) {
 	h := setup(t, map[string]string{
-		"go.mod": "module nanogo.example/global\n\ngo 1.27\n",
+		"go.mod": "module nanogo.example/iface\n\ngo 1.27\n",
 		"main.go": `package main
 
 import (
@@ -300,7 +298,45 @@ import (
 var errBad = errors.New("bad")
 
 func main() {
-	if errBad != nil {
+	if errBad == nil {
+		os.Exit(1)
+	}
+	os.Exit(42)
+}
+`,
+	}, nil)
+
+	if out, err := h.nanogoBuild(t, "-o", "iface", "."); err != nil {
+		t.Fatalf("nanogo build .: %v\n%s", err, out)
+	}
+	if code := exitCode(t, filepath.Join(h.mod, "iface")); code != 42 {
+		t.Errorf("the program exited %d, want 42: the package-level error variable did not hold its value", code)
+	}
+}
+
+// TestBuildRefusesAPackageLevelVariableByNameAndPosition is the half of that
+// boundary that is still refused.
+//
+// A variable whose type holds a pointer needs its type descriptor, because
+// cmd/link reads the pointer map of a data symbol through it. rtype cannot
+// build the descriptor of a map, whose slot group is a struct whose own slots
+// are a literal struct, so the variable is refused rather than emitted where
+// the collector would misread it. It is refused before any function is
+// compiled: a record that listed an init which assigns to a symbol that does
+// not exist would produce a program that runs and is wrong. The message names
+// the variable and where it is declared, because those are what say what to do
+// next.
+func TestBuildRefusesAPackageLevelVariableByNameAndPosition(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod": "module nanogo.example/global\n\ngo 1.27\n",
+		"main.go": `package main
+
+import "os"
+
+var table map[string]int
+
+func main() {
+	if table != nil {
 		os.Exit(1)
 	}
 }
@@ -311,7 +347,7 @@ func main() {
 	if err == nil {
 		t.Fatalf("nanogo build accepted a variable it cannot describe to the collector:\n%s", out)
 	}
-	for _, want := range []string{"package-level variable main.errBad", "main.go:8:5", "type descriptor"} {
+	for _, want := range []string{"package-level variable main.table", "main.go:5:5", "type descriptor"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the refusal does not name %q:\n%s", want, out)
 		}
