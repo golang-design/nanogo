@@ -53,11 +53,18 @@ var typePtrInt = func() *ir.Type {
 // reads the object through the pointer the frame held. The pointer lives in a
 // frame object between them, which is where the locals bitmap describes it.
 //
-// kill puts an OpVarKill before the collection. The object's slot then holds
-// the same pointer and the forward analysis of specs/027 reports it dead, so
-// the bitmap has no bit for it and the collector must free the object. That is
-// the pair: one function, one slot, two bitmaps.
-func gcFunc(t *testing.T, name string, kill bool) *compiled {
+// late puts the collection before the read rather than after it. That is the
+// whole difference between the two cases: the object's address is taken again
+// below the collection when late is true, so the bitmap describes it there,
+// and the last address is above the collection when late is false, so the
+// bitmap does not and the collector must free the object. One function, one
+// slot, two bitmaps.
+//
+// Each OpLocalAddr takes the memory of its own point in the program. That is
+// what construction produces and it is what keeps the two apart: an address
+// computed before a store must not float past it, and a call writes all of
+// memory, so an address above a call and one below it are different values.
+func gcFunc(t *testing.T, name string, late bool) *compiled {
 	t.Helper()
 	local := &ir.Object{Name: "obj", Type: typePtrInt, Class: ir.ClassLocal, Addrtaken: true}
 	return hand(t, name, func(f *ssa.Func) {
@@ -65,29 +72,40 @@ func gcFunc(t *testing.T, name string, kill bool) *compiled {
 		e := f.Entry
 		e.Kind = ssa.BlockRet
 		mem := e.NewValue(0, ssa.OpInitMem, ssa.MemType)
-		addr := e.NewValue(0, ssa.OpLocalAddr, typePtrInt, mem)
-		addr.Aux = local
 
-		mk := e.NewValue(0, ssa.OpStaticCall, ssa.MemType, mem)
-		mk.Aux = &ir.Object{Name: "main.mk"}
+		addr := func(m *ssa.Value) *ssa.Value {
+			a := e.NewValue(0, ssa.OpLocalAddr, typePtrInt, m)
+			a.Aux = local
+			return a
+		}
+		call := func(m *ssa.Value, sym string, args ...*ssa.Value) *ssa.Value {
+			c := e.NewValue(0, ssa.OpStaticCall, ssa.MemType, append(args, m)...)
+			c.Aux = &ir.Object{Name: sym}
+			return c
+		}
+
+		mk := call(mem, "main.mk")
 		p := e.NewValue(0, ssa.OpSelectN, typePtrInt, mk)
-		st := e.NewValue(0, ssa.OpStore, ssa.MemType, addr, p, mk)
+		st := e.NewValue(0, ssa.OpStore, ssa.MemType, addr(mk), p, mk)
 		st.AuxInt = typePtrInt.Size
 
-		last := st
-		if kill {
-			k := e.NewValue(0, ssa.OpVarKill, ssa.MemType, st)
-			k.Aux = local
-			last = k
+		var r, last *ssa.Value
+		if late {
+			// The collection, then the read. The address below it is a use of
+			// the object, so the object is live at the collection.
+			gc := call(st, "main.gcNow")
+			ld := e.NewValue(0, ssa.OpLoad, typePtrInt, addr(gc), gc)
+			use := call(gc, "main.use", ld)
+			r, last = e.NewValue(0, ssa.OpSelectN, typeInt, use), use
+		} else {
+			// The read, then the collection. Nothing names the object below
+			// the collection, so the bitmap does not describe it there.
+			ld := e.NewValue(0, ssa.OpLoad, typePtrInt, addr(st), st)
+			use := call(st, "main.use", ld)
+			r = e.NewValue(0, ssa.OpSelectN, typeInt, use)
+			last = call(use, "main.gcNow")
 		}
-		gc := e.NewValue(0, ssa.OpStaticCall, ssa.MemType, last)
-		gc.Aux = &ir.Object{Name: "main.gcNow"}
-
-		ld := e.NewValue(0, ssa.OpLoad, typePtrInt, addr, gc)
-		use := e.NewValue(0, ssa.OpStaticCall, ssa.MemType, ld, gc)
-		use.Aux = &ir.Object{Name: "main.use"}
-		r := e.NewValue(0, ssa.OpSelectN, typeInt, use)
-		e.Control = e.NewValue(0, ssa.OpMakeResult, ssa.MemType, r, use)
+		e.Control = e.NewValue(0, ssa.OpMakeResult, ssa.MemType, r, last)
 	})
 }
 
@@ -144,6 +162,7 @@ func use(p *int) int {
 	seen = *p
 	return *p
 }
+
 
 func report(r int) {
 	println("result", r, "finalized", duringGC, "seen", seen)
@@ -213,15 +232,15 @@ func TestStackMapKeepsALiveSlotAndFreesADeadOne(t *testing.T) {
 		caller string
 		want   string
 	}{
-		// The slot is live at the collection, so the object survives it and
-		// use reads the value mk wrote.
-		{"live", func(t *testing.T, n string) *compiled { return gcFunc(t, n, false) },
+		// The object's address is taken below the collection, so the bitmap
+		// describes it there, the object survives and use reads the value mk
+		// wrote.
+		{"live", func(t *testing.T, n string) *compiled { return gcFunc(t, n, true) },
 			gcCallerSrc, "result 24301 finalized 0 seen 24301"},
-		// The slot holds the same pointer and the lifetime marker says it is
-		// dead, so the collector frees the object. The load and use then read
-		// freed memory, which is why the assertion is the finaliser and not
-		// what use returned.
-		{"dead", func(t *testing.T, n string) *compiled { return gcFunc(t, n, true) },
+		// The slot holds the same pointer and nothing names the object below
+		// the collection, so the collector frees it. use has already run, so
+		// the assertion is the finaliser and not what use returned.
+		{"dead", func(t *testing.T, n string) *compiled { return gcFunc(t, n, false) },
 			gcCallerSrc, "finalized 1"},
 		// The pointer is an argument the function never reads. The arguments
 		// bitmap says the incoming word holds a pointer at every safepoint,
@@ -234,7 +253,7 @@ func TestStackMapKeepsALiveSlotAndFreesADeadOne(t *testing.T) {
 			c := tt.build(t, "gcrun")
 			p := newMainPackage()
 			r := emit(t, c, p)
-			if tt.name != "argument" {
+			if tt.name == "live" || tt.name == "dead" {
 				assertPointerSlot(t, c, r, tt.name == "dead")
 			}
 			addFull(t, r, p)
@@ -268,13 +287,18 @@ func assertPointerSlot(t *testing.T, c *compiled, r *Result, kill bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lv.NumSafepoints() < 3 {
+	if lv.NumSafepoints() != 3 {
 		t.Fatalf("%d safepoints, and the function makes three calls", lv.NumSafepoints())
 	}
-	// The collection is the second call.
-	live := lv.LiveAt(1, frameObjectItem(t, items))
+	// The collection is the second call when the read is below it and the
+	// third when the read is above it.
+	gcAt := 1
+	if kill {
+		gcAt = 2
+	}
+	live := lv.LiveAt(gcAt, frameObjectItem(t, items))
 	if live == kill {
-		t.Errorf("the frame object is live=%v at the collection and the lifetime marker says %v", live, !kill)
+		t.Errorf("the frame object is live=%v at the collection, and the address below it says %v", live, !kill)
 	}
 	// The bitmap symbol holds n, nbit, and one byte per bitmap: one bit, so
 	// the byte is one or zero.
@@ -287,7 +311,7 @@ func assertPointerSlot(t *testing.T, c *compiled, r *Result, kill bool) {
 	}
 	// Which bitmap the collection selects is the pc-value stream's answer and
 	// not the reader's, so it is read from the maps rather than assumed.
-	idx := r.maps.Index[1]
+	idx := r.maps.Index[gcAt]
 	want := byte(1)
 	if kill {
 		want = 0

@@ -203,12 +203,39 @@ A **spill slot** is described by the backward may-analysis above. Its uses are
 all visible: the value is defined into the slot and read from it, and nothing
 else can reach it.
 
-A **frame object** cannot be. Its address escaped, which is why it is in the
-frame, so the compiler cannot enumerate its uses. It is described instead by a
-**forward** may-analysis over the `VarDef` and `VarKill` markers, seeded at
-entry with every object that has no `VarDef` anywhere. Running the backward
+A **frame object** is never read or written directly: every access goes through
+an `OpLocalAddr` that names the object in its `Aux`. Those are its uses, and the
+analysis is the same backward dataflow with one rule added:
+
+> Taking the address of an object is a use of it.
+
+That is `gc`'s rule, in `liveness.valueEffects`, and its comment says why the
+address counts as a read: whoever holds the pointer afterwards must see every
+word written before it. So the object is live from its definition up to the
+point its address was taken, and no further.
+
+**The two descriptions are a pair.** Above the last address, the locals bitmap
+covers the object. Below it, the stack objects table does: the pointer that was
+taken is a value the analysis already tracks, so the collector finds it in a
+slot or an argument, sees that it points into this frame, and looks the object
+up in `FUNCDATA_StackObjects`. Neither half is sufficient alone, which is why
+**an object that is not in the table gets no use analysis at all** and stays
+live for the whole function.
+
+Two `OpLocalAddr` values for one object cannot merge across a safepoint, which
+is what keeps a use from moving above a call it must cover: every safepoint is
+a call, a call produces a new memory value, and `OpLocalAddr` takes memory.
+
+This spec said the opposite. It said a frame object is described by a forward
+may-analysis over `VarDef` and `VarKill`, and that "running the backward
 analysis over an object's uses would report it dead while a pointer to it is
-live in another function.
+live in another function". That is true of a compiler with no stack objects
+table, and it was written when nanogo had none. With the table the pointer in
+the other function is exactly what finds the object.
+[`stackobj.go`](../internal/gotest/testdata/go/test/stackobj.go) is the corpus
+file that measures the difference: `gc` frees the heap object `f`'s frame points
+at as soon as the callee that was given `&s` stops needing it, and the forward
+analysis kept it two collections longer.
 
 ## What is exact and what is approximate
 

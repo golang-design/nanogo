@@ -278,37 +278,45 @@ func TestLivenessCallResultIsNotLiveAcrossItsOwnCall(t *testing.T) {
 	}
 }
 
-// lvObjectFunc returns a function with one frame object and two calls, and the
-// values that mark the object's lifetime if markers is true.
-func lvObjectFunc(name string, markers bool) (*Func, *ir.Object) {
+// lvObjectFunc returns a function with one frame object and two calls, and
+// takes the object's address either before both calls or between them.
+//
+// The address is what the analysis reads. Taking it is a use of the object,
+// and the object is live from the entry up to the last one, so where the
+// OpLocalAddr sits decides which of the two calls describes the object.
+//
+// Each OpLocalAddr takes the memory of its own point in the program, which is
+// what construction produces: an address computed before a store must not
+// float past it, and a call is a store to all of memory.
+func lvObjectFunc(name string, lateUse bool) (*Func, *ir.Object) {
 	f, e, mem := raFunc(name)
 	o := obj("box", tIntPtr, ir.ClassLocal)
 	o.Addrtaken = true
 	f.Frame = []*ir.Object{o}
 
-	m := mem
-	if markers {
-		d := e.NewValue(0, OpVarDef, MemType, m)
-		d.Aux = o
-		m = d
+	addr := func(m *Value) {
+		a := e.NewValue(0, OpLocalAddr, tIntPtr, m)
+		a.Aux = o
 	}
-	m = raCall(e, m)
-	if markers {
-		k := e.NewValue(0, OpVarKill, MemType, m)
-		k.Aux = o
-		m = k
+	addr(mem)
+	m := raCall(e, mem)
+	if lateUse {
+		addr(m)
 	}
 	m = raCall(e, m)
 	raRet(e, m)
 	return f, o
 }
 
-func TestLivenessObjectWithoutMarkersIsLiveThroughout(t *testing.T) {
-	// Nothing emits the markers yet, so this is the path every frame object
-	// takes today. The conservative answer is the whole function: an object
-	// whose address escaped can be reached from anywhere, and claiming it is
-	// dead frees it.
-	f, o := lvObjectFunc("noMarkers", false)
+func TestLivenessObjectIsDeadBelowItsLastAddress(t *testing.T) {
+	// specs/027: taking the address of an object is a use of it, and below the
+	// last one the object is reached through the pointer that was taken and
+	// the stack objects table, not through the bitmap. The address here is
+	// above both calls, so neither of them describes the object.
+	//
+	// This is stackobj.go's shape and gc's answer for it: the frame that
+	// passed &s to a callee stops describing s at the call.
+	f, o := lvObjectFunc("earlyUse", false)
 	_, items, lv := lvAnalyse(t, f)
 	i := lvObjectItem(items, o)
 	if i < 0 {
@@ -317,37 +325,64 @@ func TestLivenessObjectWithoutMarkersIsLiveThroughout(t *testing.T) {
 	if lv.NumSafepoints() != 2 {
 		t.Fatalf("the function has two calls and %d safepoints", lv.NumSafepoints())
 	}
+	if !lv.LiveIn(f.Entry.ID, i) {
+		t.Errorf("the object is dead above the address it took:\n%s", lv)
+	}
 	for k := 0; k < lv.NumSafepoints(); k++ {
-		if !lv.LiveAt(k, i) {
-			t.Errorf("the object is dead at safepoint %d:\n%s", k, lv)
+		if lv.LiveAt(k, i) {
+			t.Errorf("the object is live at safepoint %d, below its last address:\n%s", k, lv)
 		}
 	}
 }
 
-func TestLivenessObjectMarkersBoundTheLifetime(t *testing.T) {
-	// specs/027: VarDef and VarKill mark the lifetime bounds, so that a slot
-	// reused by two objects with disjoint lifetimes is described correctly at
-	// each point. The kill is what makes the second half of the function
-	// describable at all.
-	f, o := lvObjectFunc("markers", true)
+func TestLivenessObjectAddressBelowACallKeepsItLive(t *testing.T) {
+	// The same function with the second address taken between the two calls.
+	// A use below a call makes the object live at it, which is what a backward
+	// analysis is for and what a lifetime one could not see.
+	f, o := lvObjectFunc("lateUse", true)
 	_, items, lv := lvAnalyse(t, f)
 	i := lvObjectItem(items, o)
 	if i < 0 {
 		t.Fatalf("the frame object has no item")
 	}
 	if !lv.LiveAt(0, i) {
-		t.Errorf("the object is dead at the call inside its lifetime:\n%s", lv)
+		t.Errorf("the object is dead at a call above a use of it:\n%s", lv)
 	}
 	if lv.LiveAt(1, i) {
-		t.Errorf("the object is live at the call after its VarKill:\n%s", lv)
+		t.Errorf("the object is live at a call below its last address:\n%s", lv)
+	}
+}
+
+func TestLivenessObjectOutsideTheTableIsLiveThroughout(t *testing.T) {
+	// An object the stack objects table cannot hold has no second description.
+	// Nothing can reach it below its last address, so the bitmap has to cover
+	// the whole function, which is what it did for every object before the
+	// table was written.
+	f, o := lvObjectFunc("noTable", false)
+	a, items, _ := lvAnalyse(t, f)
+	i := lvObjectItem(items, o)
+	if i < 0 {
+		t.Fatalf("the frame object has no item")
+	}
+	if !items[i].StackObject {
+		t.Fatalf("the object is not in the table to begin with")
+	}
+	items[i].StackObject = false
+	lv, err := ComputeLiveness(a, items)
+	if err != nil {
+		t.Fatalf("ComputeLiveness: %v", err)
+	}
+	for k := 0; k < lv.NumSafepoints(); k++ {
+		if !lv.LiveAt(k, i) {
+			t.Errorf("the object is dead at safepoint %d and no table describes it:\n%s", k, lv)
+		}
 	}
 }
 
 func TestLivenessObjectLifetimeSpansBlocks(t *testing.T) {
-	// The shape a lowering pass emits: the marker that opens the lifetime and
-	// the one that closes it are in different blocks, with the calls that need
-	// the object described in between. A single-block test would pass with a
-	// transfer function that never looked at the block boundary.
+	// The address is taken in one block and the call that must describe the
+	// object is in another. A single-block test would pass with a transfer
+	// function that never looked at the block boundary.
 	f, entry, mem := raFunc("objSpan")
 	entry.Kind = BlockPlain
 	o := obj("box", tIntPtr, ir.ClassLocal)
@@ -359,12 +394,10 @@ func TestLivenessObjectLifetimeSpansBlocks(t *testing.T) {
 	entry.AddEdgeTo(mid)
 	mid.AddEdgeTo(tail)
 
-	d := entry.NewValue(0, OpVarDef, MemType, mem)
-	d.Aux = o
-	m1 := raCall(mid, d)
-	k := tail.NewValue(0, OpVarKill, MemType, m1)
-	k.Aux = o
-	m2 := raCall(tail, k)
+	m1 := raCall(mid, mem)
+	a := tail.NewValue(0, OpLocalAddr, tIntPtr, m1)
+	a.Aux = o
+	m2 := raCall(tail, m1)
 	raRet(tail, m2)
 
 	_, items, lv := lvAnalyse(t, f)
@@ -375,26 +408,21 @@ func TestLivenessObjectLifetimeSpansBlocks(t *testing.T) {
 	if lv.NumSafepoints() != 2 {
 		t.Fatalf("%d safepoints, want two", lv.NumSafepoints())
 	}
-	if !lv.LiveOut(entry.ID, i) {
-		t.Errorf("the object is dead on the way out of the block that defines it:\n%s", lv)
+	if !lv.LiveIn(entry.ID, i) {
+		t.Errorf("the object is dead in the block above the one that uses it:\n%s", lv)
 	}
 	if !lv.LiveAt(0, i) {
-		t.Errorf("the object is dead at a call inside its lifetime, in another block:\n%s", lv)
+		t.Errorf("the object is dead at a call above a use of it in another block:\n%s", lv)
 	}
 	if lv.LiveAt(1, i) {
-		t.Errorf("the object is live at the call after the VarKill in its own block:\n%s", lv)
-	}
-	// The object is dead before its definition, which is what lets a later
-	// object take the same words.
-	if lv.LiveIn(entry.ID, i) {
-		t.Errorf("the object is live before its VarDef:\n%s", lv)
+		t.Errorf("the object is live at the call below its last address:\n%s", lv)
 	}
 }
 
-func TestLivenessObjectLifetimeIsAMayAnalysisToo(t *testing.T) {
-	// The kill is on one path only. The other path reaches the join with the
-	// object still live, and the union at the join keeps it live, which is the
-	// same direction the backward analysis errs in.
+func TestLivenessObjectIsAMayAnalysisToo(t *testing.T) {
+	// The address is taken on one path only. The other path reaches the join
+	// with no use of the object at all, and the union at the join keeps it
+	// live above the branch, which is the may-direction.
 	f, entry, mem := raFunc("objJoin")
 	entry.Kind = BlockIf
 	entry.Control = entry.NewValue(0, OpConstBool, tBool)
@@ -410,9 +438,9 @@ func TestLivenessObjectLifetimeIsAMayAnalysisToo(t *testing.T) {
 	yes.AddEdgeTo(join)
 	no.AddEdgeTo(join)
 
-	k := yes.NewValue(0, OpVarKill, MemType, mem)
-	k.Aux = o
-	phi := join.NewValue(0, OpPhi, MemType, k, mem)
+	a := yes.NewValue(0, OpLocalAddr, tIntPtr, mem)
+	a.Aux = o
+	phi := join.NewValue(0, OpPhi, MemType, mem, mem)
 	m := raCall(join, phi)
 	raRet(join, m)
 
@@ -421,11 +449,14 @@ func TestLivenessObjectLifetimeIsAMayAnalysisToo(t *testing.T) {
 	if i < 0 {
 		t.Fatalf("the frame object has no item")
 	}
-	if lv.LiveOut(yes.ID, i) {
-		t.Errorf("the object is live after its VarKill on the path that kills it:\n%s", lv)
+	if !lv.LiveIn(yes.ID, i) {
+		t.Errorf("the object is dead on the path that takes its address:\n%s", lv)
 	}
-	if !lv.LiveAt(0, i) {
-		t.Errorf("the object reaches the join alive on one path and is dead at the call there:\n%s", lv)
+	if lv.LiveIn(no.ID, i) {
+		t.Errorf("the object is live on the path that never names it:\n%s", lv)
+	}
+	if lv.LiveAt(0, i) {
+		t.Errorf("the object is live at a call below every use of it:\n%s", lv)
 	}
 }
 

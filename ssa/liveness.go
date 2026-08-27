@@ -36,21 +36,43 @@ package ssa
 // live around the back edge, which a single reverse walk does not see.
 //
 // An object in Func.Frame is different. Its address is taken, or its type does
-// not fit in a value, so a use of it can be a load through a pointer that
-// arrived from anywhere. The compiler cannot enumerate its uses, so a backward
-// analysis over them would be a lie. What bounds it instead is the lifetime
-// markers of specs/025-lowering-and-rules.md: the object occupies its slot
-// from OpVarDef to OpVarKill. That is a FORWARD may-analysis,
+// not fit in a value, so it is never read or written directly: every access
+// goes through an OpLocalAddr that names the object in its Aux. Those are its
+// uses, and the analysis is the same backward dataflow, with one addition:
 //
-//	in(b)  = union over p in pred(b) of out(p)
-//	out(b) = (in(b) union def(b)) minus kill(b)
+//	taking the address of an object is a use of it.
 //
-// with in(entry) holding every object that has no OpVarDef anywhere, which is
-// the conservative default for an object whose lifetime nothing marked: it is
-// live for the whole function. Two objects that share a slot with disjoint
-// lifetimes are then described correctly at each point, which is what the spec
-// asks for, and a path that misses the OpVarKill keeps the object live, which
-// is the may-direction.
+// That is gc's rule, in liveness.valueEffects, and its comment says why the
+// address counts as a read: whoever holds the pointer afterwards must see
+// every word written before it, so the object is live from its definition up
+// to the point the address was taken.
+//
+// Below that point the object is described by REACHABILITY rather than by the
+// bitmap. The pointer that was taken is itself a value the analysis tracks, so
+// the collector finds it in a slot or an argument, sees that it points into
+// this frame, and looks the object up in the FUNCDATA_StackObjects table that
+// stackmap.go writes. That is what makes the answer both precise and sound:
+// gc frees the heap object stackobj.go's frame points at as soon as the callee
+// that was given &s stops needing it, and nanogo now does the same.
+//
+// The table is therefore the precondition, and an object that is not in it
+// gets no use analysis at all. FrameItem.StackObject is what says so, and an
+// object it is false for is live for the whole function: nothing below its
+// last use could find it, so nothing may assume it is dead there. That covers
+// the object whose type has no descriptor and the object whose address never
+// escaped, and it is what this analysis did for every object before.
+//
+// Two OpLocalAddr values for one object cannot be merged across a safepoint,
+// which is what keeps a use from moving above a call it must cover. Every
+// safepoint is a call, a call produces a new memory value, and OpLocalAddr
+// takes memory, so two accesses separated by a call have different arguments
+// and are different values.
+//
+// OpVarDef and OpVarKill from specs/025-lowering-and-rules.md bound a
+// lifetime, and both clear the object walking backwards: nothing above an
+// OpVarDef is read below it, and nothing below an OpVarKill reads what is
+// above it. Nothing emits either marker today, so an object is live from the
+// entry to its last use.
 //
 // # Why not the allocator's liveness
 //
@@ -104,12 +126,19 @@ type Liveness struct {
 	track []int32
 	n     int
 
-	// spillIn and spillOut are the backward analysis over the spill slots,
-	// objIn and objOut the forward analysis over the frame objects. Both are
+	// spillIn and spillOut are the analysis over the spill slots, objIn and
+	// objOut the analysis over the frame objects. Both run backwards, both are
 	// indexed by block identifier and both are over the tracked domain, so a
-	// merged view is one union.
+	// merged view is one union. They stay apart because their uses are found
+	// differently: a spill slot by the values that live in it, an object by
+	// the values that name it.
 	spillIn, spillOut []bitmap
 	objIn, objOut     []bitmap
+
+	// objAlways holds the frame objects that are not in the stack objects
+	// table. They are live everywhere, because nothing outside the bitmap can
+	// describe them, and the merged view unions them in.
+	objAlways bitmap
 
 	Safepoints []Safepoint
 	live       []bitmap // by safepoint index
@@ -192,10 +221,35 @@ func ComputeLiveness(a *Alloc, items []FrameItem) (*Liveness, error) {
 		return nil, fmt.Errorf("ssa: liveness: %s: %d of %d blocks are reachable, run Verify before allocating",
 			f.Name, len(order), len(f.Blocks))
 	}
+	// The objects nothing but the bitmap can describe. They are decided before
+	// the analyses run and folded in after, so the dataflow itself stays the
+	// answer to one question.
+	lv.objAlways = lv.newSet()
+	for i := range items {
+		if items[i].Kind == ItemObject && !items[i].StackObject && lv.track[i] >= 0 {
+			lv.objAlways.set(ID(lv.track[i]))
+		}
+	}
+
 	lv.spillBackward(order, slotItem)
-	lv.objForward(order, objOf)
+	lv.objBackward(order, objOf)
 	lv.safepoints(slotItem, objOf)
+	lv.conserve()
 	return lv, nil
+}
+
+// conserve makes every object outside the stack objects table live everywhere.
+//
+// It runs after the dataflow rather than inside it, so that a lifetime marker
+// cannot clear a bit the analysis is not entitled to clear.
+func (lv *Liveness) conserve() {
+	for _, set := range [][]bitmap{lv.objIn, lv.objOut, lv.live} {
+		for _, b := range set {
+			if b != nil {
+				b.union(lv.objAlways)
+			}
+		}
+	}
 }
 
 // newSet returns an empty set over the tracked domain.
@@ -307,8 +361,12 @@ func (lv *Liveness) spillTransfer(b *Block, live bitmap, slotItem []int32) {
 	}
 }
 
-// objForward is the forward lifetime analysis over the frame objects.
-func (lv *Liveness) objForward(order []*Block, objOf func(*ir.Object) int32) {
+// objBackward is the backward use analysis over the frame objects.
+//
+// It is the same dataflow as spillBackward and it converges for the same
+// reason. There is no phi case: a frame object is never a phi argument,
+// because it is memory and not a value.
+func (lv *Liveness) objBackward(order []*Block, objOf func(*ir.Object) int32) {
 	f := lv.Func
 	lv.objIn = make([]bitmap, f.NumBlocks())
 	lv.objOut = make([]bitmap, f.NumBlocks())
@@ -316,75 +374,51 @@ func (lv *Liveness) objForward(order []*Block, objOf func(*ir.Object) int32) {
 		lv.objIn[b.ID] = lv.newSet()
 		lv.objOut[b.ID] = lv.newSet()
 	}
-
-	// An object with no OpVarDef anywhere is live from the entry. Nothing
-	// marked its lifetime, so the whole function is its lifetime, which is the
-	// conservative answer and the one every object gets until
-	// specs/025-lowering-and-rules.md emits the markers.
-	defined := make([]bool, len(f.Frame))
-	for _, b := range f.Blocks {
-		for _, v := range b.Values {
-			if v.Op != OpVarDef {
-				continue
-			}
-			for i, o := range f.Frame {
-				if aux, _ := v.Aux.(*ir.Object); aux == o {
-					defined[i] = true
-				}
-			}
-		}
-	}
-	entry := lv.newSet()
-	for i, o := range f.Frame {
-		if defined[i] {
-			continue
-		}
-		if t := objOf(o); t >= 0 {
-			entry.set(ID(t))
-		}
-	}
-
 	work := lv.newSet()
 	for changed := true; changed; {
 		changed = false
-		for _, b := range order {
-			clearAll(work)
-			if b == f.Entry {
-				work.union(entry)
+		for i := len(order) - 1; i >= 0; i-- {
+			b := order[i]
+			work.copyFrom(lv.objOut[b.ID])
+			for _, s := range b.Succs {
+				work.union(lv.objIn[s.ID])
 			}
-			for _, p := range b.Preds {
-				work.union(lv.objOut[p.ID])
-			}
-			lv.objIn[b.ID].union(work)
-			work.copyFrom(lv.objIn[b.ID])
+			lv.objOut[b.ID].union(work)
+			work.copyFrom(lv.objOut[b.ID])
 			lv.objTransfer(b, work, objOf)
-			if lv.objOut[b.ID].union(work) {
+			if lv.objIn[b.ID].union(work) {
 				changed = true
 			}
 		}
 	}
 }
 
-// objTransfer runs the lifetime markers of b over a set.
+// objTransfer turns the live-out set of b into its live-in set.
 func (lv *Liveness) objTransfer(b *Block, live bitmap, objOf func(*ir.Object) int32) {
-	for _, v := range b.Values {
-		switch v.Op {
-		case OpVarDef:
-			if t := objOf(auxObject(v)); t >= 0 {
-				live.set(ID(t))
-			}
-		case OpVarKill:
-			if t := objOf(auxObject(v)); t >= 0 {
-				live.clear(ID(t))
-			}
-		}
+	if b.Control != nil && !b.Control.dead {
+		lv.objEffect(b.Control, live, objOf)
+	}
+	for i := len(b.Values) - 1; i >= 0; i-- {
+		lv.objEffect(b.Values[i], live, objOf)
 	}
 }
 
-// clearAll empties a set.
-func clearAll(b bitmap) {
-	for i := range b {
-		b[i] = 0
+// objEffect applies one value to a set that is being walked backwards.
+//
+// A value that names an object uses it, and a lifetime marker ends the range
+// the values above it belong to. Every other value is not about this object:
+// a load or a store reaches the object through the address, so the address is
+// where the use is recorded and the memory operation itself carries no name.
+func (lv *Liveness) objEffect(v *Value, live bitmap, objOf func(*ir.Object) int32) {
+	t := objOf(auxObject(v))
+	if t < 0 {
+		return
+	}
+	switch v.Op {
+	case OpVarDef, OpVarKill:
+		live.clear(ID(t))
+	default:
+		live.set(ID(t))
 	}
 }
 
@@ -458,25 +492,23 @@ func (lv *Liveness) safepoints(slotItem []int32, objOf func(*ir.Object) int32) {
 		}
 	}
 
-	// Forwards through the block for the objects, whose lifetime runs the
-	// other way.
+	// The objects, in a second walk of the same shape. The set recorded at a
+	// call is what is live after it, for the reason above: an operand that
+	// dies at the call is held and described by the callee, and an object
+	// whose address the call was given is reached through the pointer the
+	// callee holds.
 	objs := lv.newSet()
 	for _, b := range f.Blocks {
-		objs.copyFrom(lv.objIn[b.ID])
-		for _, v := range b.Values {
-			switch v.Op {
-			case OpVarDef:
-				if t := objOf(auxObject(v)); t >= 0 {
-					objs.set(ID(t))
-				}
-			case OpVarKill:
-				if t := objOf(auxObject(v)); t >= 0 {
-					objs.clear(ID(t))
-				}
-			}
+		objs.copyFrom(lv.objOut[b.ID])
+		if b.Control != nil && !b.Control.dead {
+			lv.objEffect(b.Control, objs, objOf)
+		}
+		for i := len(b.Values) - 1; i >= 0; i-- {
+			v := b.Values[i]
 			if k := index[v.ID]; k >= 0 {
 				lv.live[k].union(objs)
 			}
+			lv.objEffect(v, objs, objOf)
 		}
 	}
 }
