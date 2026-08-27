@@ -540,6 +540,40 @@ func methodNamesOf(t *testing.T, rt reflect.Type) []string {
 	return out
 }
 
+// TestDescriptorAsksToBeMarkedUsedInIface checks the mark without which every
+// method in the array above is pruned.
+//
+// cmd/link collects a type's Method array only when the type carries the mark,
+// so an unmarked type's entries all resolve to the sentinel -1 and
+// runtime.getitab installs runtime.unreachableMethod in their place. The
+// program links and dies with "unreachable method called. linker bug?" the
+// first time a value of the type is used through an interface. Go's own
+// test/const3.go is exactly that program: it formats a defined type with a
+// String method through fmt.
+//
+// The mark is on the descriptor and on nothing else it points at. A pointer
+// bitmask and a name are not types, and cmd/link panics on a marker aimed at a
+// symbol that is not one.
+func TestDescriptorAsksToBeMarkedUsedInIface(t *testing.T) {
+	types, _ := namedTypes(t)
+	for i, c := range namedCorpus {
+		t.Run(c.src, func(t *testing.T) {
+			syms, err := rtype.Descriptor(types[i])
+			if err != nil {
+				t.Fatalf("descriptor: %v", err)
+			}
+			if !syms[0].UsedInIface {
+				t.Error("the descriptor is not marked, so cmd/link prunes every method it holds")
+			}
+			for _, s := range syms[1:] {
+				if s.UsedInIface {
+					t.Errorf("%s is marked and it is not a type descriptor", s.Name)
+				}
+			}
+		})
+	}
+}
+
 // TestMethodArrayNamesTheFunctions checks that each entry names the method the
 // front end compiled or the wrapper ssagen generates, and never anything else.
 //

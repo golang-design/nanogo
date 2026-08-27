@@ -134,6 +134,27 @@ type Symbol struct {
 	Dupok  bool
 	Data   []byte
 	Relocs []Reloc
+
+	// UsedInIface asks the caller to mark the symbol as a type that the
+	// program converts to an interface.
+	//
+	// cmd/link prunes a method that nothing reaches, and the only two things
+	// that reach one are a call and an interface. A method whose type is not
+	// marked is never even a candidate: deadcode collects the Method array of
+	// a type only when the type carries the mark, so every entry of an
+	// unmarked type resolves to the sentinel -1, and runtime.getitab then
+	// installs runtime.unreachableMethod. That is a program that builds and
+	// links and dies with "unreachable method called. linker bug?" the first
+	// time a value of the type is used through an interface.
+	//
+	// gc knows which types are converted, because walkConvInterface emits an
+	// R_USEIFACE marker from the converting function. nanogo does not collect
+	// that fact: a descriptor is emitted for every type a package declares and
+	// for every type its code names, and neither says whether a conversion
+	// happens. So every descriptor carries the mark. The cost is that a method
+	// of a type nothing converts stays in the binary. The alternative is a
+	// program that dies at run time, and the two are not comparable.
+	UsedInIface bool
 }
 
 // The offsets of internal/abi.Type on a 64-bit target.
@@ -339,12 +360,13 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 	// (specs/041 stops at the arm64 group). The cost is that reflect.PointerTo
 	// builds a descriptor at run time rather than finding the linked one.
 	out[0] = Symbol{
-		Name:   name,
-		Kind:   obj.SRODATA,
-		Align:  ir.PtrSize,
-		Dupok:  true,
-		Data:   data,
-		Relocs: relocs,
+		Name:        name,
+		Kind:        obj.SRODATA,
+		Align:       ir.PtrSize,
+		Dupok:       true,
+		Data:        data,
+		Relocs:      relocs,
+		UsedInIface: true,
 	}
 	return out, nil
 }

@@ -699,6 +699,12 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, generated m
 			if s.Dupok {
 				d.Flag |= obj.SymFlagDupok
 			}
+			if s.UsedInIface {
+				// rtype says which symbols carry it and why. Without it
+				// cmd/link prunes every method of the type and the runtime
+				// installs runtime.unreachableMethod in its place.
+				d.Flag2 |= obj.SymFlagUsedInIface
+			}
 			// rtype documents the first symbol as the descriptor and the rest
 			// as the data it points at.
 			if i == 0 {

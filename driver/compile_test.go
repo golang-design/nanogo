@@ -396,6 +396,40 @@ func TestAddDescriptorsEmitsEachSymbolOnce(t *testing.T) {
 	}
 }
 
+// TestAddDescriptorsMarksATypeUsedInIface checks that rtype's request reaches
+// the object.
+//
+// cmd/link collects a type's Method array only when the symbol carries the
+// flag, so a descriptor written without it has every method pruned and the
+// runtime installs runtime.unreachableMethod in each one's place.
+func TestAddDescriptorsMarksATypeUsedInIface(t *testing.T) {
+	elem := &ir.Type{Kind: ir.Int64, Name: "int"}
+	if err := ir.Layout(elem); err != nil {
+		t.Fatal(err)
+	}
+	p := obj.NewPackage("p")
+	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{elem}, nil); err != nil {
+		t.Fatalf("addDescriptors: %v", err)
+	}
+	sym := findNonPkgDef(p, "type:int")
+	if sym == nil {
+		t.Fatal("the object holds no definition of type:int")
+	}
+	if sym.Flag2&obj.SymFlagUsedInIface == 0 {
+		t.Error("the descriptor is not marked used in an interface, so cmd/link prunes every method it holds")
+	}
+	// The data the descriptor points at is not a type, and cmd/link panics on
+	// a marker aimed at a symbol that is not one.
+	for _, name := range defNames(p) {
+		if name == "type:int" {
+			continue
+		}
+		if d := findDef(p, name); d != nil && d.Flag2&obj.SymFlagUsedInIface != 0 {
+			t.Errorf("%s is marked used in an interface and it is not a type descriptor", name)
+		}
+	}
+}
+
 // TestAddDescriptorsRefusesATypeWithNoMethodSet covers the refusal that arrives
 // after the function it came from compiled.
 //
