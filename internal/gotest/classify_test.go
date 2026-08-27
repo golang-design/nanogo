@@ -5,6 +5,8 @@
 package gotest
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -310,5 +312,60 @@ func TestNeedsMainStub(t *testing.T) {
 		if got := needsMainStub([]byte(src)); got != want {
 			t.Errorf("needsMainStub(%q) = %v, want %v", src, got, want)
 		}
+	}
+}
+
+// TestNormalizeStderrDropsTheClock keeps a wall-clock timestamp out of the
+// comparison.
+//
+// The two builds of one file are run one after the other, so a run that
+// crosses a second boundary makes the same program's output differ from
+// itself. test/linkobj.go and test/linkmain_run.go both reach log.Fatal, whose
+// default prefix is the date and the time, and both were reported as
+// miscompilations for exactly that.
+func TestNormalizeStderrDropsTheClock(t *testing.T) {
+	first := "2026/08/27 10:33:38 listing stdlib export files: open : no such file or directory\n"
+	second := "2026/08/27 10:33:39 listing stdlib export files: open : no such file or directory\n"
+	if a, b := NormalizeStderr(first), NormalizeStderr(second); a != b {
+		t.Errorf("one second apart is a difference:\n%q\n%q", a, b)
+	}
+	// The message itself is still compared. A timestamp is not a licence to
+	// drop the line it introduces.
+	other := "2026/08/27 10:33:39 something else entirely\n"
+	if a, b := NormalizeStderr(first), NormalizeStderr(other); a == b {
+		t.Error("two different messages compare equal")
+	}
+	// A line that is not a timestamp is untouched.
+	plain := "2026 is not a date prefix\n"
+	if got := NormalizeStderr(plain); got != strings.TrimRight(plain, "\n") {
+		t.Errorf("a plain line became %q", got)
+	}
+}
+
+// TestNormalizeStderrDropsATemporaryDirectorysName is the other part of a run
+// that is not behaviour.
+//
+// os.MkdirTemp picks a random name, so a program that prints a path under it
+// prints a different one every time. test/linkmain_run.go prints the command
+// line it runs and the command line names the directory, and it was reported
+// as a miscompilation for that alone.
+func TestNormalizeStderrDropsATemporaryDirectorysName(t *testing.T) {
+	tmp := os.TempDir()
+	first := filepath.Join(tmp, "533805337", "importcfg") + " failed"
+	second := filepath.Join(tmp, "1740082964", "importcfg") + " failed"
+	a, b := NormalizeStderr(first), NormalizeStderr(second)
+	if a != b {
+		t.Errorf("two temporary directories are a difference:\n%q\n%q", a, b)
+	}
+	// What is under the directory is kept, so a different file is still a
+	// difference.
+	other := filepath.Join(tmp, "1740082964", "something") + " failed"
+	if a == NormalizeStderr(other) {
+		t.Error("two different files under one temporary directory compare equal")
+	}
+	// A path that is not under the temporary directory is untouched.
+	plain := "/usr/local/go/test/x.go:3: bad"
+	if got := NormalizeStderr(plain); got != plain {
+		t.Errorf("an ordinary path became %q", got)
 	}
 }

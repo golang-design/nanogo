@@ -5,6 +5,7 @@
 package gotest
 
 import (
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -243,19 +244,35 @@ func normalizeReason(s string) string {
 //
 // A program's behaviour is its exit status, its standard output and its
 // standard error. The first two are compared byte for byte. The third is
-// compared after the addresses are removed, because a panic traceback carries
-// pointer values and goroutine numbers that differ between two runs of the
-// same binary, let alone two binaries.
+// compared after the parts that differ between two runs of one binary are
+// removed: a panic traceback carries pointer values and goroutine numbers, and
+// the log package prefixes every line with the wall clock. None of them is
+// behaviour, and the two builds are run one after the other, so a run that
+// crosses a second boundary would otherwise read as a miscompilation.
 var stderrSubs = []struct {
 	re   *regexp.Regexp
 	with string
 }{
 	{regexp.MustCompile(`0x[0-9a-fA-F]+`), "0xADDR"},
+	// The log package's default prefix, which is the date and the time.
+	// test/linkobj.go and test/linkmain_run.go both reach log.Fatal.
+	{regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(\.\d+)? `), "TIME "},
+	// A temporary directory the program made for itself. os.MkdirTemp picks a
+	// random name, so it differs between two runs of one binary.
+	// test/linkmain_run.go prints the command line it runs, and the command
+	// line names the directory. The root is os.TempDir() rather than a guess
+	// about what a path looks like, and everything under it is kept.
+	{tempDirRe, "TMPDIR"},
 	{regexp.MustCompile(`goroutine \d+`), "goroutine N"},
 	{regexp.MustCompile(`(?m)^\t.*:\d+ \+0xADDR$`), "\tFRAME"},
 	{regexp.MustCompile(`\bpc=0xADDR\b`), "pc=0xADDR"},
 	{regexp.MustCompile(`(?m)^exit status \d+$`), ""},
 }
+
+// tempDirRe matches one directory made directly under the system's temporary
+// directory, which is where os.MkdirTemp puts one.
+var tempDirRe = regexp.MustCompile(
+	regexp.QuoteMeta(strings.TrimRight(os.TempDir(), string(os.PathSeparator))) + `[/\\][^\s/\\]+`)
 
 // NormalizeStderr removes the parts of a program's standard error that differ
 // between two runs of the same program.
