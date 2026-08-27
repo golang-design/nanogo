@@ -166,6 +166,40 @@ func selectBlank() int {
 	return <-e
 }
 
+// selectReuse runs one select in a loop with a different pair of channels on
+// each iteration. The case array is one pair of frame slots, so a clause whose
+// channel word were written once and not again would poll the channel the
+// previous iteration chose.
+//
+// The ready channel alternates between the two, and the two arms add different
+// amounts, so a select that polled the stale pair gives a different total
+// rather than the same one by luck: the ready channel would land at the other
+// index and the other arm would run.
+func selectReuse(cs *[2]chan int, out chan int) {
+	for i := 0; i < 4; i++ {
+		cs[i&1] <- i
+		select {
+		case v := <-cs[i&1]:
+			out <- v + 1
+		case v := <-cs[1-i&1]:
+			out <- v + 100
+		}
+	}
+}
+
+func reuseTotal() int {
+	var cs [2]chan int
+	cs[0] = make(chan int, 1)
+	cs[1] = make(chan int, 1)
+	out := make(chan int, 8)
+	selectReuse(&cs, out)
+	total := 0
+	for i := 0; i < 4; i++ {
+		total = total + <-out
+	}
+	return total
+}
+
 // selectClosed reads the second result. A closed channel is always ready, and
 // the receive reports that no value arrived.
 func selectClosed() int {
@@ -218,6 +252,10 @@ func main() {
 		d = d / (d - d)
 	}
 	d = selectBlank() - 2
+	if d != 0 {
+		d = d / (d - d)
+	}
+	d = reuseTotal() - 10
 	if d != 0 {
 		d = d / (d - d)
 	}
