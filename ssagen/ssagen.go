@@ -1746,6 +1746,12 @@ func (e *emitter) result() (*Result, error) {
 	if e.frame.leaf {
 		text.Flag |= obj.SymFlagLeaf
 	}
+	if e.syms.reflectMethod {
+		// The function reaches a method through reflect, so cmd/link cannot
+		// decide which methods are live by following calls. reloc.go's
+		// reflectMethodNames says what happens without the mark.
+		text.Flag |= obj.SymFlagReflectMethod
+	}
 	// SymFlagNoSplit is not set even for a function that emits no check.
 	// The flag is what makes cmd/link compute the nosplit budget of
 	// specs/035-goroutines-and-stack-growth.md over the call graph, and

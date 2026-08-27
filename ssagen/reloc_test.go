@@ -366,3 +366,44 @@ func TestAddressOfNoSymbolIsRefused(t *testing.T) {
 		t.Errorf("the failure does not name the value: %v", err)
 	}
 }
+
+// TestReflectMethodMarksTheCallingFunction checks the flag that stops cmd/link
+// from pruning a method only reflect can find.
+//
+// Without it the linker resolves the method's Ifn and Tfn to the sentinel -1,
+// runtime.getitab installs runtime.unreachableMethod, and the program dies
+// with "unreachable method called. linker bug?" the first time reflect calls
+// the method. Go's own test/reflectmethod4.go is exactly that program.
+func TestReflectMethodMarksTheCallingFunction(t *testing.T) {
+	c := check(t, wrapperSource)
+	for _, tc := range []struct {
+		what   string
+		callee string
+		want   bool
+	}{
+		{"a lookup by index", "reflect.Value.Method", true},
+		{"a lookup by name", "reflect.Value.MethodByName", true},
+		{"an ordinary call", "main.somewhere", false},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			sig := &ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}}
+			if err := ir.Layout(sig); err != nil {
+				t.Fatal(err)
+			}
+			target := &ir.Object{Name: tc.callee, Type: sig, Class: ir.ClassFunc}
+			fn := &ir.Func{
+				Name: "caller",
+				Sym:  "main.caller",
+				Body: []ir.Stmt{
+					&ir.Node{Op: ir.OCall, Type: voidType(), X: &ir.Node{Op: ir.OGlobal, Type: sig, Obj: target}},
+					&ir.Node{Op: ir.OReturn, Type: voidType()},
+				},
+			}
+			r := emitFunc(t, c.build(t, fn), newMainPackage())
+			got := r.Text.Flag&obj.SymFlagReflectMethod != 0
+			if got != tc.want {
+				t.Errorf("a function that calls %s is marked %v, want %v", tc.callee, got, tc.want)
+			}
+		})
+	}
+}
