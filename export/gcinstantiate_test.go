@@ -82,10 +82,11 @@ const instantiatingMain = "package main\n\n" +
 // every instantiation is code gc built out of the body and the dictionary
 // nanogo wrote.
 //
-// The link takes the library's own symbols from the archive the go command
-// built, because a package whose declarations are all generic still has an
-// object of its own. What the instantiations were stenciled from is still
-// nanogo's export data: that is what the compile step read.
+// The link takes the same archive, which holds no object at all. A package
+// whose declarations are all generic has no code of its own: the archive the
+// go command builds for this library holds two DWARF compilation unit symbols
+// and nothing else, because every instantiation is code the importing package
+// generates.
 func TestGcInstantiatesAGenericNanogoWrote(t *testing.T) {
 	goCmd := goTool(t)
 	tc, err := obj.VerifyToolchain()
