@@ -187,15 +187,10 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
   and the cell needs a type descriptor.
 - `defer println(x)`. A builtin is not a function value, so there is nothing
   to hand the runtime.
-- A conversion to an interface, a type assertion, and a type switch. The first
-  is why `fmt.Println` is refused, because every argument to `fmt` converts to
-  `any`, and why `panic("boom")` is refused while `panic(err)` is not:
-
-  ```console
-  $ nanogo build .
-  nanogo: main: nanogo cannot compile function main at /tmp/greet/main.go:5:6: ssa.Build: ssa: main: convert: a conversion from string to interface is not built yet
-  ```
-- `recover`, when its result is read.
+- An assertion whose target is an interface, and a type switch case that names
+  one. Both need the itab of that pair of types, which nothing writes yet.
+  An assertion to a concrete type works, and so does a switch over concrete
+  cases.
 - `append`.
 - `range` over a string, and a conversion between `string` and `[]byte`.
 - `make` of a slice whose element type has methods, or is an interface.

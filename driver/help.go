@@ -146,16 +146,11 @@ What nanogo refuses, by name, with the reason:
 	defer of print or println. A builtin is not a function value, so there
 	is nothing to hand the runtime.
 
-	A conversion to an interface, a type assertion, and a type switch.
-	The first is why fmt.Println is refused: every argument to fmt
-	converts to any. It is also why panic("boom") is refused, and why
-	panic(err) is: an error is a non-empty interface and it converts to
-	any, which reads the type descriptor out of the itab. That last
-	conversion used to be the identity, which put an itab where the
-	runtime reads a descriptor, and the program died inside the runtime
-	instead of printing the panic (specs/032).
-
-	recover, when its result is read.
+	An assertion whose target is an interface, and a type switch case
+	that names one. Both need the itab of that pair of types, which
+	nothing writes yet. An assertion to a concrete type compares the
+	interface's first word against that type's descriptor and works,
+	and so does a switch over concrete cases.
 
 	append.
 

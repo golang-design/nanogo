@@ -74,7 +74,7 @@ probe refused append-int
 probe refused append-slice
 probe ok array-local
 probe refused asm-package
-probe refused buildinfo
+probe ok buildinfo
 probe ok buildinfo-named
 probe ok call-recursive
 probe ok call-variadic
@@ -96,7 +96,7 @@ probe ok defer-func
 probe ok defer-in-loop
 probe refused defer-method-value
 probe ok defer-order
-probe refused defer-recover-panic
+probe ok defer-recover-panic
 probe refused embed-directive
 probe ok empty-body
 probe ok float-arith
@@ -146,7 +146,7 @@ probe ok println-string
 probe ok range-int
 probe ok recover-alone
 probe ok recover-novalue
-probe refused recover-valueread
+probe ok recover-valueread
 probe ok slice-ops
 probe ok stdlib-fmt
 probe refused string-convert
@@ -162,6 +162,6 @@ probe ok struct-return-4
 probe ok struct-return-5
 probe ok struct-return-wide
 probe ok switch-expr
-probe refused type-assert
-probe refused type-assert-commaok
-probe refused type-switch
+probe ok type-assert
+probe ok type-assert-commaok
+probe ok type-switch

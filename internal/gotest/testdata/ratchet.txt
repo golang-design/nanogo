@@ -56,6 +56,7 @@ pass matched char_lit.go
 pass matched clear.go
 pass matched closure1.go
 pass matched closure2.go
+pass matched closure4.go
 pass matched closure7.go
 pass rejected cmp6.go
 pass rejected cmplx.go
@@ -74,8 +75,10 @@ pass rejected convlit.go
 pass rejected convlit1.go
 pass rejected copy1.go
 pass rejected ddd1.go
+pass matched decl.go
 pass rejected declbad.go
 pass matched defer.go
+pass matched defernil.go
 pass rejected directive.go
 pass rejected directive2.go
 pass rejected embedfunc.go
@@ -158,6 +161,7 @@ pass rejected switch7.go
 pass matched tinyfin.go
 pass rejected typecheck.go
 pass rejected typecheckloop.go
+pass matched typeswitch1.go
 pass rejected typeswitch2.go
 pass rejected typeswitch2b.go
 pass rejected typeswitch3.go
