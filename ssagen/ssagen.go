@@ -791,6 +791,35 @@ func (e *emitter) move(dst, src ssa.Loc, v *ssa.Value) {
 		st := scratchFor(v.Type)
 		e.remat(st, v)
 		e.store(st, dst.Slot, v.Type)
+	case dst.Kind == ssa.LocSlot && src.Kind == ssa.LocSlot:
+		// One frame slot to another. arm64 has no memory-to-memory move, so
+		// this is the load and the store that the pair of one-ended moves
+		// above would each make on its own, staged through the same reserved
+		// register the rematerialising arm uses.
+		//
+		// The register is safe here for the reason it is safe there. It is
+		// outside the allocatable set, so it is no value's home, and it is
+		// held only between these two instructions, which are adjacent.
+		// specs/026-register-allocation.md's phi resolution breaks a cycle of
+		// copies with Scratch[class][0] and this is Scratch[class][1], so a
+		// slot-to-slot copy in the middle of a broken cycle does not destroy
+		// the value the cycle is carrying.
+		//
+		// The type picks both the register file and the width. A float64 that
+		// travels through an integer register would be an FMOV the encoder
+		// refuses, and a byte moved with a 64-bit load would read seven bytes
+		// of a neighbouring slot.
+		//
+		// The allocator emits this whenever a phi and one of its operands both
+		// live in the frame, which is two values live across a call in a loop.
+		// Before this arm nanogo refused
+		//
+		//	for _, v := range s { a = a + f(v); b = b + f(a) }
+		//
+		// with "no move from s3 to s2".
+		st := scratchFor(v.Type)
+		e.load(st, src.Slot, v.Type)
+		e.store(st, dst.Slot, v.Type)
 	default:
 		e.fail("v%d: no move from %v to %v", v.ID, src, dst)
 	}

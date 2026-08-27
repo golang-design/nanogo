@@ -1823,14 +1823,15 @@ func TestEmitterNamesEveryFailure(t *testing.T) {
 		if err := e.err(); err == nil || !strings.Contains(err.Error(), "not in the function") {
 			t.Errorf("a copy of a value that is not there gave %v", e.err())
 		}
-		// A move between two slots has no instruction: the emitter reads a
-		// slot into a register and writes a register to a slot, and the pair
-		// is what a pass above it must not ask for.
+		// A move that writes nowhere. Every pair of real locations now has
+		// an arm, including two slots, so the destination with no kind is
+		// what is left for the default one to catch. A pass that asks for it
+		// has lost the destination rather than named an unusual one.
 		e = newEmitter(f, alloc(4))
 		v := f.Entry.NewValue(0, ssa.OpARM64ADD, typeInt)
-		e.move(ssa.SlotLoc(0), ssa.SlotLoc(1), v)
+		e.move(ssa.Loc{}, ssa.SlotLoc(1), v)
 		if err := e.err(); err == nil || !strings.Contains(err.Error(), "no move") {
-			t.Errorf("a move between two slots gave %v", e.err())
+			t.Errorf("a move into no location gave %v", e.err())
 		}
 	})
 
@@ -2396,6 +2397,187 @@ func TestRematerialisationIntoASlotStoresIt(t *testing.T) {
 		t.Fatal("a floating-point store into a slot does not encode")
 	}
 	mustEmit(t, e, imm, store)
+}
+
+// slotMoveEmitter builds an emitter with n values and the given slot offsets.
+func slotMoveEmitter(t *testing.T, f *ssa.Func, n int, offs []int64) *emitter {
+	t.Helper()
+	a := &ssa.Alloc{
+		Target:  ssa.NewArm64Target(),
+		Home:    make([]ssa.Loc, n),
+		Fixed:   make([]ssa.Reg, n),
+		Result:  make([]ssa.Reg, n),
+		Args:    make([][]ssa.Reg, n),
+		Remat:   make([]bool, n),
+		Spilled: make([]bool, n),
+	}
+	for i := range a.Fixed {
+		a.Fixed[i] = ssa.NoReg
+		a.Result[i] = ssa.NoReg
+	}
+	e := &emitter{
+		f: f, a: a,
+		opt:    Options{Sym: "test.f", File: "t.go"},
+		pkg:    obj.NewPackage("test"),
+		frames: map[*ir.Object]int64{},
+		done:   map[ssa.ID]bool{},
+	}
+	e.syms = newSymbols(e.pkg)
+	e.slotOff = offs
+	return e
+}
+
+// TestSlotToSlotMoveLoadsThenStores covers the copy from one frame slot to
+// another.
+//
+// specs/026-register-allocation.md resolves a phi into copies on the edges.
+// When the phi and one of its operands both live in the frame, the copy reads
+// one slot and writes another, and arm64 has no memory-to-memory move. The
+// emitter had no arm for the pair and reported
+//
+//	v98: no move from s3 to s2
+//
+// which refused every loop that keeps two values live across a call.
+//
+// The assertions are the register file and the width, because the pair that
+// fails is a pair that still emits two instructions. A float staged through an
+// integer register reaches an encoder that wants the other file, and a byte
+// moved with the 64-bit load reads seven bytes of the neighbouring slot.
+func TestSlotToSlotMoveLoadsThenStores(t *testing.T) {
+	f := ssa.NewFunc("f")
+	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
+	u8 := &ir.Type{Kind: ir.Uint8, Size: 1, Align: 1, Name: "uint8"}
+
+	cases := []struct {
+		name       string
+		typ        *ir.Type
+		op         ssa.Op
+		reg        arm64.Reg
+		load, save arm64.MemOp
+	}{
+		{"int", typeInt, ssa.OpARM64ADD, moveScratch, arm64.LoadX, arm64.StoreX},
+		{"float64", f64, ssa.OpARM64FADD, fmoveScratch, arm64.LoadF64, arm64.StoreF64},
+		{"uint8", u8, ssa.OpARM64ADD, moveScratch, arm64.LoadBU, arm64.StoreB},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := slotMoveEmitter(t, f, 4, []int64{8, 24})
+			v := f.Entry.NewValue(0, c.op, c.typ)
+			e.move(ssa.SlotLoc(1), ssa.SlotLoc(0), v)
+
+			load, lok := arm64.MemUnsignedOffset(c.load, c.reg, arm64.RSP, 8)
+			store, sok := arm64.MemUnsignedOffset(c.save, c.reg, arm64.RSP, 24)
+			if !lok || !sok {
+				t.Fatalf("a %v slot-to-slot move does not encode", c.typ)
+			}
+			if len(e.text) != 2 {
+				t.Fatalf("%d instructions, want the load and the store", len(e.text))
+			}
+			mustEmit(t, e, load, store)
+		})
+	}
+
+	// A move of a slot to itself is nothing at all, not a load and a store.
+	e := slotMoveEmitter(t, f, 4, []int64{8, 24})
+	v := f.Entry.NewValue(0, ssa.OpARM64ADD, typeInt)
+	e.move(ssa.SlotLoc(0), ssa.SlotLoc(0), v)
+	if err := e.err(); err != nil {
+		t.Fatalf("a move of a slot to itself gave %v", err)
+	}
+	if len(e.text) != 0 {
+		t.Errorf("%d instructions for a move of a slot to itself", len(e.text))
+	}
+}
+
+// TestSlotToSlotMoveDoesNotDestroyThePhiCycleTemporary is the reason a
+// slot-to-slot move stages through the second scratch register of its file
+// and not the first.
+//
+// specs/026-register-allocation.md breaks a cycle of edge copies with
+// Scratch[class][0]. A cycle of two slots becomes
+//
+//	R16 <- s1
+//	s1  <- s0
+//	s0  <- R16
+//
+// so R16 holds a value of the function across the slot-to-slot copy in the
+// middle. Staging that copy through R16 as well would overwrite the value the
+// last copy reads and swap one slot into both, which is a wrong answer with no
+// failure and the right instruction count.
+//
+// The test runs the whole path. ParallelCopy sequentialises the cycle and
+// copies emits the result, and the words are compared against the sequence
+// built from the two registers the emitter must have chosen.
+func TestSlotToSlotMoveDoesNotDestroyThePhiCycleTemporary(t *testing.T) {
+	tg := ssa.NewArm64Target()
+	for _, c := range []struct {
+		name  string
+		class ssa.RegClass
+		reg   arm64.Reg
+	}{
+		{"int", ssa.ClassInt, moveScratch},
+		{"float", ssa.ClassFloat, fmoveScratch},
+	} {
+		if got := arm64.Reg(tg.Scratch[c.class][0]); got == c.reg {
+			t.Errorf("the %s cycle temporary and the staging register are both %v", c.name, got)
+		}
+	}
+
+	f := ssa.NewFunc("f")
+	vals := make([]*ssa.Value, 2)
+	for i := range vals {
+		vals[i] = f.Entry.NewValue(0, ssa.OpARM64ADD, typeInt)
+	}
+	cps := []ssa.Copy{
+		{Dst: ssa.SlotLoc(0), Src: ssa.SlotLoc(1), Value: vals[0].ID},
+		{Dst: ssa.SlotLoc(1), Src: ssa.SlotLoc(0), Value: vals[1].ID},
+	}
+	var temp [ssa.NumRegClass]ssa.Loc
+	for c := ssa.RegClass(0); c < ssa.NumRegClass; c++ {
+		temp[c] = ssa.RegLoc(tg.Scratch[c][0])
+	}
+	seq, err := ssa.ParallelCopy(cps, temp, func(ssa.ID) ssa.RegClass { return ssa.ClassInt })
+	if err != nil {
+		t.Fatalf("a cycle of two slots gave %v", err)
+	}
+	if len(seq) != 3 {
+		t.Fatalf("%d copies for a cycle of two, want the temporary and the two moves", len(seq))
+	}
+
+	e := slotMoveEmitter(t, f, len(vals)+1, []int64{8, 24})
+	e.byID = make([]*ssa.Value, len(vals)+1)
+	for _, v := range vals {
+		e.byID[v.ID] = v
+	}
+	e.copies(seq)
+	if err := e.err(); err != nil {
+		t.Fatalf("emitting the sequence gave %v", err)
+	}
+
+	cycle := arm64.Reg(tg.Scratch[ssa.ClassInt][0])
+	want := []struct {
+		op   arm64.MemOp
+		reg  arm64.Reg
+		off  int64
+		what string
+	}{
+		{arm64.LoadX, cycle, 24, "the cycle temporary reads s1"},
+		{arm64.LoadX, moveScratch, 8, "the slot pair reads s0"},
+		{arm64.StoreX, moveScratch, 24, "the slot pair writes s1"},
+		{arm64.StoreX, cycle, 8, "the cycle temporary writes s0"},
+	}
+	if len(e.text) != len(want) {
+		t.Fatalf("%d instructions for %d copies, want %d", len(e.text), len(seq), len(want))
+	}
+	for i, w := range want {
+		word, ok := arm64.MemUnsignedOffset(w.op, w.reg, arm64.RSP, w.off)
+		if !ok {
+			t.Fatalf("%s does not encode", w.what)
+		}
+		if e.text[i] != word {
+			t.Errorf("instruction %d is %#08x and %s is %#08x", i, e.text[i], w.what, word)
+		}
+	}
 }
 
 // TestFloatRegistersReachTheEncoder covers the three paths a floating-point
