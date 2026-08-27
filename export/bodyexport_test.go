@@ -1,0 +1,258 @@
+// Copyright 2026 The golang.design Initiative Authors.
+// All rights reserved. Use of this source code is governed by
+// a BSD-style license that can be found in the LICENSE file.
+
+package export
+
+import (
+	"strings"
+	"testing"
+
+	"golang.design/x/nanogo/export/pkgbits"
+	"golang.design/x/nanogo/syntax"
+	"golang.design/x/nanogo/types2"
+)
+
+// The writer's own resolver, measured through nanogo's reader.
+//
+// bodywrite_test.go proves the layout against gc's bytes and says nothing
+// about which element a reference names, because the tree it encodes carries
+// gc's own indices. This is the other half: the tree here was built from
+// syntax and carries no index at all, so every reference is one the writer
+// allocated. Reading the file back is what says the allocation was right.
+
+// writeSource parses and type checks src as one package, builds the body of
+// every function it declares, and writes the export data.
+func writeSource(t *testing.T, path, src string, file func(string) string) ([]byte, *types2.Package, []InlineFunc) {
+	t.Helper()
+	fset := syntax.NewFileSet()
+	sf := fset.AddFile(path+"/a.go", len(src))
+	f, err := syntax.Parse(sf, []byte(src), nil, nil, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	info := &types2.Info{
+		Types:        make(map[syntax.Expr]types2.TypeAndValue),
+		Defs:         make(map[*syntax.Name]types2.Object),
+		Uses:         make(map[*syntax.Name]types2.Object),
+		Implicits:    make(map[syntax.Node]types2.Object),
+		Selections:   make(map[*syntax.SelectorExpr]*types2.Selection),
+		Scopes:       make(map[syntax.Node]*types2.Scope),
+		Instances:    make(map[*syntax.Name]types2.Instance),
+		FileVersions: make(map[*syntax.SrcFile]string),
+	}
+	conf := types2.Config{Fset: fset, Sizes: types2.SizesFor("gc", "arm64")}
+	pkg, err := conf.Check(path, []*syntax.File{f}, info)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+
+	src2 := NewBodySource(pkg, info, fset)
+	var funcs []InlineFunc
+	for name, fd := range declaredFuncs(info, []*syntax.File{f}) {
+		obj := info.Defs[fd.Name].(*types2.Func)
+		body, err := src2.BuildBody(path+"."+name, obj.Signature(), fd.Body)
+		if err != nil {
+			t.Fatalf("BuildBody(%s): %v", name, err)
+		}
+		funcs = append(funcs, InlineFunc{Obj: obj, Name: name, Cost: 1, Body: body})
+	}
+	payload, _, err := Write(pkg, false, &Bodies{Funcs: funcs, File: file})
+	if err != nil {
+		t.Fatalf("Write(%s): %v", path, err)
+	}
+	return payload, pkg, funcs
+}
+
+// readBack reads the bodies out of what the writer produced.
+func readBack(t *testing.T, path string, payload []byte) []*FuncBody {
+	t.Helper()
+	dec := pkgbits.NewPkgDecoder(path, string(payload))
+	checkStubs(t, path, &dec)
+	_, bodies, err := ReadBodies(types2.NewContext(), map[string]*types2.Package{}, dec)
+	if err != nil {
+		t.Fatalf("ReadBodies(%s): %v", path, err)
+	}
+	return bodies
+}
+
+// TestWriteCarriesABodyToTheFile is the narrowest shape the wiring has: one
+// function whose body reaches the file and comes back out of it.
+//
+// It is the first check of the writer's resolver. Every element the body
+// names is one the writer allocated, so a body that decodes with no byte and
+// no reference left over says the allocation named the elements it meant to.
+func TestWriteCarriesABodyToTheFile(t *testing.T) {
+	const src = `package p
+
+type T struct{ N int }
+
+func (t *T) Get() int { return t.N }
+
+func Add(a, b int) int { return a + b }
+`
+	payload, _, funcs := writeSource(t, "xtest/p", src, nil)
+	if len(funcs) != 2 {
+		t.Fatalf("built %d bodies, want 2", len(funcs))
+	}
+
+	bodies := readBack(t, "xtest/p", payload)
+	got := make(map[string]bool)
+	for _, b := range bodies {
+		if b.Generic {
+			t.Errorf("%s is reached through the extension data, which is the generic path", b.Name)
+		}
+		if b.Path != "xtest/p" {
+			t.Errorf("%s is listed under path %q, want %q", b.Name, b.Path, "xtest/p")
+		}
+		got[b.Name] = true
+	}
+	for _, want := range []string{"Add", "(*T).Get"} {
+		if !got[want] {
+			t.Errorf("the file carries no body for %s; it carries %v", want, got)
+		}
+	}
+}
+
+// TestWriteAllocatesAPositionBase is the position base section, which the
+// writer never allocated an element of until a body carried a position.
+func TestWriteAllocatesAPositionBase(t *testing.T) {
+	const src = `package p
+
+func Add(a, b int) int { return a + b }
+`
+	payload, _, _ := writeSource(t, "xtest/q", src, func(name string) string {
+		return "trimmed/" + name
+	})
+	dec := pkgbits.NewPkgDecoder("xtest/q", string(payload))
+	if n := dec.NumElems(pkgbits.SectionPosBase); n != 1 {
+		t.Fatalf("the file holds %d position bases, want 1", n)
+	}
+
+	bodies := readBack(t, "xtest/q", payload)
+	if len(bodies) != 1 {
+		t.Fatalf("the file carries %d bodies, want 1", len(bodies))
+	}
+	pos := bodies[0].Body.Rbrace
+	if !pos.Known {
+		t.Fatal("the body's closing brace has no position")
+	}
+	if want := "trimmed/xtest/q/a.go"; pos.File != want {
+		t.Errorf("the position names file %q, want %q", pos.File, want)
+	}
+	if pos.Line != 3 {
+		t.Errorf("the closing brace is on line %d, want 3", pos.Line)
+	}
+}
+
+// TestWriteCarriesAFunctionLiteralsBody is the case that makes a body a tree
+// of elements rather than one element.
+func TestWriteCarriesAFunctionLiteralsBody(t *testing.T) {
+	const src = `package p
+
+func Make(n int) func() int {
+	return func() int { return n }
+}
+`
+	payload, _, _ := writeSource(t, "xtest/r", src, nil)
+	dec := pkgbits.NewPkgDecoder("xtest/r", string(payload))
+	if n := dec.NumElems(pkgbits.SectionBody); n != 2 {
+		t.Fatalf("the file holds %d body elements, want 2", n)
+	}
+	bodies := readBack(t, "xtest/r", payload)
+	if len(bodies) != 1 {
+		t.Fatalf("the private root lists %d bodies, want 1", len(bodies))
+	}
+	if bodies[0].Nested != 1 {
+		t.Errorf("the body names %d function literals, want 1", bodies[0].Nested)
+	}
+}
+
+// TestWriteLeavesOutABodyItCannotAllocate is the rule that keeps a guessed
+// index out of the file.
+//
+// A body that names a generic declaration needs an object element the writer
+// refuses to write. The declaration the body belongs to is still written, so
+// the package still exports; the body is what is left out.
+func TestWriteLeavesOutABodyItCannotAllocate(t *testing.T) {
+	const src = `package p
+
+func Id[T any](v T) T { return v }
+
+func Use(n int) int { return Id(n) }
+
+func Add(a, b int) int { return a + b }
+`
+	fset := syntax.NewFileSet()
+	sf := fset.AddFile("xtest/s/a.go", len(src))
+	f, err := syntax.Parse(sf, []byte(src), nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &types2.Info{
+		Types:        make(map[syntax.Expr]types2.TypeAndValue),
+		Defs:         make(map[*syntax.Name]types2.Object),
+		Uses:         make(map[*syntax.Name]types2.Object),
+		Implicits:    make(map[syntax.Node]types2.Object),
+		Selections:   make(map[*syntax.SelectorExpr]*types2.Selection),
+		Scopes:       make(map[syntax.Node]*types2.Scope),
+		Instances:    make(map[*syntax.Name]types2.Instance),
+		FileVersions: make(map[*syntax.SrcFile]string),
+	}
+	conf := types2.Config{Fset: fset, Sizes: types2.SizesFor("gc", "arm64")}
+	pkg, err := conf.Check("xtest/s", []*syntax.File{f}, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The exported surface is what the writer refuses a generic declaration
+	// for, so the package here exports only the two ordinary functions.
+	src2 := NewBodySource(pkg, info, fset)
+	var funcs []InlineFunc
+	for _, name := range []string{"Use", "Add"} {
+		obj := pkg.Scope().Lookup(name).(*types2.Func)
+		fd := declaredFuncs(info, []*syntax.File{f})[name]
+		body, err := src2.BuildBody("xtest/s."+name, obj.Signature(), fd.Body)
+		if err != nil {
+			t.Fatalf("BuildBody(%s): %v", name, err)
+		}
+		funcs = append(funcs, InlineFunc{Obj: obj, Name: name, Cost: 1, Body: body})
+	}
+
+	kept := writableBodies(pkg, nil, funcs)
+	if len(kept) != 1 || kept[0].Name != "Add" {
+		names := make([]string, len(kept))
+		for i, k := range kept {
+			names[i] = k.Name
+		}
+		t.Fatalf("the writer kept the bodies of %v, want only Add", names)
+	}
+}
+
+// TestWriteRefusesAGenericBodyItWasHanded is the guarantee underneath the
+// filter: a body the writer cannot allocate an element for is refused rather
+// than written with an index nothing holds.
+func TestWriteRefusesAGenericBodyItWasHanded(t *testing.T) {
+	pw := newPkgWriter(types2.NewPackage("xtest/t", "p"), nil, nil)
+	body := &Body{
+		HasBlock: true,
+		Stmts: []Stmt{&ReturnStmt{
+			Pos:     Pos{Known: true, File: "a.go", Line: 1},
+			Results: MultiExpr{Exprs: []Expr{&ZeroExpr{Pos: Pos{Known: true, File: "a.go", Line: 1}, Type: TypeUse{Derived: true, Idx: 0}}}},
+		}},
+	}
+	err := func() (err error) {
+		defer func() {
+			if v := recover(); v != nil {
+				err, _ = v.(error)
+			}
+		}()
+		pw.writeBody("xtest/t", "F", body)
+		return nil
+	}()
+	if err == nil {
+		t.Fatal("a body naming a derived type was written")
+	}
+	if !strings.Contains(err.Error(), "dictionary") {
+		t.Errorf("the refusal is %q and does not name the dictionary", err)
+	}
+}

@@ -235,6 +235,7 @@ func (stubRefs) typIdx(TypeUse) pkgbits.Index         { return 0 }
 func (stubRefs) objIdx(ObjUse) pkgbits.Index          { return 0 }
 func (stubRefs) posBaseIdx(Pos) pkgbits.Index         { return 0 }
 func (stubRefs) bodyIdx(*FuncLitExpr) pkgbits.Index   { return 0 }
+func (stubRefs) dictIdx(string, int) int              { return 0 }
 
 // unknownStmt is a statement no code of the format names.
 type unknownStmt struct{}

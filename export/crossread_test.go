@@ -62,7 +62,7 @@ func TestGcReadsWhatNanogoWrote(t *testing.T) {
 		}
 		resolve(t, pkg)
 
-		payload, _, err := Write(pkg, false)
+		payload, _, err := Write(pkg, false, nil)
 		if err != nil {
 			if u, ok := err.(*UnsupportedError); ok {
 				refused++

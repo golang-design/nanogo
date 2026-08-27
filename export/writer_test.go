@@ -57,7 +57,7 @@ func surface(pkg *types2.Package) []string {
 // the reader reconstructed.
 func roundTrip(t *testing.T, pkg *types2.Package) (*types2.Package, [8]byte) {
 	t.Helper()
-	payload, fp, err := Write(pkg, false)
+	payload, fp, err := Write(pkg, false, nil)
 	if err != nil {
 		t.Fatalf("Write(%s): %v", pkg.Path(), err)
 	}
@@ -230,7 +230,7 @@ func TestWriteRefusesAGeneric(t *testing.T) {
 	}
 	resolve(t, pkg)
 
-	_, _, err = Write(pkg, false)
+	_, _, err = Write(pkg, false, nil)
 	if err == nil {
 		t.Fatal("the fixture's generic declarations were written")
 	}
@@ -281,11 +281,11 @@ func TestWriteIsDeterministic(t *testing.T) {
 	}
 
 	pkg := read()
-	first, fp1, err := Write(pkg, false)
+	first, fp1, err := Write(pkg, false, nil)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	second, fp2, err := Write(pkg, false)
+	second, fp2, err := Write(pkg, false, nil)
 	if err != nil {
 		t.Fatalf("Write again: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestWriteIsDeterministic(t *testing.T) {
 		t.Errorf("two writes of one package have fingerprints %x and %x", fp1, fp2)
 	}
 
-	third, fp3, err := Write(read(), false)
+	third, fp3, err := Write(read(), false, nil)
 	if err != nil {
 		t.Fatalf("Write after a second read: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestWriteStandardLibrary(t *testing.T) {
 		}
 		resolve(t, pkg)
 
-		payload, _, err := Write(pkg, false)
+		payload, _, err := Write(pkg, false, nil)
 		if err != nil {
 			if u, ok := err.(*UnsupportedError); ok {
 				refused = append(refused, u.Package+": "+u.Name)
@@ -421,7 +421,7 @@ func TestWriteDigestHelper(t *testing.T) {
 		t.Fatalf("Read: %v", err)
 	}
 	resolve(t, pkg)
-	payload, _, err := Write(pkg, false)
+	payload, _, err := Write(pkg, false, nil)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestWriteReportsABrokenStreamAsAnError(t *testing.T) {
 	})
 	pkg.MarkComplete()
 
-	_, _, err := Write(pkg, false)
+	_, _, err := Write(pkg, false, nil)
 	if err == nil {
 		t.Fatal("a package whose declaration cannot be decoded was written")
 	}
@@ -510,7 +510,7 @@ func TestWriteCarriesTheInitialisationFlag(t *testing.T) {
 	pkg.MarkComplete()
 
 	for _, hasInit := range []bool{false, true} {
-		payload, _, err := Write(pkg, hasInit)
+		payload, _, err := Write(pkg, hasInit, nil)
 		if err != nil {
 			t.Fatalf("Write(hasInit=%v): %v", hasInit, err)
 		}

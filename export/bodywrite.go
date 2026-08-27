@@ -65,6 +65,17 @@ type bodyRefs interface {
 	// bodyIdx returns the SectionBody element holding a function literal's
 	// body.
 	bodyIdx(e *FuncLitExpr) pkgbits.Index
+
+	// dictIdx returns the slot of the enclosing declaration's dictionary
+	// the body may name, and refuses when the resolver fills no dictionary.
+	//
+	// A dictionary slot is not an element index, which is why it is not one
+	// of the five above: it is an offset into a list the declaration carries
+	// and the encoder is told it. It is still asked for, because a slot
+	// written into a dictionary that holds nothing is a type gc reads
+	// without complaint and reads wrong. what names the kind of slot, for
+	// the refusal.
+	dictIdx(what string, slot int) int
 }
 
 // bodyWriter encodes one body element.
@@ -111,7 +122,7 @@ func (w *bodyWriter) encodeBody(b *Body) {
 func (w *bodyWriter) local(l Local) {
 	w.Sync(pkgbits.SyncAddLocal)
 	if w.Bool(l.DictRType >= 0) {
-		w.Len(l.DictRType)
+		w.Len(w.refs.dictIdx("a local variable's runtime type", l.DictRType))
 	}
 }
 
@@ -149,7 +160,7 @@ func (w *bodyWriter) str(s string) {
 func (w *bodyWriter) typeUse(t TypeUse) {
 	w.Sync(pkgbits.SyncType)
 	if w.Bool(t.Derived) {
-		w.Len(int(t.Idx))
+		w.Len(w.refs.dictIdx("a derived type", int(t.Idx)))
 		return
 	}
 	w.Reloc(pkgbits.SectionType, w.refs.typIdx(t))
@@ -257,7 +268,7 @@ func (w *bodyWriter) op(op Op) {
 func (w *bodyWriter) rtype(t RType) {
 	w.Sync(pkgbits.SyncRType)
 	if w.Bool(t.Derived) {
-		w.Len(t.DictIdx)
+		w.Len(w.refs.dictIdx("a runtime type descriptor", t.DictIdx))
 		return
 	}
 	w.typeUse(t.Type)
@@ -268,7 +279,7 @@ func (w *bodyWriter) itab(c ConvRTTI) {
 	w.rtype(c.Src)
 	w.rtype(c.Dst)
 	if w.Bool(c.Derived) {
-		w.Len(c.DictIdx)
+		w.Len(w.refs.dictIdx("an itab", c.DictIdx))
 	}
 }
 
@@ -811,7 +822,7 @@ func (w *bodyWriter) derefOrAddr(deref, addr bool) {
 // funcInst writes a reference to an instantiated generic function.
 func (w *bodyWriter) funcInst(f FuncInst) {
 	if w.Bool(f.Derived) {
-		w.Len(f.DictIdx)
+		w.Len(w.refs.dictIdx("a function instantiation", f.DictIdx))
 		return
 	}
 	w.objUse(f.Obj)
@@ -834,11 +845,11 @@ func (w *bodyWriter) methodRef(m MethodRef) {
 	// A method on a type parameter is reached through the dictionary and
 	// nothing further follows.
 	if w.Bool(m.TypeParam) {
-		w.Len(m.DictIdx)
+		w.Len(w.refs.dictIdx("a method expression on a type parameter", m.DictIdx))
 		return
 	}
 	if w.Bool(m.Subdict) {
-		w.Len(m.SubdictIdx)
+		w.Len(w.refs.dictIdx("a subdictionary", m.SubdictIdx))
 		return
 	}
 	if w.Bool(m.StaticDict) {
@@ -1084,5 +1095,9 @@ func (e *elemRefs) typIdx(t TypeUse) pkgbits.Index       { return t.Idx }
 func (e *elemRefs) objIdx(o ObjUse) pkgbits.Index        { return o.Idx }
 func (e *elemRefs) posBaseIdx(p Pos) pkgbits.Index       { return p.Base }
 func (e *elemRefs) bodyIdx(f *FuncLitExpr) pkgbits.Index { return f.Body }
+
+// dictIdx answers with the slot the archive's own dictionary holds, which is
+// the one the tree was decoded against.
+func (e *elemRefs) dictIdx(_ string, slot int) int { return slot }
 
 var _ bodyRefs = (*elemRefs)(nil)

@@ -57,14 +57,18 @@ func (e *UnsupportedError) Error() string {
 // that has a record and says it has none is a package whose initialisation
 // never runs, and a package that says it has one and has none is a link
 // failure. driver/inittask.go decides it.
-func Write(pkg *types2.Package, hasInit bool) (data []byte, fingerprint [8]byte, err error) {
-	pw := &pkgWriter{
-		PkgEncoder: pkgbits.NewPkgEncoder(Version),
-		curpkg:     pkg,
-		pkgsIdx:    make(map[*types2.Package]pkgbits.Index),
-		typsIdx:    make(map[types2.Type]pkgbits.Index),
-		objsIdx:    make(map[types2.Object]pkgbits.Index),
+//
+// bodies carries the function bodies an importer can inline, and is nil for a
+// package that exports none. A body the writer cannot allocate every element
+// of is left out rather than guessed at: see [writableBodies].
+func Write(pkg *types2.Package, hasInit bool, bodies *Bodies) (data []byte, fingerprint [8]byte, err error) {
+	var funcs []InlineFunc
+	var file func(string) string
+	if bodies != nil {
+		file = bodies.File
+		funcs = writableBodies(pkg, file, bodies.Funcs)
 	}
+	pw := newPkgWriter(pkg, funcs, file)
 
 	// A declaration the writer cannot encode is reported by panicking, the
 	// way the reader reports a stream it cannot decode: the refusal is found
@@ -81,6 +85,10 @@ func Write(pkg *types2.Package, hasInit bool) (data []byte, fingerprint [8]byte,
 			data, fingerprint = nil, [8]byte{}
 			if u, ok := v.(*UnsupportedError); ok {
 				err = u
+				return
+			}
+			if b, ok := v.(*BodyError); ok {
+				err = b
 				return
 			}
 			err = fmt.Errorf("export: %s: %v", pkg.Path(), v)
@@ -108,6 +116,12 @@ func Write(pkg *types2.Package, hasInit bool) (data []byte, fingerprint [8]byte,
 		}
 	}
 
+	// The bodies, before the public root and after the walk. Encoding one
+	// allocates the elements it names, so a body can add an object to the
+	// file, and the public root's list is the count of the objects the file
+	// ends up holding.
+	entries := pw.writeBodies(pkg.Path(), funcs)
+
 	// The public root: the package, then every object in the file.
 	//
 	// Every object, not only this package's: gc's linker lists what it
@@ -130,9 +144,18 @@ func Write(pkg *types2.Package, hasInit bool) (data []byte, fingerprint [8]byte,
 	public.Flush()
 
 	// The private root: whether the object carries an initialisation record,
-	// and the function bodies, of which nanogo writes none. See README.md.
+	// and the list of function bodies an importer can inline. The entry
+	// names its declaration by gc's linker symbol name and by the real
+	// import path, which is what gc looks it up under: the empty path
+	// pkgIdx writes for the package being compiled is a property of the
+	// package element and not of this list.
 	private.Bool(hasInit)
-	private.Len(0) // no function bodies
+	private.Len(len(entries))
+	for _, e := range entries {
+		private.String(e.path)
+		private.String(e.name)
+		private.Reloc(pkgbits.SectionBody, e.idx)
+	}
 	private.Sync(pkgbits.SyncEOF)
 	private.Flush()
 
@@ -165,9 +188,45 @@ type pkgWriter struct {
 
 	curpkg *types2.Package
 
-	pkgsIdx map[*types2.Package]pkgbits.Index
-	typsIdx map[types2.Type]pkgbits.Index
-	objsIdx map[types2.Object]pkgbits.Index
+	pkgsIdx     map[*types2.Package]pkgbits.Index
+	typsIdx     map[types2.Type]pkgbits.Index
+	objsIdx     map[types2.Object]pkgbits.Index
+	posBasesIdx map[string]pkgbits.Index
+
+	// inline names the declarations whose body the file carries, so that a
+	// declaration's extension data says it has one. The body itself is
+	// reached through the private root and not through the extension data,
+	// which is the shape of the inlining path.
+	inline map[types2.Object]*InlineFunc
+
+	// lits holds the element claimed for each function literal a body
+	// named, which is filled in after the body that named it.
+	lits map[*FuncLitExpr]*pkgbits.Encoder
+
+	// fileName maps a parsed file name to the one a position base records.
+	fileName func(string) string
+
+	refs *declRefs
+}
+
+// newPkgWriter returns a writer for one package.
+func newPkgWriter(pkg *types2.Package, funcs []InlineFunc, file func(string) string) *pkgWriter {
+	pw := &pkgWriter{
+		PkgEncoder:  pkgbits.NewPkgEncoder(Version),
+		curpkg:      pkg,
+		pkgsIdx:     make(map[*types2.Package]pkgbits.Index),
+		typsIdx:     make(map[types2.Type]pkgbits.Index),
+		objsIdx:     make(map[types2.Object]pkgbits.Index),
+		posBasesIdx: make(map[string]pkgbits.Index),
+		inline:      make(map[types2.Object]*InlineFunc, len(funcs)),
+		lits:        make(map[*FuncLitExpr]*pkgbits.Encoder),
+		fileName:    file,
+	}
+	pw.refs = &declRefs{pw: pw}
+	for i := range funcs {
+		pw.inline[funcs[i].Obj] = &funcs[i]
+	}
+	return pw
 }
 
 // writer writes one element.
@@ -553,7 +612,7 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		w.typeParamNames()
 		w.signature(sig)
 		w.pos() // the declaration's position, which the linker copies
-		wext.funcExt(sig, false)
+		wext.funcExt(obj, sig, false)
 		return pkgbits.ObjFunc
 
 	case *types2.TypeName:
@@ -630,7 +689,7 @@ func (w *writer) method(wext *writer, meth *types2.Func) {
 	w.signature(sig)
 	w.pos() // the declaration's position, which the linker copies
 
-	wext.funcExt(sig, true)
+	wext.funcExt(meth, sig, true)
 }
 
 func (w *writer) qualifiedIdent(obj types2.Object) {
@@ -659,7 +718,7 @@ func (w *writer) selector(obj types2.Object) {
 // what reaches a file has the escape analysis results and the inlining cost
 // in it and no reference to a body element. See README.md for what nanogo
 // leaves out of it and what each omission costs.
-func (w *writer) funcExt(sig *types2.Signature, isMethod bool) {
+func (w *writer) funcExt(fn *types2.Func, sig *types2.Signature, isMethod bool) {
 	w.Sync(pkgbits.SyncFuncExt)
 	w.pragmaFlag()
 	w.linkname()
@@ -684,7 +743,18 @@ func (w *writer) funcExt(sig *types2.Signature, isMethod bool) {
 		w.String("")
 	}
 
-	w.Bool(false) // no inlinable body
+	// Whether the file carries a body an importer can inline, and what it
+	// costs gc's inlining budget. gc reads the body itself from the private
+	// root's list, keyed by this declaration's linker symbol name.
+	if inl := w.p.inline[fn]; w.Bool(inl != nil) {
+		w.Len(inl.Cost)
+
+		// Whether gc may leave the results of the inlined call in the
+		// caller's own variables rather than in temporaries it creates
+		// first. false is the answer that needs nothing proved about the
+		// body, and gc reads it as an instruction to create them.
+		w.Bool(false)
+	}
 	w.Sync(pkgbits.SyncEOF)
 }
 

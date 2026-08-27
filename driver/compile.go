@@ -1161,7 +1161,7 @@ func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package, hasInit bool)
 	if err != nil {
 		return fmt.Errorf("%s: %v", cfg.Package, err)
 	}
-	payload, fingerprint, err := export.Write(pkg, hasInit)
+	payload, fingerprint, err := export.Write(pkg, hasInit, nil)
 	if err != nil {
 		return err
 	}

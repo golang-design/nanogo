@@ -130,6 +130,10 @@ func (s *symRefs) bodyIdx(e *FuncLitExpr) pkgbits.Index {
 	return idx
 }
 
+// dictIdx answers with the slot itself. The oracle compares two trees of the
+// same declaration, so a slot means the same thing in both.
+func (s *symRefs) dictIdx(_ string, slot int) int { return slot }
+
 var _ bodyRefs = (*symRefs)(nil)
 
 // typeKey names a type by the element a writer would put it in.
