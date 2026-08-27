@@ -72,7 +72,9 @@ type bodyWriter struct {
 	*pkgbits.Encoder
 	refs bodyRefs
 
-	// name is the declaration the body belongs to, for a refusal.
+	// path and name are the package being written and the declaration the
+	// body belongs to, for a refusal.
+	path string
 	name string
 
 	// nested collects every function literal this element named, in the
@@ -87,7 +89,7 @@ type bodyWriter struct {
 // the format has no shape for. The message names the declaration, which is
 // what a user has to work around.
 func (w *bodyWriter) refuse(format string, args ...any) {
-	panic(&BodyError{Name: w.name, Reason: fmt.Sprintf(format, args...)})
+	panic(&BodyError{Package: w.path, Name: w.name, Reason: fmt.Sprintf(format, args...), Writing: true})
 }
 
 // encodeBody writes b into the element w holds.

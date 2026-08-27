@@ -29,13 +29,22 @@ import (
 // The declaration is named, because it is what a user has to work around and
 // what specs/015-export-data.md's census counts.
 type BodyError struct {
-	Package string // the package the body was read from
+	Package string // the package the body was read from or written for
 	Name    string // the declaration the body belongs to
-	Reason  string // what the reader cannot decode
+	Reason  string // what the reader cannot decode or the encoder cannot write
+
+	// Writing is true for a body the encoder refused. The two halves refuse
+	// different things, and a message that names one about the other sends a
+	// user to the wrong side of the format.
+	Writing bool
 }
 
 func (e *BodyError) Error() string {
-	return fmt.Sprintf("export: %s: cannot read the body of %s: %s", e.Package, e.Name, e.Reason)
+	verb := "read"
+	if e.Writing {
+		verb = "write"
+	}
+	return fmt.Sprintf("export: %s: cannot %s the body of %s: %s", e.Package, verb, e.Name, e.Reason)
 }
 
 // bodyReader decodes one body element.

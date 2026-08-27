@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.design/x/nanogo/export/pkgbits"
@@ -51,7 +52,7 @@ func (c *writeCensus) fail(format string, args ...any) {
 
 // encodeOne writes one body element and returns it with the function literals
 // it named.
-func encodeOne(pe *pkgbits.PkgEncoder, refs bodyRefs, name string, b *Body) (enc *pkgbits.Encoder, nested []*FuncLitExpr, err error) {
+func encodeOne(pe *pkgbits.PkgEncoder, refs bodyRefs, path, name string, b *Body) (enc *pkgbits.Encoder, nested []*FuncLitExpr, err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			if e, ok := v.(*BodyError); ok {
@@ -64,6 +65,7 @@ func encodeOne(pe *pkgbits.PkgEncoder, refs bodyRefs, name string, b *Body) (enc
 	w := &bodyWriter{
 		Encoder: pe.NewEncoder(pkgbits.SectionBody, pkgbits.SyncFuncBody),
 		refs:    refs,
+		path:    path,
 		name:    name,
 	}
 	w.encodeBody(b)
@@ -135,7 +137,7 @@ func (c *writeCensus) checkBodies(pr *pkgReader, bodies []*FuncBody) {
 		queue = queue[1:]
 		c.elements++
 
-		enc, nested, err := encodeOne(&pe, refs, p.name, p.body)
+		enc, nested, err := encodeOne(&pe, refs, pr.PkgPath(), p.name, p.body)
 		if err != nil {
 			c.fail("%s: %s: %v", pr.PkgPath(), p.name, err)
 			continue
@@ -216,4 +218,124 @@ func readArchiveBodies(path, file string) (*pkgReader, []*FuncBody, error) {
 		return nil, nil, err
 	}
 	return pr, bodies, nil
+}
+
+// @@@ Refusals
+
+// stubRefs resolves every reference to element zero.
+//
+// The refusals below are decided before any reference is written, or on a
+// field whose index is not what is wrong with it, so what the resolver answers
+// does not enter the test.
+type stubRefs struct{}
+
+func (stubRefs) strIdx(string) pkgbits.Index          { return 0 }
+func (stubRefs) pkgIdx(*types2.Package) pkgbits.Index { return 0 }
+func (stubRefs) typIdx(TypeUse) pkgbits.Index         { return 0 }
+func (stubRefs) objIdx(ObjUse) pkgbits.Index          { return 0 }
+func (stubRefs) posBaseIdx(Pos) pkgbits.Index         { return 0 }
+func (stubRefs) bodyIdx(*FuncLitExpr) pkgbits.Index   { return 0 }
+
+// unknownStmt is a statement no code of the format names.
+type unknownStmt struct{}
+
+func (*unknownStmt) stmtKind() StmtKind { return StmtEnd }
+
+// typedLocal is a use of a local carrying the type the stream gave it.
+func typedLocal(t types2.Type) *LocalExpr {
+	return &LocalExpr{exprType: exprType{typ: t}}
+}
+
+// TestWriteBodyRefusals checks that a tree the format has no shape for is
+// refused by name rather than encoded with every byte after the field moved.
+//
+// The round trip cannot reach these: it encodes trees the reader built, and
+// the reader builds each of these fields by the same test the encoder makes on
+// it. They are what a builder from syntax would get wrong.
+func TestWriteBodyRefusals(t *testing.T) {
+	mapType := types2.NewMap(types2.Typ[types2.Int], types2.Typ[types2.Int])
+	intType := types2.Typ[types2.Int]
+	appendCall := func(rt *RType) *CallExpr {
+		return &CallExpr{
+			Fun:   &GlobalExpr{Obj: ObjUse{Name: "append"}},
+			Args:  MultiExpr{},
+			RType: rt,
+		}
+	}
+
+	tests := []struct {
+		name string
+		expr Expr
+		stmt Stmt
+		want string
+	}{{
+		name: "an operator no body carries",
+		expr: &UnaryExpr{Op: Op(3), X: typedLocal(intType)},
+		want: "gc's ir.Op 3",
+	}, {
+		name: "a statement the format has no code for",
+		stmt: &unknownStmt{},
+		want: "which the format has no encoding for",
+	}, {
+		name: "an index of a map with no descriptor",
+		expr: &IndexExpr{X: typedLocal(mapType), Index: typedLocal(intType)},
+		want: "the indexed operand is a map and carries no descriptor",
+	}, {
+		name: "an index of what is not a map with a descriptor",
+		expr: &IndexExpr{X: typedLocal(intType), Index: typedLocal(intType), MapRType: &RType{}},
+		want: "the indexed operand is not a map and carries a descriptor",
+	}, {
+		name: "an index whose operand carries no type",
+		expr: &IndexExpr{X: typedLocal(nil), Index: typedLocal(intType)},
+		want: "the indexed operand carries no type",
+	}, {
+		name: "a call of append with no runtime type",
+		expr: appendCall(nil),
+		want: "needs a runtime type and carries none",
+	}, {
+		name: "a call carrying a runtime type its callee needs none for",
+		expr: &CallExpr{Fun: typedLocal(intType), Args: MultiExpr{}, RType: &RType{}},
+		want: "carries a runtime type and its callee needs none",
+	}, {
+		name: "a composite literal with no type",
+		expr: &CompLitExpr{},
+		want: "the composite literal carries no type",
+	}, {
+		name: "Offsetof naming no field",
+		expr: &OffsetofExpr{},
+		want: "Offsetof names no field",
+	}, {
+		name: "a type written where an expression is expected with neither shape",
+		expr: &MakeExpr{},
+		want: "carries neither a descriptor nor an itab",
+	}, {
+		name: "an expression the format requires and the tree does not hold",
+		stmt: &ExprStmt{},
+		want: "an expression the format requires is absent",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmt := tt.stmt
+			if stmt == nil {
+				stmt = &ExprStmt{X: tt.expr}
+			}
+			body := &Body{HasBlock: true, Stmts: []Stmt{stmt}}
+			pe := pkgbits.NewPkgEncoder(Version)
+			_, _, err := encodeOne(&pe, stubRefs{}, "xtest", "xtest.F", body)
+			if err == nil {
+				t.Fatalf("the tree encoded and the format has no shape for it")
+			}
+			e, ok := err.(*BodyError)
+			if !ok {
+				t.Fatalf("the refusal is a %T and not a *BodyError: %v", err, err)
+			}
+			if e.Name != "xtest.F" {
+				t.Errorf("the refusal names %q and not the declaration", e.Name)
+			}
+			if !strings.Contains(e.Reason, tt.want) {
+				t.Errorf("the refusal says %q and not %q", e.Reason, tt.want)
+			}
+		})
+	}
 }
