@@ -368,18 +368,18 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | --- | --- | --- |
 | [`syntax`](syntax/) | 99% | 19,674 files agree with `go/scanner` on tokens and positions; 16,293 agree with `go/parser` on accept, reject and first error |
 | [`types2`](types2/) | see below | a fork of the Go type checker, re-pointed at nanogo's tree: 613 subtests, a 375-entry errorcheck corpus, and it type-checks nanogo's own source |
-| [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 536 packages agree with `go list` |
+| [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 537 packages agree with `go list` |
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
 | [`obj/arm64`](obj/arm64/) | 99% | 981,124 encodings agree with `go tool asm`, with none disagreeing |
-| [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 39,947 functions and 4,188,075 nodes |
+| [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 41,084 functions and 4,191,767 nodes |
 | [`ssa`](ssa/) | 96% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant |
 | [`ssa/rules`](ssa/rules/) | 97% | the arm64 rule set, checked by lowering the corpus and by a verifier after every rule |
 | [`export`](export/) | 96% | reads gc's export data for all 375 packages of the standard library, 13,518 declarations, and for a fixture carrying every encoding the format has, checked declaration by declaration |
 | [`export/pkgbits`](export/pkgbits/) | 93% | the container, ported from `internal/pkgbits` and exercised by every archive the reader above reads |
-| [`ssagen`](ssagen/) | 91% | emits machine code that **links and runs**, and stack maps a real collector honours |
-| [`rtsym`](rtsym/) | 100% | 120 runtime signatures checked against the runtime's own source |
-| [`rtype`](rtype/) | 96% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
-| [`driver`](driver/) | 96% | a real `go build -toolexec` completes |
+| [`ssagen`](ssagen/) | 90% | emits machine code that **links and runs**, and stack maps a real collector honours |
+| [`rtsym`](rtsym/) | 96% | 120 runtime signatures checked against the runtime's own source |
+| [`rtype`](rtype/) | 93% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
+| [`driver`](driver/) | 95% | a real `go build -toolexec` completes |
 
 `types2` is excluded from the coverage gate, with the reason recorded in
 [`internal/covercheck/exclusions.txt`](internal/covercheck/exclusions.txt): it
@@ -387,7 +387,7 @@ is a fork, and the gate that replaces coverage is upstream's own test suite,
 ported with the sources.
 
 The back end is proved by running programs. `ssagen`'s `TestLinkAndRun` is the
-proof: 25 programs go from source text through the whole pipeline to a process
+proof: 27 programs go from source text through the whole pipeline to a process
 that returns the right answer, and several of them call into, or are called
 from, code the Go toolchain compiled, so the calling convention is checked
 across the toolchain boundary. Seven compute in floating point. The stack maps
@@ -398,16 +398,16 @@ survives a collection, the same object with the slot killed is freed, and
 ## How far it reaches
 
 The Go distribution is the measure of reach. The `ir` row above builds a typed
-tree from all of it, 39,947 functions. How much of that tree the middle end
+tree from all of it, 41,084 functions. How much of that tree the middle end
 accepts is the number below.
 
-**17,905 of those functions reach SSA construction** from a tree the lowering
+**19,367 of those functions reach SSA construction** from a tree the lowering
 pass has not touched, and 17,809 of them lower completely to arm64 machine
-operations. 17,758 of the 17,905 carry a stack map.
+operations. 19,248 of the 19,367 carry a stack map.
 
 The lowering pass builds part of [`specs/020`](specs/020-ir.md)'s table, and
 the driver runs it before construction, so a real compile reaches further:
-**24,508 of them get past construction once the lowering pass has run**. A
+**29,710 of them get past construction once the lowering pass has run**. A
 composite literal, `len`, a slice expression, `new`, and `make` of a slice are
 lowered and no longer refused.
 

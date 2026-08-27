@@ -233,20 +233,20 @@ reach for no construct nanogo refuses. [060](060-selfhost.md) owns that census
 and the refusal each of the others gives.
 
 The corpus says how much narrower. The IR builder produces a typed tree for
-536 packages of the Go distribution, 39,947 functions and 4,188,075 nodes. The
+536 packages of the Go distribution, 41,084 functions and 4,191,767 nodes. The
 reach past that point is two numbers, not one, because the driver runs
 [020](020-ir.md)'s lowering pass before SSA construction and the corpus
 measures both orders:
 
 | Measurement | Functions |
 | --- | --- |
-| reach SSA construction with no lowering pass | 17,905 |
-| get past construction once the lowering pass has run, which is what the driver does | 24,508 |
+| reach SSA construction with no lowering pass | 19,367 |
+| get past construction once the lowering pass has run, which is what the driver does | 29,710 |
 | lower completely to arm64 machine operations | 17,809 |
-| carry a stack map | 17,758 |
+| carry a stack map | 19,248 |
 
-**17,905 of those functions reach SSA construction** without the pass. 17,758
-of the 17,905 carry a stack map, over 120,493 safepoints, and 10,727 of them
+**19,367 of those functions reach SSA construction** without the pass. 19,248
+of the 19,367 carry a stack map, over 120,493 safepoints, and 10,727 of them
 have a pointer bit set. 162 have a stack object.
 
 Construction refuses the rest by name. The causes below are measured without
@@ -304,14 +304,14 @@ package:
 | `ir` | 94% | [020](020-ir.md); builds 536 packages of the distribution |
 | `ssa` | 96% | [021](021-ssa-construction.md), with the verifier of that spec |
 | `ssa/rules` | 97% | [025](025-lowering-and-rules.md), [042](042-arm64-backend.md) |
-| `ssagen` | 91% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |
+| `ssagen` | 90% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |
 | `obj` | 98% | [040](040-object-format.md) |
 | `obj/arm64` | 99% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
-| `rtsym` | 100% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |
-| `rtype` | 96% | [032](032-type-descriptors-and-itabs.md) |
+| `rtsym` | 96% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |
+| `rtype` | 93% | [032](032-type-descriptors-and-itabs.md) |
 | `export` | 96% | [015](015-export-data.md) |
 | `export/pkgbits` | 93% | [015](015-export-data.md) |
-| `driver` | 96% | [050](050-driver.md), [051](051-build-integration.md) |
+| `driver` | 95% | [050](050-driver.md), [051](051-build-integration.md) |
 | `internal/covercheck` | 97% | the gate itself |
 | `cmd/nanogo` | excluded | one statement; the reason is in the exclusions file |
 
@@ -380,7 +380,7 @@ the remainder is values wider than a machine register, went with it.
 **Then construction learned the assignment statement and both numbers moved
 again.** `ssa/build.go` had no case for `ir.OAssign`, none for `ir.OCase`, and
 read a `for` statement's post list out of `Else` rather than `Post`. The three
-were 25,036 refusals and one miscompile. The corpus now reports 17,905 reaching
+were 25,036 refusals and one miscompile. The corpus now reports 19,367 reaching
 SSA and 17,809 lowering, so the identity that held while the accepted set was
 small is gone: what is left undecomposed is 87 functions holding a wide
 `SelectN`, 12 holding an array and 93 holding a struct, and 96 of them do not
