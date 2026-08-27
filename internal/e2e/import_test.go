@@ -464,6 +464,22 @@ var linkingShapes = []linkShape{
 		main: "\tc := lib.Counter{N: 2}\n\tos.Exit(c.Add(40))\n",
 	},
 	{
+		// The itab this one goes through is nanogo's. The library converts the
+		// concrete type to the interface, so nanogo writes go:itab, and gc
+		// compiles an importer that only calls through it: a conversion in the
+		// importer would make gc write an itab of its own and the row would
+		// prove nothing.
+		// The interface lists two methods and the importer calls the second,
+		// so the row also says the call reads the slot rtype wrote the entry
+		// into: a wrong offset reaches the other method and the program exits
+		// with the other number.
+		name: "an interface value built by the library and called by the importer",
+		lib: "type Coder interface {\n\tBase() int\n\tCode() int\n}\n\ntype code int\n\n" +
+			"func (c code) Base() int { return 7 }\n\nfunc (c code) Code() int { return int(c) }\n\n" +
+			"func Get() Coder { return code(42) }\n",
+		main: "\tos.Exit(lib.Get().Code())\n",
+	},
+	{
 		name: "a constant and a function",
 		lib:  "const S = 21\n\nfunc Double(x int) int { return x * 2 }\n",
 		main: "\tos.Exit(lib.Double(lib.S))\n",
