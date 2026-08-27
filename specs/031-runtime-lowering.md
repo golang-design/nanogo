@@ -65,6 +65,12 @@ other row of the tables further down names a call nothing produces yet:
 | `closechan` | `close` | IR lowering |
 | `deferproc`, `deferreturn` | `defer` ([033](033-closures-defer-panic.md)) | IR lowering |
 | `newproc` | `go` ([035](035-goroutines-and-stack-growth.md)) | IR lowering |
+| `makechan` | `make(chan T)` and `make(chan T, n)` | IR lowering |
+| `chansend1` | a send | IR lowering |
+| `chanrecv1` | a receive whose value is the whole of what is read | IR lowering |
+| `chanrecv2` | the two-value receive, and the loop of a `range` over a channel | IR lowering |
+| `chanlen`, `chancap` | `len` and `cap` of a channel | IR lowering |
+| `selectgo` | `select` with at least one communication clause | IR lowering |
 | `printlock`, `printunlock`, `printsp`, `printnl` and the `print*` family | `print` and `println` | IR lowering |
 | the fourteen equality algorithms | a type descriptor's `Equal` field | descriptor encoding |
 
@@ -84,9 +90,18 @@ construction, which is where every `panic` in ordinary Go stops today.
 
 The gap is not in this pass. It is in which rows of
 [020](020-ir.md)'s table are built, and its **State** column is the answer per
-row. What is left without a caller is `append`, `select`, `send`, `recv`, and
-every row holding a map: no `m[k]` reaches this far, so no row of the map table
-has a caller.
+row. What is left without a caller is `append`, and every row holding a map: no
+`m[k]` reaches this far, so no row of the map table has a caller. The block on
+the map rows is the descriptor and not the calls. `rtsym` holds every map
+symbol and this compiler can already name a map type; what it cannot describe
+is the slot group the descriptor's tail points at, whose own fields are literal
+structs ([032](032-type-descriptors-and-itabs.md)).
+
+`selectnbsend` and `selectnbrecv` have no caller either, and they never need
+one. `gc` reaches them through an optimisation of a select with one
+communication clause and a default; `selectgo` is correct for that shape too,
+and building the general form first is the rule this deck applies to the
+type-specialised map variants as well.
 
 **Every group of the table now has members, and two of them have no caller.**
 The **map** and **write barrier** groups were declared and empty, which is a
@@ -211,11 +226,42 @@ the two-parameter form passes the hint where the buffer belongs.
 
 `len` and `cap` of a channel are calls and not loads. A nil channel has length
 and capacity zero and no `hchan` to read them from, so the nil check is the
-runtime's.
+runtime's. `cmd/compile/internal/ssagen/ssa.go` stops `gc` with "cannot inline
+len(chan)" rather than reading the word, which is the same rule stated from the
+other side.
+
+The element of a send and of a receive crosses the call as the address of a
+frame slot, and a send copies into a slot of its own rather than passing the
+address of the program's variable. `chansend1` may block before it copies, so
+the address it is given has to name storage no other goroutine writes, and the
+specification evaluates the sent value before the communication begins.
 
 `selectgo` takes arrays of cases and returns the chosen index, which the compiler
 turns into a jump table. Building those arrays in the frame, with correct GC
 description, is the part that is easy to get wrong.
+
+The frame holds a `[ncases]scase` and a `[2*ncases]uint16`, and `selectgo`
+requires both to be on the goroutine's stack whatever else escapes. An `scase`
+is the channel and the address of the element, and **both words are pointers**.
+A case array described as holding none lets the collector free the channel a
+goroutine is parked in, or free what the element points at, and neither failure
+appears where the mistake is. `ir/lower_test.go` asserts the pointer map of the
+type and `internal/e2e` runs a select over pointers under
+`GODEBUG=gccheckmark=1,clobberfree=1` with `GOGC=1`.
+
+`selectgo` reads `cas0[0:nsends]` as sends and the rest as receives, so a clause
+in the wrong half is a send through a receive's destination slot. Within each
+half the order is free: `selectgo` shuffles the cases into a poll order of its
+own, which is what makes a select with two ready cases pick between them at
+random.
+
+Both words of every case are written on every execution rather than cleared
+first. A select inside a loop reaches the same frame slots on the next
+iteration, and a field left over from the iteration before would name the
+channel that iteration chose.
+
+`select {}` is refused. It parks the goroutine for good, which is
+`runtime.block`, and `rtsym` does not carry it.
 
 ### Interfaces and types
 
