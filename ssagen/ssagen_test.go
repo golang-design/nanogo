@@ -873,7 +873,7 @@ func TestStackGrowthCarriesAPointerArgument(t *testing.T) {
 	goCmd := goTool(t)
 	tc := hostToolchain(t)
 	cfg := linkConfig(t)
-	const src = "type box struct{ n int }\n\n" +
+	const src = "type box struct{ n, b, c, d int }\n\n" +
 		"func run(a int, p *box) int {\n" +
 		"\tif a > 0 {\n\t\treturn run(a-1, p)\n\t}\n" +
 		"\treturn p.n\n}"
@@ -886,7 +886,11 @@ func TestStackGrowthCarriesAPointerArgument(t *testing.T) {
 	"sync/atomic"
 )
 
-type box struct{ n int }
+// box is bigger than a tiny block on purpose. An allocation the tiny allocator
+// serves shares a block with other allocations, and a live neighbour would keep
+// this object alive whatever the stack maps did with the pointer through the
+// growth, which is the one thing this test asserts.
+type box struct{ n, b, c, d int }
 
 var finalized int32
 
