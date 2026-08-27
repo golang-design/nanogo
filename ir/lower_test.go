@@ -111,6 +111,28 @@ func lowerCalls(fn *Func) []string {
 	return out
 }
 
+// findCall returns the first call to a named runtime function in a lowered
+// body, so that a case can assert on its arguments and not only on its name.
+func findCall(fn *Func, name string) *Node {
+	var out *Node
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if out != nil {
+				return false
+			}
+			if n.Op == OCall && n.X != nil && n.X.Op == OGlobal && n.X.Obj != nil && n.X.Obj.Name == name {
+				out = n
+				return false
+			}
+			return true
+		})
+		if out != nil {
+			break
+		}
+	}
+	return out
+}
+
 func lowerCalled(fn *Func, name string) bool {
 	for _, c := range lowerCalls(fn) {
 		if c == name {
@@ -403,6 +425,12 @@ func TestLowerAllocationRows(t *testing.T) {
 		{"make", `func f() []int { return make([]int, 4) }`, "runtime.makeslice", "type:int"},
 		{"make with a capacity", `func f(n int) []int { return make([]int, n, 2*n) }`, "runtime.makeslice", "type:int"},
 		{"make of a slice of empty interfaces", `func f(n int) []any { return make([]any, n) }`, "runtime.makeslice", "type:interface {}"},
+		// The channel rows name the descriptor of the channel type itself and
+		// not of its element, because runtime.makechan takes a *chantype and
+		// reads the element size out of it.
+		{"make of a channel", `func f() chan int { return make(chan int) }`, "runtime.makechan", "type:chan int"},
+		{"make of a buffered channel", `func f(n int) chan int { return make(chan int, n) }`, "runtime.makechan", "type:chan int"},
+		{"make of a directed channel", `func f() chan<- int { return make(chan<- int) }`, "runtime.makechan", "type:chan<- int"},
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			fn := lowerOK(t, tc.body)
@@ -413,6 +441,51 @@ func TestLowerAllocationRows(t *testing.T) {
 			if !lowerNames(fn, tc.desc) {
 				t.Errorf("%s was not named; the descriptors are %v:\n%s",
 					tc.desc, lowerDescriptors(fn), buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerMakeChanBuffer checks the size operand runtime.makechan is given.
+//
+// An unbuffered channel is a buffer of zero and not a call with one argument.
+// makechan takes two parameters, so a call that dropped the size would hand
+// the runtime whatever the second argument register held.
+func TestLowerMakeChanBuffer(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		want int64 // the constant size, or -1 when the size is an operand
+	}{
+		{"unbuffered", `func f() chan int { return make(chan int) }`, 0},
+		{"a constant buffer", `func f() chan int { return make(chan int, 4) }`, 4},
+		{"a computed buffer", `func f(n int) chan int { return make(chan int, n) }`, -1},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			call := findCall(fn, "runtime.makechan")
+			if call == nil {
+				t.Fatalf("runtime.makechan was not called:\n%s", buildDump(fn))
+			}
+			if len(call.Args) != 2 {
+				t.Fatalf("makechan has %d arguments, want 2:\n%s", len(call.Args), buildDump(fn))
+			}
+			size := call.Args[1]
+			if size.Type == nil || size.Type.Kind != Int64 {
+				t.Errorf("the size is %v, want an int", size.Type)
+			}
+			if tc.want < 0 {
+				if size.Op == OConst {
+					t.Errorf("a computed size became the constant %v", size.Val)
+				}
+				return
+			}
+			c, ok := size.Val.(ConstValue)
+			if size.Op != OConst || !ok {
+				t.Fatalf("the size is a %s and not a constant:\n%s", size.Op, buildDump(fn))
+			}
+			if v, exact := c.Int64(); !exact || v != tc.want {
+				t.Errorf("the size is %v, want %d", size.Val, tc.want)
 			}
 		})
 	}
@@ -1122,7 +1195,6 @@ func TestLowerRefusals(t *testing.T) {
 		// which field is holding the row back rather than only that a name was
 		// wanted.
 		{"make of a map", `func f() map[int]int { return make(map[int]int) }`, OMake, "descriptor"},
-		{"make of a channel", `func f() chan int { return make(chan int) }`, OMake, "descriptor"},
 		{"new of a literal struct", `func f() *struct{ A int } { return new(struct{ A int }) }`, ONew, "embedded field renamed through an alias"},
 		{"len of a map", `func f(m map[int]int) int { return len(m) }`, OLen, "the length of map"},
 		{"len of a channel", `func f(c chan int) int { return len(c) }`, OLen, "the length of chan"},

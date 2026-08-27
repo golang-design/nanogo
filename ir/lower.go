@@ -1169,19 +1169,23 @@ func (l *lowerer) addrLit(n, lit Expr) Expr {
 
 // makeExpr builds the make builtin.
 //
-// specs/020-ir.md gives it three rows and one is built. A map needs
-// runtime.makemap and the descriptor of a map type, whose tail names the
-// runtime's own group type; a channel needs runtime.makechan and the
-// descriptor of a channel type, whose direction specs/020's type boundary does
-// not carry. Both are refused with the field that is missing.
+// specs/020-ir.md gives it three rows and two are built. A map is refused: its
+// descriptor's tail points at the runtime's own slot group, whose fields are a
+// literal struct, and specs/032-type-descriptors-and-itabs.md has no spelling
+// for one. The refusal is on the descriptor and not on the call, because
+// rtsym holds runtime.makemap and this pass can name the map type already.
 func (l *lowerer) makeExpr(n Expr) Expr {
 	t, pos := n.Type, n.Pos
 	if t == nil {
 		l.refuse(n, "a make with no type")
 		return n
 	}
-	if t.Kind != Slice {
-		l.refuse(n, "a make of "+t.Kind.String()+" needs a descriptor of that kind, which specs/032 does not build")
+	switch t.Kind {
+	case Slice:
+	case Chan:
+		return l.makeChan(n)
+	default:
+		l.refuse(n, "a make of "+t.Kind.String()+" needs runtime.makemap and the descriptor of a map type, whose group specs/032 does not build")
 		return n
 	}
 	if t.Elem == nil || len(n.Args) < 1 || len(n.Args) > 2 {
@@ -1211,6 +1215,58 @@ func (l *lowerer) makeExpr(n Expr) Expr {
 	}
 	data := &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(t.Elem), X: call}
 	return l.sliceHeader(t, data, length(), capacity(), pos)
+}
+
+// Channels.
+//
+// specs/031-runtime-lowering.md's channel group. Every operation on a channel
+// is a runtime call, and none of them reads the hchan: the runtime owns that
+// layout and a nil channel has no hchan at all, so the nil case is the
+// runtime's answer and never a load this pass emits.
+//
+// The element crosses the call as a pointer in both directions.
+// runtime.chansend1 copies from the address it is given and runtime.chanrecv1
+// writes through it, so a send needs storage holding the value and a receive
+// needs storage to land in. Both are frame slots here, and both are safe as
+// frame slots: the call reads or writes the storage and keeps no pointer to
+// it.
+
+// makeChan builds make of a channel.
+//
+// The buffer size arrives as an int, because ir.Build converts every operand
+// of make to one. specs/030-abi.md makes int 64 bits, so runtime.makechan64 is
+// unreachable on this target: gc reaches it only where int is narrower than
+// the operand's own type, and it cannot be here. A size above the largest int,
+// written as a uint64, converts to a negative int and runtime.makechan panics
+// on it, which is the check the specification requires and the same place gc
+// leaves it.
+func (l *lowerer) makeChan(n Expr) Expr {
+	t, pos := n.Type, n.Pos
+	if t.Elem == nil {
+		l.refuse(n, "a make of a channel with no element type")
+		return n
+	}
+	if len(n.Args) > 1 {
+		l.refuse(n, fmt.Sprintf("a make of a channel with %d bounds", len(n.Args)))
+		return n
+	}
+	desc, why := l.descriptor(t, pos)
+	if desc == nil {
+		l.refuse(n, why)
+		return n
+	}
+	size := intConst(pos, lowerInt, 0)
+	if len(n.Args) == 1 {
+		size = l.widen(n.Args[0])
+	}
+	call := &Node{
+		Op: OCall, Pos: pos, Type: lowerUnsafePtr,
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.makechan")},
+		Args: []Expr{desc, size},
+	}
+	// The value is the *hchan the call returns, and a channel is one word
+	// (specs/030-abi.md), so the conversion is a relabelling and not a copy.
+	return &Node{Op: OConvert, Pos: pos, Type: t, X: call}
 }
 
 // newExpr builds the new builtin.
