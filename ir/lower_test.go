@@ -1753,7 +1753,6 @@ func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
 		{"defer of println", `func f(n int) { defer println(n) }`, ODefer, "holds a println and not a call"},
 		{"defer of recover", `func f() { defer recover() }`, ODefer, "holds a recover and not a call"},
 		{"a select with no clauses", `func f() { select {} }`, OSelect, "runtime.block"},
-		{"an assertion to an interface", `func f(v any) error { return v.(error) }`, OTypeAssert, "runtime.typeAssert"},
 		{"an assertion to a one-word struct", `
 type W struct{ P *int }
 
@@ -3939,5 +3938,133 @@ func TestLowerRunsTheStatementsAMapDestinationHolds(t *testing.T) {
 	}
 	if !called {
 		t.Errorf("the key expression is never evaluated:\n%s", buildDump(fn))
+	}
+}
+
+// lowerAll lowers and returns everything the pass collected.
+func lowerAll(t *testing.T, body string) (*Func, Collected) {
+	t.Helper()
+	pkg, files, info := buildTypecheck(t, lowerPrelude+"\n"+body)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	fn := buildFuncOf(t, out, "f")
+	c, err := LowerAndCollect(fn)
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	return fn, c
+}
+
+// lowerGlobal reports whether the tree names a global symbol.
+func lowerGlobal(fn *Func, name string) bool {
+	found := false
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OGlobal && n.Obj != nil && n.Obj.Name == name {
+				found = true
+			}
+			return true
+		})
+	}
+	return found
+}
+
+// TestLowerAssertToAnInterface is specs/032's assertion row for a target that
+// is an interface with methods.
+//
+// The answer is the itab that pairs the target with the dynamic type, which is
+// a search over a method set and is not known until the value is. So the row
+// is a call to runtime.typeAssert with a cache this package defines, and not a
+// comparison against a link-time constant.
+func TestLowerAssertToAnInterface(t *testing.T) {
+	fn, c := lowerAll(t, `func f(v any) error { return v.(error) }`)
+	if !lowerCalled(fn, "runtime.typeAssert") {
+		t.Fatalf("the row calls %v, want runtime.typeAssert:\n%s", lowerCalls(fn), buildDump(fn))
+	}
+	// A nil operand has no dynamic type to look one up for, and the message
+	// the specification asks for comes from this call and not from the lookup.
+	if !lowerCalled(fn, "runtime.panicnildottype") {
+		t.Errorf("the row does not guard a nil operand: %v", lowerCalls(fn))
+	}
+	if len(c.TypeAsserts) != 1 {
+		t.Fatalf("the pass collected %d caches, want one", len(c.TypeAsserts))
+	}
+	a := c.TypeAsserts[0]
+	if a.CanFail {
+		t.Error("the one-value form asks the runtime to return nil, and nothing tests the result")
+	}
+	if a.Iface == nil || a.Iface.Name != "error" {
+		t.Errorf("the cache targets %v, want error", a.Iface)
+	}
+	want, err := TypeAssertSymbol(fn.Sym, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Sym != want {
+		t.Errorf("the cache is named %s, want %s", a.Sym, want)
+	}
+	if !lowerGlobal(fn, want) {
+		t.Errorf("the tree does not name %s, so nothing points at the cache:\n%s", want, buildDump(fn))
+	}
+	// The target's descriptor is what the cache's Inter field points at and
+	// what the nil panic prints, so the object owes it.
+	if !lowerNames(fn, "type:error") {
+		t.Errorf("the tree does not name type:error: %v", lowerDescriptors(fn))
+	}
+}
+
+// TestLowerAssertToAnInterfaceCommaOk is the two-value form.
+//
+// CanFail is what tells the runtime to return a nil itab rather than panic, so
+// the flag and the absence of a panic are one fact stated in two places and
+// both are checked.
+func TestLowerAssertToAnInterfaceCommaOk(t *testing.T) {
+	fn, c := lowerAll(t, `func f(v any) (error, bool) { e, ok := v.(error); return e, ok }`)
+	if !lowerCalled(fn, "runtime.typeAssert") {
+		t.Fatalf("the row calls %v, want runtime.typeAssert", lowerCalls(fn))
+	}
+	for _, p := range lowerCalls(fn) {
+		if strings.HasPrefix(p, "runtime.panic") {
+			t.Errorf("the two-value form panics through %s", p)
+		}
+	}
+	if len(c.TypeAsserts) != 1 || !c.TypeAsserts[0].CanFail {
+		t.Errorf("the pass collected %v, want one cache that may fail", c.TypeAsserts)
+	}
+}
+
+// TestLowerAssertToTheEmptyInterface needs no cache and no call.
+//
+// Every type is a value of the empty interface, so the only question is
+// whether the operand holds one at all. The word is then the dynamic type's
+// descriptor, which an operand with methods carries one field inside its itab.
+func TestLowerAssertToTheEmptyInterface(t *testing.T) {
+	fn, c := lowerAll(t, `func f(v interface{ M() int }) any { return v.(any) }`)
+	if lowerCalled(fn, "runtime.typeAssert") {
+		t.Errorf("the row calls the runtime for an answer that is a load:\n%s", buildDump(fn))
+	}
+	if len(c.TypeAsserts) != 0 {
+		t.Errorf("the pass collected %v, and the empty interface has no itab to search for", c.TypeAsserts)
+	}
+	if !lowerCalled(fn, "runtime.panicnildottype") {
+		t.Errorf("the row does not guard a nil operand: %v", lowerCalls(fn))
+	}
+}
+
+// TestLowerAssertCachesAreOnePerSite is the identity rule.
+//
+// The runtime installs a table into the symbol with a compare-and-swap, so two
+// sites sharing one symbol would be two questions writing one table. gc numbers
+// per package; this numbers per function, because a function symbol is already
+// unique in a package and a lowering pass sees one function at a time.
+func TestLowerAssertCachesAreOnePerSite(t *testing.T) {
+	_, c := lowerAll(t, `func f(v any) (error, error) { return v.(error), v.(error) }`)
+	if len(c.TypeAsserts) != 2 {
+		t.Fatalf("the pass collected %d caches for two assertions", len(c.TypeAsserts))
+	}
+	if c.TypeAsserts[0].Sym == c.TypeAsserts[1].Sym {
+		t.Errorf("both assertions read %s", c.TypeAsserts[0].Sym)
 	}
 }

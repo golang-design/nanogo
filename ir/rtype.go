@@ -773,3 +773,92 @@ func signatureName(b *strings.Builder, t *Type, link bool, depth int) error {
 	b.WriteString(")")
 	return nil
 }
+
+// The suffixes of the two runtime caches an interface assertion and an
+// interface type switch read.
+//
+// gc spells them ".typeAssert.<n>" and ".interfaceSwitch.<n>" in the local
+// package, so the linker name is "<path>..typeAssert.<n>". The double dot is
+// not a typo: the package qualifier ends with one and the name begins with
+// one, which is what keeps the symbol out of the namespace a declared
+// identifier can reach.
+const (
+	TypeAssertSuffix      = "..typeAssert."
+	InterfaceSwitchSuffix = "..interfaceSwitch."
+)
+
+// TypeAssertSymbol returns the linker symbol of the n'th internal/abi.TypeAssert
+// of the function whose symbol is fn.
+//
+// Unlike a descriptor and unlike an itab, this symbol is not canonical and must
+// not be. The runtime writes a cache into it at run time, so one symbol shared
+// by two packages would be one cache two modules race on, and cmd/link would
+// have to merge two definitions of a symbol whose contents change. It is a
+// package definition instead, unique within the package, and the linker never
+// deduplicates it.
+//
+// The function's own symbol is the qualifier, and the ordinal is per function.
+// gc numbers per package, which needs a package-wide counter; a lowering pass
+// sees one function at a time, and a function symbol is already unique within a
+// package, so the pair is unique without one.
+func TypeAssertSymbol(fn string, n int) (string, error) {
+	return cacheSymbol(fn, n, TypeAssertSuffix)
+}
+
+// InterfaceSwitchSymbol returns the linker symbol of the n'th
+// internal/abi.InterfaceSwitch of the function whose symbol is fn.
+//
+// It is TypeAssertSymbol's rule with the other suffix, and the two counters are
+// separate so that neither depends on how many of the other kind a function
+// happens to hold.
+func InterfaceSwitchSymbol(fn string, n int) (string, error) {
+	return cacheSymbol(fn, n, InterfaceSwitchSuffix)
+}
+
+// cacheSymbol builds one of the two names above.
+func cacheSymbol(fn string, n int, suffix string) (string, error) {
+	if fn == "" {
+		return "", fmt.Errorf("ir: a runtime cache is named after the function that reads it, and the function has no symbol")
+	}
+	if n < 0 {
+		return "", fmt.Errorf("ir: a runtime cache ordinal is %d", n)
+	}
+	return fn + suffix + strconv.Itoa(n), nil
+}
+
+// TypeAssert is one internal/abi.TypeAssert a lowered function names and this
+// package defines.
+//
+// It is the argument runtime.typeAssert reads to answer which itab implements
+// Iface for a dynamic type. The answer is a search over a method set, which is
+// why it is a call and why the runtime caches it inside the symbol.
+type TypeAssert struct {
+	// Sym is the linker symbol, from TypeAssertSymbol.
+	Sym string
+
+	// Iface is the interface with methods the assertion targets. It is the
+	// descriptor the Inter field points at, so the object that defines this
+	// symbol owes that descriptor too.
+	Iface *Type
+
+	// CanFail is the comma-ok form. The runtime returns a nil itab where it
+	// would otherwise panic, and the field is read at run time rather than
+	// baked into two entry points.
+	CanFail bool
+}
+
+// InterfaceSwitch is one internal/abi.InterfaceSwitch a lowered function names
+// and this package defines.
+//
+// Cases is in source order and the order is the answer: runtime.interfaceSwitch
+// returns the index of the first case the dynamic type implements, so a
+// reordering picks a different clause for a type that implements two of them.
+type InterfaceSwitch struct {
+	// Sym is the linker symbol, from InterfaceSwitchSymbol.
+	Sym string
+
+	// Cases are the interfaces the switch tests, each with methods. The empty
+	// interface is not among them: every non-nil dynamic type implements it,
+	// so it is decided without a call.
+	Cases []*Type
+}

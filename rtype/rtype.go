@@ -155,6 +155,27 @@ type Symbol struct {
 	// of a type nothing converts stays in the binary. The alternative is a
 	// program that dies at run time, and the two are not comparable.
 	UsedInIface bool
+
+	// Gotype is the linker name of the descriptor of this symbol's own Go
+	// type, or "" when the symbol needs none.
+	//
+	// Only a writable symbol that holds a pointer needs one, and only one kind
+	// of symbol here is writable: the two runtime caches switch.go writes. The
+	// collector scans the data section through a program cmd/link builds from
+	// each symbol's own type, and ld's GCProg.AddSym stops the link with
+	// "missing Go type information for global symbol" when a symbol in that
+	// section arrives without one. A read-only descriptor is not scanned and
+	// carries none.
+	Gotype string
+
+	// Local asks the caller to mark the symbol as one no other package may
+	// name.
+	//
+	// It goes with Gotype and for the same reason: a runtime cache is a
+	// package definition that belongs to one function of one package, and gc
+	// writes both with objw.Global(..., obj.LOCAL). A descriptor is the
+	// opposite, a symbol every importer is meant to reach by name.
+	Local bool
 }
 
 // The offsets of internal/abi.Type on a 64-bit target.

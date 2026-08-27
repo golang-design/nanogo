@@ -393,6 +393,14 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// way. Only ssa.Build and ir.Lower name one, and both report what they
 	// named, because cmd/link defines no go:itab. symbol.
 	var itabs []ir.Itab
+	// The two runtime caches an assertion to an interface and a type switch
+	// over interface cases read, unioned the same way. Unlike a descriptor and
+	// unlike an itab these are not canonical: each belongs to one site of one
+	// function, and the runtime stores into it, so nothing merges two.
+	var (
+		asserts  []ir.TypeAssert
+		switches []ir.InterfaceSwitch
+	)
 	// The data symbols of the package-level variables. They go in before any
 	// function is compiled, so that a variable nanogo cannot write is refused
 	// by name and position rather than reported by the linker as an undefined
@@ -442,7 +450,7 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 					"A function compiled without it collects the referent while the callee is reading it",
 			}
 		}
-		r, types, its, err := compileFunc(cfg, fn, target, out, fset)
+		r, c, err := compileFunc(cfg, fn, target, out, fset)
 		if err != nil {
 			return nil, false, err
 		}
@@ -453,8 +461,10 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 		if isPackageInit(p, fn) {
 			initFns = append(initFns, ref)
 		}
-		needed = append(needed, types...)
-		itabs = append(itabs, its...)
+		needed = append(needed, c.Types...)
+		itabs = append(itabs, c.Itabs...)
+		asserts = append(asserts, c.TypeAsserts...)
+		switches = append(switches, c.InterfaceSwitches...)
 	}
 	// A package with no function body is not refused. internal/goarch and
 	// internal/goos are constants and type aliases only, so what gc produces
@@ -488,6 +498,17 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 		}
 		needed = append(needed, refs...)
 	}
+	// A runtime cache points at descriptors too: the interface a type
+	// assertion targets, and every case an interface switch lists. They join
+	// the roots here for the reason the itabs' do, and the failure a missing
+	// one produces is the same: cmd/link resolves the relocation by name and
+	// reports the descriptor, not the cache.
+	for _, a := range asserts {
+		needed = append(needed, rtype.TypeAssertReferenced(a)...)
+	}
+	for _, sw := range switches {
+		needed = append(needed, rtype.InterfaceSwitchReferenced(sw)...)
+	}
 	types, err := descriptorSet(cfg, needed)
 	if err != nil {
 		return nil, false, err
@@ -507,7 +528,7 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 			return nil, false, err
 		}
 	}
-	if err := addDescriptors(cfg, out, types, itabs, generated); err != nil {
+	if err := addDescriptors(cfg, out, types, itabs, asserts, switches, generated); err != nil {
 		return nil, false, err
 	}
 	// The record goes in last. It names the init function by the reference
@@ -559,11 +580,25 @@ func addGenerated(cfg *Config, out *obj.Package, target *ssa.Target, fset *synta
 			// and one type is in the closure once per path that reached it.
 			continue
 		}
-		r, ts, its, err := compileFunc(cfg, fn, target, out, fset)
+		r, c, err := compileFunc(cfg, fn, target, out, fset)
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(its) > 0 {
+		if len(c.TypeAsserts) > 0 || len(c.InterfaceSwitches) > 0 {
+			// A generated function questions no interface's dynamic type: a
+			// method wrapper adjusts its receiver and tail-calls, and an
+			// equality or hash routine reads memory. A cache named here would
+			// be a symbol this pass reports to nobody, because the caller
+			// takes the caches before the generated functions are compiled.
+			return nil, nil, &UnsupportedError{
+				Package: cfg.Package,
+				What:    "the generated function " + fn.Sym,
+				Detail: "it asserts a value to an interface, whose runtime cache this object owes and " +
+					"the generated functions are compiled after the caches are collected; " +
+					"specs/032-type-descriptors-and-itabs.md owns the gap",
+			}
+		}
+		if len(c.Itabs) > 0 {
 			// A generated function converts nothing to an interface: a method
 			// wrapper adjusts its receiver and tail-calls, and an equality or
 			// hash routine reads memory. So an itab named here would mean the
@@ -588,7 +623,7 @@ func addGenerated(cfg *Config, out *obj.Package, target *ssa.Target, fset *synta
 			return nil, nil, &UnsupportedError{Package: cfg.Package, What: "the generated function " + fn.Sym, Detail: err.Error()}
 		}
 		generated[fn.Sym] = true
-		needed = append(needed, ts...)
+		needed = append(needed, c.Types...)
 	}
 	return needed, generated, nil
 }
@@ -713,7 +748,7 @@ func algFuncs(t *ir.Type, set []rtype.Symbol) ([]*ir.Func, error) {
 // hashed for the reason a descriptor is named, and one reason more: cmd/link
 // collects a go:itab. symbol into runtime.itablinks by its name prefix, and it
 // reads no name for a symbol in the hashed index space.
-func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.Itab, generated map[string]bool) error {
+func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.Itab, asserts []ir.TypeAssert, switches []ir.InterfaceSwitch, generated map[string]bool) error {
 	// defs and refs are lookup tables and are never ranged over
 	// (specs/053-determinism.md). A symbol is emitted once however many types
 	// name it: two descriptors share one pointer bitmask whenever their
@@ -796,17 +831,85 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.
 			relocs = append(relocs, s.Relocs)
 		}
 	}
+	// The two runtime caches. Each is a package definition and not a
+	// non-package one, which is the opposite of everything above and follows
+	// from the same rule: cmd/link deduplicates by name in the non-package
+	// index space, and these must not be deduplicated. The runtime stores a
+	// table into the symbol, so two sites that shared one would be two
+	// questions writing one table.
+	//
+	// They are also the only symbols here in a writable section, and the only
+	// ones that carry a Go type. rtype/switch.go states why.
+	var cached []rtype.Symbol
+	for _, a := range asserts {
+		s, err := rtype.TypeAssert(a)
+		if err != nil {
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "an assertion its code makes to an interface with methods",
+				Detail:  err.Error(),
+			}
+		}
+		cached = append(cached, s)
+	}
+	for _, sw := range switches {
+		s, err := rtype.InterfaceSwitch(sw)
+		if err != nil {
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "a type switch its code makes over interface cases",
+				Detail:  err.Error(),
+			}
+		}
+		cached = append(cached, s)
+	}
+	// nonPkgRef is the reference a name that no definition here covers takes.
+	// It is shared by the relocation pass below and by the Go type of a cache,
+	// so that one name is one reference however it is reached.
+	nonPkgRef := func(name string, abi uint16) obj.SymRef {
+		if ref, ok := refs[name]; ok {
+			return ref
+		}
+		ref := out.AddNonPkgRef(&obj.Symbol{Name: name, ABI: abi})
+		// go tool nm and go tool objdump print a name only for a symbol the
+		// RefName block covers.
+		out.AddRefName(ref, name)
+		refs[name] = ref
+		return ref
+	}
+	for _, s := range cached {
+		if _, ok := defs[s.Name]; ok {
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "the runtime cache " + s.Name,
+				Detail:  "two sites name one cache, and the runtime writes a table into each",
+			}
+		}
+		d := &obj.Symbol{
+			Name:  s.Name,
+			Type:  s.Kind,
+			Size:  uint32(len(s.Data)),
+			Align: s.Align,
+			Data:  s.Data,
+		}
+		if s.Local {
+			d.Flag |= obj.SymFlagLocal
+		}
+		if s.Gotype != "" {
+			// A data symbol, so ABI0. cmd/link builds the pointer map of the
+			// data section out of this entry, and without it the link stops
+			// with "missing Go type information for global symbol".
+			d.Aux = append(d.Aux, obj.Aux{Type: obj.AuxGotype, Sym: nonPkgRef(s.Gotype, obj.ABI0)})
+		}
+		defs[s.Name] = out.AddDef(d)
+		syms = append(syms, d)
+		relocs = append(relocs, s.Relocs)
+	}
 	for i, s := range syms {
 		for _, r := range relocs[i] {
 			ref, ok := defs[r.Target]
 			if !ok {
-				if ref, ok = refs[r.Target]; !ok {
-					ref = out.AddNonPkgRef(&obj.Symbol{Name: r.Target, ABI: targetABI(r, generated)})
-					// go tool nm and go tool objdump print a name only for a
-					// symbol the RefName block covers.
-					out.AddRefName(ref, r.Target)
-					refs[r.Target] = ref
-				}
+				ref = nonPkgRef(r.Target, targetABI(r, generated))
 			}
 			s.Relocs = append(s.Relocs, obj.Reloc{
 				Off: r.Off, Size: r.Size, Type: r.Type, Add: r.Add, Sym: ref,
@@ -876,23 +979,18 @@ func targetABI(r rtype.Reloc, generated map[string]bool) uint16 {
 //
 // The stage is named ir.Lower and not "lowering" because ssa.Lower is in the
 // same list, and a refusal has to say which of the two spec decks owns the gap.
-func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package, fset *syntax.FileSet) (*ssagen.Result, []*ir.Type, []ir.Itab, error) {
+func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package, fset *syntax.FileSet) (*ssagen.Result, ir.Collected, error) {
 	var (
-		f       *ssa.Func
-		a       *ssa.Alloc
-		r       *ssagen.Result
-		needed  []*ir.Type
-		lowered []ir.Itab
+		f *ssa.Func
+		a *ssa.Alloc
+		r *ssagen.Result
+		c ir.Collected
 	)
 	passes := []struct {
 		name string
 		run  func() error
 	}{
-		{"ir.Lower", func() error {
-			c, err := ir.LowerAndCollect(fn)
-			needed, lowered = c.Types, c.Itabs
-			return err
-		}},
+		{"ir.Lower", func() (err error) { c, err = ir.LowerAndCollect(fn); return err }},
 		{"ssa.Build", func() (err error) { f, err = ssa.Build(fn); return err }},
 		{"decomposition", func() error { ssa.Decompose(f); return nil }},
 		{"the ABI assignment", func() error { return ssa.AssignABI(f, target) }},
@@ -918,7 +1016,7 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 	}
 	for _, p := range passes {
 		if err := p.run(); err != nil {
-			return nil, nil, nil, unsupportedFunc(cfg, fset, fn, p.name, err)
+			return nil, ir.Collected{}, unsupportedFunc(cfg, fset, fn, p.name, err)
 		}
 	}
 	// Two passes name descriptors and the package owes both sets. ir.Lower
@@ -937,7 +1035,14 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 	// is not a descriptor: it is named per (concrete type, interface) pair,
 	// cmd/link collects it into runtime.itablinks by name, and rtype writes it
 	// from a different encoder.
-	return r, append(needed, f.Descriptors...), append(lowered, f.Itabs...), nil
+	//
+	// The two runtime caches have one set and not two. They come from
+	// specs/020's assertion and type switch rows alone, which is where an
+	// interface's dynamic type is questioned; construction builds interface
+	// values and never asks one a question.
+	c.Types = append(c.Types, f.Descriptors...)
+	c.Itabs = append(c.Itabs, f.Itabs...)
+	return r, c, nil
 }
 
 // unsupportedFunc is the refusal every pass of compileFunc reports.

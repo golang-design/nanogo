@@ -109,6 +109,17 @@ type Collected struct {
 	// dynamic type test on a value that leads with an *itab compares that word
 	// against the itab of the pair.
 	Itabs []Itab
+
+	// TypeAsserts and InterfaceSwitches are the two runtime caches the lowered
+	// tree names, in the order it named them.
+	//
+	// They are unlike the two above in the one way that matters to a caller:
+	// each is a symbol this package *defines* and no other package may merge,
+	// because the runtime stores into it. The two above are canonical names
+	// the linker deduplicates. Both lists still travel here, because the
+	// object writer owes the bytes either way.
+	TypeAsserts       []TypeAssert
+	InterfaceSwitches []InterfaceSwitch
 }
 
 // LowerAndCollect is Lower, and it also returns what the lowered tree names.
@@ -154,7 +165,12 @@ func LowerAndCollect(fn *Func) (Collected, error) {
 
 // collected is what the pass named, in the order the names were first met.
 func (l *lowerer) collected() Collected {
-	return Collected{Types: l.needed, Itabs: l.needItabs}
+	return Collected{
+		Types:             l.needed,
+		Itabs:             l.needItabs,
+		TypeAsserts:       l.asserts,
+		InterfaceSwitches: l.switches,
+	}
 }
 
 // lowerer holds the state of one function's lowering.
@@ -190,6 +206,22 @@ type lowerer struct {
 	// pair and rtype writes it from a different encoder.
 	itabs     map[string]*Object
 	needItabs []Itab
+
+	// asserts and switches are the runtime caches this function names. There
+	// is no lookup table beside them, and that is the difference between a
+	// cache and the two records above: a descriptor and an itab are named by
+	// what they describe, so two references to one are one symbol, while a
+	// cache is named by the site that reads it, so two sites are two symbols
+	// however alike their contents are. The ordinal in the name is the length
+	// of the list when the name was made.
+	asserts  []TypeAssert
+	switches []InterfaceSwitch
+
+	// itabHdr is the front of internal/abi.ITab as a struct, built once so
+	// that reading the concrete type out of an itab is a field of one type
+	// rather than an offset written down at each use. It is a lookup, never
+	// ranged over.
+	itabHdr *Type
 
 	// capIndex names the field of the closure object each of this function's
 	// own captures is read from, and cells names the heap cell of each
@@ -648,6 +680,113 @@ func (l *lowerer) itab(t, iface *Type, pos syntax.Pos) (Expr, string) {
 	return &Node{
 		Op: OAddr, Pos: pos, Type: l.ptrTo(itabType),
 		X: &Node{Op: OGlobal, Pos: pos, Type: itabType, Obj: o},
+	}, ""
+}
+
+// typeAssertType and ifaceSwitchType are the types of the two runtime caches,
+// as this pass sees them.
+//
+// Three words each, which is internal/abi.TypeAssert and the declared shape of
+// internal/abi.InterfaceSwitch. An interface switch symbol is longer, by one
+// word per case after the first, and the length is not known here. It does not
+// have to be: every use is the address of a symbol rtype defines, so what is
+// needed is a type of pointer width to take the address of.
+//
+// They are separate types from rtypeType and itabType so that a word holding
+// one is not well typed where another belongs.
+var (
+	typeAssertType  = wordsType(3, "internal/abi.TypeAssert")
+	ifaceSwitchType = wordsType(3, "internal/abi.InterfaceSwitch")
+)
+
+// wordsType is n machine words, laid out.
+func wordsType(n int64, what string) *Type {
+	t := &Type{Kind: Array, Elem: lowerUintptr, Len: n}
+	if err := Layout(t); err != nil {
+		panic("ir: " + what + " does not lay out: " + err.Error())
+	}
+	return t
+}
+
+// itabHeader returns the front of internal/abi.ITab as a struct.
+//
+// ITab is Inter, then Type, then Hash and Fun. Only Type is read here, which is
+// the descriptor of the concrete type the itab was built for, so the tail is
+// not written down: a struct that stops short still places the fields it
+// declares where the runtime writes them, and a field beyond what is declared
+// is never named. The offset is checked against the installed runtime by
+// rtype's itab encoder, which writes the same two words.
+func (l *lowerer) itabHeader() *Type {
+	if l.itabHdr != nil {
+		return l.itabHdr
+	}
+	t := &Type{Kind: Struct, Name: "itab", Fields: []Field{
+		{Name: "inter", Type: l.ptrTo(rtypeType)},
+		{Name: "typ", Type: l.ptrTo(rtypeType)},
+	}}
+	if err := Layout(t); err != nil {
+		panic("ir: the front of internal/abi.ITab does not lay out: " + err.Error())
+	}
+	l.itabHdr = t
+	return t
+}
+
+// itabTypeField is the index of Type in the struct above.
+const itabTypeField = 1
+
+// assertCache returns the address of the internal/abi.TypeAssert that one
+// assertion to iface reads, and records the symbol this object owes.
+//
+// The symbol is per site and never shared. The runtime installs a cache into
+// it with a compare-and-swap, so a symbol two sites shared would be one table
+// two questions write, and a symbol two packages shared would be one table two
+// modules write. ir.TypeAssertSymbol names it after the function and the
+// ordinal for exactly that reason.
+//
+// The second result is the reason there is no cache, for a caller to report.
+func (l *lowerer) assertCache(iface *Type, canFail bool, pos syntax.Pos) (Expr, string) {
+	if iface == nil || iface.Kind != Interface || iface.EmptyIface {
+		return nil, "a runtime cache for an assertion whose target is not an interface with methods"
+	}
+	name, err := TypeAssertSymbol(l.fn.Sym, len(l.asserts))
+	if err != nil {
+		return nil, err.Error()
+	}
+	l.asserts = append(l.asserts, TypeAssert{Sym: name, Iface: iface, CanFail: canFail})
+	o := &Object{Name: name, Type: typeAssertType, Class: ClassGlobal}
+	return &Node{
+		Op: OAddr, Pos: pos, Type: l.ptrTo(typeAssertType),
+		X: &Node{Op: OGlobal, Pos: pos, Type: typeAssertType, Obj: o},
+	}, ""
+}
+
+// switchCache returns the address of the internal/abi.InterfaceSwitch that one
+// type switch reads, and records the symbol this object owes.
+//
+// The cases are in source order, and the order is the answer:
+// runtime.interfaceSwitch returns the index of the first case the dynamic type
+// implements. A caller that grouped the cases by anything other than the order
+// they were written picks a different clause for a type that satisfies two.
+//
+// The second result is the reason there is no cache.
+func (l *lowerer) switchCache(cases []*Type, pos syntax.Pos) (Expr, string) {
+	if len(cases) == 0 {
+		return nil, "a runtime cache for an interface switch with no case"
+	}
+	for _, c := range cases {
+		if c == nil || c.Kind != Interface || c.EmptyIface {
+			return nil, "a runtime cache for an interface switch over a case that is not an interface with methods"
+		}
+	}
+	name, err := InterfaceSwitchSymbol(l.fn.Sym, len(l.switches))
+	if err != nil {
+		return nil, err.Error()
+	}
+	l.switches = append(l.switches, InterfaceSwitch{Sym: name, Cases: append([]*Type(nil), cases...)})
+	o := &Object{Name: name, Type: ifaceSwitchType, Class: ClassGlobal}
+	return &Node{
+		Op: OAddr, Pos: pos, Type: l.ptrTo(ifaceSwitchType),
+		X: &Node{Op: OGlobal, Pos: pos, Type: ifaceSwitchType, Obj: o},
 	}, ""
 }
 
@@ -4080,6 +4219,41 @@ func (r *ifaceRef) panicSym() string {
 	return "runtime.panicdottypeI"
 }
 
+// dynamic returns the *_type of the value's dynamic type, given its first
+// word.
+//
+// The word already is one when the operand is an empty interface. When the
+// operand has methods the word is an *itab, and the descriptor is the itab's
+// second field, so the answer is a load.
+//
+// The load is correct only where the word is known not to be nil. Every caller
+// tests the word first, which is also what gets gc's message: an assertion on
+// a nil interface reports "interface conversion: interface is nil" from
+// runtime.panicnildottype, and a lookup handed a nil type reports nothing at
+// all.
+func (r *ifaceRef) dynamic(word Expr, pos syntax.Pos) Expr {
+	if r.t.EmptyIface {
+		return word
+	}
+	h := r.l.itabHeader()
+	return &Node{
+		Op: OField, Pos: pos, Type: h.Fields[itabTypeField].Type, Index: itabTypeField,
+		X: &Node{Op: OConvert, Pos: pos, Type: r.l.ptrTo(h), X: word},
+	}
+}
+
+// isNil and isNotNil are the test that separates an interface holding nothing
+// from one holding a value. The word is compared and not the pair: an
+// interface with no dynamic type has a nil first word whichever layout it has,
+// and the second word is not read.
+func (r *ifaceRef) isNil(pos syntax.Pos) Expr    { return r.nilTest(syntax.Eql, pos) }
+func (r *ifaceRef) isNotNil(pos syntax.Pos) Expr { return r.nilTest(syntax.Neq, pos) }
+
+func (r *ifaceRef) nilTest(op syntax.Operator, pos syntax.Pos) Expr {
+	return &Node{Op: OCompare, Op1: op, Pos: pos, Type: lowerBool,
+		X: r.word(ifaceTyp), Y: r.nilWord(pos)}
+}
+
 // nilWord is the first word of an operand holding nothing, which is what
 // case nil in a type switch compares against.
 func (r *ifaceRef) nilWord(pos syntax.Pos) Expr {
@@ -4119,9 +4293,147 @@ func assertTarget(t *Type) string {
 	if t == nil {
 		return "an assertion with no target type"
 	}
-	if t.Kind == Interface {
-		return "a target that is an interface, whose answer is the itab that pairs it with the dynamic type and is not known until the value is: cmd/compile calls runtime.typeAssert with an *abi.TypeAssert, and specs/032 writes no such descriptor"
+	return ""
+}
+
+// setIface writes the two words of an interface value into o.
+//
+// The words are written through a pointer to the header rather than assembled
+// into a value, because the IR has no node for a pair of words: OConvert
+// reinterprets one machine word and an interface is two. The object is
+// addressed, which puts it in the frame, and an interface is wider than a
+// register so specs/021-ssa-construction.md's ssaAble puts it there anyway.
+//
+// The type word is written first and the data word second, which is the order
+// gc writes them in and the order that keeps the slot readable throughout: the
+// collector scans both words of an interface, each holds a pointer or nil at
+// every point between the two stores, and neither store leaves an address that
+// is not one.
+func (l *lowerer) setIface(o *Object, word, data Expr, pos syntax.Pos) {
+	h := l.header(o.Type)
+	if h == nil {
+		l.refuse(ref(o, pos), "an interface value with no header layout")
+		return
 	}
+	p := l.spill(&Node{Op: OConvert, Pos: pos, Type: l.ptrTo(h), X: l.addrOf(ref(o, pos))})
+	field := func(i int) Expr {
+		return &Node{Op: OField, Pos: pos, Type: h.Fields[i].Type, X: ref(p, pos), Index: i}
+	}
+	l.emit(Assign(pos, field(ifaceTyp), &Node{Op: OConvert, Pos: pos, Type: h.Fields[ifaceTyp].Type, X: word}))
+	l.emit(Assign(pos, field(ifaceData), data))
+}
+
+// makeIface builds a fresh value of the interface t out of its two words.
+func (l *lowerer) makeIface(t *Type, word, data Expr, pos syntax.Pos) Expr {
+	o := l.tempObj(t, pos)
+	l.setIface(o, word, data, pos)
+	return ref(o, pos)
+}
+
+// assertWord returns the first word an assertion to the interface target
+// produces, given an operand already known to hold a dynamic type.
+//
+// For the empty interface it is the dynamic type's descriptor, which the
+// operand already carries or holds one field away. For an interface with
+// methods it is the itab of that interface and the dynamic type, which is a
+// search over a method set and therefore a call. runtime.typeAssert makes the
+// search and caches the answer in the symbol assertCache defines.
+//
+// canFail chooses what the runtime does when the type does not implement the
+// interface: return a nil itab, or panic. It is a byte in the cache rather
+// than a second entry point, so the two forms are one call site.
+//
+// The word is held in a temporary and the object is returned rather than the
+// expression, so that a caller may name it more than once. A node is a tree a
+// later pass rewrites in place and may not stand in two places, and the
+// comma-ok row reads the word twice: once to test it and once to store it.
+//
+// The second result is the reason the word cannot be built.
+func (l *lowerer) assertWord(x *ifaceRef, target *Type, canFail bool, pos syntax.Pos) (*Object, string) {
+	word := x.dynamic(x.word(ifaceTyp), pos)
+	if target.EmptyIface {
+		return l.spill(word), ""
+	}
+	cache, why := l.assertCache(target, canFail, pos)
+	if cache == nil {
+		return nil, why
+	}
+	return l.spill(&Node{
+		Op: OCall, Pos: pos, Type: l.ptrTo(itabType),
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.typeAssert")},
+		Args: []Expr{cache, word},
+	}), ""
+}
+
+// assertToIface builds x.(I), the form that panics, where I is an interface.
+//
+// The shape is cmd/compile's dottype1 for an interface destination:
+//
+//	if x.tab == nil {
+//		panicnildottype(I)
+//	}
+//	res = iface{typeAssert(&cache, x.dynamic), x.data}
+//
+// The nil test is not the lookup's job even though runtime.typeAssert takes a
+// nil type and panics on one. The two panics print different messages, and the
+// specification asks for the first: "interface conversion: interface is nil,
+// not main.I". runtime.panicnildottype does not return, which is what makes
+// one block enough here, exactly as the concrete row's panic does.
+func (l *lowerer) assertToIface(n Expr, x *ifaceRef, target *Type, pos syntax.Pos) Expr {
+	desc, why := l.descriptor(target, pos)
+	if desc == nil {
+		l.refuse(n, why)
+		return n
+	}
+	l.emit(&Node{
+		Op: OIf, Pos: pos, Type: voidType, X: x.isNil(pos),
+		Body: []Stmt{runtimeCall(pos, "runtime.panicnildottype", desc)},
+	})
+	word, why := l.assertWord(x, target, false, pos)
+	if word == nil {
+		l.refuse(n, why)
+		return n
+	}
+	return l.makeIface(target, ref(word, pos), x.word(ifaceData), pos)
+}
+
+// assertToIface2 builds v, ok = x.(I), where I is an interface.
+//
+// Two nested tests and no join to build. The outer one is the nil operand,
+// which has no dynamic type to look an itab up for. The inner one is the
+// lookup returning nothing, which is what CanFail asks the runtime to do
+// instead of panicking. Both destinations keep the zero the caller wrote when
+// neither is taken.
+//
+// The empty destination has no inner test: every dynamic type is a value of
+// the empty interface, so a non-nil operand always succeeds and the word is
+// the descriptor rather than a call.
+func (l *lowerer) assertToIface2(x *ifaceRef, target *Type, val, ok *Object, pos syntax.Pos) string {
+	l.push()
+	word, why := l.assertWord(x, target, true, pos)
+	if word == nil {
+		l.pop()
+		return why
+	}
+	succeed := func() []Stmt {
+		l.push()
+		l.setIface(val, ref(word, pos), x.word(ifaceData), pos)
+		l.emit(Assign(pos, ref(ok, pos), boolConst(pos, true)))
+		return l.pop()
+	}
+	if target.EmptyIface {
+		l.emit(succeed()...)
+	} else {
+		body := succeed()
+		l.emit(&Node{
+			Op: OIf, Pos: pos, Type: voidType,
+			X: &Node{Op: OCompare, Op1: syntax.Neq, Pos: pos, Type: lowerBool,
+				X: ref(word, pos), Y: l.zeroOf(word.Type, pos)},
+			Body: body,
+		})
+	}
+	body := l.pop()
+	l.emit(&Node{Op: OIf, Pos: pos, Type: voidType, X: x.isNotNil(pos), Body: body})
 	return ""
 }
 
@@ -4196,6 +4508,11 @@ func (l *lowerer) typeAssert(n Expr) Expr {
 		l.refuse(n, why)
 		return n
 	}
+	if target.Kind == Interface {
+		// The answer is an itab that is not known until the value is, so the
+		// row is a call and not a comparison against a link-time constant.
+		return l.assertToIface(n, x, target, pos)
+	}
 	want, why := x.want(target, pos)
 	if want == nil {
 		l.refuse(n, why)
@@ -4261,18 +4578,26 @@ func (l *lowerer) typeAssert2(s Stmt) {
 		l.emit(s)
 		return
 	}
-	want, why := x.want(target, pos)
-	if want == nil {
-		l.refuse(n, why)
-		l.emit(s)
-		return
-	}
-
-	got, why := l.ifaceValue(x.word(ifaceData), target, pos)
-	if got == nil {
-		l.refuse(n, why)
-		l.emit(s)
-		return
+	// The two rows differ only in what proves the assertion. A concrete target
+	// is one comparison against a link-time constant; an interface target is a
+	// lookup the runtime makes. Both write the same two destinations, and both
+	// leave them holding the zero when the assertion fails, so the zeroes are
+	// written first and once.
+	var (
+		want Expr
+		got  Expr
+	)
+	if target.Kind != Interface {
+		if want, why = x.want(target, pos); want == nil {
+			l.refuse(n, why)
+			l.emit(s)
+			return
+		}
+		if got, why = l.ifaceValue(x.word(ifaceData), target, pos); got == nil {
+			l.refuse(n, why)
+			l.emit(s)
+			return
+		}
 	}
 
 	val := l.tempObj(target, pos)
@@ -4283,15 +4608,23 @@ func (l *lowerer) typeAssert2(s Stmt) {
 	}
 	ok := l.tempObj(lowerBool, pos)
 	l.emit(define(pos, ref(ok, pos), boolConst(pos, false)))
-	l.emit(&Node{
-		Op: OIf, Pos: pos, Type: voidType,
-		X: &Node{Op: OCompare, Op1: syntax.Eql, Pos: pos, Type: lowerBool,
-			X: x.word(ifaceTyp), Y: want},
-		Body: []Stmt{
-			Assign(pos, ref(val, pos), got),
-			Assign(pos, ref(ok, pos), boolConst(pos, true)),
-		},
-	})
+	if target.Kind == Interface {
+		if why := l.assertToIface2(x, target, val, ok, pos); why != "" {
+			l.refuse(n, why)
+			l.emit(s)
+			return
+		}
+	} else {
+		l.emit(&Node{
+			Op: OIf, Pos: pos, Type: voidType,
+			X: &Node{Op: OCompare, Op1: syntax.Eql, Pos: pos, Type: lowerBool,
+				X: x.word(ifaceTyp), Y: want},
+			Body: []Stmt{
+				Assign(pos, ref(val, pos), got),
+				Assign(pos, ref(ok, pos), boolConst(pos, true)),
+			},
+		})
+	}
 	l.assignTo(s, 0, ref(val, pos))
 	l.assignTo(s, 1, ref(ok, pos))
 }
