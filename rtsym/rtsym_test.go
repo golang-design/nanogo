@@ -379,9 +379,16 @@ func linknamedIntoRuntime(fset *token.FileSet) map[string]string {
 // runtimeVarTypes reads the Go runtime's source and returns the type of every
 // package-level variable that has one written down, keyed by name.
 //
-// A variable declared with a value and no type is absent, which is what the
-// table wants: a variable whose type is inferred is not one the compiler reads
-// by layout.
+// A variable declared with a value and no type carries its type in the value
+// when the value is a composite literal, because a composite literal names the
+// type it builds. runtime.emptyTypeAssertCache is written that way and the
+// compiler points a descriptor's Cache field at it, so the type is read from
+// the literal.
+//
+// Nothing else is inferred. A variable whose type is neither written on the
+// declaration nor named by a composite literal is absent, which is what the
+// table wants: the type would have to be resolved rather than read, and a
+// resolved type is not what this file compares against.
 func runtimeVarTypes(t *testing.T) map[string]string {
 	t.Helper()
 
@@ -408,12 +415,19 @@ func runtimeVarTypes(t *testing.T) map[string]string {
 			}
 			for _, spec := range gd.Specs {
 				vs, ok := spec.(*ast.ValueSpec)
-				if !ok || vs.Type == nil {
+				if !ok {
 					continue
 				}
-				for _, id := range vs.Names {
+				for i, id := range vs.Names {
+					typ := vs.Type
+					if typ == nil {
+						typ = compositeLitType(vs, i)
+					}
+					if typ == nil {
+						continue
+					}
 					if _, seen := out[id.Name]; !seen {
-						out[id.Name] = normalizeType(fset, vs.Type)
+						out[id.Name] = normalizeType(fset, typ)
 					}
 				}
 			}
@@ -427,6 +441,25 @@ func runtimeVarTypes(t *testing.T) map[string]string {
 // A struct's fields are separated by a newline in the source and by "; " here,
 // which is the separator the language accepts for the same declaration written
 // on one line. So the recorded spelling is still Go the reader can paste back.
+// compositeLitType returns the type a composite literal initialiser names, or
+// nil when the i'th value of the declaration is not one.
+//
+// "var x = T{...}" writes T down as plainly as "var x T" does, and the runtime
+// declares both empty caches that way. Anything else is left alone: an
+// initialiser that is a call or a conversion states a type the reader would
+// have to resolve, and this file compares spellings rather than resolving
+// them.
+func compositeLitType(vs *ast.ValueSpec, i int) ast.Expr {
+	if i >= len(vs.Values) {
+		return nil
+	}
+	lit, ok := vs.Values[i].(*ast.CompositeLit)
+	if !ok {
+		return nil
+	}
+	return lit.Type
+}
+
 func normalizeType(fset *token.FileSet, e ast.Expr) string {
 	var b strings.Builder
 	if err := printer.Fprint(&b, fset, e); err != nil {
@@ -483,6 +516,31 @@ func TestVarTableMatchesTheRuntime(t *testing.T) {
 		}
 	}
 	t.Logf("checked %d variables against %d runtime variables", len(AllVars()), len(types))
+}
+
+// TestTheVariablesInterfacesNeedAreNamed is the gate on the three rows the
+// interface descriptors read.
+//
+// Each is a symbol the compiler writes a relocation to and never a call.
+// runtime.zerobase is the address every zero-sized value carries, and the two
+// caches are what the Cache field of an *abi.TypeAssert and an
+// *abi.InterfaceSwitch point at before the runtime replaces them. A missing
+// row here is an emitter that writes a nil where the runtime dereferences.
+func TestTheVariablesInterfacesNeedAreNamed(t *testing.T) {
+	for _, name := range []string{
+		"runtime.zerobase",
+		"runtime.emptyTypeAssertCache",
+		"runtime.emptyInterfaceSwitchCache",
+	} {
+		v := LookupVar(name)
+		if v == nil {
+			t.Errorf("%s is not in the variable table", name)
+			continue
+		}
+		if Lookup(name) != nil {
+			t.Errorf("%s is reachable through Lookup, which names functions, and a call to it jumps into data", name)
+		}
+	}
 }
 
 func TestLookupAndAllVars(t *testing.T) {

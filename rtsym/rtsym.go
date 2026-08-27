@@ -407,6 +407,29 @@ var vars = []Var{
 		Type:  "struct { enabled bool; pad [3]byte; alignme uint64 }",
 		Group: GroupBarrier,
 	},
+
+	// The address a zero-sized value carries.
+	//
+	// Every value of a zero-sized type has to be a pointer the collector can
+	// read, because the data word of an interface is scanned. runtime.mallocgc
+	// returns the address of this variable for a request of no bytes, so the
+	// address is the answer without the call.
+	{Name: "runtime.zerobase", Type: "uintptr", Group: GroupAlloc},
+
+	// The two empty caches an *abi.TypeAssert and an *abi.InterfaceSwitch
+	// start out pointing at.
+	//
+	// The runtime dereferences the Cache field before it looks at anything
+	// else: typeAssert and interfaceSwitch both read oldC.Mask. A descriptor
+	// whose Cache word were nil faults there, so the field is a relocation to
+	// one of these and never a zero.
+	//
+	// Both are declared with a composite literal rather than a type, which is
+	// why the oracle reads the literal's type. abi.TypeAssertCache is written
+	// in the runtime's source either way, and the spelling here is the
+	// runtime's own.
+	{Name: "runtime.emptyTypeAssertCache", Type: "abi.TypeAssertCache", Group: GroupInterface},
+	{Name: "runtime.emptyInterfaceSwitchCache", Type: "abi.InterfaceSwitchCache", Group: GroupInterface},
 }
 
 // index is built once from syms, for lookup only. It never reaches an output
