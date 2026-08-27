@@ -139,6 +139,7 @@ func TestExportedTypeRefusalSkipsMainAndAliases(t *testing.T) {
 // nil is read as a claim that the type is not comparable rather than as an
 // absence.
 func TestGeneratedEqualityLetsAFieldWiseStructCompile(t *testing.T) {
+	arm64Only(t)
 	const src = "package lib\n\ntype Point struct{ Name, Unit string }\n"
 	out, err := compileSource(t, src, func(c *Config) { c.Package = "lib" })
 	if err != nil {

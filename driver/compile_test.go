@@ -739,6 +739,7 @@ func TestCompileRefusesAGenericFunction(t *testing.T) {
 // internal/gotest/testdata/go/test/uintptrescapes3.go is the corpus file that
 // showed it, and the refusal is what turns a wrong answer into a diagnostic.
 func TestCompileRefusesALifetimeDirective(t *testing.T) {
+	arm64Only(t)
 	for _, tt := range []struct {
 		name string
 		src  string
@@ -922,6 +923,7 @@ func TestNosplitIsStillDropped(t *testing.T) {
 // it, so searching the bytes for the symbol finds the reference the conversion
 // creates and answers yes in exactly the case that is broken.
 func TestCompileEmitsTheDescriptorsSsaBuildNames(t *testing.T) {
+	arm64Only(t)
 	const src = `package main
 
 func box() any {
