@@ -1707,13 +1707,17 @@ func (b *bodyBuilder) methodRef(e *syntax.SelectorExpr, recv types2.Type, sel *t
 	if isInterfaceType(recv) != isInterfaceType(sig.Recv().Type()) {
 		b.refuse("the receiver %v and the method's receiver %v disagree about being an interface", recv, sig.Recv().Type())
 	}
-	// A concrete method of a generic type is reached through a dictionary.
-	// Nothing generic reaches this builder, so neither does a dictionary,
-	// and the check says so rather than assuming it.
+	// A concrete method of an instantiated type is called with the
+	// receiver type's own dictionary, which is a reference to the
+	// instantiated type and not a slot of the enclosing declaration's
+	// dictionary. A slot would need the type arguments to be derived, and
+	// nothing derived reaches this builder.
 	if sig.Recv() != nil && !isInterfaceType(sig.Recv().Type()) {
-		named, ok := types2.Unalias(deref2(recv)).(*types2.Named)
-		if ok && named.TypeArgs().Len() != 0 {
-			b.refuse("the method is on the instantiated type %v, and calling it needs the object dictionary the writer does not fill", named)
+		if named, ok := types2.Unalias(deref2(recv)).(*types2.Named); ok {
+			if targs := typeSlice(named.TypeArgs()); len(targs) != 0 {
+				out.StaticDict = true
+				out.Dict = b.objUse(named.Obj(), targs)
+			}
 		}
 	}
 	return out
