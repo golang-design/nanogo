@@ -5,6 +5,7 @@
 package ssagen
 
 import (
+	"encoding/binary"
 	"strings"
 	"testing"
 
@@ -122,6 +123,74 @@ func TestTablesAreIndexedByPosition(t *testing.T) {
 	}
 	if len(r.Pcdata[ssa.PCDATA_UnsafePoint].Data) == 0 {
 		t.Error("the function has a prologue and no range of it is marked unsafe")
+	}
+}
+
+// TestStackObjectsTableIsWritten checks that a function with an address-taken
+// pointer local carries FUNCDATA_StackObjects.
+//
+// The table is what lets the collector reach such a local through a pointer to
+// it rather than only through the locals bitmap, which is the precision
+// specs/027-liveness-and-stackmaps.md asks for: below the point where the
+// address was taken, the bitmap does not describe the object and this table
+// is the only thing that does.
+//
+// The record's last field is an offset to the type's pointer mask, so a
+// relocation is the assertion: a zero there is an offset the runtime would
+// resolve into the module and scan whatever it found.
+func TestStackObjectsTableIsWritten(t *testing.T) {
+	const src = "package main\n\nfunc use(p **int) int\n\n" +
+		"func f() int {\n\tvar p *int\n\treturn use(&p)\n}\n"
+	c := compile(t, src, "f")
+	p := obj.NewPackage("main")
+	r := emit(t, c, p)
+
+	if len(r.Funcdata) != 3 {
+		t.Fatalf("%d funcdata symbols, want the two bitmaps and the stack objects table", len(r.Funcdata))
+	}
+	so := r.Funcdata[ssa.FUNCDATA_StackObjects]
+	if !strings.HasSuffix(so.Name, ".stkobj") {
+		// The suffix is what puts the symbol in the go:func.* class of obj's
+		// content hash, which is where cmd/link places it.
+		t.Errorf("the stack objects table is named %q", so.Name)
+	}
+	// One count of a word, then one sixteen-byte record.
+	if want := uint32(8 + 16); so.Size != want || uint32(len(so.Data)) != want {
+		t.Fatalf("the table is %d bytes with %d of data, want %d for one object", so.Size, len(so.Data), want)
+	}
+	if n := binary.LittleEndian.Uint64(so.Data); n != 1 {
+		t.Errorf("the table says it holds %d objects, want one", n)
+	}
+	if off := int32(binary.LittleEndian.Uint32(so.Data[8:])); off >= 0 {
+		t.Errorf("the object is at %d from Varp, and a local is below it", off)
+	}
+	if len(so.Relocs) != 1 {
+		t.Fatalf("%d relocations, want one to the type's pointer mask", len(so.Relocs))
+	}
+	rel := so.Relocs[0]
+	if rel.Off != 8+12 || rel.Size != 4 || rel.Type != obj.R_ADDROFF {
+		t.Errorf("the mask relocation is %+v, want a four byte ADDROFF at 20", rel)
+	}
+	mask := p.Def(rel.Sym)
+	if mask == nil {
+		t.Fatalf("the mask relocation names %v, which this object does not define", rel.Sym)
+	}
+	if !strings.HasPrefix(mask.Name, "runtime.gcbits.") {
+		t.Errorf("the record points at %q, want a pointer mask", mask.Name)
+	}
+}
+
+// TestNoStackObjectKeepsTwoTables checks that a function without one writes no
+// third entry.
+//
+// The position of an entry is its index, so a table written for a function
+// that has no stack object is not spare bytes: it is an entry the runtime
+// reads as a stack objects table for a frame that has none.
+func TestNoStackObjectKeepsTwoTables(t *testing.T) {
+	c := compile(t, "package main\n\nfunc gcNow() int\n\nfunc f(a int) int { return gcNow() + a }\n", "f")
+	r := emit(t, c, obj.NewPackage("main"))
+	if len(r.Funcdata) != 2 {
+		t.Fatalf("%d funcdata symbols, want the two bitmaps", len(r.Funcdata))
 	}
 }
 

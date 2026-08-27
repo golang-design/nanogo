@@ -48,8 +48,11 @@ func addSymbols(t *testing.T, p *obj.Package, syms []rtype.Symbol) {
 	}
 	// Two passes: a relocation may name a symbol later in the list, and an
 	// array's slice reference names one that is not in the list at all.
+	// A non-package definition, as the driver writes them: every one of these
+	// is dupok, and cmd/link deduplicates a dupok symbol by name in that index
+	// space only.
 	for i, s := range syms {
-		defs[s.Name] = p.AddDef(out[i])
+		defs[s.Name] = p.AddNonPkgDef(out[i])
 	}
 	refs := make(map[string]obj.SymRef)
 	for i, s := range syms {

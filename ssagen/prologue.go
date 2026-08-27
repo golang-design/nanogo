@@ -319,6 +319,10 @@ func (e *emitter) layout() error {
 	}
 	e.items, e.fr = fr.Items, fr
 	f.size = fr.Size
+	// Which frame objects the collector can be given a type for. It is decided
+	// here, before liveness runs, because liveness describes an object that is
+	// not in the table differently.
+	e.keepDescribableObjects()
 
 	if err := e.checkFrame(frameless); err != nil {
 		return err

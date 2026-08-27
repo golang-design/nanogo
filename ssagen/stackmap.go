@@ -44,7 +44,9 @@ import (
 	"encoding/base64"
 	"fmt"
 
+	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
+	"golang.design/x/nanogo/rtype"
 	"golang.design/x/nanogo/ssa"
 )
 
@@ -133,13 +135,26 @@ func (e *emitter) buildTables(size int64) (*tables, error) {
 	t.pcdata[ssa.PCDATA_UnsafePoint] = pcdataSym(unsafePoint)
 	t.pcdata[ssa.PCDATA_StackMapIndex] = pcdataSym(stackMap)
 
-	// A stack object table is not written. specs/027 wants one for an
-	// address-taken local whose type holds pointers, and the record holds an
-	// offset to that type's descriptor, which specs/032 has no writer for. The
-	// table is precision rather than coverage: such a local is in the locals
-	// bitmap for the whole of its marked lifetime, which is the conservative
-	// answer and the safe one. ssa.StackMaps.ObjectsSym is where it goes the
-	// day a descriptor can be named.
+	// The stack objects table, when the function has one. It is what lets the
+	// collector reach an address-taken local through a pointer to it rather
+	// than only through the locals bitmap, which is the precision
+	// specs/027-liveness-and-stackmaps.md asks for.
+	//
+	// It is appended and not written into a fixed slot: FUNCDATA_StackObjects
+	// is the highest index this package writes, and a function with no stack
+	// object must keep a two-entry array rather than one with a hole in it,
+	// because the position of an entry is its index.
+	objects, err := m.ObjectsSym(e.opt.Sym+".stkobj", e.gcdata)
+	if err != nil {
+		return nil, err
+	}
+	if objects != nil {
+		if len(t.funcdata) != ssa.FUNCDATA_StackObjects {
+			return nil, fmt.Errorf("the stack objects table is index %d and %d entries are written",
+				ssa.FUNCDATA_StackObjects, len(t.funcdata))
+		}
+		t.funcdata = append(t.funcdata, objects)
+	}
 	for i, s := range t.funcdata {
 		if s == nil || s.Size == 0 {
 			// cmd/link refuses a zero-size funcdata symbol, and a bitmap is
@@ -179,4 +194,90 @@ func gclocalsName(data []byte) string {
 	sum := sha256.Sum256(data)
 	sum[0] ^= 0xff
 	return "gclocals·" + base64.StdEncoding.EncodeToString(sum[:16])
+}
+
+// gcdata returns the pointer mask symbol of a stack object's type, defining it
+// in this object the first time the type is seen.
+//
+// The name is not built here. rtype writes the descriptor of the type and the
+// descriptor points at its own mask, so the mask is found in the descriptor's
+// own words: the relocation at the GCData field names it, and the symbol it
+// names is in the same set. Deciding the name a second time here could
+// disagree with the one the descriptor carries, and then the collector would
+// read one mask for a type described by another.
+//
+// The symbol is content-addressable, as every mask rtype returns is. Two types
+// with the same pointer map are one symbol in the linked binary, and a package
+// that emits the descriptor as well emits these bytes once.
+func (e *emitter) gcdata(t *ir.Type) (obj.SymRef, bool) {
+	if t == nil {
+		return obj.SymRef{}, false
+	}
+	set, err := rtype.Descriptor(t)
+	if err != nil || len(set) == 0 {
+		return obj.SymRef{}, false
+	}
+	var name string
+	for _, r := range set[0].Relocs {
+		if r.Off == rtype.GCDataOffset {
+			name = r.Target
+			break
+		}
+	}
+	if name == "" {
+		return obj.SymRef{}, false
+	}
+	if r, ok := e.gcbits[name]; ok {
+		return r, true
+	}
+	for _, sym := range set[1:] {
+		if sym.Name != name {
+			continue
+		}
+		d := &obj.Symbol{
+			Name:   sym.Name,
+			Type:   sym.Kind,
+			Align:  sym.Align,
+			Size:   uint32(len(sym.Data)),
+			Data:   sym.Data,
+			Relocs: nil,
+		}
+		if sym.Dupok {
+			d.Flag |= obj.SymFlagDupok
+		}
+		if d.Align == 0 {
+			d.Align = 1
+		}
+		r := e.pkg.AddHashedDef(d)
+		if e.gcbits == nil {
+			e.gcbits = make(map[string]obj.SymRef)
+		}
+		e.gcbits[name] = r
+		return r, true
+	}
+	return obj.SymRef{}, false
+}
+
+// keepDescribableObjects drops from the stack objects table every object whose
+// type has no descriptor.
+//
+// A record names the type's pointer mask, and rtype refuses a type it cannot
+// write. Refusing the whole function for that would turn a precision feature
+// into a coverage loss, so the object leaves the table instead. What replaces
+// the table for it is the locals bitmap: ssa.ComputeLiveness keeps a frame
+// object that is not in the table live for the whole function, because there
+// is then nothing else that can reach it.
+//
+// The items slice is the frame's own, so clearing the mark here is what
+// ssa.Frame.StackObjects reads later.
+func (e *emitter) keepDescribableObjects() {
+	for i := range e.items {
+		it := &e.items[i]
+		if !it.StackObject {
+			continue
+		}
+		if _, ok := e.gcdata(it.Type); !ok {
+			it.StackObject = false
+		}
+	}
 }

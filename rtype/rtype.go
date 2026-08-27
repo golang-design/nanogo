@@ -108,6 +108,14 @@ type Reloc struct {
 	Target string
 }
 
+// GCDataOffset is the offset of internal/abi.Type's GCData field within a
+// descriptor.
+//
+// It is exported so that a caller holding a descriptor can find the pointer
+// mask the descriptor points at, by the relocation at this offset rather than
+// by spelling the mask's name a second time.
+const GCDataOffset = offGCData
+
 // A Symbol is one data symbol a descriptor needs.
 //
 // Dupok is set on every one of them. specs/032 makes deduplication the

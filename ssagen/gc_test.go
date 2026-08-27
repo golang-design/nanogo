@@ -36,7 +36,10 @@ import (
 // typePtrInt is *int, with the pointer bit ir.Layout computes. Nothing else
 // may decide which words hold pointers (specs/020-ir.md).
 var typePtrInt = func() *ir.Type {
-	t := &ir.Type{Kind: ir.Ptr, Elem: typeInt, Name: "*int"}
+	// Unnamed, because *int is a type literal and not a defined type. A name
+	// here would make rtype ask for the method set of a defined type, and the
+	// stack objects table asks rtype for this type's pointer mask.
+	t := &ir.Type{Kind: ir.Ptr, Elem: typeInt}
 	if err := ir.Layout(t); err != nil {
 		panic(err)
 	}

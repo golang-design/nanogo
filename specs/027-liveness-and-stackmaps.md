@@ -23,16 +23,18 @@ streams are built and are written into object files. `ssa/liveness.go`,
 `ssa/frame.go` and `ssa/stackmap.go` hold them, and `ssagen/stackmap.go`
 attaches them to a function.
 
-**The stack objects table is computed and not written.**
-`ssa.StackMaps.ObjectsSym` builds one, and 162 functions of the distribution
-corpus have a stack object, but `ssagen` does not call it. A record names the
-`runtime.gcbits` symbol of its type's descriptor, and what is missing is the
-lookup from an `ir.Type` to that symbol's `goobj.SymRef`.
-[032](032-type-descriptors-and-itabs.md) writes the descriptor and its pointer
-mask, so the gap is the lookup and not the writer. The table is precision rather
-than coverage, so its absence is safe: an address-taken local is in the locals
-bitmap for the whole of its marked lifetime, which is the conservative
-answer.
+The stack objects table is written. `ssagen/stackmap.go` calls
+`ssa.StackMaps.ObjectsSym` and finds the `runtime.gcbits` symbol of a type in
+the descriptor [032](032-type-descriptors-and-itabs.md) writes for it: the
+descriptor carries a relocation at `GCData`, and the symbol it names is in the
+same set, so the mask is read out of the descriptor's own words rather than
+named a second time here.
+
+**A frame object whose type has no descriptor is not in the table.** `rtype`
+refuses a type it cannot write, and refusing the whole function for that would
+turn a precision feature into a coverage loss. Such an object stays in the
+locals bitmap for the whole function instead, which is the conservative answer
+and the one that needs no table.
 
 ## The contract
 
@@ -41,8 +43,8 @@ At a **safepoint**, for the frame of a function $f$, the compiler provides:
 - an **arguments** bitmap: which words of the incoming argument area hold
   pointers;
 - a **locals** bitmap: which words of the local frame area hold pointers;
-- a **stack objects** table: the address-taken locals whose lifetime the
-  collector must respect. This one is computed and not written, as above.
+- a **stack objects** table: the address-taken locals the collector reaches
+  through a pointer to them rather than through the locals bitmap.
 
 The collector reads them through `FUNCDATA` symbol references and selects the
 bitmap for the current program counter through `PCDATA` index changes.

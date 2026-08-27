@@ -292,6 +292,11 @@ type emitter struct {
 	frame  frame
 	frames map[*ir.Object]int64 // the offset of each frame object
 
+	// gcbits holds the pointer mask symbol of each stack object type this
+	// function named, by symbol name. It is a lookup table and is never
+	// ranged over (specs/053-determinism.md).
+	gcbits map[string]obj.SymRef
+
 	// items, fr and slotOff are specs/027-liveness-and-stackmaps.md's frame,
 	// which this package reads and does not compute. slotOff is indexed as
 	// ssa.Alloc.Slots is and holds -1 for a slot the layout did not place.
