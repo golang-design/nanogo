@@ -40,6 +40,7 @@ census runindir 1
 census runoutput 14
 census skip 5
 
+pass matched 235.go
 pass rejected alias.go
 pass rejected alias2.go
 pass matched align.go
@@ -82,6 +83,7 @@ pass matched defer.go
 pass matched defernil.go
 pass rejected directive.go
 pass rejected directive2.go
+pass matched divmod.go
 pass rejected embedfunc.go
 pass compiled empty.go
 pass matched env.go
@@ -120,6 +122,7 @@ pass matched initcomma.go
 pass rejected initexp.go
 pass rejected initializerr.go
 pass rejected initloop.go
+pass matched inline_literal.go
 pass matched int_lit.go
 pass matched intcvt.go
 pass matched iota.go
@@ -134,6 +137,7 @@ pass rejected makemap.go
 pass rejected makenew.go
 pass matched mallocfin.go
 pass rejected map1.go
+pass matched mapclear.go
 pass rejected method1.go
 pass rejected method2.go
 pass rejected method6.go
@@ -141,6 +145,7 @@ pass rejected named1.go
 pass matched newexpr.go
 pass matched peano.go
 pass matched printbig.go
+pass matched range.go
 pass rejected range2.go
 pass matched range3.go
 pass rejected recover5.go
@@ -157,9 +162,11 @@ pass matched sizeof.go
 pass rejected slice3err.go
 pass matched slicecap.go
 pass matched stackobj.go
+pass matched stackobj2.go
 pass matched stackobj3.go
 pass matched strcopy.go
 pass matched string_lit.go
+pass matched stringrange.go
 pass rejected switch2.go
 pass rejected switch3.go
 pass rejected switch4.go

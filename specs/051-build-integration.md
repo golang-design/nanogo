@@ -157,11 +157,12 @@ only one:
 | a package-level variable of type `error`, which needs a function's signature in the IR type (`math/bits`) | 1 |
 | a row of [020](020-ir.md)'s lowering table, `append` in `internal/byteorder` | 1 |
 
-The third row holds the two that fit no other bucket, and neither is a
-construct in the source. `internal/stringslite` asks for an edge move between
-two spill slots, `no move from s6 to s4` in `Index`; `internal/runtime/gc` asks
-for three integer scratch registers on an indexed store where the target
-reserves two. [026](026-register-allocation.md) owns both.
+The third row held two that fit no other bucket and neither was a construct in
+the source. [026](026-register-allocation.md) owned both and both are built
+now: the target reserves three integer scratch registers, and `ssagen` moves
+between two spill slots through the second one. What refuses
+`internal/stringslite` today is a type parameter with no run-time
+representation, which is [013](013-generics.md)'s row and not this one.
 
 The corpus counts in [004](004-conformance.md) are the second measure, one
 level below a package: 536 packages of the distribution reach the IR builder,
