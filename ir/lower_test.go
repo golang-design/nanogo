@@ -1754,7 +1754,8 @@ func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
 		{"defer of println", `func f(n int) { defer println(n) }`, ODefer, "holds a println and not a call"},
 		{"defer of recover", `func f() { defer recover() }`, ODefer, "holds a recover and not a call"},
 		{"a select with no clauses", `func f() { select {} }`, OSelect, "runtime.block"},
-		{"a type assertion", `func f(v any) int { return v.(int) }`, OTypeAssert, "no row"},
+		{"an assertion to an interface", `func f(v any) error { return v.(error) }`, OTypeAssert, "runtime.typeAssert"},
+		{"an assertion from an interface with methods", `func f(v interface{ M() int }) int { return v.(T).M() }`, OTypeAssert, "no itab"},
 		{"recover whose value is read", `func f() { useAny(recover()) }`, ORecover, "no row"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},
 		{"range over a function", `func f(it func(func(int) bool)) { for v := range it { use(v) } }`, ORange, "range over func"},
@@ -3116,5 +3117,84 @@ func TestLowerDeferRewritesEveryReturn(t *testing.T) {
 	}
 	if n := lowerCount(fn, "runtime.deferreturn"); n != 1 {
 		t.Errorf("the function calls deferreturn %d times, want 1:\n%s", n, buildDump(fn))
+	}
+}
+
+// The assertion rows of specs/032-type-descriptors-and-itabs.md.
+//
+// Every one of them is a pointer comparison against a type descriptor, so the
+// checks are on which symbols the tree names and on which arm the panic is in.
+
+// lowerHasOp reports whether a lowered body holds a node with op whose type is
+// spelled name.
+func lowerHasOp(fn *Func, op Op, name string) bool {
+	found := false
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == op && n.Type != nil && n.Type.String() == name {
+				found = true
+			}
+			return true
+		})
+	}
+	return found
+}
+
+func TestLowerTypeAssert(t *testing.T) {
+	fn := lowerOK(t, `func f(v any) int { return v.(int) }`)
+	if !lowerCalled(fn, "runtime.panicdottypeE") {
+		t.Errorf("the failing arm does not panic: %v\n%s", lowerCalls(fn), buildDump(fn))
+	}
+	for _, want := range []string{"type:int", "type:interface {}"} {
+		if !lowerNames(fn, want) {
+			t.Errorf("the tree does not name %s: %v\n%s", want, lowerDescriptors(fn), buildDump(fn))
+		}
+	}
+	// An int is not one pointer-sized word holding a pointer, so it was
+	// boxed on the way in and the data word is the address of the box.
+	if !lowerHasOp(fn, ODeref, "int") {
+		t.Errorf("the value was not read through the data word:\n%s", buildDump(fn))
+	}
+	// The panic is handed the word the value carried, the target and the
+	// static type of the operand, in that order.
+	c := findCall(fn, "runtime.panicdottypeE")
+	if c == nil || len(c.Args) != 3 {
+		t.Fatalf("panicdottypeE takes %v\n%s", c, buildDump(fn))
+	}
+}
+
+// TestLowerTypeAssertDirectIface asserts to a type that is its own data word.
+func TestLowerTypeAssertDirectIface(t *testing.T) {
+	fn := lowerOK(t, `func f(v any) *int { return v.(*int) }`)
+	if lowerHasOp(fn, ODeref, "*int") {
+		t.Errorf("a pointer was read through its own data word:\n%s", buildDump(fn))
+	}
+	if !lowerNames(fn, "type:*int") {
+		t.Errorf("the tree does not name type:*int: %v", lowerDescriptors(fn))
+	}
+}
+
+// TestLowerTypeAssertCommaOk asserts that the two-value form has no panic in
+// it and writes both destinations.
+func TestLowerTypeAssertCommaOk(t *testing.T) {
+	fn := lowerOK(t, `func f(v any) (int, bool) { n, ok := v.(int); return n, ok }`)
+	if lowerCalled(fn, "runtime.panicdottypeE") {
+		t.Errorf("the comma-ok form panics: %v\n%s", lowerCalls(fn), buildDump(fn))
+	}
+	if !lowerNames(fn, "type:int") {
+		t.Errorf("the tree does not name type:int: %v", lowerDescriptors(fn))
+	}
+	// The static type of the operand is named only by the panic, which this
+	// form does not have.
+	if lowerNames(fn, "type:interface {}") {
+		t.Errorf("the comma-ok form names the operand's own descriptor: %v", lowerDescriptors(fn))
+	}
+}
+
+// TestLowerTypeAssertCommaOkBlank drops the value and keeps the answer.
+func TestLowerTypeAssertCommaOkBlank(t *testing.T) {
+	fn := lowerOK(t, `func f(v any) bool { _, ok := v.(int); return ok }`)
+	if lowerCalled(fn, "runtime.panicdottypeE") {
+		t.Errorf("the comma-ok form panics: %v", lowerCalls(fn))
 	}
 }

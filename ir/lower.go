@@ -259,6 +259,13 @@ const (
 	hdrCap = 2
 )
 
+// The words of an interface value, named apart from the three above because
+// they are a different header and share only the mechanism.
+const (
+	ifaceTyp  = 0
+	ifaceData = 1
+)
+
 // header returns the struct that describes the layout of a slice or a string.
 //
 // The IR has no node for "the length word of a slice", and inventing one would
@@ -283,6 +290,16 @@ func (l *lowerer) header(t *Type) *Type {
 		h = &Type{Kind: Struct, Name: "string", Fields: []Field{
 			{Name: "ptr", Type: l.ptrTo(lowerByte)},
 			{Name: "len", Type: lowerInt},
+		}}
+	case Interface:
+		// An interface is a header too: a word that names the dynamic type
+		// and a word that holds the value. The first word is typed as a
+		// descriptor pointer because that is what an empty interface leads
+		// with, and the assertion rows refuse an interface with methods,
+		// whose first word is an *itab, before they read the field.
+		h = &Type{Kind: Struct, Name: "eface", Fields: []Field{
+			{Name: "typ", Type: l.ptrTo(rtypeType)},
+			{Name: "data", Type: lowerUnsafePtr},
 		}}
 	default:
 		return nil
@@ -688,6 +705,11 @@ func (l *lowerer) stmt(s Stmt) {
 			l.mapAccess2(s)
 			return
 		}
+		if len(s.Args) == 2 && s.Y != nil && s.Y.Op == OTypeAssert {
+			// v, ok = x.(T), for the same reason.
+			l.typeAssert2(s)
+			return
+		}
 		if len(s.Args) == 0 && isMapIndex(s.X) {
 			// m[k] = v. The destination is a call and not a location, so the
 			// statement is built rather than rewritten in place.
@@ -913,6 +935,8 @@ func (l *lowerer) expr(n Expr) Expr {
 		return l.printExpr(n)
 	case OClosure:
 		return l.closureExpr(n)
+	case OTypeAssert:
+		return l.typeAssert(n)
 	case OUnsafeAdd:
 		// Pointer arithmetic. The offset was written with an integer type of
 		// its own, which the specification leaves free, so it is widened to a
@@ -3373,4 +3397,187 @@ func (l *lowerer) printExpr(n Expr) Expr {
 		l.emit(runtimeCall(pos, "runtime.printnl"))
 	}
 	return runtimeCall(pos, "runtime.printunlock")
+}
+
+// Interfaces.
+//
+// specs/032-type-descriptors-and-itabs.md's assertion rows. An interface value
+// is two words: the first names the dynamic type and the second holds the
+// value. x.(T) asks whether the first word is T's descriptor, so every form
+// this section builds is one pointer comparison against a link-time constant.
+//
+// # Why there is no runtime call in the common case
+//
+// runtime.typeAssert and the *abi.TypeAssert cache it reads answer one
+// question only: which itab implements a non-empty interface for the value's
+// dynamic type. That is a search over a method set, so it is a call and it is
+// cached. cmd/compile's dottype1 reaches it for an interface target and for
+// nothing else, and a concrete target is CMP against a symbol there too.
+//
+// # What is refused, and what would lift it
+//
+// A target that is an interface needs runtime.typeAssert, the *abi.TypeAssert
+// descriptor that call reads, and a writer for the itab it returns. A source
+// that is an interface with methods leads with an *itab rather than a *_type,
+// so the word to compare against is the itab of the (target, source) pair,
+// which is the same missing writer. Neither is reachable today for a second
+// reason: specs/021's concreteToInterface refuses to build a value of a
+// non-empty interface type, because its type word is that same itab.
+
+// assertOperand evaluates the interface an assertion reads and returns a
+// factory for its two words.
+//
+// The value is addressed rather than copied. An interface is wider than a
+// register, so specs/021-ssa-construction.md's ssaAble puts every one of them
+// in the frame already, and one pointer temporary reads both words without a
+// sixteen-byte copy. The address is evaluated once, so an operand that is a
+// call is called once.
+//
+// The second result is the reason the row cannot be built, for a caller to
+// report.
+func (l *lowerer) assertOperand(x Expr, target *Type) (func(int) Expr, string) {
+	if x == nil || x.Type == nil {
+		return nil, "an operand with no type"
+	}
+	if x.Type.Kind != Interface {
+		return nil, "an operand of " + x.Type.Kind.String() + ", and only an interface holds a dynamic type"
+	}
+	if target == nil {
+		return nil, "an assertion with no target type"
+	}
+	if target.Kind == Interface {
+		return nil, "a target that is an interface, whose answer is the itab that pairs it with the dynamic type: cmd/compile calls runtime.typeAssert with an *abi.TypeAssert, and specs/032 writes neither that descriptor nor an itab"
+	}
+	if !x.Type.EmptyIface {
+		return nil, "an operand that is an interface with methods, which leads with an *itab and not a *_type, so the word to compare against is the itab of the pair: specs/032 writes no itab"
+	}
+	h := l.header(x.Type)
+	if h == nil {
+		return nil, "an interface with no header layout"
+	}
+	pos := x.Pos
+	p := l.spill(&Node{Op: OConvert, Pos: pos, Type: l.ptrTo(h), X: l.addrOf(x)})
+	return func(i int) Expr {
+		return &Node{Op: OField, Pos: pos, Type: h.Fields[i].Type, X: ref(p, pos), Index: i}
+	}, ""
+}
+
+// ifaceValue reads a value of t out of the data word of an interface.
+//
+// A value that is one word wide and holds a pointer is its own data word, so
+// the word is the value. Everything else was copied to the heap when it went
+// in, and the word is the address of that copy. types.IsDirectIface asks the
+// same question the same way, and it is not "pointer shaped": a uintptr is one
+// word and holds no pointer, so an interface carries the integer's address.
+func (l *lowerer) ifaceValue(data Expr, t *Type, pos syntax.Pos) Expr {
+	if directIface(t) {
+		return &Node{Op: OConvert, Pos: pos, Type: t, X: data}
+	}
+	return &Node{Op: ODeref, Pos: pos, Type: t,
+		X: &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(t), X: data}}
+}
+
+// directIface reports whether a value of t is its own data word.
+func directIface(t *Type) bool {
+	return t.Size == PtrSize && t.PtrBytes() == PtrSize
+}
+
+// typeAssert builds x.(T), the form that panics.
+//
+// The failure is a call and the success is the fall-through, which is a shape
+// gc does not use: dottype1 branches to two blocks and joins nothing, because
+// runtime.panicdottypeE does not return. That is what makes one block enough
+// here. rtsym records the symbol as NoReturn for the same reason.
+//
+// There is no nil guard. A nil interface has a nil first word, the comparison
+// fails, and panicdottypeE is handed the nil: it prints "interface conversion:
+// interface {} is nil, not int", which is the message the specification asks
+// for. runtime.panicnildottype belongs to the interface-target path, where the
+// answer is an itab lookup that cannot take a nil.
+func (l *lowerer) typeAssert(n Expr) Expr {
+	if n.Y == nil {
+		l.refuse(n, "an assertion with no target type")
+		return n
+	}
+	pos, target := n.Pos, n.Y.Type
+	word, why := l.assertOperand(n.X, target)
+	if why != "" {
+		l.refuse(n, why)
+		return n
+	}
+	// The descriptor of the target is asked for twice, because a node is a
+	// tree one pass rewrites in place and may not stand in two places. Both
+	// calls name one object and one symbol. The third is the static type of
+	// the operand, which is the "interface {} is" half of the message gc
+	// prints and it reads it the same way.
+	want, why := l.descriptor(target, pos)
+	again, _ := l.descriptor(target, pos)
+	src, srcWhy := l.descriptor(n.X.Type, pos)
+	if want == nil || src == nil {
+		if want == nil {
+			l.refuse(n, why)
+		} else {
+			l.refuse(n, srcWhy)
+		}
+		return n
+	}
+	l.emit(&Node{
+		Op: OIf, Pos: pos, Type: voidType,
+		X: &Node{Op: OCompare, Op1: syntax.Neq, Pos: pos, Type: lowerBool,
+			X: word(ifaceTyp), Y: want},
+		Body: []Stmt{runtimeCall(pos, "runtime.panicdottypeE", word(ifaceTyp), again, src)},
+	})
+	return l.ifaceValue(word(ifaceData), target, pos)
+}
+
+// typeAssert2 builds v, ok = x.(T).
+//
+// It is a statement row rather than an expression one, for the reason
+// mapAccess2 is: the IR has no node for a value pair. The value is a
+// temporary, because the two arms write it and the destination may be the
+// blank identifier, which names no storage to write twice.
+//
+// Both destinations are written after the test and neither before it, which is
+// the specification's order for a multi-value assignment.
+func (l *lowerer) typeAssert2(s Stmt) {
+	n, pos := s.Y, s.Pos
+	l.flush(n)
+	if n.Type == nil || n.Type.Kind != Tuple || len(n.Type.Fields) != 2 || n.Y == nil {
+		l.refuse(n, "a comma-ok assertion whose result is not a pair")
+		l.emit(s)
+		return
+	}
+	target := n.Type.Fields[0].Type
+	word, why := l.assertOperand(l.expr(n.X), target)
+	if why != "" {
+		l.refuse(n, why)
+		l.emit(s)
+		return
+	}
+	want, why := l.descriptor(target, pos)
+	if want == nil {
+		l.refuse(n, why)
+		l.emit(s)
+		return
+	}
+
+	val := l.tempObj(target, pos)
+	if z := l.zeroOf(target, pos); z != nil {
+		l.emit(define(pos, ref(val, pos), z))
+	} else {
+		l.zero(val, pos)
+	}
+	got := l.tempObj(lowerBool, pos)
+	l.emit(define(pos, ref(got, pos), boolConst(pos, false)))
+	l.emit(&Node{
+		Op: OIf, Pos: pos, Type: voidType,
+		X: &Node{Op: OCompare, Op1: syntax.Eql, Pos: pos, Type: lowerBool,
+			X: word(ifaceTyp), Y: want},
+		Body: []Stmt{
+			Assign(pos, ref(val, pos), l.ifaceValue(word(ifaceData), target, pos)),
+			Assign(pos, ref(got, pos), boolConst(pos, true)),
+		},
+	})
+	l.assignTo(s, 0, ref(val, pos))
+	l.assignTo(s, 1, ref(got, pos))
 }
