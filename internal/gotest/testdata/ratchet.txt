@@ -53,6 +53,7 @@ pass matched atomicload.go
 pass rejected blank1.go
 pass rejected bombad.go
 pass rejected cannotassign.go
+pass matched chancap.go
 pass matched chanlinear.go
 pass matched char_lit.go
 pass matched clear.go
@@ -145,6 +146,7 @@ pass rejected mainsig.go
 pass rejected makechan.go
 pass rejected makemap.go
 pass rejected makenew.go
+pass matched makeslice.go
 pass matched mallocfin.go
 pass rejected map1.go
 pass matched mapclear.go

@@ -33,17 +33,16 @@
 // floating-point arithmetic, comparisons, numeric conversions, calls
 // including variadic, recursive and method calls, the control statements,
 // slices with append, strings with their conversions, maps, channels with
-// select, interfaces with method calls and assertions to a concrete type,
+// select, interfaces with method calls, conversions between them, assertions
+// and type switches naming either a concrete type or another interface,
 // range over any of them, a struct type declared in the package being
 // compiled, package-level variables, init functions, defer and go with their
 // arguments, print and println, a closure with or without captures, and a
 // declared function used as a value all compile.
 //
-// Defer of a builtin, an assertion or a type switch case naming an interface,
-// a conversion between two different interfaces, generics, a package with
-// assembly in it, and a package with a go:embed directive in it are refused,
-// each with a message that names the function, the position and the
-// construct.
+// Defer of a builtin, generics, a package with assembly in it, and a package
+// with a go:embed directive in it are refused, each with a message that names
+// the function, the position and the construct.
 //
 // No program the probe corpus reaches behaves differently from the one gc
 // builds. That is a measurement over 95 programs compiled twice and run

@@ -157,10 +157,14 @@ list, and `sh run.sh` in that directory reproduces it.
   `clear`, and `range`.
 - Channels: `make`, send, receive in both forms, `close`, `len`, `cap`,
   `range`, and `select` with any number of arms and a default.
-- Interfaces: converting a value to one, calling a method through one,
-  comparing two, an assertion to a concrete type in both forms, and a type
-  switch over concrete cases. The itab is nanogo's and a method called through
-  it may be compiled by either compiler.
+- Interfaces: converting a value to one, converting between two of them,
+  calling a method through one, comparing two, an assertion in both forms to
+  either a concrete type or another interface, and a type switch over cases of
+  either kind. The itab is nanogo's and a method called through it may be
+  compiled by either compiler. An assertion whose answer is not known until the
+  value is calls `runtime.typeAssert` or `runtime.interfaceSwitch`, reading a
+  cache nanogo writes into the object and the runtime fills in as the program
+  runs.
 - A struct type declared in the package being compiled: a composite literal,
   reading and writing a field, and passing one by value. A struct is returned
   by value in as many registers as the convention gives it.
@@ -191,12 +195,6 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
 
 - `defer println(x)`. A builtin is not a function value, so there is nothing
   to hand the runtime.
-- An assertion whose target is an interface, and a type switch case that names
-  one. Both need the `abi.TypeAssert` and `abi.InterfaceSwitch` descriptors,
-  which nothing writes yet. An assertion to a concrete type works, and so does
-  a switch over concrete cases.
-- A conversion between two interfaces that are not the same type, for the same
-  reason.
 - Generics.
 - Taking the address of a variable the compiler keeps in a register.
 - A package with assembly in it, and a package that imports `"C"`.
