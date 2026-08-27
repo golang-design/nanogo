@@ -30,8 +30,8 @@ Both directions, for everything but a generic declaration.
 | The declaration writer | `export/writer.go` | built; refuses a generic declaration by name |
 | The `__.PKGDEF` archive member | `driver/archive.go` | built; nanogo writes both members `gc` writes |
 | `-importcfg` parsing | `driver/importcfg.go` | built; all four directives, in separate tables, and an unknown directive is an error |
-| Function bodies, the container half | `export/body.go` | specified below and being built; a body element decodes to a tree and re-encodes to the same bytes |
-| Function bodies, the type checker half | nowhere | **not written from source and not resolved to objects**; see below |
+| Function bodies, the reader | `export/body.go`, `export/bodyread.go`, `export/bodies.go` | built; every body of every standard library package decodes, and the decode is exact |
+| Function bodies, the writer | nowhere | **not written**; a body is encoded from `syntax` plus the checker's record, and nothing does that; see below |
 
 `driver/importer.go` turns an import path into a file through `-importcfg` and
 hands it to the reader, so a package that imports compiles.
@@ -133,8 +133,14 @@ importer that instantiates it, with a message naming neither the generic nor
 the package that wrote it.
 
 So the writer refuses rather than writing something a build would get halfway
-through. Closing it needs the body writer, which is the same gap that stops the
-stenciler; [013](013-generics.md) owns both.
+through. **The refusal stands, and the body reader does not lift it.** Lifting
+it needs two things the reader does not provide: an encoder from `syntax` plus
+the checker's record into a body element, and the dictionary that encoding
+fills as a side effect. `objDict` writes zero for every count today, and every
+one of them is populated while a body is encoded, by the writer's `rtype`,
+`itab`, `convRTTI` and `varDictIndex` calls. A missing entry there is a
+dictionary slot `gc` reads as a different type, which is a wrong answer and
+not a refusal. So the order is the encoder first and the refusal second.
 
 The `types2` fork carries a hand-written `srcimporter_test.go`, which
 type-checks an imported package from source. Upstream's `importer_test.go` is
@@ -243,33 +249,63 @@ through it and lowers the result. What the stenciler needs from the tree is
 what the format already carries, because it is what `gc`'s own stenciler reads
 out of the same bytes.
 
-### The round trip that proves the decoding
+### The oracle that proves the decoding
 
 A decoder for an undocumented format is only as good as its oracle, and a
-fixture is not one. The oracle here is `gc`'s own bodies:
+fixture is not one. The oracle here is `gc`'s own bodies, and the check is
+that the decode is **exact**. For every body element $b$ of every standard
+library archive:
 
 $$
-\forall b \in \text{SectionBody} : \quad
-\texttt{encode}(\texttt{decode}(b)) = b
+\underbrace{|b| - \texttt{consumed}(b) = 0}_{\text{no byte left}}
+\quad\wedge\quad
+\underbrace{R(b) \setminus \texttt{resolved}(b) = \varnothing}_{\text{no reference left}}
 $$
 
-Every body element of every standard library archive is decoded into the tree
-and encoded back, and the resulting bitstream is compared byte for byte with
-the one `gc` wrote. Two things must be held fixed for the comparison to mean
-what it says, and both are properties of the container rather than of the
-body:
+where $R(b)$ is the element's reference table. The two halves catch different
+failures and neither one alone is enough:
 
-- The element's reference table is seeded from the source element's. The
-  encoder builds its table in first-use order, so a table built afresh can
-  hold the same entries at different indices, and the data stream carries
-  table indices.
-- The string section is seeded from the source's, in order. `Encoder.String`
-  interns, so a string written afresh gets an index of the encoder's own
-  choosing.
+- **No byte left.** A field read at the wrong width, or skipped, or read in
+  the wrong order moves every byte after it, so a decode that finishes on the
+  last byte of the element agrees with the writer field for field. Dropping
+  one `Bool` from the call encoding refuses 9,317 of 9,317 bodies.
+- **No reference left.** `gc`'s encoder adds a table entry only where it
+  writes a reference, so an entry nothing resolved names a reference the
+  decoder passed over. This is the half that catches a skipped reference
+  whose width happened to match the field that replaced it.
 
-A field the decoder reads with the wrong width, or skips, or re-encodes in the
-wrong order, moves every byte after it. So the comparison is exact and it
-fails loudly.
+The measured result, over the archives the pinned toolchain wrote:
+
+| Claim | Number |
+| --- | --- |
+| standard library packages whose bodies were read | 375 of 375 |
+| bodies reached through a declaration's extension data, which is the generic path | 820 |
+| bodies reached through the private root, which is the inlining path | 8,301 |
+| bodies of function literals inside those | 196 |
+| bodies refused | 0 |
+
+**The encoder is owed.** Until it exists the reader is proved against `gc`'s
+bytes and not against nanogo's own, and nothing nanogo writes carries a body.
+
+### Two things the format does that its writer does not say
+
+Both were found by the oracle and neither is in `noder/writer.go`, because
+both are `noder/linker.go` rewriting what the writer produced.
+
+**A defined type's extension data has one shape and a function's has two.**
+`linker.go` re-encodes an object's extension data when the object has a
+definition in `gc`'s IR and copies the writer's own bytes when it does not. A
+generic function has no definition, which is the branch that carries its body.
+A generic *type* does have one, so its extension data is re-encoded like any
+other type's and carries the two type descriptor symbol indices. `gc`'s reader
+settles it: `typeExt` reads them with no branch at all, so the re-encoded shape
+is the only shape a file holds for a defined type. Reading a generic type's
+extension data as the writer's shape misaligns every method after it, which is
+what 5 packages of the corpus reported.
+
+**A function's escape analysis notes are one per receiver and parameter, and
+none for a result.** So the count that skips them is not the count of locals a
+body opens with, and the two have to be carried separately.
 
 ### What neither half carries
 
@@ -309,11 +345,11 @@ record and says it has none never runs its initialisation and nothing reports
 it, and a package that says it has one and has none is a link failure naming a
 symbol nothing defines.
 
-No function body of any kind is read, because the reader is the types-only one.
-That blocks [024](024-inlining-and-devirtualization.md) entirely, and it blocks
-the part of [013](013-generics.md) where a package instantiates a generic
-another package declares. The row below that calls generic bodies required data
-is still true, and it is still unmet.
+Function bodies are read now and are still not written. What that leaves is
+one gap and not two: an importer can reach the body of a generic another
+package declares, and nanogo cannot yet hand one to an importer of its own.
+[024](024-inlining-and-devirtualization.md) is unblocked from the reading side
+by the same work and is otherwise untouched, because nothing inlines yet.
 
 ## What is in it
 
@@ -562,11 +598,26 @@ What the writer has:
   packages of the build against them. All four programs run
   (`internal/e2e/import_test.go`).
 
+What the body reader has:
+
+- The standard library, exactly: every body element of every one of the 375
+  packages, decoded with no byte of the element left and no reference in its
+  table unresolved. 9,317 elements, 0 refused (`export/body_test.go`). An
+  unattended run reads 20 packages, one per shape the encoding has; the sweep
+  runs under `NANOGO_REQUIRE_CORPUS=1`.
+- The refusal is by name. A statement code, an expression code, an assignment
+  code or an operator ordinal the format does not have is a `BodyError`
+  naming the declaration, and so is a body whose element does not decode
+  exactly.
+
 What the writer still needs:
 
+- The body encoder: from `syntax` plus the checker's record into a body
+  element, with the dictionary it fills as it goes.
 - Generic bodies: an importer instantiates a generic declared in a package it
   only has export data for, and the instantiation compiles and runs. This is
-  the whole of what is refused, and it needs the body writer.
+  the whole of what is refused, and it needs the encoder above and
+  [013](013-generics.md)'s stenciler.
 
 ## What was wrong
 

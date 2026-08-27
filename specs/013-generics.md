@@ -39,14 +39,25 @@ uninstantiated body arrived. The property this spec claims at the end therefore
 holds today, that nothing below [020](020-ir.md) sees a type parameter, but it
 holds because the bodies are dropped and not because they were instantiated.
 
-**Export data refuses a generic declaration too, and for this spec's reason.**
-`export/writer.go` names a declaration with type parameters and refuses to
-encode it: an importing package stencils a generic, stenciling needs the
-function body, and nanogo writes declarations only. So the missing stenciler
-and the missing body reader are one gap seen from two sides, and a package that
-declares a generic does not round-trip. That is what is left of
-[003](003-sequencing.md)'s M2 gate, and [015](015-export-data.md) records it
-from its side.
+**What a stenciler will need from `ir` is not there either.** `ir.Build` takes
+a package, its files and the checker's `Info`, and one decoded body is none of
+the three. A per-function entry point is the thing the reader cannot supply
+from its side, and it is what this spec asks [020](020-ir.md) for.
+
+**The body reader is built and the export data writer still refuses a generic
+declaration.** [015](015-export-data.md) reads the body of a generic another
+package declares: every body element of all 375 standard library packages
+decodes, 820 of them through the path a generic takes, into a tree
+`export/body.go` owns. So the stenciler has its input now, and what it takes
+is not `syntax` and not `ir` but the format's own statement and expression
+codes, with the types resolved and the local variables numbered.
+
+Two things are still owed and neither is this spec's. `export/writer.go` names
+a declaration with type parameters and refuses to encode it, because writing
+one needs a body *encoder* and the dictionary that encoding fills, and
+[015](015-export-data.md) has neither. Until then a package nanogo compiles
+cannot export a generic, which is what is left of [003](003-sequencing.md)'s
+M2 gate.
 
 This note is at the top rather than at the end because a reader who takes the
 design below for a description of the code will be wrong about the whole file.
