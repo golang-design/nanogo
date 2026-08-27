@@ -76,9 +76,12 @@ func TestTypeAssertLayout(t *testing.T) {
 		if s.Gotype != "type:internal/abi.TypeAssert" {
 			t.Errorf("the symbol's Go type is %q, and cmd/link builds the data section's pointer map out of it", s.Gotype)
 		}
-		if len(s.Relocs) != 2 {
-			t.Fatalf("the symbol has %d relocations, want the cache and the interface", len(s.Relocs))
+		// The cache, the interface, and one marker per method of that
+		// interface. ifaceType declares one method.
+		if len(s.Relocs) != 3 {
+			t.Fatalf("the symbol has %d relocations, want the cache, the interface and one method marker", len(s.Relocs))
 		}
+		checkMarkers(t, s.Relocs[2:], iface)
 		if got := s.Relocs[0]; got.Off != 0 || got.Target != "runtime.emptyTypeAssertCache" {
 			t.Errorf("the Cache word is %+v, and runtime.typeAssert reads Cache.Mask before anything else", got)
 		}
@@ -113,8 +116,10 @@ func TestInterfaceSwitchLayout(t *testing.T) {
 	if s.Gotype != "type:internal/abi.InterfaceSwitch" {
 		t.Errorf("the symbol's Go type is %q", s.Gotype)
 	}
-	if len(s.Relocs) != 4 {
-		t.Fatalf("the symbol has %d relocations, want the cache and three cases", len(s.Relocs))
+	// The cache, then one case pointer and one method marker per case, in
+	// case order.
+	if len(s.Relocs) != 1+2*len(cases) {
+		t.Fatalf("the symbol has %d relocations, want the cache plus a pointer and a marker per case", len(s.Relocs))
 	}
 	if s.Relocs[0].Target != "runtime.emptyInterfaceSwitchCache" {
 		t.Errorf("the Cache word is %q", s.Relocs[0].Target)
@@ -127,9 +132,62 @@ func TestInterfaceSwitchLayout(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := s.Relocs[1+i]
+		got := s.Relocs[1+2*i]
 		if got.Off != int32(16+i*8) || got.Target != name {
 			t.Errorf("case %d is %+v, want %s at %d", i, got, name, 16+i*8)
+		}
+		checkMarkers(t, s.Relocs[2+2*i:3+2*i], c)
+	}
+}
+
+// checkMarkers is the gate on the addend of an R_USEIFACEMETHOD relocation.
+//
+// cmd/link reads an internal/abi.Imethod out of the interface's descriptor at
+// exactly the offset the addend names, so an addend that lands between two
+// entries decodes a name from the middle of one offset and a type from the
+// middle of another. The descriptor this package writes for the same interface
+// is the oracle: the Imethod's Name is a four-byte offset relocation, and the
+// marker's addend must be the offset that relocation sits at.
+func checkMarkers(t *testing.T, got []rtype.Reloc, iface *ir.Type) {
+	t.Helper()
+	desc, err := rtype.Descriptor(iface)
+	if err != nil {
+		t.Fatalf("Descriptor: %v", err)
+	}
+	offs, err := rtype.InterfaceMethodOffsets(iface)
+	if err != nil {
+		t.Fatalf("InterfaceMethodOffsets: %v", err)
+	}
+	if len(got) != len(offs) {
+		t.Fatalf("the symbol carries %d markers and %s has %d methods", len(got), iface, len(offs))
+	}
+	name, err := ir.TypeSymbol(iface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range got {
+		if r.Type != obj.R_USEIFACEMETHOD {
+			t.Errorf("marker %d is a %v, want R_USEIFACEMETHOD", i, r.Type)
+		}
+		if r.Size != 0 {
+			t.Errorf("marker %d writes %d bytes, and a marker writes none", i, r.Size)
+		}
+		if r.Target != name {
+			t.Errorf("marker %d names %s, want %s", i, r.Target, name)
+		}
+		if r.Add != offs[i] {
+			t.Errorf("marker %d names offset %d, want %d", i, r.Add, offs[i])
+		}
+		// The Imethod's Name field sits exactly there in the descriptor this
+		// package writes, which is the array cmd/link decodes.
+		found := false
+		for _, d := range desc[0].Relocs {
+			if int64(d.Off) == r.Add && d.Size == 4 && d.Type == obj.R_ADDROFF {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("offset %d of %s holds no four-byte name offset, so the marker does not land on an Imethod", r.Add, name)
 		}
 	}
 }

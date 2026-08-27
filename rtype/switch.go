@@ -112,6 +112,14 @@ func TypeAssert(a ir.TypeAssert) (Symbol, error) {
 	if a.CanFail {
 		data[typeAssertOffCanFail] = 1
 	}
+	relocs := []Reloc{
+		{Off: typeAssertOffCache, Size: 8, Type: obj.R_ADDR, Target: emptyTypeAssertCache},
+		{Off: typeAssertOffInter, Size: 8, Type: obj.R_ADDR, Target: inter},
+	}
+	used, err := usedIfaceMethods(a.Iface, inter)
+	if err != nil {
+		return Symbol{}, err
+	}
 	return Symbol{
 		Name:   a.Sym,
 		Kind:   obj.SDATA,
@@ -119,10 +127,7 @@ func TypeAssert(a ir.TypeAssert) (Symbol, error) {
 		Local:  true,
 		Gotype: typeAssertGotype,
 		Data:   data,
-		Relocs: []Reloc{
-			{Off: typeAssertOffCache, Size: 8, Type: obj.R_ADDR, Target: emptyTypeAssertCache},
-			{Off: typeAssertOffInter, Size: 8, Type: obj.R_ADDR, Target: inter},
-		},
+		Relocs: append(relocs, used...),
 	}, nil
 }
 
@@ -160,6 +165,11 @@ func InterfaceSwitch(s ir.InterfaceSwitch) (Symbol, error) {
 		relocs = append(relocs, Reloc{
 			Off: int32(ifaceSwitchOffCases + i*ir.PtrSize), Size: 8, Type: obj.R_ADDR, Target: name,
 		})
+		used, err := usedIfaceMethods(c, name)
+		if err != nil {
+			return Symbol{}, err
+		}
+		relocs = append(relocs, used...)
 	}
 	data := make([]byte, ifaceSwitchOffCases+len(s.Cases)*ir.PtrSize)
 	binary.LittleEndian.PutUint64(data[ifaceSwitchOffNCases:], uint64(len(s.Cases)))
@@ -172,6 +182,56 @@ func InterfaceSwitch(s ir.InterfaceSwitch) (Symbol, error) {
 		Data:   data,
 		Relocs: relocs,
 	}, nil
+}
+
+// usedIfaceMethods marks every method of the interface iface as one the
+// program may call, with one marker relocation per method against the
+// interface's descriptor.
+//
+// # What goes wrong without them
+//
+// The two entry points these caches feed reach runtime.getitab, which builds
+// an itab out of the concrete type's Method array when no compile-time itab
+// exists for the pair. cmd/link prunes an entry of that array unless something
+// says the method is reached, and it writes -1 in its place; runtime.getitab
+// then installs runtime.unreachableMethod, and the program dies with
+//
+//	fatal error: unreachable method called. linker bug?
+//
+// at the first call through that slot. It links, and it dies at run time, and
+// the message names neither the method nor the interface.
+//
+// A method of a type marked used-in-iface is kept when its name and signature
+// match a method the linker saw an interface call select. gc emits that fact
+// per call site, from walkExpr's MarkUsedIfaceMethod, because it knows which
+// method a call selects. nanogo does not, and it does not have to: every
+// method of an interface a cache names may be selected, because the itab the
+// runtime builds carries all of them and the caller may call any one.
+//
+// The itabs this package writes at compile time need none of this. Their Fun
+// entries are strong relocations, which reach the methods directly, and
+// rtype/itab.go says why they are strong.
+//
+// # Why the relocation is on the cache and not on the function
+//
+// gc puts it on the function that makes the call. Here the fact belongs to the
+// cache: the cache is what sends the runtime to getitab, and it is reachable
+// exactly when the code that reads it is. A marker changes no bytes, so it
+// costs the symbol nothing.
+func usedIfaceMethods(iface *ir.Type, desc string) ([]Reloc, error) {
+	offs, err := InterfaceMethodOffsets(iface)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Reloc, 0, len(offs))
+	for _, off := range offs {
+		// A marker relocation writes no bytes, so it has no size and its
+		// offset within this symbol means nothing. The addend is what carries
+		// the fact: cmd/link reads the Imethod at that offset in the
+		// descriptor the relocation names.
+		out = append(out, Reloc{Size: 0, Type: obj.R_USEIFACEMETHOD, Add: off, Target: desc})
+	}
+	return out, nil
 }
 
 // TypeAssertReferenced returns the types whose descriptors a type assertion

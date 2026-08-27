@@ -61,6 +61,18 @@ type C int
 
 func (c C) M() int { return int(c) }
 
+type K interface {
+	M() int
+	N() int
+	O() int
+}
+
+type E int
+
+func (e E) M() int { return int(e) }
+func (e E) N() int { return int(e) * 10 }
+func (e E) O() int { return int(e) * 100 }
+
 // Assert is the one-value form. A nil operand panics before the lookup, which
 // is the message the specification asks for, so nothing calls it with one.
 //
@@ -131,6 +143,23 @@ func Anyone(v any) int {
 	return 0
 }
 
+// Mixed switches on a guard that has methods, so the operand leads with an
+// itab and not with a descriptor. The two runs read that one word differently:
+// the concrete case compares it against the itab of its own pair, and the
+// interface case hands the runtime the descriptor stored inside it. A mix-up
+// between the two is a clause that runs for the wrong value and says nothing.
+//
+//go:noinline
+func Mixed(j J) int {
+	switch t := j.(type) {
+	case B:
+		return 10 + t.M()
+	case K:
+		return 20 + t.O()
+	}
+	return 0
+}
+
 //go:noinline
 func BoxA(n int) any { return A(n) }
 
@@ -145,6 +174,9 @@ func BoxInt(n int) any { return n }
 
 //go:noinline
 func BoxJ(n int) J { return B(n) }
+
+//go:noinline
+func BoxJE(n int) J { return E(n) }
 `
 
 // cacheImporter is compiled by gc, so runtime.GC and the linkname are the
@@ -251,6 +283,14 @@ func main() {
 		want("any after J", lib.Anyone(b), 1)
 		want("any", lib.Anyone(a), 2)
 		want("any not nil", lib.Anyone(nil), 0)
+		want("mixed concrete", lib.Mixed(lib.BoxJ(3)), 13)
+		want("mixed interface", lib.Mixed(lib.BoxJE(4)), 420)
+		// The same calls with nothing rooting the boxed value outside nanogo's
+		// frame. runtime.typeAssert allocates when it builds a table, so a
+		// collection can run inside the call, and the operand's data word is
+		// then live only in the frame the stack map describes.
+		want("assert unrooted", lib.Assert(lib.BoxA(11)).M(), 11)
+		want("class unrooted", lib.Class(lib.BoxB(6)), 1060)
 		if n%40000 == 0 {
 			runtime.GC()
 			churn()

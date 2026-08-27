@@ -255,9 +255,9 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 	}
 	a := TypeSize
 	b := a + kindTailSize(t)
-	c := b
-	if un {
-		c = b + uncommonSize
+	c := kindDataOffset(t, un)
+	if c != b && !un {
+		return nil, fmt.Errorf("rtype: the kind data of %s starts at %d and the header ends at %d", t, c, b)
 	}
 	body, bodyRelocs, bodySyms, err := kindData(t, c)
 	if err != nil {
@@ -426,6 +426,49 @@ func Referenced(t *ir.Type) ([]*ir.Type, error) {
 		return nil, err
 	}
 	return append(out, more...), nil
+}
+
+// kindDataOffset is where the kind-specific data of a descriptor starts, which
+// is after internal/abi.Type, after the kind's own header, and after the
+// UncommonType when the type has one.
+//
+// For an interface it is where the Imethod array starts, which is the offset a
+// caller marking one of those methods as reachable has to name. It is one
+// definition and not two, because the linker reads an Imethod at whatever
+// offset the marker names and reports nothing when that lands between two.
+func kindDataOffset(t *ir.Type, uncommon bool) int {
+	off := TypeSize + kindTailSize(t)
+	if uncommon {
+		off += uncommonSize
+	}
+	return off
+}
+
+// InterfaceMethodOffsets returns the offset of each internal/abi.Imethod entry
+// within the descriptor of the interface t, in the order the descriptor holds
+// them.
+//
+// cmd/link reads a method out of an interface descriptor at the offset an
+// R_USEIFACEMETHOD relocation names, so a caller that keeps one of those
+// methods alive names its offset with this.
+func InterfaceMethodOffsets(t *ir.Type) ([]int64, error) {
+	if t == nil || t.Kind != ir.Interface {
+		return nil, fmt.Errorf("rtype: %s is not an interface and has no Imethod array", t)
+	}
+	un, err := hasUncommon(t)
+	if err != nil {
+		return nil, err
+	}
+	ms, err := imethods(t)
+	if err != nil {
+		return nil, err
+	}
+	base := kindDataOffset(t, un)
+	out := make([]int64, len(ms))
+	for i := range ms {
+		out[i] = int64(base + i*imethodSize)
+	}
+	return out, nil
 }
 
 // referencedByKind returns the descriptors the kind-specific sections of t's
