@@ -505,3 +505,81 @@ func TestToolexecConstantsKeepTheirValue(t *testing.T) {
 		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
 	}
 }
+
+// stringConvertProgram is specs/020-ir.md's conversion rows, run as a program.
+//
+// The assertion that is not about the bytes is the copy: []byte(s) that shared
+// the string's storage would let the write below change a string constant, and
+// the program would still print something. So the write happens and the string
+// is read again afterwards.
+//
+// The multi-byte cases are the ones a unit test cannot reach. []rune of a
+// string with a two-byte and a four-byte rune in it, and string of the runes
+// back, are the runtime's UTF-8 and this compiler's headers meeting.
+const stringConvertProgram = `package main
+
+import "fmt"
+
+//go:noinline
+func id(s string) string { return s }
+
+//go:noinline
+func crash() {
+	d := 0
+	d = d / d
+}
+
+func main() {
+	bs := []byte(id("hello"))
+	fmt.Println(len(bs), string(bs))
+	bs[0] = 'j'
+	fmt.Println(string(bs), id("hello"))
+
+	const mixed = "aé漢🙂z"
+	rs := []rune(id(mixed))
+	fmt.Println(len(rs), len(mixed))
+	for i, r := range rs {
+		fmt.Println(i, r, string(r))
+	}
+	back := string(rs)
+	fmt.Println(back, len(back))
+	if back != mixed {
+		crash()
+	}
+	if string([]byte(id(mixed))) != mixed {
+		crash()
+	}
+	fmt.Println(string(rune(65)), string(rune(233)), string(rune(0x1F642)))
+
+	var empty []byte
+	fmt.Println(len(string(empty)), len([]byte(id(""))), len([]rune(id(""))))
+
+	type B []byte
+	type S string
+	fmt.Println(string(B(id("named"))), int([]byte(S(id("named")))[0]))
+
+	if string(rs) != mixed {
+		crash()
+	}
+}
+`
+
+// TestToolexecConvertsBetweenStringsAndSlices compares every conversion
+// against gc's answer.
+func TestToolexecConvertsBetweenStringsAndSlices(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/strconv\n\ngo 1.27\n",
+		"main.go": stringConvertProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "strconv", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "strconv"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

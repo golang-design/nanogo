@@ -3546,3 +3546,115 @@ func TestLowerAppendRefusals(t *testing.T) {
 		t.Errorf("append of nothing grew the slice:\n%s", buildDump(fn))
 	}
 }
+
+// TestLowerStringConversionRows is specs/031-runtime-lowering.md's string
+// group, minus the concatenation SSA construction owns.
+//
+// Every one of these allocates, and that is the row rather than an
+// implementation detail: []byte(s) that shared the string's bytes would let a
+// write through the slice change a string, which the language says cannot
+// happen.
+func TestLowerStringConversionRows(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		want string
+	}{
+		{"[]byte(s)", `func f(s string) []byte { return []byte(s) }`, "runtime.stringtoslicebyte"},
+		{"[]rune(s)", `func f(s string) []rune { return []rune(s) }`, "runtime.stringtoslicerune"},
+		{"string(bs)", `func f(b []byte) string { return string(b) }`, "runtime.slicebytetostring"},
+		{"string(rs)", `func f(r []rune) string { return string(r) }`, "runtime.slicerunetostring"},
+		{"string(r)", `func f(r rune) string { return string(r) }`, "runtime.intstring"},
+		{"a named destination", `
+type B []byte
+
+func f(s string) B { return B(s) }`, "runtime.stringtoslicebyte"},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if !lowerCalled(fn, tc.want) {
+				t.Errorf("the row does not call %s:\n%s", tc.want, buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerStringConversionBufferIsNil checks the first parameter of every one
+// of the five.
+//
+// Each takes a buffer the caller may supply, and gc supplies the address of a
+// frame array where escape analysis proved the result does not outlive the
+// frame. specs/023-escape-analysis.md is not built, so this pass passes nil
+// and the runtime allocates. A frame array passed without that proof is a
+// pointer to a dead frame the moment the result is returned.
+func TestLowerStringConversionBufferIsNil(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		sym  string
+	}{
+		{`func f(s string) []byte { return []byte(s) }`, "runtime.stringtoslicebyte"},
+		{`func f(s string) []rune { return []rune(s) }`, "runtime.stringtoslicerune"},
+		{`func f(b []byte) string { return string(b) }`, "runtime.slicebytetostring"},
+		{`func f(r []rune) string { return string(r) }`, "runtime.slicerunetostring"},
+		{`func f(r rune) string { return string(r) }`, "runtime.intstring"},
+	} {
+		t.Run(tc.sym, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			call := findCall(fn, tc.sym)
+			if call == nil || len(call.Args) == 0 {
+				t.Fatalf("no %s:\n%s", tc.sym, buildDump(fn))
+			}
+			buf := call.Args[0]
+			if buf.Op != OConst || buf.Type == nil || buf.Type.Kind != UnsafePtr {
+				t.Errorf("the buffer argument is %s of %v, want a nil pointer:\n%s",
+					buf.Op, buf.Type, buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerSliceByteToStringIsDecomposed checks the one row whose operand does
+// not cross whole.
+//
+// runtime.slicebytetostring takes the data pointer and the length, so a call
+// built with the header would put a slice's three words where the runtime
+// reads two parameters.
+func TestLowerSliceByteToStringIsDecomposed(t *testing.T) {
+	fn := lowerOK(t, `func f(b []byte) string { return string(b) }`)
+	call := findCall(fn, "runtime.slicebytetostring")
+	if call == nil {
+		t.Fatalf("no call:\n%s", buildDump(fn))
+	}
+	if len(call.Args) != 3 {
+		t.Fatalf("the call takes %d arguments, want the buffer, the pointer and the length:\n%s",
+			len(call.Args), buildDump(fn))
+	}
+	if !headerRead(call.Args[1], hdrPtr, 3) {
+		t.Errorf("argument 1 is not the data pointer of the slice:\n%s", buildDump(fn))
+	}
+	if !headerRead(call.Args[2], hdrLen, 3) {
+		t.Errorf("argument 2 is not the length of the slice:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerConversionLeavesTheRestAlone checks that the row claims only its
+// own pairs.
+//
+// ssa.Build answers a conversion whose source and destination have one kind
+// and one width by returning the operand, and picks a machine operation for
+// the rest. A pair this pass rewrote by accident would become a call to a
+// runtime symbol for what is a register move.
+func TestLowerConversionLeavesTheRestAlone(t *testing.T) {
+	for _, body := range []string{
+		`func f(x int) int64 { return int64(x) }`,
+		`func f(x int) float64 { return float64(x) }`,
+		`func f(s string) string { type S string; return string(S(s)) }`,
+		`func f(b []byte) []byte { type B []byte; return []byte(B(b)) }`,
+		`func f(p *int) unsafe.Pointer { return unsafe.Pointer(p) }`,
+	} {
+		fn := lowerOK(t, body)
+		if got := lowerCalls(fn); len(got) != 0 {
+			t.Errorf("%s calls %v:\n%s", body, got, buildDump(fn))
+		}
+	}
+}

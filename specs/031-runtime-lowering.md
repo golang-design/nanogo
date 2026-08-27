@@ -61,6 +61,7 @@ other row of the tables further down names a call nothing produces yet:
 | `newarray` | a slice literal, which is also every variadic call | IR lowering |
 | `makeslice` | `make([]T, n)` and `make([]T, n, m)` | IR lowering |
 | `growslice` | `append` past the capacity | IR lowering |
+| `stringtoslicebyte`, `stringtoslicerune`, `slicebytetostring`, `slicerunetostring`, `intstring` | a conversion between a string and a slice, and `string(r)` | IR lowering |
 | `gopanic` | `panic` whose operand is already an interface value | IR lowering |
 | `gorecover` | `recover()` whose value nobody reads | IR lowering |
 | `closechan` | `close` | IR lowering |
@@ -347,6 +348,21 @@ function pointer read at the wrong offset.
 `runtime.concatstring2` through `concatstring5`, `slicebytetostring`,
 `stringtoslicebyte`, `stringtoslicerune`, `slicerunetostring`,
 `intstring`, `cmpstring`, `decoderune`.
+
+**Every one of the five conversions takes a buffer as its first parameter, and
+this compiler passes nil.** `gc` passes the address of a frame array where
+escape analysis proved the result does not outlive the frame.
+[023](023-escape-analysis.md) is the pass that would let this one do the same,
+and until it exists nil is the answer that is always correct and sometimes
+slower, which is the rule the allocation group already applies to
+`makemap`'s third parameter. A frame array passed without the proof is a
+pointer into a dead frame the moment the result is returned.
+
+**`slicebytetostring` is the one that does not take its operand whole.** Its
+parameters are the data pointer and the length, so the caller reads the header
+and passes two words; the other four take a header or a number. A call built
+with the header instead would put a slice's three words where the runtime
+reads two parameters.
 
 ### Memory
 

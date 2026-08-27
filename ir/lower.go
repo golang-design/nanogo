@@ -924,6 +924,8 @@ func (l *lowerer) expr(n Expr) Expr {
 			return n
 		}
 		return l.headerField(l.stable(n.X), hdrPtr, n.Type)
+	case OConvert:
+		return l.convertExpr(n)
 	case OAppend:
 		return l.appendExpr(n)
 	case OCopy:
@@ -1524,6 +1526,116 @@ func (l *lowerer) appendResize(n Expr, s *Object, num func() Expr, pos syntax.Po
 		Else: []Stmt{Assign(pos, l.headerField(ref(s, pos), hdrLen, lowerInt), newLen())},
 	})
 	return newLen, true
+}
+
+// String conversions.
+//
+// specs/020-ir.md's row and specs/031-runtime-lowering.md's string group. Five
+// conversions are calls and every one of them allocates, because the result is
+// a value the program may keep and the operand is a value it may write:
+// []byte(s) has to copy or a write through the slice would change the string.
+//
+//	[]byte(s)   runtime.stringtoslicebyte
+//	[]rune(s)   runtime.stringtoslicerune
+//	string(bs)  runtime.slicebytetostring
+//	string(rs)  runtime.slicerunetostring
+//	string(r)   runtime.intstring
+//
+// Every one of them takes a buffer as its first parameter and this pass passes
+// nil, which asks the runtime to allocate. gc passes the address of a frame
+// array where escape analysis proved the result does not outlive the frame,
+// and specs/023-escape-analysis.md is the pass that would let this one do the
+// same. nil is the answer that is always correct and sometimes slower, which
+// is the rule the make row states for runtime.makemap's third parameter.
+//
+// runtime.slicebytetostring is the one that does not take its operand whole.
+// Its parameters are the data pointer and the length, so the header is read
+// here rather than passed; the other four take a header or a number.
+
+// convertExpr builds a conversion the machine cannot do by reinterpreting a
+// word.
+//
+// Everything else is left alone. ssa.Build answers a conversion whose source
+// and destination have one kind and one width by returning the operand, and
+// picks a machine operation for the rest, so a pair this function does not
+// name has to reach it untouched.
+func (l *lowerer) convertExpr(n Expr) Expr {
+	to, x := n.Type, n.X
+	if to == nil || x == nil || x.Type == nil {
+		return n
+	}
+	from, pos := x.Type, n.Pos
+	switch {
+	case from.Kind == String && to.Kind == Slice:
+		switch elemKind(to) {
+		case Uint8:
+			return l.stringCall(n, to, "runtime.stringtoslicebyte", x)
+		case Int32:
+			return l.stringCall(n, to, "runtime.stringtoslicerune", x)
+		}
+		l.refuse(n, "a conversion from a string to a slice of "+kindOf(to.Elem))
+
+	case from.Kind == Slice && to.Kind == String:
+		switch elemKind(from) {
+		case Uint8:
+			// The only row whose operand is decomposed: the parameters are
+			// the data pointer and the length and not the header.
+			b := l.stable(x)
+			return l.stringCall(n, to, "runtime.slicebytetostring",
+				l.headerField(b, hdrPtr, l.ptrTo(lowerByte)),
+				l.headerField(b, hdrLen, lowerInt))
+		case Int32:
+			return l.stringCall(n, to, "runtime.slicerunetostring", x)
+		}
+		l.refuse(n, "a conversion to a string from a slice of "+kindOf(from.Elem))
+
+	case from.Kind.IsInteger() && to.Kind == String:
+		// string(r), which is the rune's UTF-8 encoding and not its digits.
+		// The runtime takes an int64, so a narrower operand is widened rather
+		// than passed at its own width.
+		v := x
+		if from.Size != lowerInt64.Size || from.Kind != Int64 {
+			v = &Node{Op: OConvert, Pos: pos, Type: lowerInt64, X: x}
+		}
+		return l.stringCall(n, to, "runtime.intstring", v)
+	}
+	return n
+}
+
+// stringCall builds one of the string conversion calls.
+//
+// The first parameter of every one of them is the buffer, and it is nil here.
+// It is spelled as a pointer rather than as a number so that the argument
+// bitmap of the call describes it as one, which is the reason the makemap row
+// gives for the same argument.
+func (l *lowerer) stringCall(n Expr, t *Type, name string, args ...Expr) Expr {
+	pos := n.Pos
+	call := &Node{
+		Op: OCall, Pos: pos, Type: t,
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc(name)},
+		Args: append([]Expr{l.zeroOf(lowerUnsafePtr, pos)}, args...),
+	}
+	// The result is held in a temporary rather than returned as the call. A
+	// string and a slice are both wider than a register, and a caller that
+	// reads the result twice would otherwise make the call twice.
+	return ref(l.spill(call), pos)
+}
+
+// elemKind returns the kind of a slice's element, or OpInvalid's kind for a
+// slice with no element type.
+func elemKind(t *Type) Kind {
+	if t == nil || t.Elem == nil {
+		return Invalid
+	}
+	return t.Elem.Kind
+}
+
+// kindOf names a type for a refusal, including the type that is not there.
+func kindOf(t *Type) string {
+	if t == nil {
+		return "no element type"
+	}
+	return t.Kind.String()
 }
 
 // Channels.
