@@ -1386,23 +1386,12 @@ func (b *builder) convert(n ir.Expr) *Value {
 		b.errorf(InvNone, "a conversion with no type")
 		return x
 	}
-	// Two interface types are the same width and the same kind, and the word
-	// they lead with is not the same word. A non-empty interface leads with an
-	// *itab and an empty one leads with a *_type, so returning the value
-	// unchanged puts an *itab where the runtime reads a type descriptor. That
-	// is how panic(err) died in the runtime with "name offset out of range"
-	// rather than printing its value: nothing below the IR could tell the two
-	// apart, because both are one kind and one size.
-	//
-	// The conversion itself reads the type descriptor out of the itab, behind a
-	// nil check, and specs/032-type-descriptors-and-itabs.md owns it. It is not
-	// built, so the mismatch is refused below rather than compiled into a wrong
-	// answer.
-	sameShape := from.Kind == to.Kind && from.Size == to.Size
-	if from.Kind == ir.Interface && to.Kind == ir.Interface {
-		sameShape = sameShape && from.EmptyIface == to.EmptyIface
+	// An interface is the one destination whose shape says nothing about what
+	// the conversion has to do, so it is answered before the shape test below.
+	if from.Kind == ir.Interface || to.Kind == ir.Interface {
+		return b.convertInterface(n, x, from, to)
 	}
-	if sameShape {
+	if from.Kind == to.Kind && from.Size == to.Size {
 		return x
 	}
 	op, ok := convertOp(from, to)
@@ -1411,6 +1400,75 @@ func (b *builder) convert(n ir.Expr) *Value {
 		return x
 	}
 	return b.value(op, to, n.Pos, x)
+}
+
+// convertInterface builds a conversion whose source or destination is an
+// interface.
+//
+// Every interface is two words of the same width and reports one kind, so
+// "same kind, same size" is true of every pair of them and says nothing. Two
+// facts separate a pair, and neither is visible below the IR.
+//
+// The first is the word the value leads with. A non-empty interface leads with
+// an *itab and an empty one leads with a *_type, so returning the value
+// unchanged puts an *itab where the runtime reads a type descriptor. That is
+// how panic(err) died in the runtime with "name offset out of range" rather
+// than printing its value.
+//
+// The second is which interface an *itab was built for. An itab holds the
+// concrete type's methods in the order the interface lists them, so an itab
+// built for io.ReadWriter carries two entries where io.Reader reads one, and a
+// value passed along unchanged calls through a slot that holds another
+// method. Both interfaces are non-empty, both are 16 bytes, and the leading
+// word is an *itab on each side, so the first fact does not separate them.
+//
+// ir.TypeLinkString is therefore the test, because two types have the same
+// link string exactly when they are the same type. cmd/compile answers the
+// same question the same way: walkConvInterface reaches its I2I path for every
+// pair of interfaces that is not identical, whether or not the method sets
+// happen to agree.
+func (b *builder) convertInterface(n ir.Expr, x *Value, from, to *ir.Type) *Value {
+	if to.Kind != ir.Interface {
+		// A value leaves an interface through a type assertion, which is its
+		// own node and not a conversion, so there is nothing to build here.
+		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v", from, to))
+		return x
+	}
+	if from.Kind == ir.Interface && sameType(from, to) {
+		return x
+	}
+	b.unsupported(n, fmt.Sprintf("a conversion from %v to %v", from, to))
+	return x
+}
+
+// sameType reports whether two IR types are one type.
+//
+// The link string is the general answer: ir.TypeLinkString documents that two
+// types have it in common exactly when they are the same type. It is not
+// available for every type, and a type it cannot spell is reported as not the
+// same, because the question is whether the two are provably one type and an
+// unspellable type proves nothing.
+//
+// Pointer equality comes first and is not a shortcut. ir.Converter memoises,
+// so one Go type of one package build is one *ir.Type, and the fast path is
+// what answers for a type below the type boundary that carries no spelling at
+// all.
+func sameType(a, c *ir.Type) bool {
+	if a == c {
+		return true
+	}
+	if a == nil || c == nil {
+		return false
+	}
+	x, err := ir.TypeLinkString(a)
+	if err != nil {
+		return false
+	}
+	y, err := ir.TypeLinkString(c)
+	if err != nil {
+		return false
+	}
+	return x == y
 }
 
 // call builds a call and returns its first result, or nil when it has none.

@@ -2280,3 +2280,90 @@ func TestBuildRefusesAnInterfaceConversionThatChangesTheLeadingWord(t *testing.T
 		})
 	}
 }
+
+// TestBuildRefusesAConversionBetweenTwoDifferentInterfaces pins the second
+// half of the identity question, which the leading-word test above does not
+// reach.
+//
+// io.ReadWriter and io.Reader are both non-empty, both 16 bytes, both kind
+// Interface, and both lead with an *itab. Every shape test says the two are
+// the same, and they are not: an itab holds the concrete type's methods in the
+// order its own interface lists them, so an itab built for a two-method
+// interface has a second entry where a one-method interface reads none, and
+// passing the value along unchanged calls through a slot that holds another
+// method.
+//
+// The types below are spelled with method lists rather than with names,
+// because the link string is what separates them and a name would make the
+// test pass on the name instead.
+func TestBuildRefusesAConversionBetweenTwoDifferentInterfaces(t *testing.T) {
+	sig := mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}})
+	reader := mkType(&ir.Type{Kind: ir.Interface, Methods: []ir.Method{
+		{Name: "Read", Sig: sig},
+	}})
+	readWriter := mkType(&ir.Type{Kind: ir.Interface, Methods: []ir.Method{
+		{Name: "Read", Sig: sig},
+		{Name: "Write", Sig: sig},
+	}})
+	if reader.Size != readWriter.Size || reader.EmptyIface != readWriter.EmptyIface {
+		t.Fatalf("the two interfaces differ in shape, so this test no longer pins what it says")
+	}
+
+	for _, tt := range []struct {
+		name     string
+		from, to *ir.Type
+		refuse   bool
+	}{
+		{"wide to narrow", readWriter, reader, true},
+		{"narrow to wide", reader, readWriter, true},
+		{"one interface to itself", reader, reader, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			src := obj("src", tt.from, ir.ClassLocal)
+			dst := obj("dst", tt.to, ir.ClassLocal)
+			fn := fun("convert", []*ir.Object{src, dst},
+				asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tt.to}),
+			)
+			_, err := Build(fn)
+			if tt.refuse && err == nil {
+				t.Fatal("the conversion built, so an itab built for one interface reaches a value of another")
+			}
+			if !tt.refuse && err != nil {
+				t.Fatalf("a conversion from one interface to itself was refused: %v", err)
+			}
+		})
+	}
+}
+
+// TestSameTypeAnswersFromTheLinkString pins that the identity test above is
+// the link string and not the pointer.
+//
+// Two ir.Type values for one Go type occur across package builds, and a
+// conversion between them is the identity. A test that only ever compared
+// pointers would refuse one, and a shape test would accept two interfaces that
+// differ.
+func TestSameTypeAnswersFromTheLinkString(t *testing.T) {
+	sig := mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}})
+	one := mkType(&ir.Type{Kind: ir.Interface, Methods: []ir.Method{{Name: "Read", Sig: sig}}})
+	two := mkType(&ir.Type{Kind: ir.Interface, Methods: []ir.Method{{Name: "Read", Sig: sig}}})
+	other := mkType(&ir.Type{Kind: ir.Interface, Methods: []ir.Method{{Name: "Write", Sig: sig}}})
+	// An interface with no method list has no spelling at all, so nothing can
+	// be proved about it beyond its own identity.
+	noList := mkType(&ir.Type{Kind: ir.Interface})
+
+	if !sameType(one, two) {
+		t.Error("two IR types with one link string are not reported as one type")
+	}
+	if sameType(one, other) {
+		t.Error("two interfaces with different method sets are reported as one type")
+	}
+	if !sameType(noList, noList) {
+		t.Error("a type with no spelling is not reported as itself")
+	}
+	if sameType(noList, mkType(&ir.Type{Kind: ir.Interface})) {
+		t.Error("two types that cannot be spelled are reported as one type")
+	}
+	if sameType(nil, one) || sameType(one, nil) {
+		t.Error("a nil type is reported as some type")
+	}
+}
