@@ -139,6 +139,109 @@ func crash() {
 }
 `
 
+// The library gc compiles, whose job is to write the type word.
+//
+// Everything in the program above is boxed and unboxed by nanogo, so the two
+// sides of every comparison are symbols this compiler emitted and the test
+// passes whatever the linker did with them: a second copy of type:int compares
+// equal to itself. The direction that separates them is this one. gc writes
+// the word, nanogo compares it against its own type:int, and the assertion
+// fails where it should succeed if cmd/link kept two definitions of that
+// symbol.
+//
+// Wide is the second thing only gc can produce. Its data word is the address
+// of a copy, because the value is three words and is not its own data word,
+// and ssa.Build refuses to box one: runtime.convT takes the address of a frame
+// slot and construction has already placed the frame by then. Reading one back
+// out is a row of its own and gc is what hands it over.
+const ifaceLibrary = `package lib
+
+type Wide struct{ A, B, C int }
+
+func Int() any    { return 7 }
+func Str() any    { return "hi" }
+func Ptr(p *int) any { return p }
+func Big() any    { return Wide{A: 1, B: 2, C: 3} }
+`
+
+// The program that reads gc's interface values back out.
+const ifaceImporter = `package main
+
+import "nanogo.example/iface2/lib"
+
+func main() {
+	if lib.Int().(int) != 7 {
+		crash()
+	}
+	if lib.Str().(string) != "hi" {
+		crash()
+	}
+	k := 5
+	if *lib.Ptr(&k).(*int) != 5 {
+		crash()
+	}
+	if n, ok := lib.Int().(int); !ok || n != 7 {
+		crash()
+	}
+	if _, ok := lib.Int().(string); ok {
+		crash()
+	}
+	switch v := lib.Str().(type) {
+	case int:
+		crash()
+	case string:
+		if v != "hi" {
+			crash()
+		}
+	default:
+		crash()
+	}
+	if b, ok := lib.Big().(lib.Wide); !ok || b.A != 1 || b.C != 3 {
+		crash()
+	}
+	switch w := lib.Big().(type) {
+	case lib.Wide:
+		if w.B != 2 {
+			crash()
+		}
+	default:
+		crash()
+	}
+}
+
+//go:noinline
+func crash() {
+	d := 0
+	d = d / d
+}
+`
+
+// TestToolexecAssertsWhatGcBoxed is the evidence that the descriptor this
+// compiler names is the one gc's own code wrote into the interface value.
+//
+// The library is left out of the allowlist, so gc compiles it and nanogo
+// compiles only the program that reads its results back.
+func TestToolexecAssertsWhatGcBoxed(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":     "module nanogo.example/iface2\n\ngo 1.27\n",
+		"lib/lib.go": ifaceLibrary,
+		"main.go":    ifaceImporter,
+	}, []string{"# nanogo owns the importing package, gc owns the library that boxes the values", "main"})
+
+	if out, err := h.build(t, "-o", "iface2", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	lines := h.decisions(t)
+	if !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the importing package:\n%s", strings.Join(lines, "\n"))
+	}
+	if compiled(lines, "nanogo.example/iface2/lib") {
+		t.Fatalf("nanogo compiled the library, so nothing gc wrote reached the assertion:\n%s",
+			strings.Join(lines, "\n"))
+	}
+	runProgram(t, filepath.Join(h.mod, "iface2"))
+}
+
 // TestToolexecAssertsAndSwitchesOnTheDynamicType is the evidence that the
 // descriptor this compiler writes is the word the interface value carries.
 func TestToolexecAssertsAndSwitchesOnTheDynamicType(t *testing.T) {
