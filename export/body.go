@@ -24,7 +24,8 @@ import (
 // nothing and that a consumer cannot recompute: a type reference carries the
 // resolved [types2.Type] beside its index, and a position carries the raw
 // triple rather than being dropped. Nothing is normalised away, so the tree
-// is what the body writer will encode back.
+// is what the body writer encodes back: [WriteBody] writes the same bytes
+// the tree was read from.
 
 // A Body is one function body, decoded from one element of SectionBody.
 //
@@ -428,6 +429,10 @@ func (*SelectStmt) stmtKind() StmtKind   { return StmtSelect }
 type Expr interface {
 	exprKind() ExprKind
 
+	// Reshape is the reshape node the format wrote in front of the
+	// expression, and is nil where it wrote none.
+	Reshape() *TypeUse
+
 	// ExprType is the type of the value the expression produces, and is nil
 	// where the stream did not carry one. It is nil for an expression of a
 	// tuple type, for a reference to a builtin, and for a use of a local.
@@ -436,9 +441,21 @@ type Expr interface {
 
 // exprType is embedded by every expression node to carry the type the
 // enclosing reshape node named.
-type exprType struct{ typ types2.Type }
+//
+// reshape is the reshape node itself, kept because the encoder writes it back
+// and typ alone cannot say whether there was one: a constant, a zero value
+// and a conversion each carry a type of their own, which the reader falls
+// back to when no reshape node preceded them.
+type exprType struct {
+	reshape *TypeUse
+	typ     types2.Type
+}
 
 func (e *exprType) ExprType() types2.Type { return e.typ }
+
+// Reshape returns the type the reshape node in front of the expression named,
+// and nil where the stream carried no such node.
+func (e *exprType) Reshape() *TypeUse { return e.reshape }
 
 // A ConstExpr is a constant. gc folds a constant expression before it writes
 // it, so the source's operators are not here.

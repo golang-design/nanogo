@@ -696,22 +696,28 @@ func (r *bodyReader) expr() Expr {
 	if kind != ExprReshape {
 		return r.expr1(kind, nil)
 	}
-	typ := r.typeUse()
+	rs := r.typeUse()
 	inner := ExprKind(r.Code(pkgbits.SyncExpr))
 	if inner == ExprReshape {
 		r.refuse("two reshape nodes in a row, which the writer never produces")
 	}
-	return r.expr1(inner, typ.Type)
+	return r.expr1(inner, &rs)
 }
 
-func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
+// expr1 decodes one expression of the given kind, with the reshape node that
+// preceded it or nil.
+func (r *bodyReader) expr1(kind ExprKind, rs *TypeUse) Expr {
+	et := exprType{reshape: rs}
+	if rs != nil {
+		et.typ = rs.Type
+	}
 	switch kind {
 	default:
 		r.refuse("the expression is %v, which the format has no encoding for", kind)
 		panic("unreachable")
 
 	case ExprConst:
-		e := &ConstExpr{exprType: exprType{typ}, Pos: r.pos()}
+		e := &ConstExpr{exprType: et, Pos: r.pos()}
 		e.Type = r.typeUse()
 		if e.typ == nil {
 			e.typ = e.Type.Type
@@ -720,7 +726,7 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprZero:
-		e := &ZeroExpr{exprType: exprType{typ}, Pos: r.pos()}
+		e := &ZeroExpr{exprType: et, Pos: r.pos()}
 		e.Type = r.typeUse()
 		if e.typ == nil {
 			e.typ = e.Type.Type
@@ -729,41 +735,41 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 
 	case ExprLocal:
 		r.Sync(pkgbits.SyncUseObjLocal)
-		e := &LocalExpr{exprType: exprType{typ}}
+		e := &LocalExpr{exprType: et}
 		e.Captured = !r.Bool()
 		e.Index = r.Len()
 		return e
 
 	case ExprGlobal:
-		return &GlobalExpr{exprType: exprType{typ}, Obj: r.objUse()}
+		return &GlobalExpr{exprType: et, Obj: r.objUse()}
 
 	case ExprFuncInst:
-		e := &FuncInstExpr{exprType: exprType{typ}, Pos: r.pos()}
+		e := &FuncInstExpr{exprType: et, Pos: r.pos()}
 		e.Inst = r.funcInst()
 		return e
 
 	case ExprCompLit:
-		return r.compLit(typ)
+		return r.compLit(et)
 
 	case ExprFuncLit:
-		return r.funcLit(typ)
+		return r.funcLit(et)
 
 	case ExprFieldVal:
-		e := &FieldValExpr{exprType: exprType{typ}}
+		e := &FieldValExpr{exprType: et}
 		e.X = r.expr()
 		e.Pos = r.pos()
 		e.Sel = r.selector()
 		return e
 
 	case ExprMethodVal:
-		e := &MethodValExpr{exprType: exprType{typ}}
+		e := &MethodValExpr{exprType: et}
 		e.Recv = r.expr()
 		e.Pos = r.pos()
 		e.Method = r.methodRef()
 		return e
 
 	case ExprMethodExpr:
-		e := &MethodExprExpr{exprType: exprType{typ}}
+		e := &MethodExprExpr{exprType: et}
 		e.Recv = r.typeUse()
 		e.Implicits = make([]int, r.Len())
 		for i := range e.Implicits {
@@ -777,7 +783,7 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprRecv:
-		e := &RecvExpr{exprType: exprType{typ}}
+		e := &RecvExpr{exprType: et}
 		e.X = r.expr()
 		e.Pos = r.pos()
 		e.Implicits = make([]int, r.Len())
@@ -790,7 +796,7 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprIndex:
-		e := &IndexExpr{exprType: exprType{typ}}
+		e := &IndexExpr{exprType: et}
 		e.X = r.expr()
 		e.Pos = r.pos()
 		e.Index = r.expr()
@@ -808,7 +814,7 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprSlice:
-		e := &SliceExpr{exprType: exprType{typ}}
+		e := &SliceExpr{exprType: et}
 		e.X = r.expr()
 		e.Pos = r.pos()
 		for i := range e.Index {
@@ -817,7 +823,7 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprAssert:
-		e := &AssertExpr{exprType: exprType{typ}}
+		e := &AssertExpr{exprType: et}
 		e.X = r.expr()
 		e.Pos = r.pos()
 		e.Type = *r.exprType()
@@ -825,14 +831,14 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprUnaryOp:
-		e := &UnaryExpr{exprType: exprType{typ}}
+		e := &UnaryExpr{exprType: et}
 		e.Op = r.op()
 		e.Pos = r.pos()
 		e.X = r.expr()
 		return e
 
 	case ExprBinaryOp:
-		e := &BinaryExpr{exprType: exprType{typ}}
+		e := &BinaryExpr{exprType: et}
 		e.Op = r.op()
 		e.X = r.expr()
 		e.Pos = r.pos()
@@ -840,10 +846,10 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprCall:
-		return r.call(typ)
+		return r.call(et)
 
 	case ExprConvert:
-		e := &ConvertExpr{exprType: exprType{typ}}
+		e := &ConvertExpr{exprType: et}
 		e.Implicit = r.Bool()
 		e.Type = r.typeUse()
 		if e.typ == nil {
@@ -857,7 +863,7 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprNew:
-		e := &NewExpr{exprType: exprType{typ}, Pos: r.pos()}
+		e := &NewExpr{exprType: et, Pos: r.pos()}
 		if r.Bool() {
 			e.Value = r.expr()
 		} else {
@@ -866,19 +872,19 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprMake:
-		e := &MakeExpr{exprType: exprType{typ}, Pos: r.pos()}
+		e := &MakeExpr{exprType: et, Pos: r.pos()}
 		e.Type = *r.exprType()
 		e.Args = r.exprs()
 		e.RType = r.rtype()
 		return e
 
 	case ExprSizeof, ExprAlignof:
-		e := &SizeExpr{exprType: exprType{typ}, Kind: kind, Pos: r.pos()}
+		e := &SizeExpr{exprType: et, Kind: kind, Pos: r.pos()}
 		e.Type = r.typeUse()
 		return e
 
 	case ExprOffsetof:
-		e := &OffsetofExpr{exprType: exprType{typ}, Pos: r.pos()}
+		e := &OffsetofExpr{exprType: et, Pos: r.pos()}
 		e.Type = r.typeUse()
 		// The count is one less than the number of steps, because a
 		// selection always goes through at least one field.
@@ -889,7 +895,7 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		return e
 
 	case ExprRuntimeBuiltin:
-		return &RuntimeBuiltinExpr{exprType: exprType{typ}, Name: r.str()}
+		return &RuntimeBuiltinExpr{exprType: et, Name: r.str()}
 	}
 }
 
@@ -934,8 +940,8 @@ func (r *bodyReader) methodRef() MethodRef {
 }
 
 // call decodes a call.
-func (r *bodyReader) call(typ types2.Type) Expr {
-	e := &CallExpr{exprType: exprType{typ}}
+func (r *bodyReader) call(et exprType) Expr {
+	e := &CallExpr{exprType: et}
 	switch {
 	case r.Bool(): // a call through a method selection
 		c := &MethodCall{}
@@ -985,9 +991,9 @@ func needsCallRType(fun Expr) bool {
 }
 
 // compLit decodes a composite literal.
-func (r *bodyReader) compLit(typ types2.Type) Expr {
+func (r *bodyReader) compLit(et exprType) Expr {
 	r.Sync(pkgbits.SyncCompLit)
-	e := &CompLitExpr{exprType: exprType{typ}, Pos: r.pos()}
+	e := &CompLitExpr{exprType: et, Pos: r.pos()}
 	e.Type = r.typeUse()
 
 	// The element encoding depends on what is being built, and a literal
@@ -1077,9 +1083,9 @@ func (r *bodyReader) structElems(e *CompLitExpr) {
 }
 
 // funcLit decodes a function literal, and the body it names.
-func (r *bodyReader) funcLit(typ types2.Type) Expr {
+func (r *bodyReader) funcLit(et exprType) Expr {
 	r.Sync(pkgbits.SyncFuncLit)
-	e := &FuncLitExpr{exprType: exprType{typ}, Pos: r.pos()}
+	e := &FuncLitExpr{exprType: et, Pos: r.pos()}
 
 	r.Sync(pkgbits.SyncSignature)
 	e.Params = r.params()
