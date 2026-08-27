@@ -60,6 +60,7 @@ other row of the tables further down names a call nothing produces yet:
 | `newobject` | `new`, `&T{...}` | IR lowering |
 | `newarray` | a slice literal, which is also every variadic call | IR lowering |
 | `makeslice` | `make([]T, n)` and `make([]T, n, m)` | IR lowering |
+| `growslice` | `append` past the capacity | IR lowering |
 | `gopanic` | `panic` whose operand is already an interface value | IR lowering |
 | `gorecover` | `recover()` whose value nobody reads | IR lowering |
 | `closechan` | `close` | IR lowering |
@@ -90,7 +91,18 @@ construction, which is where every `panic` in ordinary Go stops today.
 
 The gap is not in this pass. It is in which rows of
 [020](020-ir.md)'s table are built, and its **State** column is the answer per
-row. What is left without a caller is `append`.
+row.
+
+**`runtime.growslice` has a caller now.** `append` is built, and the shape is
+`cmd/compile/internal/walk`'s `walkAppend` and `appendSlice`: the fast path
+writes the new length into the header the slice already has, and the other arm
+calls `growslice`. Three facts of the contract decide whether the stores land
+inside the allocation. `growslice` takes the **element**'s `*_type`, the way
+`newarray` does, so the runtime reads the new backing array's pointer map out
+of it. It returns a header whose length is already the new one, so both arms
+leave the same length behind and the stores need no arm of their own. And the
+capacity test is unsigned, because a length that overflowed is negative and a
+signed test would send it down the fast path.
 
 **The map group has callers now.** The block on it was the descriptor and never
 the calls: `rtsym` held every map symbol and this compiler could already name a

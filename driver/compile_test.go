@@ -223,17 +223,17 @@ func TestCompileRefusals(t *testing.T) {
 		},
 		{
 			// The construct this case names has to be one the pipeline still
-			// refuses, and the struct literal it used to name is lowered now
-			// that ir.Lower runs. A map is the largest row of
-			// specs/020-ir.md's lowering table that specs/032 still blocks:
-			// a map descriptor's tail names the runtime's own group type.
+			// refuses, and append is lowered now. min over floats is the row
+			// that stays: the language propagates a NaN operand to the result
+			// and a compare and a select do not, so specs/020-ir.md refuses
+			// the float form rather than building a wrong one.
 			//
 			// The stage in the message is ir.Lower and not ssa.Lower, and the
 			// two are different decks. A refusal that named the wrong one
 			// would send a reader to the wrong spec.
 			name: "a construct lowering refuses names the function and the pass",
-			src:  "package main\n\nfunc f(s []int) []int {\n\treturn append(s, 1)\n}\n",
-			want: []string{"function f", "a.go:3:6", "ir.Lower", "append"},
+			src:  "package main\n\nfunc f(a, b float64) float64 {\n\treturn min(a, b)\n}\n",
+			want: []string{"function f", "a.go:3:6", "ir.Lower", "min"},
 		},
 		{
 			// By name and by position. A package whose variables have no

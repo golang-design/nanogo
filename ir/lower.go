@@ -924,6 +924,8 @@ func (l *lowerer) expr(n Expr) Expr {
 			return n
 		}
 		return l.headerField(l.stable(n.X), hdrPtr, n.Type)
+	case OAppend:
+		return l.appendExpr(n)
 	case OCopy:
 		return l.copyExpr(n)
 	case OClear:
@@ -1323,6 +1325,205 @@ func (l *lowerer) makeExpr(n Expr) Expr {
 	}
 	data := &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(t.Elem), X: call}
 	return l.sliceHeader(t, data, length(), capacity(), pos)
+}
+
+// append.
+//
+// specs/020-ir.md: an inlined fast path plus runtime.growslice. The shape is
+// cmd/compile/internal/walk's, from walkAppend and appendSlice:
+//
+//	s := operand
+//	newLen := len(s) + num
+//	if uint(newLen) > uint(cap(s)) {
+//		s = growslice(s.ptr, newLen, cap(s), num, elemtype)
+//	} else {
+//		s.len = newLen
+//	}
+//	// the new elements, written at newLen-num onwards
+//
+// Three facts have to agree or the stores go past the end of an allocation,
+// which the collector does not catch and which fails far from the mistake:
+//
+//  1. runtime.growslice returns a header whose length is already newLen, so
+//     both arms of the branch leave the same length behind and the stores
+//     need no arm of their own.
+//  2. growslice takes the *element's* descriptor, the way runtime.newarray
+//     does. The descriptor is what the runtime reads the pointer map of the
+//     new backing array out of, so an element type spelled wrong here gives
+//     the collector the wrong bits for every element.
+//  3. The test is unsigned. newLen is len+num and both are non-negative, so
+//     an addition that overflows produces a negative value, and a signed test
+//     would take the fast path and store through a capacity that does not
+//     exist. Unsigned makes the overflowed value larger than any capacity, so
+//     the case reaches growslice and panics there.
+//
+// # Why every argument is evaluated before the branch
+//
+// walkAppend's comment is a requirement rather than an optimisation: the
+// evaluation of every argument, and any panic one of them raises, happens
+// before the slice is modified in a way the program can see. append(xs, f())
+// where f panics must leave xs as it was, and append(xs, xs[0]) must read the
+// element before growslice moves the backing array. Each operand is held in a
+// temporary here, which is what fixes the order.
+
+// appendExpr builds the append builtin.
+func (l *lowerer) appendExpr(n Expr) Expr {
+	t, pos := n.Type, n.Pos
+	if t == nil || t.Kind != Slice || t.Elem == nil || len(n.Args) == 0 {
+		l.refuse(n, "an append whose result is not a slice")
+		return n
+	}
+	src := n.Args[0]
+	if src == nil || src.Type == nil || src.Type.Kind != Slice {
+		l.refuse(n, "an append to an operand that is not a slice")
+		return n
+	}
+	if n.Index == spread {
+		return l.appendSpread(n, t, pos)
+	}
+	// The slice first and the elements after, which is the order the source
+	// wrote them in.
+	s := l.spill(src)
+	args := make([]func() Expr, 0, len(n.Args)-1)
+	for _, a := range n.Args[1:] {
+		args = append(args, l.hold(a))
+	}
+	if len(args) == 0 {
+		// append(s) is the operand.
+		return ref(s, pos)
+	}
+	num := int64(len(args))
+	newLen, ok := l.appendResize(n, s, func() Expr { return intConst(pos, lowerInt, num) }, pos)
+	if !ok {
+		return n
+	}
+	// s[newLen-num+i] = arg. Every index is at least the old length and less
+	// than the new one, so each store is inside the slice the branch above
+	// left behind.
+	for i, a := range args {
+		idx := &Node{Op: OBinary, Op1: syntax.Sub, Pos: pos, Type: lowerInt,
+			X: newLen(), Y: intConst(pos, lowerInt, num-int64(i))}
+		l.emit(Assign(pos, &Node{Op: OIndex, Pos: pos, Type: t.Elem,
+			X: ref(s, pos), Y: idx}, a()))
+	}
+	return ref(s, pos)
+}
+
+// appendSpread builds append(s, xs...).
+//
+// The operand after the ... is a slice of the element type or, where the
+// element is a byte, a string. Both are a pointer and a length, which is the
+// only thing this row reads out of it, so one path serves both. copyExpr takes
+// the same pair from the same field of the same header.
+//
+// The copy is runtime.memmove and not runtime.typedslicecopy, which is the
+// answer specs/034-write-barriers.md changes: nothing in this compiler emits a
+// barrier yet, and a copy that emitted one here would be the only one in the
+// program.
+func (l *lowerer) appendSpread(n Expr, t *Type, pos syntax.Pos) Expr {
+	if len(n.Args) != 2 {
+		l.refuse(n, fmt.Sprintf("an append with ... and %d operands", len(n.Args)))
+		return n
+	}
+	src := n.Args[1]
+	if src == nil || src.Type == nil {
+		l.refuse(n, "an append of an operand with no type")
+		return n
+	}
+	switch src.Type.Kind {
+	case Slice, String:
+	default:
+		l.refuse(n, "an append of "+src.Type.Kind.String()+" with ...")
+		return n
+	}
+	s := l.spill(n.Args[0])
+	// The operand is read after growslice has moved the destination, so it is
+	// held first: append(xs, xs...) must copy out of the header the source
+	// named and not out of the one the branch wrote.
+	from := l.stable(src)
+	num := l.hold(l.headerField(from, hdrLen, lowerInt))
+	newLen, ok := l.appendResize(n, s, num, pos)
+	if !ok {
+		return n
+	}
+	// The destination is the address of the element at newLen-num, computed as
+	// pointer arithmetic rather than as an index. Where the operand is empty
+	// that element is one past the end of the slice, which is a legal index
+	// for nothing, and the address of it is a pointer the collector would
+	// attribute to whatever object comes next in the heap. The move is
+	// therefore emitted under a test that the operand holds something, which
+	// is also the test that makes the address itself unreachable when it does
+	// not.
+	l.push()
+	off := Expr(&Node{Op: OBinary, Op1: syntax.Sub, Pos: pos, Type: lowerInt,
+		X: newLen(), Y: num()})
+	if t.Elem.Size != 1 {
+		off = &Node{Op: OBinary, Op1: syntax.Mul, Pos: pos, Type: lowerInt,
+			X: off, Y: intConst(pos, lowerInt, t.Elem.Size)}
+	}
+	dst := &Node{Op: OBinary, Op1: syntax.Add, Pos: pos, Type: l.ptrTo(t.Elem),
+		X: l.headerField(ref(s, pos), hdrPtr, l.ptrTo(t.Elem)), Y: off}
+	size := Expr(num())
+	if t.Elem.Size != 1 {
+		size = &Node{Op: OBinary, Op1: syntax.Mul, Pos: pos, Type: lowerInt,
+			X: size, Y: intConst(pos, lowerInt, t.Elem.Size)}
+	}
+	l.emit(runtimeCall(pos, "runtime.memmove",
+		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: dst},
+		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr,
+			X: l.headerField(from, hdrPtr, l.ptrTo(lowerByte))},
+		&Node{Op: OConvert, Pos: pos, Type: lowerUintptr, X: size}))
+	l.emit(&Node{
+		Op: OIf, Pos: pos, Type: voidType,
+		X: &Node{Op: OCompare, Op1: syntax.Neq, Pos: pos, Type: lowerBool,
+			X: num(), Y: intConst(pos, lowerInt, 0)},
+		Body: l.pop(),
+	})
+	return ref(s, pos)
+}
+
+// appendResize grows the slice a temporary holds to hold num more elements,
+// and returns a factory for the new length.
+//
+// The temporary is left holding a header whose length is the new one on both
+// paths, and whose pointer and capacity are the old ones where the capacity
+// was enough and growslice's where it was not.
+func (l *lowerer) appendResize(n Expr, s *Object, num func() Expr, pos syntax.Pos) (func() Expr, bool) {
+	t := s.Type
+	desc, why := l.descriptor(t.Elem, pos)
+	if desc == nil {
+		l.refuse(n, why)
+		return nil, false
+	}
+	// The capacity is read once, before the branch writes the header, because
+	// growslice is told the old one and the test compares against it.
+	oldCap := l.hold(l.headerField(ref(s, pos), hdrCap, lowerInt))
+	nl := l.tempObj(lowerInt, pos)
+	l.emit(define(pos, ref(nl, pos), &Node{Op: OBinary, Op1: syntax.Add, Pos: pos, Type: lowerInt,
+		X: l.headerField(ref(s, pos), hdrLen, lowerInt), Y: num()}))
+	newLen := func() Expr { return ref(nl, pos) }
+
+	// The call returns a whole header, and the assignment to the temporary is
+	// what writes all three of its words. growslice sets the length to newLen,
+	// so the fast path writes the same length by hand.
+	grow := &Node{
+		Op: OCall, Pos: pos, Type: t,
+		X: &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.growslice")},
+		Args: []Expr{
+			&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr,
+				X: l.headerField(ref(s, pos), hdrPtr, l.ptrTo(t.Elem))},
+			newLen(), oldCap(), num(), desc,
+		},
+	}
+	l.emit(&Node{
+		Op: OIf, Pos: pos, Type: voidType,
+		X: &Node{Op: OCompare, Op1: syntax.Gtr, Pos: pos, Type: lowerBool,
+			X: &Node{Op: OConvert, Pos: pos, Type: lowerUint64, X: newLen()},
+			Y: &Node{Op: OConvert, Pos: pos, Type: lowerUint64, X: oldCap()}},
+		Body: []Stmt{Assign(pos, ref(s, pos), grow)},
+		Else: []Stmt{Assign(pos, l.headerField(ref(s, pos), hdrLen, lowerInt), newLen())},
+	})
+	return newLen, true
 }
 
 // Channels.

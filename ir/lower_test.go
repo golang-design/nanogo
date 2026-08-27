@@ -721,9 +721,9 @@ func TestLowerCollectsASignatureDescriptor(t *testing.T) {
 // its lowered part names still has to be emitted. Returning an empty list on a
 // refusal would drop it.
 func TestLowerCollectsOnARefusal(t *testing.T) {
-	_, types, err := lowerCollect(t, `func f(s []int) []int { p := new(int); use(*p); return append(s, 1) }`)
+	_, types, err := lowerCollect(t, `func f(a, b float64) float64 { p := new(int); use(*p); return min(a, b) }`)
 	if err == nil {
-		t.Fatal("append was lowered")
+		t.Fatal("min of floats was lowered")
 	}
 	if len(types) != 1 {
 		t.Fatalf("collected %d types, want the one new named", len(types))
@@ -1734,7 +1734,6 @@ func TestLowerRefusals(t *testing.T) {
 		op   Op
 		want string
 	}{
-		{"append", `func f(s []int) []int { return append(s, 1) }`, OAppend, "no row"},
 		// The allocation rows are built, and each still refuses a type whose
 		// descriptor cannot be named. The reason names the field
 		// specs/020-ir.md's type boundary drops, so that a count by cause says
@@ -2122,22 +2121,22 @@ func TestLowerMapIteratorMatchesTheRuntimesLayout(t *testing.T) {
 // TestLowerReportsTheFirstRefusal checks that a function with two refusals is
 // counted once, under the first one.
 func TestLowerReportsTheFirstRefusal(t *testing.T) {
-	// Two refusals, in source order. append is the earlier one, so it is the
-	// one the count is grouped under; the map literal after it is not counted
-	// again. Both rows are chosen because neither is built, and the test moves
-	// to another pair when one of them is.
-	_, err := lowerFunc(t, `func f(s []int) int { c := append(s, 1); m := map[int]int{1: 2}; return c[0] + m[1] }`, "f")
+	// Two refusals, in source order. min of floats is the earlier one, so it
+	// is the one the count is grouped under; the method value after it is not
+	// counted again. Both rows are chosen because neither is built, and the
+	// test moves to another pair when one of them is.
+	_, err := lowerFunc(t, `func f(a, b float64, t T) float64 { x := min(a, b); g := t.M; use(g()); return x }`, "f")
 	le, ok := err.(*LowerError)
 	if !ok {
 		t.Fatalf("the error is a %T: %v", err, err)
 	}
-	if le.Op != OAppend {
-		t.Errorf("the refusal names %s, want %s", le.Op, OAppend)
+	if le.Op != OMin {
+		t.Errorf("the refusal names %s, want %s", le.Op, OMin)
 	}
 	if !strings.Contains(le.Error(), "lowering f") {
 		t.Errorf("the message does not name the function: %s", le.Error())
 	}
-	if le.Cause() != "append: "+le.What {
+	if le.Cause() != "min: "+le.What {
 		t.Errorf("the cause is %q", le.Cause())
 	}
 }
@@ -3373,5 +3372,177 @@ func TestLowerRecoverAssigned(t *testing.T) {
 	fn := lowerOK(t, `func f() int { if r := recover(); r != nil { return 1 }; return 0 }`)
 	if !lowerCalled(fn, "runtime.gorecover") {
 		t.Errorf("recover did not reach gorecover: %v\n%s", lowerCalls(fn), buildDump(fn))
+	}
+}
+
+// TestLowerAppendRows is specs/020-ir.md's append row: an inlined fast path
+// plus runtime.growslice.
+//
+// The assertions are the three facts the row's correctness rests on, and each
+// one is silent when it is wrong. A descriptor that names the slice rather
+// than the element gives the new backing array the wrong pointer map. A signed
+// capacity test takes the fast path for a length that overflowed. A store
+// placed outside the branch writes through a capacity the branch did not
+// establish.
+func TestLowerAppendRows(t *testing.T) {
+	for _, tc := range []struct {
+		row   string
+		body  string
+		calls []string
+	}{
+		{"one element", `func f(s []int) []int { return append(s, 1) }`,
+			[]string{"runtime.growslice"}},
+		{"three elements", `func f(s []int) []int { return append(s, 1, 2, 3) }`,
+			[]string{"runtime.growslice"}},
+		{"a spread", `func f(s, t []int) []int { return append(s, t...) }`,
+			[]string{"runtime.growslice", "runtime.memmove"}},
+		{"a string spread", `func f(s []byte, t string) []byte { return append(s, t...) }`,
+			[]string{"runtime.growslice", "runtime.memmove"}},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			for _, want := range tc.calls {
+				if !lowerCalled(fn, want) {
+					t.Errorf("the row does not call %s:\n%s", want, buildDump(fn))
+				}
+			}
+		})
+	}
+}
+
+// TestLowerAppendGrowsWithTheElementDescriptor checks the argument the
+// collector reads the new backing array's pointer map out of.
+//
+// runtime.growslice takes the element's *_type, the way runtime.newarray does.
+// A slice's descriptor is the same size and the same shape as an element's, so
+// passing the wrong one links, runs, and describes every word of the new array
+// with the wrong bits.
+func TestLowerAppendGrowsWithTheElementDescriptor(t *testing.T) {
+	fn := lowerOK(t, `func f(s []*int) []*int { return append(s, gp) }`)
+	call := findCall(fn, "runtime.growslice")
+	if call == nil {
+		t.Fatalf("no growslice:\n%s", buildDump(fn))
+	}
+	if len(call.Args) != 5 {
+		t.Fatalf("growslice takes %d arguments, want 5:\n%s", len(call.Args), buildDump(fn))
+	}
+	desc := call.Args[4]
+	if desc.Op != OAddr || desc.X == nil || desc.X.Obj == nil {
+		t.Fatalf("the descriptor argument is %s:\n%s", desc.Op, buildDump(fn))
+	}
+	if want := "type:*int"; desc.X.Obj.Name != want {
+		t.Errorf("the descriptor is %s, want %s", desc.X.Obj.Name, want)
+	}
+	// The count of elements is the fourth argument and a constant here.
+	if num := call.Args[3]; num.Op != OConst {
+		t.Errorf("the count is %s, want a constant:\n%s", num.Op, buildDump(fn))
+	}
+}
+
+// TestLowerAppendTestsTheCapacityUnsigned checks the comparison the fast path
+// turns on.
+//
+// newLen is len+num and both are non-negative, so the only way the sum is
+// negative is an overflow. A signed test reads a negative newLen as smaller
+// than the capacity and takes the fast path, which then stores through a
+// capacity that does not exist. Unsigned makes the same value larger than any
+// capacity, so the case reaches growslice and panics there, which is what
+// cmd/compile/internal/walk's walkAppend does with the same conversion.
+func TestLowerAppendTestsTheCapacityUnsigned(t *testing.T) {
+	fn := lowerOK(t, `func f(s []int) []int { return append(s, 1) }`)
+	var cond *Node
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if cond != nil {
+				return false
+			}
+			if n.Op == OIf && n.X != nil && n.X.Op == OCompare && len(n.Body) == 1 &&
+				n.Body[0].Op == OAssign && n.Body[0].Y != nil && n.Body[0].Y.Op == OCall {
+				cond = n.X
+				return false
+			}
+			return true
+		})
+	}
+	if cond == nil {
+		t.Fatalf("no branch guards the growslice:\n%s", buildDump(fn))
+	}
+	for i, side := range []Expr{cond.X, cond.Y} {
+		if side == nil || side.Type == nil || side.Type.Kind.IsSigned() {
+			t.Errorf("operand %d of the capacity test is %v, want an unsigned type:\n%s",
+				i, side.Type, buildDump(fn))
+		}
+	}
+}
+
+// TestLowerAppendEvaluatesItsArgumentsFirst checks the order walkAppend calls
+// out: every argument is evaluated, and any panic it raises is raised, before
+// the slice is modified in a way the program can see.
+//
+// append(s, one()) whose call was left in the element store would call one
+// after growslice had already moved the backing array, so a panic inside it
+// would leave a slice the program never asked for.
+func TestLowerAppendEvaluatesItsArgumentsFirst(t *testing.T) {
+	fn := lowerOK(t, `func f(s []int) []int { return append(s, one()) }`)
+	seen := ""
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if seen != "" || n.Op != OCall || n.X == nil || n.X.Obj == nil {
+				return seen == ""
+			}
+			switch n.X.Obj.Name {
+			case "p.one", "runtime.growslice":
+				seen = n.X.Obj.Name
+				return false
+			}
+			return true
+		})
+		if seen != "" {
+			break
+		}
+	}
+	if seen != "p.one" {
+		t.Errorf("the first call is %q, want the argument's own call:\n%s", seen, buildDump(fn))
+	}
+}
+
+// TestLowerAppendMovesNothingForAnEmptySpread checks the guard on the copy.
+//
+// The destination of the move is the address of the element at newLen-num.
+// Where the operand holds nothing that element is one past the end of the
+// slice, and where the slice is also full it is one past the end of the
+// allocation, which the collector attributes to whatever object follows it in
+// the heap. The move is emitted under a test that the operand holds something,
+// which is what keeps that address off the argument list.
+func TestLowerAppendMovesNothingForAnEmptySpread(t *testing.T) {
+	fn := lowerOK(t, `func f(s, t []int) []int { return append(s, t...) }`)
+	found := false
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if found || n.Op != OIf || n.X == nil || n.X.Op != OCompare || n.X.Op1 != syntax.Neq {
+				return !found
+			}
+			for _, b := range n.Body {
+				if b.Op == OCall && b.X != nil && b.X.Obj != nil && b.X.Obj.Name == "runtime.memmove" {
+					found = true
+				}
+			}
+			return !found
+		})
+	}
+	if !found {
+		t.Errorf("the move is not guarded by a non-empty operand:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerAppendRefusals is what the row still will not take.
+func TestLowerAppendRefusals(t *testing.T) {
+	fn, err := lowerFunc(t, `func f(s []int) []int { return append(s) }`, "f")
+	if err != nil {
+		t.Fatalf("append of nothing was refused: %v", err)
+	}
+	// append(s) is the operand, so the row emits no call at all.
+	if lowerCalled(fn, "runtime.growslice") {
+		t.Errorf("append of nothing grew the slice:\n%s", buildDump(fn))
 	}
 }
