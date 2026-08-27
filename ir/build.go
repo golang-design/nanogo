@@ -1793,7 +1793,7 @@ func (b *builder) snapshot(n Expr) Expr {
 // A name is held as it is. The statement writes one destination, so nothing
 // between the two reads of the name can change it, which is what ++, -- and an
 // operation assignment need.
-func (b *builder) stabilize(n Expr) Expr { return b.hold(n, b.stable) }
+func (b *builder) stabilize(n Expr) Expr { return b.stabilizeWith(n, b.stable) }
 
 // stabilizeParallel is stabilize for a destination of a parallel assignment.
 //
@@ -1811,20 +1811,20 @@ func (b *builder) stabilize(n Expr) Expr { return b.hold(n, b.stable) }
 // wrote through the new pointer instead of the old one. Each was a silent
 // wrong answer: the program ran and computed a value Go does not define.
 // test/range.go of Go's own corpus is the file that reports it.
-func (b *builder) stabilizeParallel(n Expr) Expr { return b.hold(n, b.snapshot) }
+func (b *builder) stabilizeParallel(n Expr) Expr { return b.stabilizeWith(n, b.snapshot) }
 
-// hold is stabilize with the treatment of a name as a parameter.
+// stabilizeWith is stabilize with the treatment of a name as a parameter.
 //
 // The recursion carries the treatment, because a field of an array of a struct
 // is one destination and its innermost index is evaluated under the same rule
 // as its outermost one.
-func (b *builder) hold(n Expr, keep func(Expr) Expr) Expr {
+func (b *builder) stabilizeWith(n Expr, keep func(Expr) Expr) Expr {
 	if n == nil {
 		return nil
 	}
 	switch n.Op {
 	case OField:
-		n.X = b.hold(n.X, keep)
+		n.X = b.stabilizeWith(n.X, keep)
 	case ODeref:
 		n.X = keep(n.X)
 	case OIndex:
@@ -1832,7 +1832,7 @@ func (b *builder) hold(n Expr, keep func(Expr) Expr) Expr {
 			// An array is the storage the assignment writes and not a value it
 			// reads, so the destination goes on naming it and the recursion
 			// carries on into whatever addresses it.
-			n.X = b.hold(n.X, keep)
+			n.X = b.stabilizeWith(n.X, keep)
 		} else {
 			n.X = keep(n.X)
 		}
