@@ -193,12 +193,27 @@ array, which holds the same `Ifn` wrappers the method rows above are refused
 for, and the interface side for a **literal** interface, which carries no
 method names because it is not a `*types2.Named`.
 
-A type assertion and a type switch still stop above SSA. `OTypeAssert` and
-`OTypeSwitch` are in `ir.goSpecificOps` and have no row in the lowering table,
-so `ir/lower.go` refuses each with "no row of the lowering table is built for
-it yet" and the node never reaches SSA construction. The distinction matters to
-anyone measuring what a change buys: a row refused in the lowering pass is not
-evidence about SSA construction.
+**A type assertion and a type switch are built for a concrete target, and
+neither is a runtime call.** `ir/lower.go` lowers `OTypeAssert` into a
+comparison of the interface's first word against the target's descriptor and
+`OTypeSwitch` into an `ir.OSwitch` on that same word, so both are gone before
+SSA construction sees them. The one-value assertion calls
+`runtime.panicdottypeE` in the failing arm and falls through in the other,
+which needs no join because the symbol does not return. `cmd/compile`'s
+`dottype1` builds the same comparison for the same case.
+
+`runtime.typeAssert` and `runtime.interfaceSwitch` answer one question only:
+which itab implements a non-empty interface for a value's dynamic type. That is
+a search over a method set, which is why it is a call and why the runtime
+caches it in the `*abi.TypeAssert` and `*abi.InterfaceSwitch` the compiler
+allocates. `gc` reaches them for an interface target or an interface case and
+for nothing else, so neither descriptor is on the path of the rows built here.
+An interface target and an interface case are refused, and both refusals name
+the itab, because that is what the answer is.
+
+`runtime.assertI2I` does not exist in `go1.27`. `runtime.typeAssert` is what an
+interface-to-interface assertion reaches, and `rtsym` carries both it and
+`interfaceSwitch` with signatures checked against the installed runtime.
 
 **One program does reach an itab, and it is a conversion and not an
 assertion.** `var c coder = seven{}` converts a concrete type to an interface
@@ -600,6 +615,13 @@ generated equality functions, neither of which exists.
 - Itab identity: convert the same concrete type to the same interface in two
   packages, one compiled by nanogo and one by `gc`, and assert the interface
   values compare equal.
+- Dynamic type: box a value, assert it back out and switch on it, in one
+  program that nanogo compiled end to end. Both sides of the comparison are
+  things this compiler produced, so a descriptor with wrong contents still
+  compares equal to itself and only a running program says the pair agrees.
+  `internal/e2e/iface_test.go` runs the three shapes: an assertion that
+  succeeds, one that fails and is recovered, and a type switch that picks each
+  arm, `case nil` and `default` included.
 - `GCData` against `PtrBits` for every type in a corpus, and against the
   collector's own view under `GODEBUG=gccheckmark=1`. The first half is built
   and the mask is asserted to be exactly what `PtrBits` says, so that a second
