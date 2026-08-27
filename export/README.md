@@ -40,6 +40,7 @@ format and the code that wrote it come from the same tree by construction.
 | `support.go` | `src/cmd/compile/internal/importer/support.go` |
 | `read.go` | written here; see below |
 | `body.go`, `bodyread.go`, `bodies.go` | `src/cmd/compile/internal/noder/reader.go`'s function body half, and `linker.go` for how a body is reached; see below |
+| `bodywrite.go` | the mirror of `bodyread.go`; see below |
 | `writer.go` | `src/cmd/compile/internal/noder/writer.go` and `linker.go`; see below |
 
 ## Which upstream reader, and why
@@ -109,6 +110,7 @@ mode, and `ir.Build` takes a package rather than a function.
 | --- | --- |
 | The tree is `export`'s own, named after the format's statement and expression codes | The three facts above. Its consumer is [013](../specs/013-generics.md)'s stenciler. |
 | No node is type checked as it is built | Upstream reads a node's type off the result of type checking it. Here the type comes out of the stream: `gc` writes a reshape node carrying the type in front of nearly every expression, and the decoder attaches it to the node it wrapped. That answers the four places the decoding depends on a type, which are the map descriptor after an index, the map descriptor in a range clause, the element encoding of a composite literal, and the descriptor after a call of `append`, `copy`, `delete` or `unsafe.Slice`. |
+| The reshape node is kept on the expression it wrapped, and not only its type | `bodywrite.go` writes it back, and the type alone cannot say whether there was one: a constant, a zero value and a conversion each carry a type of their own, which the reader falls back to when no reshape node preceded them. |
 | A type the stream does not carry is refused rather than assumed | Every one of those four branches has a default that reads fewer bytes. A guess would drop a field silently. |
 | The decode is exact, and a body that leaves a byte or a reference is refused | The oracle. See [specs/015](../specs/015-export-data.md). |
 | An operator ordinal that is not one of the 32 a body can carry is refused by number | The field is `gc`'s `ir.Op` ordinal and nothing translates it, so an ordinal outside the set is a stream from another release or a desync. |
@@ -117,6 +119,28 @@ mode, and `ir.Build` takes a package rather than a function.
 | The WebAssembly fields of a function's extension data are not read | They are written only where the compiling toolchain targeted wasm, and nanogo reads the archives of its own target ([specs/030](../specs/030-abi.md)). |
 | `bodies.go` has no upstream file | Upstream finds a body through global maps its own compilation filled. nanogo has no such compilation, so the two paths a body is reached by are walked directly: the private root's list and each declaration's extension data. |
 | The extension data of a defined type is read with no branch, and a function's with one | `linker.go` re-encodes an object's extension data when the object has a definition in `gc`'s IR and copies the writer's bytes when it does not. A generic function has no definition and a generic type does, so a type has one shape and a function has two. `gc`'s own `typeExt` reader has no branch, which is what settles it. |
+
+### The body encoder, `bodywrite.go`
+
+`bodywrite.go` writes the tree of `body.go` back into one element of
+`SectionBody`. It is the mirror of `bodyread.go`, field for field and in the
+same order, so the two files are read side by side rather than one against an
+upstream file: `noder/writer.go`'s body half writes from `syntax` and the
+checker's record, which is a different input, and the file it produces is the
+stub form.
+
+The oracle is byte identity with `gc` rather than acceptance by `gc`. Every
+body element of every standard library package is decoded, encoded again and
+compared with `gc`'s own bytes and `gc`'s own reference table. 9,317 of 9,317
+match, the nested function literal bodies included.
+
+| Change | Why |
+| --- | --- |
+| Which element a reference names is asked of a `bodyRefs` and is not the encoder's | The layout belongs to the encoder and the index belongs to the package being written. `elemRefs` answers with the index the archive the tree was read from already gave it, which is what makes the byte comparison meaningful. A tree built from `syntax` has no such index and needs a resolver backed by the package writer, which is not built. |
+| A string and a package are looked up in a reverse map of the section, and a section that holds one value twice is refused | The reader resolves both to their value rather than keeping the index, so the reverse map is the only way back. `gc`'s encoder interns both sections, so a repeat would make the map a choice rather than an answer. No package of the corpus has one. |
+| A constant is written by dispatching on `constant.Val`'s dynamic type | This is `pkgbits.Encoder.Value`'s own rule, applied here so that the string references it makes are this element's. The reader normalises a value on the way in, so a big integer that fits in an `int64` comes back as one; `gc` writes the wide tag only where the value needs it, so nothing in the corpus round-trips to a different tag. |
+| The encoder refuses a tree whose optional field disagrees with the type beside it | A map descriptor, a range clause's conversions and a call's runtime type each follow only where the format has room for them, and the reader decides by the same test on the same type. A tree that carries one where the format has none, or leaves one out where it has room, moves every byte after it. |
+| A function literal's body is queued rather than written | The literal names an element and does not hold one, so whoever holds the elements writes each queued body after this one. |
 
 ### The writer, `writer.go`
 
@@ -134,7 +158,7 @@ comes from `writer.go` for the public part of a declaration and from
 | No stub for a declaration of another package | A file's export data has no stub left except the universe's and unsafe's, and every reader asserts it. nanogo has no linker pass, so a foreign declaration the exported surface reaches is written out in full at the point it is reached. |
 | The public root lists every object in the file | This is `linker.go`'s list and not `writer.go`'s. `gc` builds its stub resolution table from it, so a root naming only nanogo's own declarations leaves `gc` unable to resolve, say, `io.Reader` in a `bufio` signature. |
 | `pos` writes an absent position | The mirror of the reader's gap. See below. |
-| No function body, and the private root lists none | The body writer is [specs/015](../specs/015-export-data.md)'s other half. |
+| No function body, and the private root lists none | `bodywrite.go` encodes a body and nothing builds one: a body is encoded from `syntax` plus the checker's record, and that half is not written. See [specs/015](../specs/015-export-data.md). |
 | A generic declaration is refused by name | See below. |
 | `funcExt` writes no `//go:` directive | The driver records the fourteen verbs its handler recognises, and their positions (`driver/pragma.go`, [specs/016](../specs/016-directives-and-pragmas.md)), and nothing carries them this far: the flag bits there are nanogo's own numbering and this field is read with `gc`'s. |
 | `funcExt` writes no linkname | `//go:linkname` is not one of those fourteen verbs, so the driver records nothing for the writer to drop ([016](../specs/016-directives-and-pragmas.md)). |
