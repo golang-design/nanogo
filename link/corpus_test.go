@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -306,4 +307,45 @@ func out(t *testing.T, name string, args ...string) []byte {
 		t.Fatalf("%s %s: %v", name, strings.Join(args, " "), err)
 	}
 	return b
+}
+
+// TestBuiltinListMatchesTheToolchain compares the pinned list of
+// predeclared runtime symbols with the installed toolchain's.
+//
+// A reference to one of these carries an index and no name, so a list that
+// is one entry out resolves every reference past that entry to the wrong
+// symbol, and nothing else in the object would say so. The list is pinned
+// the way obj.Magic is: specs/040-object-format.md says a version mismatch
+// is an error and not a negotiation, and this is where the mismatch is
+// reported.
+func TestBuiltinListMatchesTheToolchain(t *testing.T) {
+	goCmd := goTool(t)
+	root := strings.TrimSpace(string(out(t, goCmd, "env", "GOROOT")))
+	path := filepath.Join(root, "src", "cmd", "internal", "goobj", "builtinlist.go")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		if requireCorpus() {
+			t.Fatalf("NANOGO_REQUIRE_CORPUS is set and the toolchain's builtin list is not readable: %v", err)
+		}
+		t.Skipf("no toolchain source to compare against: %v", err)
+	}
+	entry := regexp.MustCompile(`\{"([^"]+)",\s*(\d+)\},`)
+	found := entry.FindAllStringSubmatch(string(src), -1)
+	if len(found) == 0 {
+		t.Fatalf("%s holds no entry this test recognises", path)
+	}
+	if len(found) != NumBuiltin() {
+		t.Fatalf("the toolchain declares %d predeclared symbols and this package pins %d", len(found), NumBuiltin())
+	}
+	for i, m := range found {
+		name, abi, _ := BuiltinName(i)
+		wantABI := uint16(obj.ABI0)
+		if m[2] == "1" {
+			wantABI = obj.ABIInternal
+		}
+		if name != m[1] || abi != wantABI {
+			t.Fatalf("builtin %d is %q ABI %s in the toolchain and %q ABI %d here", i, m[1], m[2], name, abi)
+		}
+	}
+	t.Logf("%d predeclared symbols agree with the installed toolchain", NumBuiltin())
 }
