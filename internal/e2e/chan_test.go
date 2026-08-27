@@ -70,6 +70,31 @@ func lenCap() int {
 	return len(c)*10 + cap(c)
 }
 
+// closeRange drains a closed channel. The loop has no bound: it leaves when
+// the receive says the channel is closed and empty, and a compiler that left
+// it any other way either hangs or reads one value past the end.
+func closeRange() int {
+	c := make(chan int, 3)
+	c <- 3
+	c <- 4
+	c <- 5
+	close(c)
+	total := 0
+	for v := range c {
+		total = total + v
+	}
+	// A break the program writes binds to the same loop the receive does.
+	d := make(chan int, 2)
+	d <- 1
+	d <- 2
+	close(d)
+	for v := range d {
+		total = total + v
+		break
+	}
+	return total
+}
+
 func main() {
 	d := handoff() - 7
 	if d != 0 {
@@ -84,6 +109,10 @@ func main() {
 		d = d / (d - d)
 	}
 	d = lenCap() - 23
+	if d != 0 {
+		d = d / (d - d)
+	}
+	d = closeRange() - 13
 	if d != 0 {
 		d = d / (d - d)
 	}

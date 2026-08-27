@@ -805,6 +805,82 @@ func TestLowerRangeRows(t *testing.T) {
 	}
 }
 
+// TestLowerRangeOverAChannel is the row that is not an index loop.
+//
+// A channel has no length to stop at, so the loop has no condition and leaves
+// through the break the receive decides. The shape is asserted rather than the
+// calls alone, because a loop with a condition on the wrong side of the
+// receive would still call the same symbol.
+func TestLowerRangeOverAChannel(t *testing.T) {
+	for _, tc := range []struct {
+		row    string
+		body   string
+		writes bool
+	}{
+		{"with a variable", `func f(c chan int) { for v := range c { use(v) } }`, true},
+		{"with none", `func f(c chan int) { for range c {} }`, false},
+		{"over a receive-only channel", `func f(c <-chan int) { for v := range c { use(v) } }`, true},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if len(fn.Body) != 1 || fn.Body[0].Op != OFor {
+				t.Fatalf("the body is not one loop:\n%s", buildDump(fn))
+			}
+			loop := fn.Body[0]
+			if loop.X != nil {
+				t.Errorf("the loop has a condition, and a channel has no bound:\n%s", buildDump(fn))
+			}
+			if len(loop.Post) != 0 {
+				t.Errorf("the loop has a post statement:\n%s", buildDump(fn))
+			}
+			// The channel is read into a temporary in the loop's init, so the
+			// operand is evaluated once whatever the body assigns.
+			if len(loop.Init) != 1 || loop.Init[0].Op != OAssign {
+				t.Fatalf("the operand is not held in the init list:\n%s", buildDump(fn))
+			}
+			if !lowerCalled(fn, "runtime.chanrecv2") {
+				t.Errorf("the loop does not receive; the calls are %v:\n%s",
+					lowerCalls(fn), buildDump(fn))
+			}
+			// The receive comes first and the break is decided by it.
+			if len(loop.Body) < 2 || loop.Body[0].Op != OAssign {
+				t.Fatalf("the loop does not open with the receive:\n%s", buildDump(fn))
+			}
+			guard := loop.Body[1]
+			if guard.Op != OIf || len(guard.Body) != 1 || guard.Body[0].Op != OBreak {
+				t.Fatalf("the receive is not what leaves the loop:\n%s", buildDump(fn))
+			}
+			if guard.X == nil || guard.X.Op != OUnary || guard.X.Op1 != syntax.Not {
+				t.Errorf("the loop leaves when the receive succeeded:\n%s", buildDump(fn))
+			}
+			wrote := false
+			for _, s := range loop.Body[2:] {
+				if s.Op == OAssign && s.X != nil && s.X.Op == OLocal &&
+					s.X.Obj != nil && s.X.Obj.Name == "v" {
+					wrote = true
+				}
+			}
+			if wrote != tc.writes {
+				t.Errorf("the loop writes the variable: %v, want %v:\n%s",
+					wrote, tc.writes, buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerRangeOverAChannelDrainsIt checks that the receive is emitted for a
+// clause that asked for no value.
+//
+// "for range c" reads the channel until it is closed, so a loop that skipped
+// the call would spin on a channel it never drained.
+func TestLowerRangeOverAChannelDrainsIt(t *testing.T) {
+	fn := lowerOK(t, `func f(c chan int) { for range c {} }`)
+	if !lowerCalled(fn, "runtime.chanrecv2") {
+		t.Errorf("the loop does not receive; the calls are %v:\n%s",
+			lowerCalls(fn), buildDump(fn))
+	}
+}
+
 // TestLowerRangeReadsTheElementOnlyWhenItIsAsked is the part of the row that
 // says what the loop body opens with.
 func TestLowerRangeReadsTheElementOnlyWhenItIsAsked(t *testing.T) {
@@ -1365,7 +1441,6 @@ func TestLowerRefusals(t *testing.T) {
 		// maps.Iter frame slot.
 		{"range over a map", `func f(m map[int]int) { for k := range m { use(k) } }`, ORange, "runtime.mapIterStart"},
 		{"range over a string", `func f(s string) { for i := range s { use(i) } }`, ORange, "UTF-8"},
-		{"range over a channel", `func f(c chan int) { for v := range c { use(v) } }`, ORange, "channel"},
 		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
 		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
 		{"defer of a builtin", `func f(c chan int) { defer close(c) }`, ODefer, "holds a close and not a call"},

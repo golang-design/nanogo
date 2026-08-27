@@ -1588,7 +1588,10 @@ func (l *lowerer) rangeStmt(n *Node) {
 		bail("a range over a map needs runtime.mapIterStart and runtime.mapIterNext, and the row that calls them is not built")
 		return
 	case x.Type.Kind == Chan:
-		bail("a range over a channel")
+		// The channel loop has no index and no bound, so it is built whole
+		// rather than through the index loop below. The statements the
+		// operand needed are on the sink and rangeChan takes them.
+		l.rangeChan(n, x)
 		return
 	default:
 		bail("a range over " + x.Type.Kind.String())
@@ -1645,6 +1648,81 @@ func (l *lowerer) rangeStmt(n *Node) {
 	}
 	loop.Body = l.pop()
 	l.emit(loop)
+}
+
+// rangeChan builds a range over a channel.
+//
+// specs/020-ir.md's row, and it is not an index loop: a channel has no length
+// to stop at and no element to index. The loop runs until the receive says the
+// channel is closed and drained, which is the same fact runtime.chanrecv2
+// returns to the two-value receive.
+//
+//	ha := c
+//	for {
+//		hv, hb := <-ha
+//		if !hb {
+//			break
+//		}
+//		v := hv
+//		body
+//	}
+//
+// The channel is evaluated once, before the loop, which is what the
+// specification requires of every range expression: an assignment inside the
+// body cannot change what is iterated.
+//
+// The receive is emitted whether or not the clause asked for the value.
+// "for range c" drains the channel, so a loop that skipped the call would
+// either spin or never end.
+func (l *lowerer) rangeChan(n *Node, x Expr) {
+	pos := n.Pos
+	elem, why := chanElem(x)
+	if elem == nil {
+		l.refuse(n, why)
+		l.emit(l.pop()...)
+		l.emit(n)
+		return
+	}
+	c := l.spill(x)
+	// The operand's temporaries go in the loop's own init list and not in
+	// front of the loop, for the reason rangeStmt gives: a statement between a
+	// label and the loop takes the name the loop needs.
+	init := l.pop()
+
+	l.push()
+	arg := l.chanArg(ref(c, pos))
+	o, addr := l.elemSlot(elem, pos)
+	got := l.tempObj(lowerBool, pos)
+	l.emit(define(pos, ref(got, pos), &Node{
+		Op: OCall, Pos: pos, Type: lowerBool,
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.chanrecv2")},
+		Args: []Expr{arg, addr},
+	}))
+	l.emit(&Node{
+		Op: OIf, Pos: pos, Type: voidType,
+		X: &Node{Op: OUnary, Op1: syntax.Not, Pos: pos, Type: lowerBool, X: ref(got, pos)},
+		// An unlabelled break, which ssa.Build binds to the innermost loop,
+		// and this loop is it. A break the source wrote in the body binds to
+		// the same one, which is what the language says it does.
+		Body: []Stmt{{Op: OBreak, Pos: pos, Type: voidType}},
+	})
+	// The destination is written before the body, so that the per-iteration
+	// declaration ir.Build put at the head of the body copies a value that is
+	// already there.
+	if len(n.Args) > 0 && n.Args[0] != nil {
+		l.emit(Assign(pos, l.expr(n.Args[0]), ref(o, pos)))
+	}
+	if len(n.Args) > 1 && n.Args[1] != nil {
+		l.refuse(n, "a range over a channel with two variables")
+	}
+	for _, s := range n.Body {
+		l.stmt(s)
+	}
+	body := l.pop()
+
+	// No condition. The loop leaves through the break above and through
+	// nothing else, which is what makes the receive the only exit.
+	l.emit(&Node{Op: OFor, Pos: pos, Type: voidType, Init: init, Body: body})
 }
 
 // widen converts an integer to a machine word, so that it can be added to a
