@@ -92,7 +92,7 @@ func (s *BodySource) BuildBody(name string, sig *types2.Signature, block *syntax
 			Reason: "the declaration is a method of a generic type, and its dictionary is the type's rather than its own",
 		}
 	}
-	dict := &Dict{TypeParams: typeParamSlice(sig.TypeParams())}
+	dict := &Dict{Pkg: s.pkg, TypeParams: typeParamSlice(sig.TypeParams())}
 	if sig.Recv() != nil && sig.TypeParams().Len() != 0 {
 		dict.Receivers = typeParamSlice(sig.RecvTypeParams())
 	}
@@ -229,6 +229,16 @@ func (b *bodyBuilder) typeUse(typ types2.Type) TypeUse {
 	return TypeUse{Derived: true, Idx: pkgbits.Index(slot), Type: typ}
 }
 
+// deriveType allocates the dictionary slot of a derived type, reporting what
+// the dictionary cannot hold as a refusal of the body.
+func (b *bodyBuilder) deriveType(typ types2.Type) (int, bool) {
+	slot, derived, err := b.dict.Derive(typ)
+	if err != nil {
+		b.refuse("%s", err)
+	}
+	return slot, derived
+}
+
 // derivedOf reports whether a type's identity depends on a type parameter,
 // allocating its dictionary slot when it does.
 func (b *bodyBuilder) derivedOf(typ types2.Type) bool {
@@ -236,176 +246,12 @@ func (b *bodyBuilder) derivedOf(typ types2.Type) bool {
 	return ok
 }
 
-// deriveType returns the dictionary slot a type is named by, and false when
-// the type's identity does not depend on a type parameter.
-//
-// This is cmd/compile/internal/noder.pkgWriter.typIdx with the elements left
-// out. gc allocates the slot of a type after it has written the element of
-// every type that type names, so a composite type's slot follows the slots of
-// its components, and the walk below is the order of gc's encoding rather than
-// an order of this package's choosing. A slot numbered otherwise is a slot gc
-// reads as a different type, and gc reads it without complaint.
-func (b *bodyBuilder) deriveType(typ types2.Type) (int, bool) {
-	// A local alias is stripped to what it names, the way the type writer
-	// strips it, so that two local aliases of one name are not one element.
-	for {
-		alias, ok := typ.(*types2.Alias)
-		if !ok || isGlobal(alias.Obj()) {
-			break
-		}
-		typ = alias.Rhs()
+// walkSignature allocates the slots a signature's parameters and results
+// name, which is what seeding a declaration's dictionary walks.
+func (b *bodyBuilder) walkSignature(sig *types2.Signature) {
+	if _, err := b.dict.walkSignature(sig); err != nil {
+		b.refuse("%s", err)
 	}
-	if slot, ok := b.dict.derivedIdx[typ]; ok {
-		return slot, true
-	}
-	if b.dict.nonDerived[typ] {
-		return 0, false
-	}
-	if !b.walkDerived(typ) {
-		if b.dict.nonDerived == nil {
-			b.dict.nonDerived = make(map[types2.Type]bool)
-		}
-		b.dict.nonDerived[typ] = true
-		return 0, false
-	}
-	slot := len(b.dict.Derived)
-	b.dict.Derived = append(b.dict.Derived, typ)
-	if b.dict.derivedIdx == nil {
-		b.dict.derivedIdx = make(map[types2.Type]int)
-	}
-	b.dict.derivedIdx[typ] = slot
-	return slot, true
-}
-
-// walkDerived reports whether a type names a type parameter, allocating the
-// slot of every derived type it names on the way.
-//
-// Every component is walked, and none is skipped once one has answered yes,
-// because gc writes the element of each and the slots are allocated in that
-// order.
-func (b *bodyBuilder) walkDerived(typ types2.Type) bool {
-	switch typ := typ.(type) {
-	default:
-		b.refuse("the type is a %T, which the format has no tag for", typ)
-		panic("unreachable")
-
-	case *types2.Basic:
-		// byte and rune are written as a reference to their TypeName and
-		// every other basic type as its kind. Neither names a type
-		// parameter.
-		return false
-
-	case *types2.Named:
-		return b.walkNamed(typ.Obj(), typeSlice(typ.TypeArgs()))
-
-	case *types2.Alias:
-		return b.walkNamed(typ.Obj(), typeSlice(typ.TypeArgs()))
-
-	case *types2.TypeParam:
-		return true
-
-	case *types2.Array:
-		return b.derivedOf(typ.Elem())
-
-	case *types2.Chan:
-		return b.derivedOf(typ.Elem())
-
-	case *types2.Map:
-		key := b.derivedOf(typ.Key())
-		return b.derivedOf(typ.Elem()) || key
-
-	case *types2.Pointer:
-		return b.derivedOf(typ.Elem())
-
-	case *types2.Signature:
-		return b.walkSignature(typ)
-
-	case *types2.Slice:
-		return b.derivedOf(typ.Elem())
-
-	case *types2.Struct:
-		derived := false
-		for i := range typ.NumFields() {
-			if b.derivedOf(typ.Field(i).Type()) {
-				derived = true
-			}
-		}
-		return derived
-
-	case *types2.Interface:
-		// The canonical empty interface is written as a reference to the
-		// TypeName any, and comparable's underlying interface as an
-		// embedding of comparable. Neither names a type parameter.
-		if anyName := types2.Universe.Lookup("any"); anyName != nil &&
-			types2.Unalias(typ) == types2.Unalias(anyName.Type()) {
-			return false
-		}
-		if typ.NumEmbeddeds() == 0 && !typ.IsMethodSet() {
-			return false
-		}
-		derived := false
-		// A method's signature is written inline, so the signature gets no
-		// slot of its own and only the types it names do.
-		for i := range typ.NumExplicitMethods() {
-			sig, ok := typ.ExplicitMethod(i).Type().(*types2.Signature)
-			if !ok {
-				b.refuse("a method of an interface has no signature")
-			}
-			if b.walkSignature(sig) {
-				derived = true
-			}
-		}
-		for i := range typ.NumEmbeddeds() {
-			if b.derivedOf(typ.EmbeddedType(i)) {
-				derived = true
-			}
-		}
-		return derived
-
-	case *types2.Union:
-		derived := false
-		for i := range typ.Len() {
-			if b.derivedOf(typ.Term(i).Type()) {
-				derived = true
-			}
-		}
-		return derived
-	}
-}
-
-// walkSignature walks the parameters and the results of a signature, which is
-// what the signature's encoding names and all of it.
-func (b *bodyBuilder) walkSignature(sig *types2.Signature) bool {
-	derived := false
-	for _, tuple := range []*types2.Tuple{sig.Params(), sig.Results()} {
-		for i := range tuple.Len() {
-			if b.derivedOf(tuple.At(i).Type()) {
-				derived = true
-			}
-		}
-	}
-	return derived
-}
-
-// walkNamed walks a use of a defined type or of a global alias, which names
-// the declaration and its type arguments.
-func (b *bodyBuilder) walkNamed(obj *types2.TypeName, targs []types2.Type) bool {
-	// A type declared inside a generic declaration carries that
-	// declaration's type parameters implicitly, so every use of it is
-	// derived and the dictionary holds them ahead of the declaration's own.
-	// The builder keeps no record of which declaration a local type was
-	// declared in, so it refuses one rather than reading it as a type that
-	// needs no slot.
-	if b.dict.Generic() && obj.Pkg() != nil && obj.Pkg() == b.s.pkg && !isGlobal(obj) {
-		b.refuse("%s is declared inside a generic declaration, and every use of it carries the enclosing type parameters", obj.Name())
-	}
-	derived := false
-	for _, t := range targs {
-		if b.derivedOf(t) {
-			derived = true
-		}
-	}
-	return derived
 }
 
 // objUse names one package-scope declaration, with the type arguments it is
