@@ -10,9 +10,10 @@ depends_on:
 
 # Linker
 
-**The first two stages are built and the rest is not.** The `link` package
-reads objects and archives, and it marks what a program uses from the entry
-point. It assigns no addresses, builds no `pclntab` and no `moduledata`, and
+**The first three stages are built and the rest is not.** The `link` package
+reads objects and archives, marks what a program uses from the entry point,
+and assigns addresses over the text segment and over the data sections whose
+membership the objects decide. It builds no `pclntab` and no `moduledata` and
 writes no executable, so nanogo's objects are still linked by `go tool link`.
 That is the one external dependency this deck most depends on being kept:
 `ssagen`'s `TestLinkAndRun` calls it to turn compiled source into a running
@@ -128,7 +129,7 @@ that is already in the tree, and none of them needs the stage after it.
 | --- | --- |
 | **Built.** Read a `goobj` archive back into symbols, relocations and aux records | Round trip: read what `obj` wrote and compare against the structures that produced it. `go tool nm` is the second opinion, and it agrees over the whole archive set of a real build |
 | **Built.** Reachability from the entry point | The set nanogo keeps against the set `cmd/link -dumpdep` reports for the same program. Two programs, one of 9,024 and one of 13,807 named symbols, agree exactly, and so does every interface and reflection attribute the dump prints |
-| Address assignment over text, rodata, data and bss | Section sizes against `cmd/link`'s for the same objects, which [040](040-object-format.md)'s tests already link |
+| **Built.** Address assignment over text, and over the data sections the objects close | Every text symbol at the same offset from `runtime.text` as in the executable `cmd/link` wrote from the same archives, `runtime.etext` included, over 1,675 and 3,210 functions. Four data sections at the same size, and the sections that are not closed are named below with what blocks each |
 | `pclntab` | A panic deep in a call chain prints the same stack, with the same line numbers, as the `cmd/link` build of the same source. `runtime.Callers` agrees |
 | `moduledata` | The runtime starts. Nothing subtler is needed: a wrong `moduledata` does not boot |
 | Mach-O, then ELF | The program runs, and `otool`/`readelf` agree with the same tool run on `cmd/link`'s output |
@@ -315,6 +316,101 @@ wants the same names loads them the same way. The set is the same either
 way, so this is a fact about names and not about reachability, which is why
 it takes a comparison by name to see it.
 
+## Address assignment
+
+The third stage gives every symbol the program keeps an address. The text
+segment is laid out completely. The data sections are laid out where the
+objects decide what is in them, and the ones they do not decide are named
+at the end of this section with what each is waiting for.
+
+### The order the text is laid out in
+
+```mermaid
+flowchart TD
+  libs["packages, in load order"] --> post["postorder over the import graph"]
+  post --> two["two passes<br/>the runtime's own dependencies first"]
+  two --> split["per package:<br/>its own text, then the text it holds a copy of"]
+  split --> kind["stable sort by kind<br/>gathers the FIPS text"]
+  kind --> addr["addresses<br/>align 16, at least 16 each"]
+```
+
+A function is aligned to `Funcalign` and given at least `MINFUNC` bytes,
+both 16 on `arm64`, because the runtime's pc to function table needs every
+function to have an address of its own. Writing $a_i$ for the alignment a
+symbol asked for and $z_i$ for its size,
+
+$$
+v_{i+1} = \left\lceil \frac{v_i}{\max(a_i, 16)} \right\rceil \cdot \max(a_i, 16) + \max(z_i, 16)
+$$
+
+and the section is `MinLC` bytes longer than the last of them, so that the
+end marker does not share an address with the next section.
+
+Two symbols in the text belong to no package. `go:textfipsstart` and
+`go:textfipsend` are the linker's, they exist whether or not any FIPS text
+is linked, and the sort by kind is what moves them to the end where the
+FIPS text of a build that has some falls between them. Without them
+`runtime.etext` is 0x20 short of `cmd/link`'s.
+
+### Rewriting a relocation moves the symbol
+
+The oracle found a third fact of the same kind as the two above, and it
+crosses the two stages.
+
+`cmd/link` prunes the initialiser of a map nothing reads, and redirects
+the weak call the package's initialisation function makes to
+`runtime.mapinitnoop`. Two things follow that no reading of the pass
+predicts.
+
+The first is that `runtime.mapinitnoop` is kept by setting the attribute
+and not by marking, so it has no incoming edge and `-dumpdep` prints no
+line for it. **The dump is a list of edges and not the reachable set**,
+and a linker that matched the dump exactly was one symbol short of the
+binary. The symbol table of the executable is the oracle that sees it.
+
+The second is that `cmd/link` rewrites a relocation by copying the symbol
+out of its object first, and its text ordering asks which object each
+symbol came from. The copy answers "not this one", so the initialisation
+function is laid out with the package's duplicate-tolerant text rather
+than at its index. In a hello-world that is `time.init`, which moves 0x50
+bytes, and every function after it moves with it.
+
+### The sections the objects close
+
+A section is laid out here when every symbol in it comes out of an object,
+because then the two linkers have the same members and the size is a
+number they must agree on. The symbols the linker adds to these four have
+size zero.
+
+| Section | Holds | Size, two programs |
+| --- | --- | --- |
+| `.go.module` | the module descriptor, which leaves the zero-filled data the compiler put it in | 0x238, 0x238 |
+| `.noptrbss` | the zero-filled data that holds no pointer, and the garbage collection masks | 0x4030, 0x4050 |
+| `.go.type` | the type descriptors and the itabs | 0x18e40, 0x2e6c0 |
+| `.go.func` | the function descriptors | 0x398, 0x488 |
+
+The order inside `.go.type` is what makes the size right and not only the
+addresses. The descriptors a typelink names come first, in order of the
+string the type calls itself, then the rest by size, then the itabs.
+Sorting the section by size alone gives 0x18e48, eight bytes over.
+
+### The sections the objects do not close, and what each waits for
+
+| Section | What is missing |
+| --- | --- |
+| `.rodata` | the garbage collection data for the globals, and the typelink and itablink tables |
+| `.gopclntab` | `pclntab`, the stage below |
+| `.noptrdata`, `.data` | the FIPS brackets, and the string variables that arrive from `.bss` |
+| `.bss` | the three string variables the linker fills in, which move out of it. One of the three, `runtime.modinfo`, is named by the import configuration and by no object, so this section is blocked on an input and not on a stage. Its size is 0x20 out |
+
+One more thing is out of reach and it is not a stage. `cmd/link` breaks a
+tie between two symbols of one size by its own symbol number, and that
+numbering counts the symbols `pclntab`, `moduledata` and DWARF create. So
+two symbols of one size may be laid out in an order this package cannot
+predict. Inside a size class that changes no total, because the sizes are
+equal, but it does change an address, which is why the data oracle is the
+section size and the text oracle is the address.
+
 ## Scope, stated as exclusions
 
 | Excluded | Consequence |
@@ -338,7 +434,14 @@ sections, and a fixed load layout.
 - The reader reads every archive of a real build, and refuses one it cannot
   account for. `go tool nm` reports the same symbols.
 - Reachability is compared with `cmd/link -dumpdep` on the same archives, over
-  the symbol set and over the attributes.
+  the symbol set and over the attributes, and against the symbol table of the
+  executable the same linker wrote, which holds the symbols the dump's edges
+  do not reach.
+- Every text symbol is at the same offset from `runtime.text` as in that
+  executable, and the four data sections the objects close are the same size.
+- The list of packages the runtime depends on and the list of symbol kinds are
+  compared with the installed toolchain's, because one entry out of either one
+  moves symbols and still links.
 - The descriptor decoders the method pass needs are checked against gc's own
   naming: a decoded method name is the tail of the symbol name of the function
   its relocations point at, and an itab holds the type its name says.
@@ -346,9 +449,9 @@ sections, and a fixed load layout.
   test that matters.
 - Compare against `go tool link` on the same objects: same entry point, same
   section contents modulo addresses, same symbol set.
-- `pclntab` verified through the runtime: a panic deep in a call chain must print
-  the correct stack with correct line numbers, and `runtime.Callers` must agree
-  with the source.
+- `pclntab` compared with `cmd/link`'s own table for the same objects, entry by
+  entry. A running program proves nothing here, which is why the comparison is
+  against the table and not against a traceback.
 - Trampoline insertion forced by a generated binary large enough to exceed branch
   range.
 
@@ -369,3 +472,12 @@ sections, and a fixed load layout.
 - The string region was said to be covered completely by the strings some
   block references. The measurement said otherwise and named the reason,
   which is now the section above.
+- The oracle for reachability was said to be `cmd/link -dumpdep`, with no
+  qualification. The dump is a list of edges, and a symbol the linker
+  keeps without an edge is absent from it. There is one,
+  `runtime.mapinitnoop`, and the symbol table of the executable is what
+  found it.
+- Address assignment was said to be proved by section sizes. That is the
+  oracle for the data sections and it is weaker than the one the text
+  admits, where every symbol's offset can be compared and a size that
+  agrees can still hold two functions in the wrong order.
