@@ -611,7 +611,7 @@ reader who follows the same reasoning again makes the same two mistakes.
    construction with the pass, and 17,905 without it.
 2. `emitPackage` collects `ir.LowerAndCollect`'s per function lists, unions
    them in first-use order, calls `rtype.Descriptor` on each, and resolves each
-   `rtype.Reloc` target by name. **The descriptor itself is `AddDef`, not
+   `rtype.Reloc` target by name. **The descriptor itself is `AddNonPkgDef`, not
    `AddHashedDef`, and this spec was wrong to say otherwise.** `cmd/link` reads
    no name for a symbol in the hashed index space, so a hashed descriptor is
    nameless to the linker: no reference from another object resolves to it and
@@ -620,6 +620,36 @@ reader who follows the same reasoning again makes the same two mistakes.
    `runtime.gcbits.` and itabs, and never on the descriptor. So the descriptor
    is a named `dupok` definition and the data it points at is hashed, which is
    what `rtype` documents when it returns the descriptor first.
+
+   **It is a non-package definition, and `AddDef` was the second mistake here.**
+   A descriptor is `dupok` because every package that names a type writes one,
+   and `cmd/link` deduplicates a `dupok` symbol by name in the non-package index
+   space only. `loader.addSym` takes a package definition as unique by
+   construction, overwrites the name table entry and keeps both copies:
+
+   ```
+   case pkgDef:
+       // Defined package symbols cannot be dup to each other.
+       l.symsByName[ver][name] = i
+       addToGlobal()
+       return i
+   ```
+
+   `gc` states the same rule from the writer's side, in `obj.isNonPkgSym`: a
+   `dupok` symbol is a non-package symbol, so that it is deduplicated by name.
+   A descriptor written as a package definition is therefore a second
+   `type:*int32` in a binary that already holds the runtime's. Both copies are
+   byte-identical and both are reachable, one by name and one by index from the
+   parameter array of `type:func(*int32)`, and `runtime.SetFinalizer` compares
+   two descriptors by address:
+
+   ```
+   fatal error: runtime.SetFinalizer: cannot pass *int32 to finalizer func(*int32)
+   ```
+
+   The two types in that message read the same because they are the same type.
+   `internal/gotest/testdata/go/test/tinyfin.go` is the corpus file that found
+   it and `internal/e2e/rtype_test.go` is the claim stated on its own.
 3. `ssagen/reloc.go`'s `symbolName` prefixed `pkg.Path + "."` onto any global
    whose name held no dot. `type:p.T` survived that and `type:int`,
    `type:[]int` and `type:interface {}` did not. It leaves a `type:` name

@@ -444,10 +444,9 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// not that code generation could not reach them, and the writer exists
 	// now.
 	// The descriptors go in after the text symbols because the list is not
-	// complete until the last function is lowered. Nothing here adds a
-	// non-package definition, which is what makes that safe: the index space
-	// of NonPkgRefs continues that of NonPkgDefs, so a definition added after
-	// ssagen's references would move every one of them.
+	// complete until the last function is lowered. They are non-package
+	// definitions and they land after ssagen's references, which obj allows:
+	// a reference takes its index when the object is written.
 	//
 	// The closure is taken here rather than inside addDescriptors because the
 	// generated functions are decided by the closed set and not by the roots.
@@ -630,12 +629,25 @@ func algFuncs(t *ir.Type, set []rtype.Symbol) ([]*ir.Func, error) {
 // could be named and not written stops there, after the function it came from
 // compiled, so the refusal names the type rather than the function.
 //
-// The descriptor itself is a named definition and the data it points at is
-// content-addressable. That is gc's split, not a choice: cmd/link reads no
-// name for a symbol in the hashed index space, so a hashed descriptor could
-// not be resolved by name from another object and would not be collected into
-// runtime.typelinks. specs/032 says AddHashedDef for all of them, and it is
-// wrong about the first one.
+// The descriptor itself is a named non-package definition and the data it
+// points at is content-addressable. That is gc's split, not a choice.
+//
+// It is not a package definition. A descriptor is dupok, because every package
+// that names a type writes one, and cmd/link deduplicates a dupok symbol by
+// name. It does that only in the non-package index space: loader.addSym takes
+// a package definition as unique by construction and adds it to the binary
+// without asking whether the name is already there. gc states the same rule
+// the other way round, in obj.isNonPkgSym: a dupok symbol is a non-package
+// symbol. A descriptor written as a package definition is a second *int32 in
+// a binary that already has the runtime's, and runtime.SetFinalizer, which
+// compares two type descriptors by address, then refuses a *int32 for a
+// func(*int32).
+//
+// It is not content-addressable either: cmd/link reads no name for a symbol in
+// the hashed index space, so a hashed descriptor could not be resolved by name
+// from another object and would not be collected into runtime.typelinks.
+// specs/032 says AddHashedDef for all of them, and it is wrong about the
+// first one.
 func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, generated map[string]bool) error {
 	// defs and refs are lookup tables and are never ranged over
 	// (specs/053-determinism.md). A symbol is emitted once however many types
@@ -676,7 +688,7 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, generated m
 			// rtype documents the first symbol as the descriptor and the rest
 			// as the data it points at.
 			if i == 0 {
-				defs[s.Name] = out.AddDef(d)
+				defs[s.Name] = out.AddNonPkgDef(d)
 			} else {
 				defs[s.Name] = out.AddHashedDef(d)
 			}
