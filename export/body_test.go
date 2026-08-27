@@ -58,9 +58,17 @@ func (c *bodyCensus) report(t *testing.T) {
 
 // readBodyCorpus reads the bodies of each named package and returns the
 // census.
-func readBodyCorpus(t *testing.T, dir string, paths ...string) *bodyCensus {
+//
+// share says the package table and the type checker's context are one for the
+// whole run, which is how the driver holds them: a package reached through two
+// archives must be one package. It is the harder case for the walk that pairs
+// a declaration with its extension data, because a name can then resolve to an
+// object another archive materialised.
+func readBodyCorpus(t *testing.T, dir string, share bool, paths ...string) *bodyCensus {
 	t.Helper()
 	c := newCensus()
+	ctxt := types2.NewContext()
+	imports := make(map[string]*types2.Package)
 	for _, a := range archives(t, dir, paths...) {
 		path, file := a[0], a[1]
 		data, err := os.ReadFile(file)
@@ -78,11 +86,15 @@ func readBodyCorpus(t *testing.T, dir string, paths ...string) *bodyCensus {
 			t.Errorf("%s: %v", path, err)
 			continue
 		}
-		// A fresh package table per archive, so that every declaration a
-		// body names comes out of the archive being read. The file is the
-		// linked form, so it is self-contained.
+		c1, i1 := ctxt, imports
+		if !share {
+			// A fresh package table per archive, so that every declaration
+			// a body names comes out of the archive being read. The file is
+			// the linked form, so it is self-contained.
+			c1, i1 = types2.NewContext(), make(map[string]*types2.Package)
+		}
 		dec := pkgbits.NewPkgDecoder(path, string(payload))
-		_, bodies, err := ReadBodies(types2.NewContext(), make(map[string]*types2.Package), dec)
+		_, bodies, err := ReadBodies(c1, i1, dec)
 		if err != nil {
 			if b, ok := err.(*BodyError); ok {
 				c.refused[b.Reason]++
@@ -126,15 +138,29 @@ func TestReadBodies(t *testing.T) {
 	if os.Getenv("NANOGO_REQUIRE_CORPUS") == "1" {
 		want = []string{"std"}
 	}
-	c := readBodyCorpus(t, dir, want...)
-	c.report(t)
-	for _, f := range c.failures {
-		t.Errorf("%s", f)
-	}
-	if c.generic == 0 {
-		t.Error("no generic body was read, so the path that unblocks instantiation proved nothing")
-	}
-	if c.inline == 0 {
-		t.Error("no inlinable body was read, so the private root's list proved nothing")
+
+	// Both ways of holding the package table. The shared one is how the
+	// driver holds it, and it is the one where a declaration can resolve to
+	// an object another archive materialised, so the walk that pairs a
+	// defined type's methods with its extension data positionally has to
+	// hold there too.
+	for _, share := range []bool{false, true} {
+		name := "per archive"
+		if share {
+			name = "shared"
+		}
+		t.Run(name, func(t *testing.T) {
+			c := readBodyCorpus(t, dir, share, want...)
+			c.report(t)
+			for _, f := range c.failures {
+				t.Errorf("%s", f)
+			}
+			if c.generic == 0 {
+				t.Error("no generic body was read, so the path that unblocks instantiation proved nothing")
+			}
+			if c.inline == 0 {
+				t.Error("no inlinable body was read, so the private root's list proved nothing")
+			}
+		})
 	}
 }

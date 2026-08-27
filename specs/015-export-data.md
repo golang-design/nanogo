@@ -605,6 +605,11 @@ What the body reader has:
   table unresolved. 9,317 elements, 0 refused (`export/body_test.go`). An
   unattended run reads 20 packages, one per shape the encoding has; the sweep
   runs under `NANOGO_REQUIRE_CORPUS=1`.
+- Both ways of holding the package table, with the same result. A body is
+  found by pairing a defined type's methods with its extension data by
+  position, so a shared table, where a name can resolve to an object another
+  archive materialised, is the case that could pair them wrong. It does not:
+  the two runs read the same 9,317 elements.
 - The refusal is by name. A statement code, an expression code, an assignment
   code or an operator ordinal the format does not have is a `BodyError`
   naming the declaration, and so is a body whose element does not decode

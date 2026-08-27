@@ -331,7 +331,8 @@ func (pr *pkgReader) bodyDict(idx pkgbits.Index, tag pkgbits.CodeObj) *readerDic
 	r.dict = dict
 
 	// Skip what objDictIdx already read: the counts, the bounds and the
-	// derived types.
+	// derived types. The skip states that prefix a second time, so the two
+	// have to move together if the format's dictionary ever changes.
 	r.Len()
 	nreceivers := 0
 	if r.Version().Has(pkgbits.GenericMethods) {
