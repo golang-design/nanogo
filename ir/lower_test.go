@@ -903,6 +903,10 @@ func TestLowerChannelRows(t *testing.T) {
 		{"a receive whose value nobody reads", `func f(c chan int) { <-c }`, "runtime.chanrecv1"},
 		{"the two-value receive", `func f(c chan int) bool { _, ok := <-c; return ok }`, "runtime.chanrecv2"},
 		{"close", `func f(c chan int) { close(c) }`, "runtime.closechan"},
+		// len and cap of a channel are calls and not loads. A nil channel has
+		// length and capacity zero and no hchan to read them from.
+		{"len", `func f(c chan int) int { return len(c) }`, "runtime.chanlen"},
+		{"cap", `func f(c chan int) int { return cap(c) }`, "runtime.chancap"},
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			fn := lowerOK(t, tc.body)
@@ -1355,7 +1359,6 @@ func TestLowerRefusals(t *testing.T) {
 		{"make of a map", `func f() map[int]int { return make(map[int]int) }`, OMake, "descriptor"},
 		{"new of a literal struct", `func f() *struct{ A int } { return new(struct{ A int }) }`, ONew, "embedded field renamed through an alias"},
 		{"len of a map", `func f(m map[int]int) int { return len(m) }`, OLen, "the length of map"},
-		{"len of a channel", `func f(c chan int) int { return len(c) }`, OLen, "the length of chan"},
 		// mapIterStart and not mapiterinit. runtime.mapiterinit still exists,
 		// as a //go:linkname shim taking a different struct layout, so a row
 		// built for the name in the older prose would write past the end of a

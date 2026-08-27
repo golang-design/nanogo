@@ -885,14 +885,18 @@ func (l *lowerer) expr(n Expr) Expr {
 
 // len and cap.
 //
-// specs/020-ir.md gives them four rows. Three are built here: the length or
-// capacity word read out of a slice or string header, and a constant for an
-// array or a pointer to one. The fourth, a map and a channel, is refused, and
-// the two are refused for different reasons. rtsym holds runtime.chanlen and
-// runtime.chancap, so a channel is waiting on the row that calls them and on
-// nothing else. A map's length is a field of the runtime's maps.Map, which gc
-// reads inline and rtsym holds no symbol for, so a map is waiting on a runtime
-// layout this pass may not assume.
+// specs/020-ir.md gives them four rows. Three of them read storage: the length
+// or capacity word out of a slice or string header, and a constant for an
+// array or a pointer to one. The fourth is a channel, and it is a call.
+//
+// A call and not a load, and that is a correctness rule rather than a choice
+// of shape. A nil channel has length and capacity zero and no hchan to read
+// them from, so the nil case is the runtime's answer.
+// cmd/compile/internal/ssagen/ssa.go's referenceTypeBuiltin stops the compiler
+// with "cannot inline len(chan)" for the same reason.
+//
+// A map is refused. Its length is the first word of the runtime's maps.Map,
+// which gc reads inline, and rtsym holds no symbol for it.
 func (l *lowerer) lenCap(n Expr) Expr {
 	x := n.X
 	if x == nil || x.Type == nil {
@@ -924,6 +928,17 @@ func (l *lowerer) lenCap(n Expr) Expr {
 			return n
 		}
 		return l.constLen(n, x, x.Type.Elem.Len)
+
+	case Chan:
+		name := "runtime.chanlen"
+		if n.Op == OCap {
+			name = "runtime.chancap"
+		}
+		return &Node{
+			Op: OCall, Pos: n.Pos, Type: lowerInt,
+			X:    &Node{Op: OGlobal, Pos: n.Pos, Type: funcType, Obj: runtimeFunc(name)},
+			Args: []Expr{l.chanArg(x)},
+		}
 	}
 	l.refuse(n, "the length of "+x.Type.Kind.String())
 	return n

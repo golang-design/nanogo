@@ -56,6 +56,20 @@ func commaOK() int {
 	return v
 }
 
+// lenCap is the row a load would get wrong. A nil channel has length and
+// capacity zero and no hchan to read them from, so the compiler that read the
+// words itself would fault on the first line.
+func lenCap() int {
+	var nilc chan int
+	if len(nilc) != 0 || cap(nilc) != 0 {
+		return 0
+	}
+	c := make(chan int, 3)
+	c <- 1
+	c <- 2
+	return len(c)*10 + cap(c)
+}
+
 func main() {
 	d := handoff() - 7
 	if d != 0 {
@@ -66,6 +80,10 @@ func main() {
 		d = d / (d - d)
 	}
 	d = commaOK() - 5
+	if d != 0 {
+		d = d / (d - d)
+	}
+	d = lenCap() - 23
 	if d != 0 {
 		d = d / (d - d)
 	}
