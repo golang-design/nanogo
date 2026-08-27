@@ -314,18 +314,69 @@ func main() {
 	}
 }
 
-// TestBuildRefusesAPackageLevelVariableByNameAndPosition is the half of that
-// boundary that is still refused.
+// TestBuildDescribesAPackageLevelMapToTheCollector is the half of that
+// boundary a map used to sit on the wrong side of.
 //
 // A variable whose type holds a pointer needs its type descriptor, because
-// cmd/link reads the pointer map of a data symbol through it. rtype cannot
-// build the descriptor of a map, whose slot group is a struct whose own slots
-// are a literal struct, so the variable is refused rather than emitted where
-// the collector would misread it. It is refused before any function is
-// compiled: a record that listed an init which assigns to a symbol that does
-// not exist would produce a program that runs and is wrong. The message names
-// the variable and where it is declared, because those are what say what to do
-// next.
+// cmd/link reads the pointer map of a data symbol through it. A map's was the
+// descriptor rtype could not build, so the variable was refused rather than
+// emitted where the collector would misread it. It is written now, and the
+// program is what says the description is right: the collector reads the
+// variable's pointer map on every cycle, and gccheckmark marks a second time
+// with the world stopped and compares.
+func TestBuildDescribesAPackageLevelMapToTheCollector(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod": "module nanogo.example/global\n\ngo 1.27\n",
+		"main.go": `package main
+
+import "os"
+
+var table map[string]*int
+
+func main() {
+	if table != nil {
+		os.Exit(1)
+	}
+	table = map[string]*int{}
+	for i := 0; i < 64; i++ {
+		n := i
+		table["k"] = &n
+	}
+	if len(table) != 1 || *table["k"] != 63 {
+		os.Exit(2)
+	}
+	os.Exit(42)
+}
+`,
+	}, nil)
+
+	if out, err := h.nanogoBuild(t, "-o", "global", "."); err != nil {
+		t.Fatalf("nanogo build .: %v\n%s", err, out)
+	}
+	cmd := exec.Command(filepath.Join(h.mod, "global"))
+	cmd.Env = append(os.Environ(), "GODEBUG=gccheckmark=1,clobberfree=1", "GOGC=1")
+	b, err := cmd.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("the program did not run: %v\n%s", err, b)
+	}
+	if code != 42 {
+		t.Errorf("the program exited %d, want 42\n%s", code, b)
+	}
+}
+
+// TestBuildRefusesAPackageLevelVariableByNameAndPosition is what is left of
+// that refusal.
+//
+// The type is an array of two hundred pointers, which is past
+// internal/abi.MaxPtrmaskBytes: gc stops writing an inline bitmask there and
+// emits a symbol the runtime fills in on demand, which rtype does not write.
+// The variable is refused before any function is compiled, because a record
+// that listed an init which assigns to a symbol that does not exist would
+// produce a program that runs and is wrong. The message names the variable and
+// where it is declared, because those are what say what to do next.
 func TestBuildRefusesAPackageLevelVariableByNameAndPosition(t *testing.T) {
 	h := setup(t, map[string]string{
 		"go.mod": "module nanogo.example/global\n\ngo 1.27\n",
@@ -333,10 +384,10 @@ func TestBuildRefusesAPackageLevelVariableByNameAndPosition(t *testing.T) {
 
 import "os"
 
-var table map[string]int
+var table [200]*int
 
 func main() {
-	if table != nil {
+	if table[0] != nil {
 		os.Exit(1)
 	}
 }

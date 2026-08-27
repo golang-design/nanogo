@@ -425,6 +425,22 @@ var linkingShapes = []linkShape{
 		main: "\tm := map[lib.Label]int{{Key: \"a\", Value: \"b\"}: 42}\n\tos.Exit(m[lib.Label{Key: \"a\", Value: \"b\"}])\n",
 	},
 	{
+		// The two map shapes below sat in refusedShapes until the slot group
+		// gained a descriptor. Moving them here rather than deleting them is
+		// the point: the descriptor is what an importer links against, and a
+		// group whose numbers are wrong describes the map to the runtime
+		// rather than failing to. Only a program that puts something in the
+		// map and reads it back tells the two apart.
+		name: "a named map",
+		lib:  "type M map[string]int\n",
+		main: "\tm := lib.M{\"a\": 42}\n\tos.Exit(m[\"a\"])\n",
+	},
+	{
+		name: "a struct holding a map",
+		lib:  "type Table struct{ M map[string]int }\n",
+		main: "\tt := lib.Table{M: map[string]int{\"a\": 42}}\n\tos.Exit(t.M[\"a\"])\n",
+	},
+	{
 		name: "a constant and a function",
 		lib:  "const S = 21\n\nfunc Double(x int) int { return x * 2 }\n",
 		main: "\tos.Exit(lib.Double(lib.S))\n",
@@ -570,9 +586,7 @@ func shapeModule(s linkShape) map[string]string {
 // The list is what is left of it. A declared type whose descriptor nanogo can
 // write is in linkingShapes above and is linked and run rather than refused.
 var refusedShapes = []linkShape{
-	{name: "a named map", lib: "type M map[string]int\n", main: "M"},
 	{name: "a type with a method", lib: "type Code int\n\nfunc (c Code) V() int { return int(c) }\n", main: "Code"},
-	{name: "a struct holding a map", lib: "type Table struct{ M map[string]int }\n", main: "Table"},
 }
 
 // TestNanogoRefusesATypeAnImporterCouldNotLinkAgainst is the other half of the
