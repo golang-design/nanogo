@@ -50,8 +50,18 @@ type FuncBody struct {
 // declarations are what an importer needs first and a body that cannot be
 // read is a refusal about one declaration rather than about the package. A
 // refusal is a [*BodyError] naming the declaration.
-func ReadBodies(ctxt *types2.Context, imports map[string]*types2.Package, input pkgbits.PkgDecoder) (pkg *types2.Package, bodies []*FuncBody, err error) {
-	pkg, pr := readPackage(ctxt, imports, input)
+func ReadBodies(ctxt *types2.Context, imports map[string]*types2.Package, input pkgbits.PkgDecoder) (*types2.Package, []*FuncBody, error) {
+	pkg, _, bodies, err := readBodies(ctxt, imports, input)
+	return pkg, bodies, err
+}
+
+// readBodies is [ReadBodies] with the decoder it built kept.
+//
+// The encoder needs the same one: a body it writes back names the elements
+// the archive already holds, and the reverse maps [newElemRefs] builds are of
+// that archive's sections.
+func readBodies(ctxt *types2.Context, imports map[string]*types2.Package, input pkgbits.PkgDecoder) (pkg *types2.Package, pr *pkgReader, bodies []*FuncBody, err error) {
+	pkg, pr = readPackage(ctxt, imports, input)
 
 	defer func() {
 		if v := recover(); v != nil {
@@ -80,7 +90,7 @@ func ReadBodies(ctxt *types2.Context, imports map[string]*types2.Package, input 
 		})
 	}
 	bodies = append(bodies, pr.inlineBodies(owners)...)
-	return pkg, bodies, nil
+	return pkg, pr, bodies, nil
 }
 
 // owner is one declaration that can name a body.
