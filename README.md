@@ -189,12 +189,6 @@ $ nanogo build .
 nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lower: ir: lowering main: defer: the statement holds a print and not a call, so there is no function value to give the runtime
 ```
 
-- A method value, such as `f := t.M`, and `defer i.Close()` on an interface
-  value. Both bind a receiver into the func value, and only a capture through a
-  heap cell is built.
-- A closure whose capture has no canonical type name, which is a capture of a
-  literal func type or a literal struct type. The capture lives in a heap cell
-  and the cell needs a type descriptor.
 - `defer println(x)`. A builtin is not a function value, so there is nothing
   to hand the runtime.
 - An assertion whose target is an interface, and a type switch case that names
