@@ -5,6 +5,7 @@
 package driver
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -33,15 +34,6 @@ func TestExportedTypeRefusalNamesWhatIsMissing(t *testing.T) {
 			name: "a type with a method",
 			src:  "package lib\n\ntype Code int\n\nfunc (c Code) String() string { return \"\" }\n",
 			want: []string{"Code", "type:lib.Code", "String", "ABI wrappers"},
-		},
-		{
-			// A struct whose fields do not compare as one region of memory
-			// needs a generated equality function, which specs/032 has no
-			// writer for. Leaving Equal nil would make the runtime panic on a
-			// map whose key is this type.
-			name: "a struct that compares field by field",
-			src:  "package lib\n\ntype Label struct{ Key, Value string }\n",
-			want: []string{"Label", "type:lib.Label", "equality function"},
 		},
 		{
 			// The closure and not only the root. cmd/link's defgotype walks
@@ -126,5 +118,39 @@ func TestExportedTypeRefusalSkipsMainAndAliases(t *testing.T) {
 	if _, err := compileSource(t, "package lib\n\ntype Word = int\n\nfunc F(w Word) Word { return w }\n",
 		func(c *Config) { c.Package = "lib" }); err != nil {
 		t.Errorf("a library whose only type declaration is an alias was refused: %v", err)
+	}
+}
+
+// TestGeneratedEqualityLetsAFieldWiseStructCompile is the other half of the
+// refusal that used to sit in TestExportedTypeRefusalNamesWhatIsMissing.
+//
+// A struct of two strings is named without trouble and compares field by
+// field, so its descriptor's Equal cannot point at a runtime algorithm. It
+// used to be refused for that. ssagen generates the function now and rtype
+// points the closure at it, so the package compiles and an importer can link
+// against it.
+//
+// Two fields and not one, for the reason the old refusal gave: a struct with a
+// single non-blank field compares exactly as that field does, so one string
+// would reach runtime.strequal and prove nothing about generation.
+//
+// The Equal field must not be left nil, which is why this matters more than a
+// compile. The runtime panics on a map whose key type has a nil Equal, so a
+// nil is read as a claim that the type is not comparable rather than as an
+// absence.
+func TestGeneratedEqualityLetsAFieldWiseStructCompile(t *testing.T) {
+	const src = "package lib\n\ntype Point struct{ Name, Unit string }\n"
+	out, err := compileSource(t, src, func(c *Config) { c.Package = "lib" })
+	if err != nil {
+		t.Fatalf("a struct that compares field by field did not compile: %v", err)
+	}
+	nm, err := exec.Command("go", "tool", "nm", out).CombinedOutput()
+	if err != nil {
+		t.Fatalf("go tool nm: %v\n%s", err, nm)
+	}
+	for _, want := range []string{"type:.eq.", "type:.eqfunc."} {
+		if !strings.Contains(string(nm), want) {
+			t.Errorf("the archive names no %s symbol, so the descriptor's Equal has nothing to point at:\n%s", want, nm)
+		}
 	}
 }

@@ -174,8 +174,11 @@ var namedRefusals = []struct {
 	src  string
 	want string
 }{
-	{"Wide", "generated equality function"},
-	{"Label", "generated equality function"},
+	// Empty, and kept rather than deleted. Wide and Label sat here because a
+	// struct that compares field by field had no function to point Equal at.
+	// ssagen generates one now, so both are described and
+	// TestGeneratedEqualityDescribesAFieldWiseStruct asserts that instead.
+	// The table stays because the next unwritable named type belongs in it.
 }
 
 // namedSource is the corpus as the type checker reads it.
@@ -1235,6 +1238,48 @@ func TestReferencedFollowsAnInterface(t *testing.T) {
 		}
 		if len(got) != 0 {
 			t.Errorf("an empty interface reaches %v", got)
+		}
+	}
+}
+
+// TestGeneratedEqualityDescribesAFieldWiseStruct is what replaced two rows of
+// namedRefusals.
+//
+// A struct that compares field by field has no runtime algorithm its Equal can
+// point at, and that is why it used to be refused. ssagen generates the
+// function now and rtype points a closure at it, so the descriptor is written.
+//
+// The assertion is that Equal is not nil rather than that the type is
+// described. A nil Equal is not an absence the runtime tolerates: it panics on
+// a map whose key type has one, so a descriptor emitted with a nil there is
+// worse than the refusal it replaced.
+func TestGeneratedEqualityDescribesAFieldWiseStruct(t *testing.T) {
+	_, pkg := namedTypes(t)
+	c := ir.NewConverter()
+	for _, name := range []string{"Wide", "Label"} {
+		obj := pkg.Scope().Lookup(name)
+		if obj == nil {
+			t.Fatalf("%s is not declared", name)
+		}
+		typ, err := c.Convert(obj.Type())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		syms, err := rtype.Descriptor(typ)
+		if err != nil {
+			t.Errorf("%s is refused: %v", name, err)
+			continue
+		}
+		var named bool
+		for _, sym := range syms {
+			for _, r := range sym.Relocs {
+				if strings.Contains(r.Target, ".eqfunc.") || strings.Contains(r.Target, ".eq.") {
+					named = true
+				}
+			}
+		}
+		if !named {
+			t.Errorf("%s is described and nothing names its equality function, so Equal is nil and the runtime will panic on a map keyed by it", name)
 		}
 	}
 }

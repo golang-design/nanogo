@@ -874,6 +874,9 @@ func isExported(t *ir.Type) bool {
 // at is always a closure symbol: one word holding the function's address, and
 // for the variable-length memory comparison a second word holding the size.
 func equalClosure(t *ir.Type) (string, []Symbol, error) {
+	if alg(t) == algSpecial {
+		return generatedClosure(t, "eqfunc", "eq")
+	}
 	fn, varlen, err := equalFunc(t)
 	if err != nil || fn == "" {
 		return "", nil, err
@@ -888,11 +891,43 @@ func equalClosure(t *ir.Type) (string, []Symbol, error) {
 // closure symbol and never the code. Pointing it at the function makes the
 // runtime call whatever the first instruction encodes.
 func hashClosure(t *ir.Type) (string, []Symbol, error) {
+	if alg(t) == algSpecial {
+		return generatedClosure(t, "hashfunc", "hash")
+	}
 	fn, varlen, err := hashFunc(t)
 	if err != nil || fn == "" {
 		return "", nil, err
 	}
 	return algClosure(fn, varlen, "hashfunc", t.Size)
+}
+
+// generatedClosure builds the one-word closure that names a function the
+// compiler generates for this type rather than one the runtime carries.
+//
+// A type that compares as something other than one region of memory has no
+// runtime algorithm to point at, so ssagen generates the function and this
+// names it. The closure has the same shape as algClosure's, because the
+// runtime reads a func value either way and does not know which of the two
+// wrote it. What differs is only which symbol the relocation targets.
+//
+// Leaving the field nil is not an option that was available. The runtime
+// panics on a map whose key type has a nil Equal, so a nil is read as a claim
+// that the type is not comparable rather than as an absence.
+func generatedClosure(t *ir.Type, prefix, family string) (string, []Symbol, error) {
+	link, err := ir.TypeLinkString(t)
+	if err != nil {
+		return "", nil, err
+	}
+	name := ir.TypeSymbolPrefix + "." + prefix + "." + link
+	fn := ir.TypeSymbolPrefix + "." + family + "." + link
+	return name, []Symbol{{
+		Name:   name,
+		Kind:   obj.SRODATA,
+		Align:  ir.PtrSize,
+		Dupok:  true,
+		Data:   make([]byte, ir.PtrSize),
+		Relocs: []Reloc{{Off: 0, Size: 8, Type: obj.R_ADDR, Target: fn}},
+	}}, nil
 }
 
 // algClosure builds the one-word closure that names a runtime algorithm.

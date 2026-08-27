@@ -123,16 +123,6 @@ func TestDescriptorRefusals(t *testing.T) {
 			"on-demand mask",
 		},
 		{
-			// An array of strings longer than one element compares element by
-			// element, and that loop is the generated function specs/032 says
-			// the compiler must emit.
-			"an array that needs a generated equality function",
-			func(t *testing.T) *ir.Type {
-				return lay(t, &ir.Type{Kind: ir.Array, Len: 2, Elem: &ir.Type{Kind: ir.String, Name: "string"}})
-			},
-			"generated equality function",
-		},
-		{
 			"a void",
 			func(t *testing.T) *ir.Type { return lay(t, &ir.Type{Kind: ir.Void}) },
 			"no canonical name",

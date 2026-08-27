@@ -236,20 +236,6 @@ func TestCompileRefusals(t *testing.T) {
 			want: []string{"function f", "a.go:3:6", "ir.Lower", "make", "specs/032"},
 		},
 		{
-			// The second refusal site specs/032 opens. Lowering refuses a type
-			// it cannot name; rtype refuses one whose bytes it cannot fill in.
-			// A struct of two strings is named without trouble and compares
-			// field by field, so its Equal field needs a function this
-			// compiler does not generate. Two fields and not one: a struct
-			// with a single non-blank field compares exactly as that field
-			// does, so one string would reach runtime.strequal. The message
-			// names the type rather than the function, because the gap is in
-			// the encoder and not in this function.
-			name: "a type with no writable descriptor is refused by name",
-			src:  "package main\n\ntype point struct{ name, unit string }\n\nfunc f() *point { return new(point) }\n",
-			want: []string{"a type its code needs a descriptor for", "main.point", "equality function"},
-		},
-		{
 			// By name and by position. A package whose variables have no
 			// data symbol is a package whose initialisation record would
 			// list work that cannot be done, and a record that is short of
