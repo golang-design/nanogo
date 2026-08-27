@@ -21,7 +21,8 @@ text-assembly seam in [000](000-decisions.md) decision 3.
 
 ## What is built
 
-**Descriptors are named, encoded and referenced. Itabs are not.**
+**Descriptors are named, encoded and referenced. An itab is named and encoded,
+and nothing builds a reference to one yet.**
 
 | Part | Where | State |
 | --- | --- | --- |
@@ -31,7 +32,9 @@ text-assembly seam in [000](000-decisions.md) decision 3.
 | The interface value itself | `ssa/build.go` | built for a conversion to an **empty** interface, and for a conversion of an interface with methods to one |
 | The reference from an interface conversion | `ssa/build.go` | named, in `ssa.Func.Descriptors`. **`driver/compile.go` does not read that field yet**, so a conversion of a type the runtime does not already carry a descriptor for links against nothing |
 | The descriptor as a data symbol in the object | `driver/compile.go` | built; a named `dupok` definition, and the data it points at is hashed |
-| Itabs | nowhere | **not built**; the `Fun` array needs the same ABI wrappers a method's descriptor row is refused for |
+| A defined type's `Method` array | `rtype/uncommon.go` | built; `Mtyp` from `ir.Method.Sig`, `Ifn` and `Tfn` from the wrappers `ssagen` generates, `Xcount` from the exported prefix, checked entry by entry against the array `gc` wrote for the same type |
+| The itab name and bytes | `ir/rtype.go`, `rtype/itab.go` | built; the name is checked against the symbol `gc` wrote for the same pair, read out of a `gc` object with `go tool nm` |
+| The reference to an itab | `ssa/build.go` | **not built**; `concreteToInterface` still refuses a conversion to an interface with methods, so nothing names an itab and nothing writes one into an object |
 
 The `gclocals·` and `go:string.` rows of the namespace table are produced
 elsewhere. `ssagen/stackmap.go` builds the stack maps, `ssa/decompose.go` names
@@ -145,31 +148,61 @@ fact rather than an absence. `TFlagUncommon` and the tail are one decision, beca
 tail to every type that has a name and a flag without a tail makes the runtime
 read past the end of the descriptor.
 
-Four things stop a descriptor, and each names itself in the refusal:
+Three things stop a descriptor, and each names itself in the refusal:
 
 | Stop | What is missing |
 | --- | --- |
-| a method | the `Method` array, whose `Ifn` and `Tfn` are `TextOff`s to code |
 | a struct or an array whose parts do not compare as one region of memory | the `Equal` closure, which points at code |
 | a map whose key needs a generated hash | the *body* of that hash. `ssagen` writes one and `driver/compile.go` finds it by scanning a descriptor's own relocations for its own type's `type:.hash.` symbol, and a map's `Hasher` names the **key's**, so nothing generates it. Refusing here is what keeps that from becoming an unresolved `type:.hash.K` at link time |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
-Writing a tail that claims a type has no methods is the failure the first row
-exists to stop: `reflect` would report an empty method set, and an itab built
-against it would find no functions.
+A method used to be a fourth stop. It is not one now, and the three facts that
+closed it are each easy to get wrong in a way nothing reports:
 
-**The first two rows are no longer about missing code.** They read "the two ABI
-wrappers `gc` generates" and "the generated equality function this spec owes",
-and both functions exist now: `ssagen` builds them and the driver compiles them
-into the object beside the package's own functions. See
-[The generated functions](#the-generated-functions) below. What is left in both
-rows is naming: `rtype` returns data symbols, and it has to spell the symbol
-each field points at before the field can be written.
+- **`Xcount` is the length of the exported prefix.** `reflect.Type.NumMethod`
+  on a type that is not an interface returns it, and
+  `reflect.Type.Method` indexes the array by it, so the array has to be in
+  `gc`'s order: exported names first, then by name, then by the package path
+  that qualifies an unexported one. That is `types.CompareSyms`, and it is not
+  byte order by name. The two agree for every ASCII identifier and disagree on
+  `Ärger`, which is exported and whose first byte is above every lower-case
+  ASCII letter. `ir.MethodOrder` is the one rule and `ir.Converter` sorts both
+  method sets with it.
+- **`Mtyp`, `Ifn` and `Tfn` are three consecutive `R_METHODOFF` relocations.**
+  `cmd/link`'s deadcode pass reads them as one group, three at a time, and
+  panics with "expect three consecutive R_METHODOFF relocs" when anything
+  separates them. The `Name` before them is an `R_ADDROFF` and does not.
+- **`Ifn` is not `Tfn`.** An itab call passes a one-word receiver, which is the
+  value itself when the type is stored directly in an interface and a pointer
+  to it otherwise. `rtype/uncommon.go` draws the table, which is `gc`'s
+  `methodWrapper(rcvr, m, forItab)` with the receiver replaced by a pointer for
+  the itab call. Both spellings exist and both take one word, so naming the
+  wrong one is a call with a value where a pointer belongs and nothing between
+  the descriptor and the call notices.
 
-`ir.Method.Sig` carries the signature, so `Mtyp` is writable. The refusal names
-the wrappers, and names the signature only for a method built below the
-boundary that genuinely has none, because a message that states a gap that is
-already closed sends the next reader to the wrong file.
+Writing a tail that claims a type has no methods is the failure this used to be:
+`reflect` would report an empty method set, and an itab built against it would
+find no functions.
+
+**A descriptor asks to be marked used in an interface.** `cmd/link` collects a
+type's `Method` array only when the type carries `SymFlagUsedInIface`, so every
+entry of an unmarked type resolves to the sentinel `-1` and
+`runtime.getitab` installs `runtime.unreachableMethod` in its place. The program
+links and dies with "unreachable method called. linker bug?" the first time a
+value of the type reaches an interface. `gc` knows which types are converted,
+because `walkConvInterface` emits an `R_USEIFACE` marker from the converting
+function. nanogo collects no such fact, so `rtype.Symbol.UsedInIface` is set on
+every descriptor and `driver/compile.go` puts the flag on the symbol. The cost
+is a method of a type nothing converts staying in the binary.
+
+**A function that asks `reflect` for a method says so.** A method found by
+`reflect.Value.Method` is reached by no call, so `cmd/link` cannot decide it is
+live. `SymFlagReflectMethod` is what tells the linker to stop deciding and keep
+every exported method of every type used in an interface, and `ssagen/reloc.go`
+sets it where every symbol a function references is resolved. `gc` asks the same
+question of the syntax tree in `walk.usemethod`, and it has one case this does
+not: `MethodByName` with a constant argument gets an `R_USENAMEDMETHOD`
+relocation naming the one method instead of the flag.
 
 A struct with an unexported field is **not** a stop, and it is worth saying
 because the shape looks like one. `gc` puts the declaring package's path in the
@@ -186,12 +219,10 @@ is asked for, and the refusal names `ir` and not `rtype`. It closes with
 [013](013-generics.md)'s stenciler, which replaces the parameter with the
 argument, and not with anything here.
 
-**An itab needs both sides and has one and a half.** The concrete side is
-`ir.Type.Methods`, and it carries each method's signature now, so a
-descriptor's `Method` has its `Mtyp`. What an itab still lacks is the `Fun`
-array, which holds the same `Ifn` wrappers the method rows above are refused
-for, and the interface side for a **literal** interface, which carries no
-method names because it is not a `*types2.Named`.
+**An itab has both sides.** The concrete side is `ir.Type.Methods` and the
+interface side is the same field on the interface type, which `ir/convert.go`
+sets for a literal interface as well as for a defined one. `rtype/itab.go`
+writes the bytes and `ir.ItabSymbol` names them.
 
 **A type assertion and a type switch are built for a concrete target, and
 neither is a runtime call.** `ir/lower.go` lowers `OTypeAssert` into a
@@ -209,7 +240,10 @@ caches it in the `*abi.TypeAssert` and `*abi.InterfaceSwitch` the compiler
 allocates. `gc` reaches them for an interface target or an interface case and
 for nothing else, so neither descriptor is on the path of the rows built here.
 An interface target and an interface case are refused, and both refusals name
-the itab, because that is what the answer is.
+the itab, because that is what the answer is. The itab is written now, so what
+those two still lack is the `*abi.TypeAssert` and `*abi.InterfaceSwitch`
+descriptors and the call, and their messages in `ir/lower.go` say the itab is
+unwritten and are false in that half.
 
 `runtime.assertI2I` does not exist in `go1.27`. `runtime.typeAssert` is what an
 interface-to-interface assertion reaches, and `rtsym` carries both it and
@@ -218,10 +252,11 @@ interface-to-interface assertion reaches, and `rtsym` carries both it and
 **One program does reach an itab, and it is a conversion and not an
 assertion.** `var c coder = seven{}` converts a concrete type to an interface
 with methods, and the type word of that value is the itab of the pair.
-`ssa/build.go` refuses it and the refusal names both walls, because naming one
-sends the next reader to a wall they cannot see: this spec writes no itab, and
-`rtype` refuses `main.seven`'s own descriptor until its one method has the two
-wrappers.
+`ssa/build.go` still refuses it, and the wall is now one rather than two:
+`main.seven`'s descriptor is written, and `rtype.Itab` writes the itab, so what
+is left is `concreteToInterface` naming the symbol and `driver/compile.go`
+writing it into the object. The refusal message names both walls and half of it
+is false.
 
 ## The interface value in SSA
 
@@ -478,22 +513,17 @@ field:
    `type:.eq.<link string>` or `type:.hash.<link string>`. The runtime-owned
    path stays as it is; `algClosure` refuses a name `rtsym` does not hold, and
    a generated name is not one.
-2. `uncommonTail` writes the `Method` array rather than refusing it: `Mcount`,
+2. `uncommonTail` and `uncommonMethods` write the `Method` array: `Mcount`,
    `Xcount`, `Moff`, and one sixteen-byte entry per method holding `Name` as a
    `NameOff`, `Mtyp` as a `TypeOff` to `ir.Method.Sig`, and `Ifn` and `Tfn` as
    `R_METHODOFF` relocations against the names in the table above. `Referenced`
    grows each method's `Sig`, so the closure the driver emits covers them.
+   Both are built.
 
-   **The array has to be re-sorted, and `methodSet`'s doc does not say so.**
-   `gc` orders methods **exported first**, then by name in byte order, then by
-   package path for the unexported ones (`types.CompareSyms`), and
-   `reflectdata` computes `Xcount` as a *binary search* for the first
-   unexported name (`sort.Search` in `dcommontype`). `ir.Converter.methodSet`
-   sorts by name and then by package path with no exported-first clause, so an
-   array written in that order gives `Xcount` an answer from a binary search
-   over an unsorted predicate, and `reflect` reports a method set that is not
-   the type's. This is the same rule the descriptor lane found for an
-   interface's `Imethod` array, and it has to be applied again here.
+   `hasUncommon` reads the method set and not the name alone. A pointer to a
+   defined type has no name of its own and carries the whole of the pointee's
+   method set, so the name alone would put those methods in a descriptor with
+   nowhere to hold them.
 
 The driver decides the wrapper set from the closed descriptor list, which is
 where `gc` decides it too, and it will find the equality and hash functions the
@@ -519,6 +549,35 @@ and the runtime registers it at startup.
 type and interface compare equal because they share one itab. If a program ends
 up with two itabs for one pair, interface comparison breaks and type switches
 become unreliable. That is why the naming rules below are not cosmetic.
+
+`ir.ItabSymbol` is the name, `rtype.Itab` is the bytes and
+`rtype.ItabReferenced` is the pair of descriptors the itab points at. Three
+decisions in the encoder are not obvious from the layout:
+
+- **`Fun` is in the interface's order, not the concrete type's.** The runtime
+  reads a slot by the interface's index, so an itab built for `io.ReadWriter`
+  holds two entries where `io.Reader` reads one. Both lists are in
+  `ir.MethodOrder`, so the intersection is one pass, which is what `writeITab`
+  does. Slots that are swapped each hold a function of the right shape and the
+  wrong method.
+- **Each slot holds the method's `Ifn`**, the entry point that takes a one-word
+  receiver, because that is the receiver an itab call passes. The descriptor's
+  `Method` array and the itab name one function between them.
+- **The references are strong where `gc`'s are weak.** `gc` writes each entry
+  with a weak relocation and keeps the method alive with an `R_USEIFACEMETHOD`
+  relocation at every interface call site. nanogo emits none, so a weak entry
+  would resolve to zero and the call would jump to address zero. The weak form
+  becomes available on the day an interface call names the interface and the
+  method it selects.
+
+The itab is a named `dupok` non-package definition, as the descriptor is, so
+`cmd/link` merges two copies by name. `gc` writes an itab into the hashed index
+space instead and gets the same single copy from a content hash. The two
+mechanisms do not merge with each other, so a pair converted by a nanogo package
+and by a `gc` package in one binary would have two itabs. That needs a `gc`
+package to name a nanogo package's type, which the hosted model of
+[000](000-decisions.md) decision 10 does not produce: the standard library
+imports nothing a user wrote.
 
 ## The symbol namespace
 
@@ -592,7 +651,7 @@ which names neither the package that owes the symbol nor the fix. This is not a
 compiler owes only the descriptor.
 
 `driver/types.go` walks the same closure and refuses the package when any type
-in it hits one of the four stops above, naming the type, the position and the
+in it hits one of the three stops above, naming the type, the position and the
 stop. It walks the closure and not the declaration list because `cmd/link`'s
 `defgotype` follows a struct descriptor into the type of every field, so a
 package owes a descriptor for every type its own descriptors reach. Nothing
@@ -603,8 +662,7 @@ measurement).
 
 ## Testing
 
-The first and third bullets are built. The second and fourth need itabs and
-generated equality functions, neither of which exists.
+Every bullet but the last is built, and the second is built by half.
 
 - Layout: emit a descriptor with nanogo, read it back with `reflect` in a
   `gc`-compiled program running in the same binary. Hosted mode
@@ -612,9 +670,21 @@ generated equality functions, neither of which exists.
   this by reading the `*abi.Type` out of a `reflect.Type`'s interface word,
   because `reflect` exposes no accessor for `Hash`, `TFlag`, `PtrBytes` or the
   bitmask. Every field of every type in its corpus agrees with `gc`'s.
+- The method array: emit a descriptor with nanogo and compare it entry by entry
+  with the array `gc` wrote for the same type, read out of `gc`'s own
+  descriptor through the interface word. `Mcount`, `Xcount` and `Moff` are the
+  three numbers every reader navigates by. The running proof is Go's own
+  `test/reflectmethod4.go`, which reaches a method through
+  `reflect.ValueOf(v).Method(0)`: `reflect` reads nanogo's array in
+  `gc`-compiled code and calls through `Ifn`. `test/const3.go` is the same
+  proof through an itab, because `runtime.getitab` builds one from nanogo's
+  array and `fmt` then calls `String`.
 - Itab identity: convert the same concrete type to the same interface in two
   packages, one compiled by nanogo and one by `gc`, and assert the interface
-  values compare equal.
+  values compare equal. Half of this is built: `rtype`'s test compares the itab
+  symbol nanogo names with the one `gc` wrote for the same pair, by name and by
+  size, read out of a `gc` object with `go tool nm`. The other half needs
+  `ssa/build.go` to reference an itab, which it does not.
 - Dynamic type: box a value, assert it back out and switch on it, in one
   program that nanogo compiled end to end. Both sides of the comparison are
   things this compiler produced, so a descriptor with wrong contents still
@@ -716,6 +786,57 @@ time, which is loud rather than silent. That is why the lowering rows were
 built ahead of the writer: a row blocked on a writer in another package should
 not be counted as a row blocked on the lowering table.
 
+### The method array arrived and two standing bugs arrived with it
+
+A descriptor whose `Mcount` was always zero hid three facts about `cmd/link`,
+and each surfaced as a program that built, linked and then died. They are
+recorded because none of them is visible from `internal/abi`'s layout.
+
+1. **A type has to be marked used in an interface or every method is pruned.**
+   Go's own `test/const3.go` formats a defined type with a `String` method
+   through `fmt`, and it died with "unreachable method called. linker bug?"
+   until the descriptor carried `SymFlagUsedInIface`. The linker collects the
+   `Method` array only for a marked type, so an unmarked one has every entry
+   resolved to `-1` and `runtime.getitab` installs
+   `runtime.unreachableMethod`. `gc` marks precisely, from an `R_USEIFACE`
+   relocation the converting function emits. nanogo marks every descriptor,
+   because nothing in it collects the fact.
+2. **A function that reaches a method through `reflect` has to say so.**
+   `test/reflectmethod4.go` calls `reflect.ValueOf(v).Method(0)` and died the
+   same way, because no call reaches the method and the linker decides
+   liveness by following calls. `SymFlagReflectMethod` on the calling function
+   is what makes the linker keep every exported method of every marked type.
+3. **`Mtyp`, `Ifn` and `Tfn` are read as a group of three.** The deadcode pass
+   walks a type's relocations and skips two after each `R_METHODOFF`, and it
+   panics outright when the three are not consecutive.
+
+### A pointer to a declared type has no descriptor, and an importer needs one
+
+Found while the method array was being tested, and not caused by it. nanogo
+emits `type:<path>.<Type>` for every type a package declares and does not emit
+`type:*<path>.<Type>`. `gc` emits both, because `PtrToThis` names the second
+and because an importer that takes the address of such a value needs it. So
+
+```go
+// lib, compiled by nanogo
+type Point struct{ X, Y int }
+
+// main, compiled by gc
+p := lib.Point{X: 20, Y: 22}
+var v any = &p
+```
+
+fails at link time with
+
+    panic: R_USEIFACE in main.main references type:*<path>.Point which is not
+    a type or itab
+
+which is `cmd/link` saying the symbol is defined nowhere. A type with a pointer
+receiver method reaches it every time, because such a type is only usable
+through `*T`. The fix is in `driver/types.go`'s closure walk, which decides the
+set a package emits: a declared type owes its pointer's descriptor as well.
+`rtype` writes that descriptor already, so nothing here is missing.
+
 ### Three claims the encoder disproved
 
 **The hash is `gc`'s, not the runtime's.** This spec said `Hash` must match
@@ -742,12 +863,15 @@ work that unblocked both descriptors and itabs. The boundary was extended:
 `UncommonType` tail and a struct's field array, and `new(T)` and a method call
 on either receiver now run.
 
-What is left is not one gap but four, and the sections above list them. The
-prediction that stood is that itabs and a defined type's descriptor were
-blocked on the same thing; the prediction that did not is that closing it would
-finish both. A descriptor's `Method` still needs a signature, and an itab still
-needs an interface's method list, so the boundary owes the same field twice
-over.
+The prediction that stood is that itabs and a defined type's descriptor were
+blocked on the same thing. The prediction that did not is that closing the
+boundary alone would finish both: `Ifn` and `Tfn` are `TextOff`s into generated
+code, so the descriptor's `Method` array waited on `ssagen` generating the
+wrapper, and the itab's `Fun` array waited on the same wrapper. Both arrays are
+written now. What is left of this section's list is the equality function for a
+struct that compares field by field, which `ssagen` generates, and the map slot
+group, which `rtype/map.go` writes. Both are closed as well, so the sections
+above carry three stops and not four.
 
 **One of the four was already closed when it was written down.** The stop list
 carried "a struct with an unexported field", on the reasoning that the IR type
