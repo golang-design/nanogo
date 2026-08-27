@@ -669,6 +669,8 @@ func (o *Object) checkRefs(base int64) error {
 	return nil
 }
 
+func le16(b []byte, off int) uint16 { return binary.LittleEndian.Uint16(b[off:]) }
+
 func le32(b []byte, off int) uint32 { return binary.LittleEndian.Uint32(b[off:]) }
 
 func symRef(b []byte, off int) obj.SymRef {

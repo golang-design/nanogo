@@ -42,7 +42,13 @@ func goTool(t *testing.T) string {
 
 // A build is a program the go command built with its work directory kept,
 // so the tests can read the import configuration and the archives it names.
+//
+// Each program carries a token that appears in it and nowhere else. The go
+// build cache does not key on anything these tests change, so without a
+// token a replay of an older build would look like a build of this source.
 type build struct {
+	pkg  string // the import path of the program
+	src  string // the body of main.go
 	once sync.Once
 	err  error
 	dir  string // the module directory
@@ -51,24 +57,64 @@ type build struct {
 	exe  string
 }
 
-// hostBuild is the one program every test here reads. It is built once.
-var hostBuild build
+// hostBuild is the program the corpus reads. It links os and the runtime
+// and nothing that uses reflection.
+var hostBuild = build{
+	pkg: "nanogo.example/linkcorpus",
+	src: "package main\n\nimport \"os\"\n\n" +
+		"func main() {\n\tif len(os.Args) > 99 {\n\t\tprintln(\"nanogo-link-corpus-b41d\")\n\t}\n}\n",
+}
 
-// token is a string that appears in the built program and nowhere else, so
-// a cached replay of an older build is visible rather than silent.
-const token = "nanogo-link-corpus-b41d"
+// reflectBuild is a program whose methods are reached through an
+// interface, through a name reflection is given as a constant, and through
+// a method lookup the compiler cannot resolve. Each one is a different
+// branch of the reachability pass and none of them is a plain call.
+var reflectBuild = build{
+	pkg: "nanogo.example/linkreflect",
+	src: `package main
+
+import (
+	"fmt"
+	"os"
+	"reflect"
+	"sort"
+)
+
+type shape interface {
+	Area() int
+	Name() string
+}
+
+type square struct{ side int }
+
+func (s square) Area() int    { return s.side * s.side }
+func (s square) Name() string { return "square-nanogo-link-6b2e" }
+func (s square) Unused() int  { return 1 }
+
+func main() {
+	var s shape = square{side: len(os.Args)}
+	fmt.Println(s.Area(), s.Name())
+	v := reflect.ValueOf(s)
+	fmt.Println(v.MethodByName("Name").Call(nil))
+	fmt.Println(v.MethodByName(os.Args[0]).IsValid())
+	xs := []int{3, 1, 2}
+	sort.Ints(xs)
+	fmt.Println(xs)
+}
+`,
+}
 
 func (b *build) get(t *testing.T) *build {
 	t.Helper()
 	goCmd := goTool(t)
 	b.once.Do(func() {
-		b.dir, b.err = os.MkdirTemp("", "nanogo-linkcorpus")
+		b.dir, b.err = os.MkdirTemp("", "nanogo-link")
 		if b.err != nil {
 			return
 		}
 		files := map[string]string{
-			"go.mod":  "module nanogo.example/linkcorpus\n\ngo 1.27\n",
-			"main.go": "package main\n\nimport \"os\"\n\nfunc main() {\n\tif len(os.Args) > 99 {\n\t\tprintln(\"" + token + "\")\n\t}\n}\n",
+			"go.mod":  "module " + b.pkg + "\n\ngo 1.27\n",
+			"main.go": b.src,
 		}
 		for name, body := range files {
 			if b.err = os.WriteFile(filepath.Join(b.dir, name), []byte(body), 0o600); b.err != nil {
@@ -111,9 +157,11 @@ func (b *build) get(t *testing.T) *build {
 
 func TestMain(m *testing.M) {
 	code := m.Run()
-	for _, dir := range []string{hostBuild.work, hostBuild.dir} {
-		if dir != "" {
-			os.RemoveAll(dir)
+	for _, b := range []*build{&hostBuild, &reflectBuild} {
+		for _, dir := range []string{b.work, b.dir} {
+			if dir != "" {
+				os.RemoveAll(dir)
+			}
 		}
 	}
 	os.Exit(code)
