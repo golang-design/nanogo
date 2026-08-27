@@ -11,9 +11,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
@@ -181,6 +183,26 @@ func (h Handle) Get() int {
 	return *h.p
 }
 
+// Valuer is the interface Counter implements. It exists so that gc emits an
+// itab for the pair, which is the oracle the itab tests read.
+type Valuer interface{ Value() int }
+
+// valuerHolder converts a Counter to a Valuer, which is what makes gc write
+// go:itab.<path>.Counter,<path>.Valuer into the object.
+var valuerHolder Valuer = Counter(3)
+
+// Counted is the whole of Counter's value-receiver method set as an interface.
+// It is what puts the order of the Fun array under test: gc puts every
+// exported name first and Ärger is exported, so the slots are Value, Ärger,
+// hidden and byte order by name would swap the last two.
+type Counted interface {
+	Value() int
+	Ärger() int
+	hidden() int
+}
+
+var countedHolder Counted = Counter(5)
+
 var namedCorpus = []struct {
 	src string
 	rt  reflect.Type
@@ -203,6 +225,8 @@ var namedCorpus = []struct {
 	{"Counter", reflect.TypeOf(Counter(0))},
 	{"CounterPtr", reflect.TypeOf((*Counter)(nil))},
 	{"Handle", reflect.TypeOf(Handle{})},
+	{"Valuer", reflect.TypeOf((*Valuer)(nil)).Elem()},
+	{"Counted", reflect.TypeOf((*Counted)(nil)).Elem()},
 }
 
 // namedRefusals are the rows that must be refused, with the words the refusal
@@ -303,6 +327,18 @@ func (h Handle) Get() int {
 	}
 	return *h.p
 }
+
+type Valuer interface{ Value() int }
+
+var valuerHolder Valuer = Counter(3)
+
+type Counted interface {
+	Value() int
+	Ärger() int
+	hidden() int
+}
+
+var countedHolder Counted = Counter(5)
 `
 
 // namedPkgPath is the import path gc compiled this test package under.
@@ -1317,7 +1353,9 @@ func TestReferencedFollowsAFunction(t *testing.T) {
 func TestNamedEmptyInterfaceCarriesItsPackage(t *testing.T) {
 	types, _ := namedTypes(t)
 	for i, c := range namedCorpus {
-		if c.rt.Kind() != reflect.Interface {
+		if c.rt.Kind() != reflect.Interface || c.rt.NumMethod() != 0 {
+			// An interface with methods has a method slice, and the three zero
+			// words below are what an empty one has instead.
 			continue
 		}
 		t.Run(c.src, func(t *testing.T) {
@@ -1545,4 +1583,263 @@ func TestGeneratedEqualityDescribesAFieldWiseStruct(t *testing.T) {
 			t.Errorf("%s is described and nothing names its equality function, so Equal is nil and the runtime will panic on a map keyed by it", name)
 		}
 	}
+}
+
+// The itab, checked three ways: against the symbol gc wrote for the same pair,
+// against the itab the running program holds for it, and against the rule that
+// makes an itab identity rather than a table.
+
+// abiITab mirrors internal/abi.ITab, for the reason abiType is mirrored: this
+// file runs in the target's own binary.
+type abiITab struct {
+	Inter *abiType
+	Type  *abiType
+	Hash  uint32
+	_     uint32
+	Fun   [1]uintptr
+}
+
+// gcITab returns the itab gc built for the pair (Counter, Valuer).
+//
+// A non-empty interface leads with an *ITab, so the first word of the
+// interface value is the itab itself. reflect exposes none of these fields,
+// which is why the value is read through the word rather than through reflect.
+func gcITab() *abiITab {
+	return (*abiITab)((*eface)(unsafe.Pointer(&valuerHolder)).typ)
+}
+
+// TestItabAgainstTheRunningItab checks the three fields that are not code
+// pointers against the itab this process is holding.
+func TestItabAgainstTheRunningItab(t *testing.T) {
+	types, _ := namedTypes(t)
+	counter, iface := byCorpusName(t, types, "Counter"), byCorpusName(t, types, "Valuer")
+	syms, err := rtype.Itab(counter, iface)
+	if err != nil {
+		t.Fatalf("Itab: %v", err)
+	}
+	if len(syms) != 1 {
+		t.Fatalf("an itab is %d symbols, want 1", len(syms))
+	}
+	d := syms[0]
+	want := gcITab()
+
+	// One method, so Fun holds one word and the itab is thirty-two bytes.
+	if got, wantN := len(d.Data), 24+8*reflect.TypeOf((*Valuer)(nil)).Elem().NumMethod(); got != wantN {
+		t.Errorf("the itab is %d bytes, want %d", got, wantN)
+	}
+	if got := binary.LittleEndian.Uint32(d.Data[16:]); got != want.Hash {
+		t.Errorf("Hash %#08x, want %#08x, which is the concrete type's", got, want.Hash)
+	}
+	// The hash is the concrete type's and not the interface's. A type switch
+	// reads it out of the itab, so the two have to be one number.
+	h, err := rtype.Hash(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h != want.Hash {
+		t.Errorf("the itab's hash is %#08x and Counter's descriptor holds %#08x", want.Hash, h)
+	}
+
+	// The first two words are pointers to the two descriptors, in that order.
+	inter, ok := reloc(d, 0)
+	if !ok {
+		t.Fatal("the itab has no Inter reference")
+	}
+	if inter.Size != 8 || inter.Type != obj.R_ADDR {
+		t.Errorf("Inter is a %v of %d bytes, want an eight-byte R_ADDR", inter.Type, inter.Size)
+	}
+	if wantSym, _ := ir.TypeSymbol(iface); inter.Target != wantSym {
+		t.Errorf("Inter names %s, want %s", inter.Target, wantSym)
+	}
+	typ, ok := reloc(d, 8)
+	if !ok {
+		t.Fatal("the itab has no Type reference")
+	}
+	if wantSym, _ := ir.TypeSymbol(counter); typ.Target != wantSym {
+		t.Errorf("Type names %s, want %s", typ.Target, wantSym)
+	}
+
+	// Fun[0] is Counter's Value under the entry point an itab call reaches. A
+	// Counter is an int, so the word an itab passes is a pointer and the entry
+	// point is the wrapper on it.
+	fun, ok := reloc(d, 24)
+	if !ok {
+		t.Fatal("the itab has no Fun[0] reference")
+	}
+	if want := namedPkgPath() + ".(*Counter).Value"; fun.Target != want {
+		t.Errorf("Fun[0] names %s, want %s", fun.Target, want)
+	}
+	// Strong and not weak. cmd/link resolves a weak reference to zero when it
+	// cannot prove the target live, and nanogo emits no R_USEIFACEMETHOD to
+	// prove it with, so a weak entry here is a call to address zero.
+	if fun.Type&obj.R_WEAK != 0 {
+		t.Error("Fun[0] is a weak reference, so cmd/link may resolve it to zero")
+	}
+}
+
+// TestItabFunIsInTheInterfacesOrder checks the slot order, which is the itab's
+// silent failure.
+//
+// The runtime reads Fun by the *interface's* index. Every entry holds a
+// function of the right shape whatever the order is, so slots that are swapped
+// call the wrong method and nothing between the conversion and the call
+// notices. gc puts every exported name first, so Ärger comes second here and
+// byte order by name would put it last.
+func TestItabFunIsInTheInterfacesOrder(t *testing.T) {
+	types, _ := namedTypes(t)
+	counter, iface := byCorpusName(t, types, "Counter"), byCorpusName(t, types, "Counted")
+	syms, err := rtype.Itab(counter, iface)
+	if err != nil {
+		t.Fatalf("Itab: %v", err)
+	}
+	d := syms[0]
+	pkg := namedPkgPath()
+	want := []string{
+		pkg + ".(*Counter).Value",
+		pkg + ".(*Counter).Ärger",
+		pkg + ".(*Counter).hidden",
+	}
+	if got := len(d.Data); got != 24+8*len(want) {
+		t.Fatalf("the itab is %d bytes and holds %d methods", got, len(want))
+	}
+	for i, w := range want {
+		r, ok := reloc(d, int32(24+8*i))
+		if !ok {
+			t.Fatalf("Fun[%d] has no reference", i)
+		}
+		if r.Target != w {
+			t.Errorf("Fun[%d] names %s, want %s", i, r.Target, w)
+		}
+	}
+	// The interface's own Imethod array is the same list in the same order, so
+	// the two cannot disagree without one of them being wrong.
+	imethods, err := rtype.Descriptor(iface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The array sits after the UncommonType, which a named interface has.
+	base := uncommonOffsetOf(reflect.TypeOf((*Counted)(nil)).Elem()) + 16
+	for i, w := range []string{"Value", "Ärger", "hidden"} {
+		r, ok := reloc(imethods[0], int32(base+8*i))
+		if !ok {
+			t.Fatalf("Imethod %d has no name reference", i)
+		}
+		def, ok := find(imethods, r.Target)
+		if !ok {
+			t.Fatalf("%s is not defined", r.Target)
+		}
+		if got := decodeName(t, def.Data); got != w {
+			t.Errorf("Imethod %d is %q and Fun[%d] is %s", i, got, i, want[i])
+		}
+	}
+}
+
+// TestItabNameIsTheSameFromTwoConverters is the identity property, stated as
+// the compiler meets it.
+//
+// A package compiles under one converter and another package under another, so
+// one Go type is two ir.Types. The name is a function of the type and not of
+// the pointer, or the linker would keep two itabs for one pair and every
+// comparison between an interface value from one package and one from the
+// other would be false.
+func TestItabNameIsTheSameFromTwoConverters(t *testing.T) {
+	first, _ := namedTypes(t)
+	second, _ := namedTypes(t)
+	a, err := ir.ItabSymbol(byCorpusName(t, first, "Counter"), byCorpusName(t, first, "Counted"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ir.ItabSymbol(byCorpusName(t, second, "Counter"), byCorpusName(t, second, "Counted"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("two converters name one pair %s and %s", a, b)
+	}
+}
+
+// TestItabNameAgainstGCObject is the identity check.
+//
+// One itab per (interface, concrete type) pair, and the linker merges two
+// duplicate-tolerant symbols of one name. A name that differs from gc's by one
+// character is a second itab for a pair that must have one, and the runtime
+// compares two interface values by comparing their first words, so every such
+// comparison is then false.
+func TestItabNameAgainstGCObject(t *testing.T) {
+	gc := gcObjectSymbols(t)
+	types, _ := namedTypesUnder(t, oraclePkgPath)
+	counter := byCorpusName(t, types, "Counter")
+	for _, name := range []string{"Valuer", "Counted"} {
+		syms, err := rtype.Itab(counter, byCorpusName(t, types, name))
+		if err != nil {
+			t.Fatalf("Itab: %v", err)
+		}
+		size, ok := gc[syms[0].Name]
+		if !ok {
+			var itabs []string
+			for sym := range gc {
+				if strings.HasPrefix(sym, ir.ItabSymbolPrefix) {
+					itabs = append(itabs, sym)
+				}
+			}
+			sort.Strings(itabs)
+			t.Errorf("gc's object has no %s; it holds %v", syms[0].Name, itabs)
+			continue
+		}
+		if size != int64(len(syms[0].Data)) {
+			t.Errorf("%s is %d bytes and gc's is %d", syms[0].Name, len(syms[0].Data), size)
+		}
+	}
+}
+
+// TestItabRefusesWhatHasNoItab records the three shapes that have none.
+func TestItabRefusesWhatHasNoItab(t *testing.T) {
+	types, _ := namedTypes(t)
+	counter := byCorpusName(t, types, "Counter")
+	iface := byCorpusName(t, types, "Valuer")
+	empty := byCorpusName(t, types, "NamedEmpty")
+	flags := byCorpusName(t, types, "Flags")
+	for _, tc := range []struct {
+		what       string
+		typ, iface *ir.Type
+		want       string
+	}{
+		{"an empty interface", counter, empty, "empty interface"},
+		{"an interface on both sides", iface, iface, "is an interface"},
+		{"a type that does not implement it", flags, iface, "does not implement"},
+	} {
+		if _, err := rtype.Itab(tc.typ, tc.iface); err == nil {
+			t.Errorf("%s: an itab was written", tc.what)
+		} else if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: the refusal is %q, want it to say %q", tc.what, err, tc.want)
+		}
+	}
+}
+
+// TestItabReferencesBothDescriptors checks the set the caller owes.
+//
+// cmd/link resolves both of the itab's first two words by name, so a package
+// that writes an itab and not the two descriptors links to nothing.
+func TestItabReferencesBothDescriptors(t *testing.T) {
+	types, _ := namedTypes(t)
+	counter, iface := byCorpusName(t, types, "Counter"), byCorpusName(t, types, "Valuer")
+	refs, err := rtype.ItabReferenced(counter, iface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 2 || refs[0] != iface || refs[1] != counter {
+		t.Fatalf("an itab references %v, want the interface and the concrete type", refs)
+	}
+}
+
+// byCorpusName returns the IR type of one corpus row.
+func byCorpusName(t *testing.T, types []*ir.Type, name string) *ir.Type {
+	t.Helper()
+	for i, c := range namedCorpus {
+		if c.src == name {
+			return types[i]
+		}
+	}
+	t.Fatalf("%s is not in the named corpus", name)
+	return nil
 }

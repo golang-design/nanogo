@@ -289,6 +289,55 @@ func ExportedName(name string) bool {
 	return unicode.IsUpper(r)
 }
 
+// ItabSymbolPrefix is the linker prefix of an itab.
+//
+// cmd/link collects a symbol with this prefix into runtime.itablinks, which is
+// how the runtime registers a compile-time itab, and the runtime's own itab
+// table is what makes a second itab for one pair unreachable rather than
+// merely wasteful. The colon is why specs/032 records that the text-assembly
+// seam died: the Plan 9 assembler rejects a symbol name that contains one.
+const ItabSymbolPrefix = "go:itab."
+
+// ItabSymbol returns the linker symbol of the itab that pairs the concrete
+// type t with the interface iface.
+//
+// It is the prefix, t's link string, a comma and iface's link string, which is
+// gc's itabLsym. The link string and not the name string, for the reason
+// TypeSymbol gives: identity of link strings is identity of types.
+//
+// The name is the whole of itab identity. An itab exists once per (interface,
+// concrete type) pair, the runtime compares two interface values by comparing
+// their first words, and cmd/link merges two duplicate-tolerant symbols of one
+// name. So two spellings of one pair are two itabs, and every comparison
+// between a value that holds one and a value that holds the other is false.
+//
+// An empty interface has no itab. Its first word is a *_type, so the pair has
+// nothing to name, and a symbol emitted for it would be a table the runtime
+// never reads.
+func ItabSymbol(t, iface *Type) (string, error) {
+	if iface == nil || iface.Kind != Interface {
+		return "", fmt.Errorf("ir: an itab needs an interface and %s is not one", iface)
+	}
+	if iface.EmptyIface {
+		return "", fmt.Errorf("ir: %s is the empty interface, whose values lead with a *_type and not with an itab", iface)
+	}
+	if t == nil {
+		return "", fmt.Errorf("ir: an itab needs a concrete type")
+	}
+	if t.Kind == Interface {
+		return "", fmt.Errorf("ir: the itab of %s pairs a concrete type with an interface, and %s is an interface", iface, t)
+	}
+	ts, err := TypeLinkString(t)
+	if err != nil {
+		return "", err
+	}
+	is, err := TypeLinkString(iface)
+	if err != nil {
+		return "", err
+	}
+	return ItabSymbolPrefix + ts + "," + is, nil
+}
+
 // MethodSymbol returns the linker symbol of a method of t.
 //
 // ptrRecv chooses between the two spellings: pkg.T.M for a value receiver and
