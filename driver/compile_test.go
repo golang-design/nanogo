@@ -894,20 +894,39 @@ func TestFileAndLineOfAnUnknownOffset(t *testing.T) {
 	}
 }
 
-// TestCompileRefusesAGenericFunction covers the report ir.Build makes.
+// TestCompileRefusesAGenericFunction covers the report ir.Build makes, and
+// which half of the work is still missing.
 //
-// specs/013-generics.md stencils, and stenciling needs the body of the
-// instantiated function, which is the same export data specs/015 has no reader
-// for. The builder says so and the driver passes it on with the package named.
-func TestCompileRefusesAGenericFunction(t *testing.T) {
+// The declaration itself is no longer refused. It is skipped, because a body
+// with type parameters in it has no run-time representation in the package
+// that declares it and gc emits none either. That changed when the export
+// writer learned to carry one: while ir.Build reported an error, no package
+// holding a generic function reached the writer at all, so the export data was
+// ready and nothing could use it.
+//
+// What is still refused is the instantiation. specs/013-generics.md stencils,
+// the stenciler is not written, and the type parameter reaches the IR type
+// boundary instead. So the message names the type parameter rather than the
+// declaration, and this test says so rather than accepting either.
+func TestCompileRefusesAGenericInstantiation(t *testing.T) {
 	_, err := compileSource(t, "package main\n\nfunc f[T any](x T) T { return x }\n\nfunc g() int { return f(1) }\n", nil)
 	if err == nil {
-		t.Fatal("Compile accepted a generic function")
+		t.Fatal("Compile accepted a call to a generic function, and no stenciler is built")
 	}
-	for _, want := range []string{"main", "generic"} {
+	for _, want := range []string{"main", "type parameter"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the message does not carry %q:\n%v", want, err)
 		}
+	}
+}
+
+// TestCompileSkipsAGenericDeclaration is the other half: a package whose
+// generic declaration nothing instantiates compiles, because the declaration
+// is skipped rather than refused.
+func TestCompileSkipsAGenericDeclaration(t *testing.T) {
+	arm64Only(t)
+	if _, err := compileSource(t, "package main\n\nfunc f[T any](x T) T { return x }\n\nfunc main() {}\n", nil); err != nil {
+		t.Fatalf("a generic declaration nothing instantiates was refused: %v", err)
 	}
 }
 

@@ -857,9 +857,16 @@ func (b *builder) buildFunc(d *syntax.FuncDecl, nth int) *Func {
 		return nil
 	}
 	if sig.TypeParams().Len() > 0 || sig.RecvTypeParams().Len() > 0 {
-		// specs/013-generics.md instantiates before this pass. A body with
-		// type parameters in it has no run-time representation.
-		b.errorf("ir: %s is generic and was not built", obj.Name())
+		// Skipped, not refused. specs/013-generics.md instantiates before this
+		// pass, and a body with type parameters in it has no run-time
+		// representation in the package that declares it. gc emits none
+		// either: the archive it builds for a package of nothing but generic
+		// declarations holds two DWARF symbols and no code.
+		//
+		// This was an error until the export writer could carry a generic
+		// declaration. While it was one, no package holding a generic function
+		// reached the writer at all, so the export data was ready and nothing
+		// could use it. The caller skips a nil function.
 		return nil
 	}
 
