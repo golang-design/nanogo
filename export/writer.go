@@ -10,6 +10,7 @@ import (
 
 	"golang.design/x/nanogo/export/pkgbits"
 	"golang.design/x/nanogo/obj"
+	"golang.design/x/nanogo/syntax"
 	"golang.design/x/nanogo/types2"
 )
 
@@ -58,17 +59,21 @@ func (e *UnsupportedError) Error() string {
 // never runs, and a package that says it has one and has none is a link
 // failure. driver/inittask.go decides it.
 //
-// bodies carries the function bodies an importer can inline, and is nil for a
-// package that exports none. A body the writer cannot allocate every element
-// of is left out rather than guessed at: see [writableBodies].
-func Write(pkg *types2.Package, hasInit bool, bodies *Bodies) (data []byte, fingerprint [8]byte, err error) {
+// src is what the package's own source adds to what the checker recorded: the
+// positions of the declarations and the function bodies an importer can
+// inline. It is nil for a package written without either, and then every
+// position is absent and no body reaches the file. A body the writer cannot
+// allocate every element of is left out rather than guessed at: see
+// [writableBodies].
+func Write(pkg *types2.Package, hasInit bool, src *Source) (data []byte, fingerprint [8]byte, err error) {
 	var funcs []InlineFunc
+	var fset *syntax.FileSet
 	var file func(string) string
-	if bodies != nil {
-		file = bodies.File
-		funcs = writableBodies(pkg, file, bodies.Funcs)
+	if src != nil {
+		fset, file = src.Fset, src.File
+		funcs = writableBodies(pkg, fset, file, src.Funcs)
 	}
-	pw := newPkgWriter(pkg, funcs, file)
+	pw := newPkgWriter(pkg, funcs, fset, file)
 
 	// A declaration the writer cannot encode is reported by panicking, the
 	// way the reader reports a stream it cannot decode: the refusal is found
@@ -206,11 +211,15 @@ type pkgWriter struct {
 	// fileName maps a parsed file name to the one a position base records.
 	fileName func(string) string
 
+	// fset resolves a declaration's position. It is nil for a package
+	// written without its source, and every position is then absent.
+	fset *syntax.FileSet
+
 	refs *declRefs
 }
 
 // newPkgWriter returns a writer for one package.
-func newPkgWriter(pkg *types2.Package, funcs []InlineFunc, file func(string) string) *pkgWriter {
+func newPkgWriter(pkg *types2.Package, funcs []InlineFunc, fset *syntax.FileSet, file func(string) string) *pkgWriter {
 	pw := &pkgWriter{
 		PkgEncoder:  pkgbits.NewPkgEncoder(Version),
 		curpkg:      pkg,
@@ -221,6 +230,7 @@ func newPkgWriter(pkg *types2.Package, funcs []InlineFunc, file func(string) str
 		inline:      make(map[types2.Object]*InlineFunc, len(funcs)),
 		lits:        make(map[*FuncLitExpr]*pkgbits.Encoder),
 		fileName:    file,
+		fset:        fset,
 	}
 	pw.refs = &declRefs{pw: pw}
 	for i := range funcs {
@@ -254,19 +264,37 @@ func objName(obj types2.Object) string {
 
 // @@@ Positions
 
-// pos writes an unknown position.
+// pos writes the position of a declaration nanogo compiled.
 //
-// nanogo carries no position across a package boundary in either direction.
-// The reader drops the one gc writes, because nanogo's syntax.Pos is an offset
-// into the FileSet the compiled files were parsed with
-// (specs/010-scanner-and-positions.md) and a foreign file is not in it. The
-// writer is the same gap from the other side: a diagnostic gc reports about a
-// declaration nanogo compiled says the position is unknown. The field is still
-// written, because it is inline in the element and a reader that skipped it
-// would desync.
-func (w *writer) pos() {
+// The position is absent for a declaration of another package, and that gap
+// stays. nanogo's syntax.Pos is an offset into the FileSet the compiled files
+// were parsed with (specs/010-scanner-and-positions.md), the reader drops the
+// one gc wrote because a foreign file has no place in that FileSet, and the
+// writer has nothing to put back. The field is written either way, because it
+// is inline in the element and a reader that skipped it would desync.
+//
+// A declaration nanogo compiled needs a real position for a reason beyond a
+// diagnostic. gc rebases every position of an inlined body onto the call it
+// inlined into, and it rebases a parameter's position with the rest. An
+// absent position has no base to rebase, and gc stops with "no old PosBase"
+// naming neither the declaration nor the package that wrote it. So a position
+// is written wherever the writer has one.
+func (w *writer) pos(p syntax.Pos) {
 	w.Sync(pkgbits.SyncPos)
-	w.Bool(false)
+	fset := w.p.fset
+	if fset == nil || !p.IsKnown() {
+		w.Bool(false)
+		return
+	}
+	at := fset.Position(p)
+	if at.Filename == "" {
+		w.Bool(false)
+		return
+	}
+	w.Bool(true)
+	w.Reloc(pkgbits.SectionPosBase, w.p.posBaseIdx(at.Filename))
+	w.Uint(uint(at.Line))
+	w.Uint(uint(at.Col))
 }
 
 // @@@ Packages
@@ -457,7 +485,7 @@ func (w *writer) structType(typ *types2.Struct) {
 	w.Len(typ.NumFields())
 	for i := 0; i < typ.NumFields(); i++ {
 		f := typ.Field(i)
-		w.pos()
+		w.pos(f.Pos())
 		w.selector(f)
 		w.typ(f.Type())
 		w.String(typ.Tag(i))
@@ -497,7 +525,7 @@ func (w *writer) interfaceType(typ *types2.Interface) {
 		if sig.TypeParams().Len() != 0 {
 			w.p.refuse(objName(m), genericReason)
 		}
-		w.pos()
+		w.pos(m.Pos())
 		w.selector(m)
 		w.signature(sig)
 	}
@@ -524,7 +552,7 @@ func (w *writer) params(typ *types2.Tuple) {
 
 func (w *writer) param(param *types2.Var) {
 	w.Sync(pkgbits.SyncParam)
-	w.pos()
+	w.pos(param.Pos())
 	w.localIdent(param)
 	w.typ(param.Type())
 }
@@ -600,24 +628,24 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		panic("unreachable")
 
 	case *types2.Const:
-		w.pos()
+		w.pos(obj.Pos())
 		w.typ(obj.Type())
 		w.Value(obj.Val())
 		return pkgbits.ObjConst
 
 	case *types2.Func:
 		sig := obj.Signature()
-		w.pos()
+		w.pos(obj.Pos())
 		w.Bool(false) // not a method with type parameters of its own
 		w.typeParamNames()
 		w.signature(sig)
-		w.pos() // the declaration's position, which the linker copies
+		w.pos(obj.Pos()) // the declaration's position, which the linker copies
 		wext.funcExt(obj, sig, false)
 		return pkgbits.ObjFunc
 
 	case *types2.TypeName:
 		if obj.IsAlias() {
-			w.pos()
+			w.pos(obj.Pos())
 			rhs := obj.Type()
 			if alias, ok := rhs.(*types2.Alias); ok {
 				rhs = alias.Rhs()
@@ -628,7 +656,7 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		}
 
 		named := obj.Type().(*types2.Named)
-		w.pos()
+		w.pos(obj.Pos())
 		w.typeParamNames()
 		wext.typeExt()
 		w.typ(named.Underlying())
@@ -645,7 +673,7 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		return pkgbits.ObjType
 
 	case *types2.Var:
-		w.pos()
+		w.pos(obj.Pos())
 		w.typ(obj.Type())
 		wext.varExt()
 		return pkgbits.ObjVar
@@ -682,12 +710,12 @@ func (w *writer) method(wext *writer, meth *types2.Func) {
 	}
 
 	w.Sync(pkgbits.SyncMethod)
-	w.pos()
+	w.pos(meth.Pos())
 	w.selector(meth)
 	w.typeParamNames()
 	w.param(sig.Recv())
 	w.signature(sig)
-	w.pos() // the declaration's position, which the linker copies
+	w.pos(meth.Pos()) // the declaration's position, which the linker copies
 
 	wext.funcExt(meth, sig, true)
 }

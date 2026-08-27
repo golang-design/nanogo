@@ -24,7 +24,7 @@ import (
 
 // buildSource parses and type checks src as one package and builds the body of
 // every function it declares, in name order so that the set is fixed.
-func buildSource(t *testing.T, path, src string) (*types2.Package, []InlineFunc) {
+func buildSource(t *testing.T, path, src string) (*types2.Package, *syntax.FileSet, []InlineFunc) {
 	t.Helper()
 	fset := syntax.NewFileSet()
 	sf := fset.AddFile(path+"/a.go", len(src))
@@ -66,14 +66,14 @@ func buildSource(t *testing.T, path, src string) (*types2.Package, []InlineFunc)
 		}
 		funcs = append(funcs, InlineFunc{Obj: obj, Name: name, Cost: MaxInlineCost, Body: body})
 	}
-	return pkg, funcs
+	return pkg, fset, funcs
 }
 
 // writeSource builds every body of src and writes the export data.
 func writeSource(t *testing.T, path, src string, file func(string) string) ([]byte, *types2.Package, []InlineFunc) {
 	t.Helper()
-	pkg, funcs := buildSource(t, path, src)
-	payload, _, err := Write(pkg, false, &Bodies{Funcs: funcs, File: file})
+	pkg, fset, funcs := buildSource(t, path, src)
+	payload, _, err := Write(pkg, false, &Source{Fset: fset, Funcs: funcs, File: file})
 	if err != nil {
 		t.Fatalf("Write(%s): %v", path, err)
 	}
@@ -130,6 +130,35 @@ func Add(a, b int) int { return a + b }
 	}
 }
 
+// TestWriteRecordsADeclarationsPosition is the other half of the position
+// base section: a declaration nanogo compiled carries where it stands.
+//
+// It is not only a diagnostic. gc rebases every position of an inlined body
+// onto the call it inlined into, and it rebases the parameters with the rest,
+// so an absent parameter position stops gc with "no old PosBase".
+func TestWriteRecordsADeclarationsPosition(t *testing.T) {
+	const src = `package p
+
+func Add(a, b int) int { return a + b }
+`
+	pkg, fset, _ := buildSource(t, "xtest/pos", src)
+	payload, _, err := Write(pkg, false, &Source{Fset: fset})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := pkgbits.NewPkgDecoder("xtest/pos", string(payload))
+	if n := dec.NumElems(pkgbits.SectionPosBase); n != 1 {
+		t.Fatalf("the file holds %d position bases and carries no body, want 1", n)
+	}
+	r := dec.NewDecoder(pkgbits.SectionPosBase, 0, pkgbits.SyncPosBase)
+	if got, want := r.String(), "xtest/pos/a.go"; got != want {
+		t.Errorf("the position base names %q, want %q", got, want)
+	}
+	if !r.Bool() {
+		t.Error("the position base is not a file base")
+	}
+}
+
 // TestWriteAllocatesAPositionBase is the position base section, which the
 // writer never allocated an element of until a body carried a position.
 func TestWriteAllocatesAPositionBase(t *testing.T) {
@@ -172,8 +201,8 @@ func Make(n int) func() int {
 // TestWriteEncodesAFunctionLiteralAsItsOwnElement is the case that makes a
 // body a tree of elements rather than one element.
 func TestWriteEncodesAFunctionLiteralAsItsOwnElement(t *testing.T) {
-	pkg, funcs := buildSource(t, "xtest/r", litSource)
-	pw := newPkgWriter(pkg, nil, nil)
+	pkg, _, funcs := buildSource(t, "xtest/r", litSource)
+	pw := newPkgWriter(pkg, nil, nil, nil)
 	pw.writeBody("xtest/r", funcs[0].Name, funcs[0].Body, nil)
 	if n := pw.NumElems(pkgbits.SectionBody); n != 2 {
 		t.Fatalf("the writer wrote %d body elements, want 2", n)
@@ -201,9 +230,9 @@ func TestWriteDoesNotOfferABodyWithAFunctionLiteral(t *testing.T) {
 func TestWriteLeavesOutABodyItCannotAllocate(t *testing.T) {
 	const src = `package p
 
-func Id[T any](v T) T { return v }
+func id[T any](v T) T { return v }
 
-func Use(n int) int { return Id(n) }
+func Use(n int) int { return id(n) }
 
 func Add(a, b int) int { return a + b }
 `
@@ -242,7 +271,7 @@ func Add(a, b int) int { return a + b }
 		funcs = append(funcs, InlineFunc{Obj: obj, Name: name, Cost: 1, Body: body})
 	}
 
-	kept := writableBodies(pkg, nil, funcs)
+	kept := writableBodies(pkg, nil, nil, funcs)
 	if len(kept) != 1 || kept[0].Name != "Add" {
 		names := make([]string, len(kept))
 		for i, k := range kept {
@@ -256,7 +285,7 @@ func Add(a, b int) int { return a + b }
 // filter: a body the writer cannot allocate an element for is refused rather
 // than written with an index nothing holds.
 func TestWriteRefusesAGenericBodyItWasHanded(t *testing.T) {
-	pw := newPkgWriter(types2.NewPackage("xtest/t", "p"), nil, nil)
+	pw := newPkgWriter(types2.NewPackage("xtest/t", "p"), nil, nil, nil)
 	body := &Body{
 		HasBlock: true,
 		Stmts: []Stmt{&ReturnStmt{
@@ -303,11 +332,11 @@ func F(f func()) { go f() }
 `},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pkg, funcs := buildSource(t, "xtest/"+tc.name, tc.src)
+			pkg, _, funcs := buildSource(t, "xtest/"+tc.name, tc.src)
 			if len(funcs) != 1 {
 				t.Fatalf("built %d bodies, want 1", len(funcs))
 			}
-			if kept := writableBodies(pkg, nil, funcs); len(kept) != 0 {
+			if kept := writableBodies(pkg, nil, nil, funcs); len(kept) != 0 {
 				t.Fatalf("the writer offered %s for inlining", kept[0].Name)
 			}
 		})
@@ -326,8 +355,8 @@ func Abs(x int) int {
 	return x
 }
 `
-	pkg, funcs := buildSource(t, "xtest/ok", src)
-	kept := writableBodies(pkg, nil, funcs)
+	pkg, _, funcs := buildSource(t, "xtest/ok", src)
+	kept := writableBodies(pkg, nil, nil, funcs)
 	if len(kept) != 1 {
 		t.Fatalf("the writer offered %d bodies, want 1", len(kept))
 	}

@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"golang.design/x/nanogo/export/pkgbits"
+	"golang.design/x/nanogo/syntax"
 	"golang.design/x/nanogo/types2"
 )
 
@@ -28,12 +29,16 @@ import (
 // path, which is a reference in the extension data itself, stays refused: it
 // needs the object dictionary the writer does not fill.
 
-// A Bodies carries the function bodies one package's export data holds.
+// A Source is what a package's own source adds to what the checker recorded.
 //
-// It is what the driver assembles out of the tree [BodySource] builds. The
-// writer allocates the elements each body names and writes nothing it cannot
-// allocate.
-type Bodies struct {
+// It is what the driver assembles: the FileSet that resolves a declaration's
+// position, and the bodies [BodySource] built. The writer allocates the
+// elements each body names and writes nothing it cannot allocate.
+type Source struct {
+	// Fset resolves the position of a declaration and of a position a body
+	// carries. Without it every position the file holds is absent.
+	Fset *syntax.FileSet
+
 	// Funcs is one entry per declaration whose body reaches the file, in
 	// the order the caller decided. The order the file holds them in is the
 	// order of the elements they were written to, which is gc's order.
@@ -243,16 +248,20 @@ func (pw *pkgWriter) writeBodies(path string, funcs []InlineFunc) []bodyEntry {
 // time the writer refuses, it has claimed element indices it will never fill,
 // and a claimed index that holds nothing is exactly the declaration gc reads
 // as a different one. Here the holes are in the probe, which is thrown away.
-func writableBodies(pkg *types2.Package, file func(string) string, funcs []InlineFunc) []InlineFunc {
+func writableBodies(pkg *types2.Package, fset *syntax.FileSet, file func(string) string, funcs []InlineFunc) []InlineFunc {
+	reached := surfaceObjects(pkg, fset, file)
 	out := make([]InlineFunc, 0, len(funcs))
-	probe := newPkgWriter(pkg, nil, file)
+	probe := newPkgWriter(pkg, nil, fset, file)
 	for i := range funcs {
 		fn := funcs[i]
+		if !reaches(reached, fn.Obj) {
+			continue
+		}
 		check := &inlineCheck{}
 		if !writesInto(probe, pkg.Path(), &fn, check) {
 			// The probe now holds elements it claimed and did not fill, so
 			// it cannot answer for the next body. Start a fresh one.
-			probe = newPkgWriter(pkg, nil, file)
+			probe = newPkgWriter(pkg, nil, fset, file)
 			continue
 		}
 		if check.reason != "" {
@@ -261,6 +270,94 @@ func writableBodies(pkg *types2.Package, file func(string) string, funcs []Inlin
 		out = append(out, fn)
 	}
 	return out
+}
+
+// surfaceObjects returns the declarations the exported surface reaches.
+//
+// It is what the file holds an object element for. A body is reached through
+// the private root's list, and the entry names the declaration rather than
+// pointing at it, so an entry naming a declaration the file has no element for
+// is an entry no reader can pair with anything. nanogo's own reader refuses
+// such a file by name.
+//
+// The set is measured on a package the caller never sees, for the reason
+// [writableBodies] gives: the answer has to be known before the first
+// extension data is written, because that is where a declaration says whether
+// it has an inlinable body.
+func surfaceObjects(pkg *types2.Package, fset *syntax.FileSet, file func(string) string) map[types2.Object]bool {
+	pw := newPkgWriter(pkg, nil, fset, file)
+	ok := func() (ok bool) {
+		defer func() {
+			switch v := recover().(type) {
+			case nil:
+			case *UnsupportedError, *BodyError:
+				ok = false
+			default:
+				panic(v)
+			}
+		}()
+		scope := pkg.Scope()
+		for _, name := range scope.Names() {
+			if obj := scope.Lookup(name); obj != nil && obj.Exported() {
+				pw.objIdx(obj)
+			}
+		}
+		return true
+	}()
+	if !ok {
+		// The surface itself is refused, so Write refuses the package and
+		// no body of it reaches a file either way.
+		return nil
+	}
+	out := make(map[types2.Object]bool, len(pw.objsIdx))
+	for obj := range pw.objsIdx {
+		out[obj] = true
+	}
+	return out
+}
+
+// reaches reports whether the file holds the declaration fn's body would be
+// paired with.
+//
+// A function is its own object element. A method is not: it is written inside
+// the element of the type that declares it, and a reader pairs the two by
+// position, so what the file has to hold is the receiver's type.
+func reaches(objs map[types2.Object]bool, fn *types2.Func) bool {
+	recv := fn.Signature().Recv()
+	if recv == nil {
+		return objs[fn]
+	}
+	typ := recv.Type()
+	if p, isPtr := types2.Unalias(typ).(*types2.Pointer); isPtr {
+		typ = p.Elem()
+	}
+	named, ok := types2.Unalias(typ).(*types2.Named)
+	if !ok {
+		return false
+	}
+	return objs[named.Obj()]
+}
+
+// SymName returns the name gc's linker gives a function or a method, which is
+// the name the private root's body list names a body by.
+//
+// A method is "T.M" for a value receiver and "(*T).M" for a pointer one. The
+// second result is false for a method whose receiver is not a defined type,
+// which no declaration has.
+func SymName(fn *types2.Func) (string, bool) {
+	recv := fn.Signature().Recv()
+	if recv == nil {
+		return fn.Name(), true
+	}
+	typ := recv.Type()
+	if p, isPtr := types2.Unalias(typ).(*types2.Pointer); isPtr {
+		typ = p.Elem()
+	}
+	named, ok := types2.Unalias(typ).(*types2.Named)
+	if !ok {
+		return "", false
+	}
+	return methodSym(named, fn), true
 }
 
 // writesInto reports whether probe can write fn's body, and fills check with
