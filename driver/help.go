@@ -126,6 +126,13 @@ What nanogo compiles:
 	A declared function used as a value: passed to a function, returned
 	from one, or assigned to a variable and called through it.
 
+	Interfaces. A value of a concrete type goes into an interface with
+	methods, a call through such an interface reaches the method, and an
+	assertion or a type switch on it names a concrete type. The empty
+	interface works the same way. What the two forms carry differs: an
+	empty interface leads with the dynamic type's descriptor and one with
+	methods leads with the itab of that pair (specs/032).
+
 	print and println of integers, strings and booleans, with any number
 	of operands.
 
@@ -147,15 +154,17 @@ What nanogo refuses, by name, with the reason:
 	is nothing to hand the runtime.
 
 	An assertion whose target is an interface, and a type switch case
-	that names one. Both need the itab of that pair of types, which
-	nothing writes yet. An assertion to a concrete type compares the
-	interface's first word against that type's descriptor and works,
-	and so does a switch over concrete cases.
+	that names one. Which itab implements the target is not known until
+	the value is, so cmd/compile calls runtime.typeAssert with an
+	*abi.TypeAssert and runtime.interfaceSwitch with an
+	*abi.InterfaceSwitch, and nanogo writes neither descriptor
+	(specs/032). A target that is a concrete type is one comparison
+	against a link-time constant and works, and so does a switch over
+	concrete cases.
 
-	make of a slice whose element type has methods, or is an interface.
-	make([]byte, n) and make([]T, n) for a method-free struct T compile;
-	make([]C, n) where C has one method is refused, because the descriptor
-	for it needs the method's signature (specs/032).
+	A conversion between two interfaces with methods that are not the
+	same type. The destination's itab is not the source's, and finding it
+	is the same call.
 
 	A generic function.
 
