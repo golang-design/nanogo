@@ -1,7 +1,7 @@
 {
   "arm64.encodings": 998947,
-  "cover.driver": 95.2,
-  "cover.export": 91,
+  "cover.driver": 95,
+  "cover.export": 91.2,
   "cover.export/pkgbits": 93.7,
   "cover.ir": 91.6,
   "cover.loader": 98.8,
@@ -18,7 +18,7 @@
   "ir.corpus.packages": 536,
   "ir.lowered.reached": 39206,
   "loader.constraint.files": 6821,
-  "loader.golist.packages": 537,
+  "loader.golist.packages": 538,
   "rtsym.symbols": 121,
   "ssa.corpus.lowered": 20668,
   "ssa.corpus.mapped": 20668,
