@@ -441,6 +441,17 @@ var linkingShapes = []linkShape{
 		main: "\tt := lib.Table{M: map[string]int{\"a\": 42}}\n\tos.Exit(t.M[\"a\"])\n",
 	},
 	{
+		// This sat in refusedShapes until a descriptor could carry the Method
+		// array. Moving it here rather than deleting it is the point:
+		// refusing to describe the type and describing it with an empty method
+		// set look the same to a compile test, and only a program that calls
+		// the method tells them apart. The importer is compiled by gc, so the
+		// itab is gc's and the method array it reads is nanogo's.
+		name: "a type with a method, reached through an interface",
+		lib:  "type Code int\n\nfunc (c Code) V() int { return int(c) }\n",
+		main: "\tvar c lib.Code = 42\n\tvar v interface{ V() int } = c\n\tos.Exit(v.V())\n",
+	},
+	{
 		name: "a constant and a function",
 		lib:  "const S = 21\n\nfunc Double(x int) int { return x * 2 }\n",
 		main: "\tos.Exit(lib.Double(lib.S))\n",
@@ -586,7 +597,10 @@ func shapeModule(s linkShape) map[string]string {
 // The list is what is left of it. A declared type whose descriptor nanogo can
 // write is in linkingShapes above and is linked and run rather than refused.
 var refusedShapes = []linkShape{
-	{name: "a type with a method", lib: "type Code int\n\nfunc (c Code) V() int { return int(c) }\n", main: "Code"},
+	// Empty, and kept rather than deleted. A type with a method sat here until
+	// a descriptor could carry the Method array, and it is in linkingShapes
+	// now. The table stays because the next type nanogo cannot describe
+	// belongs in it.
 }
 
 // TestNanogoRefusesATypeAnImporterCouldNotLinkAgainst is the other half of the
