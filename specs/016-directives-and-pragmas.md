@@ -135,6 +135,13 @@ is the corpus file that showed it: it printed four failures rather than nothing.
 `driver.LifetimeDirective` is the refusal and
 [023](023-escape-analysis.md) owns the pass that would lift it.
 
+**The refusal reads the declaration, so it covers the callee's own package and
+nothing else.** A package nanogo compiles that *calls* a `//go:uintptrescapes`
+function it imported, `syscall.Syscall` for one, is not refused, and the
+obligation is the caller's. Closing that needs the directive to travel in the
+export data ([015](015-export-data.md)) or the check to read the callee's
+declaration through the type checker, and neither is built.
+
 `//go:nosplit` deserves its own note. The budget is a fixed number of bytes of
 stack available below the guard, shared by the whole nosplit call chain. The
 compiler must compute the chain's depth and reject an overflow, because the

@@ -223,6 +223,12 @@ func checkDirectives(f *syntax.File, report func(syntax.Error)) {
 // is the outcome specs/016-directives-and-pragmas.md rule 1 names: a directive
 // in the correctness group that is recorded and not honoured is not a missing
 // optimisation.
+//
+// The declaration is what is read, so this covers the callee's own package and
+// no other. A package nanogo compiles that calls an imported function carrying
+// the directive is not refused, and the obligation is the caller's. specs/016
+// records that hole rather than leaving it silent: the directive does not
+// travel in the export data.
 const lifetimePragmas = uintptrKeepAlive | uintptrEscapes
 
 // LifetimeDirective returns the directive a declaration carries that nanogo

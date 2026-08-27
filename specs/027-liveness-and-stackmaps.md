@@ -326,20 +326,27 @@ only stack does not produce one.
 ### The corpus
 
 `ssa/stackmap_test.go` runs the whole pipeline over 536 packages of the
-distribution. **17,905 functions reach SSA construction, 17,809 lower
-completely, 17,758 reach a stack map, 10,727 carry a pointer bit, 162 carry a
-stack object, and there are 120,493 safepoints.**
+distribution. **19,367 functions reach SSA construction, 19,299 lower
+completely, 19,248 reach a stack map, 9,199 carry a pointer bit, 6,315 carry a
+stack object, and there are 125,572 safepoints.**
 
-Two of those numbers need reading with care.
+Three of those numbers need reading with care.
 
 The 51 functions that are built and lowered and never mapped are not stack map
 failures. The register allocator refuses them, and the map is built from the
 allocation, so the pipeline stops one pass earlier.
 [026](026-register-allocation.md) owns those refusals.
 
-The 162 stack objects are objects the analysis found, not records in an object
-file. Nothing writes `FUNCDATA_StackObjects` yet, for the reason at the top of
-this spec.
+The stack objects were 162 when the mark was `Addrtaken && HasPointers`. Every
+frame object that holds a pointer carries it now, which is why the number is
+6,315: a frame object that no source expression took the address of is in the
+frame because its type does not fit one value, and the collector reaches it
+through an address all the same.
+
+The functions carrying a pointer bit fell from 10,727 to 9,199, and that is the
+arguments bitmap losing the reserved words of the register arguments. A
+function whose only pointer bit was one of those words now has none, because
+the word holds nothing this function wrote.
 
 ## What was wrong
 
@@ -347,10 +354,14 @@ Three claims of this spec were wrong, and each was found by running something
 rather than by reading it.
 
 **The spec said an address-taken local is a stack object.** The condition is
-narrower: the type must hold pointers as well. The corpus is what showed it. A
-zero-sized address-taken local gets offset 0 from `Varp` and the runtime reads
-a non-negative offset as one into the incoming argument area, so the record it
-produced described an argument.
+neither narrower nor wider but different: the type must hold pointers, and
+being address-taken is not required. The corpus is what showed the first half.
+A zero-sized address-taken local gets offset 0 from `Varp` and the runtime
+reads a non-negative offset as one into the incoming argument area, so the
+record it produced described an argument.
+[`stackobj3.go`](../internal/gotest/testdata/go/test/stackobj3.go) showed the
+second: `gc` lists only the address-taken locals because it keeps everything
+else in SSA, and nanogo has frame objects `gc` does not have.
 
 **The spec said an `arm64` frame reserves neither word.** It reserves the word
 at the top of the frame for the caller's saved frame pointer, and the link

@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
+	"golang.design/x/nanogo/rtype"
 	"golang.design/x/nanogo/ssa"
 )
 
@@ -265,6 +267,62 @@ func TestGclocalsNameIsGcs(t *testing.T) {
 		t.Error("two bitmaps that differ share a name")
 	}
 	comparisons++
+}
+
+// TestAnUndescribableObjectLeavesTheTable covers the fallback that keeps such
+// an object conservatively live.
+//
+// A record names its type's pointer mask, and rtype refuses a type it cannot
+// write. Refusing the whole function for that would turn a precision feature
+// into a coverage loss, so the object leaves the table. What replaces the
+// table for it is the locals bitmap: ssa.ComputeLiveness keeps a frame object
+// that is not in the table live for the whole function, because nothing else
+// can reach it. Clearing the mark is therefore the safe direction and leaving
+// it set is not.
+//
+// The type is a pointer that carries a name. rtype reads that as a defined
+// type and asks for its method set, which an ir.Type built here does not have.
+func TestAnUndescribableObjectLeavesTheTable(t *testing.T) {
+	named := &ir.Type{Kind: ir.Ptr, Elem: typeInt, Name: "*int"}
+	if err := ir.Layout(named); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rtype.Descriptor(named); err == nil {
+		t.Fatal("the type has a descriptor, so this test measures nothing")
+	}
+	local := &ir.Object{Name: "obj", Type: named, Class: ir.ClassLocal, Addrtaken: true}
+	c := hand(t, "undescribable", func(f *ssa.Func) {
+		f.Frame = []*ir.Object{local}
+		e := f.Entry
+		e.Kind = ssa.BlockRet
+		mem := e.NewValue(0, ssa.OpInitMem, ssa.MemType)
+		a := e.NewValue(0, ssa.OpLocalAddr, named, mem)
+		a.Aux = local
+		call := e.NewValue(0, ssa.OpStaticCall, ssa.MemType, a, mem)
+		call.Aux = &ir.Object{Name: "main.use"}
+		n := e.NewValue(0, ssa.OpSelectN, typeInt, call)
+		e.Control = e.NewValue(0, ssa.OpMakeResult, ssa.MemType, n, call)
+	})
+	r, err := Emit(c.f, c.a, obj.NewPackage("main"), Options{Sym: c.f.Sym})
+	if err != nil {
+		t.Fatalf("a function with an undescribable frame object was refused: %v", err)
+	}
+	if len(r.Funcdata) != 2 {
+		t.Fatalf("%d funcdata symbols, want the two bitmaps: the object has no record to point at", len(r.Funcdata))
+	}
+	for i := range r.maps.Frame.Items {
+		it := &r.maps.Frame.Items[i]
+		if it.Kind == ssa.ItemObject && it.StackObject {
+			t.Errorf("%s is in the table and its type has no pointer mask", it.Name)
+		}
+	}
+	// And the bitmap covers it at the call, which is below its last address.
+	if len(r.maps.Locals.Maps) == 0 {
+		t.Fatal("the function makes a call and carries no bitmap")
+	}
+	if r.maps.Locals.Maps[r.maps.Index[0]][0]&1 == 0 {
+		t.Error("the object is outside the table and outside the bitmap at the call, so nothing describes it")
+	}
 }
 
 // TestALeafWithAGrowableFrameCarriesTheGrowthMap is what closed a gap
