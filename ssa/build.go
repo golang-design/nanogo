@@ -52,6 +52,7 @@ func Build(fn *ir.Func) (*Func, error) {
 		ptrTypes:     make(map[*ir.Type]*ir.Type),
 		memVar:       &ir.Object{Name: "mem", Type: MemType, Class: ir.ClassLocal},
 		descs:        make(map[string]*ir.Object),
+		itabs:        make(map[string]*ir.Object),
 		boolType:     &ir.Type{Kind: ir.Bool, Size: 1, Align: 1, Name: "bool"},
 		intType:      &ir.Type{Kind: ir.Int64, Size: 8, Align: 8, Name: "int"},
 	}
@@ -119,6 +120,12 @@ type builder struct {
 	// first-use order for the caller that has to emit them
 	// (specs/053-determinism.md).
 	descs map[string]*ir.Object
+
+	// itabs names each itab symbol once, the way descs does, so that two
+	// conversions of one pair produce two relocations against one object.
+	// Func.Itabs carries the same set in first-use order
+	// (specs/053-determinism.md).
+	itabs map[string]*ir.Object
 }
 
 // ctrlFrame is one enclosing loop or switch.
@@ -1515,19 +1522,20 @@ const itabTypeOffset = ir.PtrSize
 //
 // The shape is cmd/compile's walkConvInterface: a type word and a data word,
 // joined into one value. The type word is the concrete type's descriptor for an
-// empty interface and the itab of the (interface, concrete type) pair for an
-// interface with methods. Only the first is built, because an itab is a symbol
-// this compiler has to define and specs/032 has no writer for one.
+// empty interface and the itab of the (concrete type, interface) pair for an
+// interface with methods, which is the split walkConvInterface makes and the
+// runtime reads: an empty interface leads with a *_type and one with methods
+// leads with an *itab.
+//
+// The data word is the same in both cases. What goes in it is decided by the
+// concrete type alone, so the destination does not reach dataWord.
 func (b *builder) concreteToInterface(n ir.Expr, x *Value, from, to *ir.Type) *Value {
-	if !to.EmptyIface {
-		// Two things are missing and naming one of them would send the next
-		// reader to a wall they cannot see. specs/032 writes no itab, and the
-		// concrete type's own descriptor is refused by rtype until every
-		// method has the two ABI wrappers Ifn and Tfn.
-		b.errorf(InvNone, "%s: a conversion from %v to %v is not built yet. Its type word is the itab of that pair. specs/032 writes no itab, and a descriptor for a type with methods needs the two ABI wrappers rtype refuses one without", n.Op, from, to)
-		return b.zeroValue(to)
+	var word *Value
+	if to.EmptyIface {
+		word = b.typeWord(n, from)
+	} else {
+		word = b.itabWord(n, from, to)
 	}
-	word := b.typeWord(n, from)
 	data := b.dataWord(n, x, from)
 	if b.err != nil {
 		return b.zeroValue(to)
@@ -1561,6 +1569,55 @@ func (b *builder) typeWord(n ir.Expr, t *ir.Type) *Value {
 	v.Aux = o
 	return v
 }
+
+// itabWord returns the address of the itab that pairs t with iface.
+//
+// The name comes from ir.ItabSymbol and is never built here, for the reason
+// typeWord gives: the linker deduplicates an itab by name, and two spellings
+// of one pair are two itabs. Two interface values that hold one pair then
+// compare unequal, because the runtime compares interface values by comparing
+// their first words.
+//
+// The pair is recorded on the function, because a reference is not a
+// definition. cmd/link defines no go:itab. symbol, so the object that names
+// one owes the bytes, and only the caller holds the set a package emits.
+func (b *builder) itabWord(n ir.Expr, t, iface *ir.Type) *Value {
+	name, err := ir.ItabSymbol(t, iface)
+	if err != nil {
+		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v, whose type word is the itab of that pair: %v", t, iface, err))
+		return nil
+	}
+	o, ok := b.itabs[name]
+	if !ok {
+		o = &ir.Object{Name: name, Type: itabType, Class: ir.ClassGlobal}
+		b.itabs[name] = o
+		b.f.Itabs = append(b.f.Itabs, ir.Itab{Type: t, Iface: iface})
+	}
+	v := b.value(OpAddr, b.ptrTo(itabType), n.Pos)
+	v.Aux = o
+	return v
+}
+
+// itabType is the type of an itab, as construction sees it.
+//
+// Four words, which is internal/abi.ITab with the one Fun entry the struct
+// declares. The real symbol is one word longer per method the interface lists,
+// and the length is not known here and does not have to be: every use is the
+// address of a symbol rtype defines, so what is needed is a type of pointer
+// width to take the address of.
+//
+// It carries no name, for the reason descriptorType carries none.
+var itabType = func() *ir.Type {
+	t := &ir.Type{
+		Kind: ir.Array,
+		Elem: &ir.Type{Kind: ir.Uintptr, Size: ir.PtrSize, Align: ir.PtrSize, Name: "uintptr"},
+		Len:  4,
+	}
+	if err := ir.Layout(t); err != nil {
+		panic("ssa: internal/abi.ITab does not lay out: " + err.Error())
+	}
+	return t
+}()
 
 // descriptorType is the type of a type descriptor, as construction sees it.
 //

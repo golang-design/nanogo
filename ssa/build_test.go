@@ -2490,13 +2490,61 @@ func TestBuildConvertsAConcreteValueToAnEmptyInterface(t *testing.T) {
 	}
 }
 
+// TestBuildConvertsAConcreteValueToAnInterfaceWithMethods pins the type word
+// of the other half of specs/032's conversion.
+//
+// An interface with methods leads with an *itab and not with a *_type, and the
+// itab is per (concrete type, interface) pair. So the claim is two claims: the
+// word is the address of the pair's itab symbol, and the pair is recorded for
+// the object writer, which owes the bytes because cmd/link defines no
+// go:itab. symbol.
+func TestBuildConvertsAConcreteValueToAnInterfaceWithMethods(t *testing.T) {
+	sig := mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{tInt}})
+	tCoder := mkType(&ir.Type{Kind: ir.Interface, Name: "main.coder", PkgPath: "main",
+		Methods: []ir.Method{{Name: "code", Sig: sig}}})
+	tSeven := mkType(&ir.Type{Kind: ir.Ptr, Name: "*main.seven", Elem: mkType(&ir.Type{
+		Kind: ir.Struct, Name: "main.seven", PkgPath: "main", Fields: []ir.Field{},
+		Methods: []ir.Method{{Name: "code", Sig: sig, PtrOnly: true}},
+	})})
+
+	src := obj("src", tSeven, ir.ClassLocal)
+	dst := obj("dst", tCoder, ir.ClassLocal)
+	f := build(t, fun("convert", []*ir.Object{src, dst},
+		asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tCoder}),
+		asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tCoder}),
+	))
+
+	mk := findOp(f, OpIMake)
+	if mk == nil {
+		t.Fatalf("no interface was made:\n%s", f)
+	}
+	word := mk.Args[0]
+	if word.Op != OpAddr {
+		t.Fatalf("the type word is %v, want the address of an itab", word.Op)
+	}
+	name, err := ir.ItabSymbol(tSeven, tCoder)
+	if err != nil {
+		t.Fatalf("ItabSymbol: %v", err)
+	}
+	o, _ := word.Aux.(*ir.Object)
+	if o == nil || o.Name != name {
+		t.Fatalf("the type word names %v, want %s", word.Aux, name)
+	}
+	if len(f.Itabs) != 1 || f.Itabs[0].Type != tSeven || f.Itabs[0].Iface != tCoder {
+		t.Fatalf("the function records %v as the itabs it names, want the one pair once", f.Itabs)
+	}
+	if len(f.Descriptors) != 0 {
+		t.Errorf("the conversion also recorded %v, and an itab is not a descriptor", f.Descriptors)
+	}
+	// The data word is the concrete value: a pointer is its own data word.
+	if data := mk.Args[1]; data.Type != tSeven {
+		t.Errorf("the data word has type %v, want the pointer itself, which is %v", data.Type, tSeven)
+	}
+}
+
 // TestBuildRefusesADataWordItCannotBox names the two shapes construction has
 // no answer for, so that neither is compiled into a wrong one.
 func TestBuildRefusesADataWordItCannotBox(t *testing.T) {
-	tIface := mkType(&ir.Type{Kind: ir.Interface, Methods: []ir.Method{
-		{Name: "Code", Sig: mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}})},
-	}})
-
 	for _, tt := range []struct {
 		name string
 		from *ir.Type
@@ -2509,8 +2557,6 @@ func TestBuildRefusesADataWordItCannotBox(t *testing.T) {
 		// Two words. convT and convTnoptr take an address and construction has
 		// no frame slot to give them.
 		{"a two-word struct", tStruct, tEface, "runtime.convT"},
-		// The type word of an interface with methods is an itab.
-		{"an interface with methods", tInt, tIface, "itab"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			src := obj("src", tt.from, ir.ClassLocal)

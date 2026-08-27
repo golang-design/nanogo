@@ -335,6 +335,19 @@ type Func struct {
 	// written in the order symbols were added (specs/053-determinism.md).
 	Descriptors []*ir.Type
 
+	// Itabs lists the (concrete type, interface) pairs whose itabs this
+	// function's code names, in first-use order.
+	//
+	// It is a second list and not part of Descriptors because an itab is not a
+	// descriptor. It is named per pair, it is collected into
+	// runtime.itablinks, and rtype writes it from a different encoder. The
+	// obligation is the same one: a reference is not a definition, and
+	// cmd/link resolves go:itab. symbols by name and defines none of them.
+	//
+	// First-use order and not a map, for the reason Descriptors gives
+	// (specs/053-determinism.md).
+	Itabs []ir.Itab
+
 	// ABI is where specs/030-abi.md puts this function's parameters and
 	// results. AssignABI fills it and it is nil until then.
 	//

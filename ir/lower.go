@@ -520,6 +520,48 @@ var rtypeType = func() *Type {
 	return t
 }()
 
+// Itab names one (concrete type, interface) pair whose itab a package owes.
+//
+// It is a pair and not a type, because an itab holds the concrete type's
+// methods in the order the interface lists them: one type reached through two
+// interfaces is two itabs, and one interface reached from two types is two
+// more. ir.ItabSymbol turns the pair into the linker name and rtype.Itab
+// writes the bytes.
+//
+// It is here rather than beside ItabSymbol because it is the shape a pass
+// reports to the object writer, which is what LowerAndCollect and
+// ssa.Func.Itabs carry. Both name it, so it is declared once.
+type Itab struct {
+	// Type is the concrete type the interface value holds.
+	Type *Type
+
+	// Iface is the interface with methods the value was converted to. The
+	// empty interface has no itab (ItabSymbol refuses it), because its first
+	// word is a *_type.
+	Iface *Type
+}
+
+// itabType is the type of an itab, as this pass sees it: four words, which is
+// internal/abi.ITab with the one Fun entry the struct declares.
+//
+// The real symbol is longer, by one word per method the interface lists, and
+// the length is not known here. It does not have to be: every use is the
+// address of a symbol some other package defines, so what is needed is a type
+// of pointer width to take the address of. rtype.Itab writes the bytes and
+// decides the length.
+//
+// It is a separate type from rtypeType so that the first word of an interface
+// with methods is typed as what it holds. A comparison between that word and
+// the descriptor stand-in would be a comparison the IR calls well typed and
+// the runtime reads two different structures out of.
+var itabType = func() *Type {
+	t := &Type{Kind: Array, Elem: lowerUintptr, Len: 4}
+	if err := Layout(t); err != nil {
+		panic("ir: internal/abi.ITab does not lay out: " + err.Error())
+	}
+	return t
+}()
+
 // descriptor returns the address of the type descriptor of t.
 //
 // The name comes from TypeSymbol and is never built here.
