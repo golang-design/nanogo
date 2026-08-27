@@ -67,6 +67,18 @@ type K interface {
 	O() int
 }
 
+// L and F exist so that one method reaches a program through nothing but the
+// marker relocation the cache carries. Q is declared on no other interface, F
+// is converted to nothing but the empty interface, and so no compile-time itab
+// anywhere holds a reference to F.Q. The only itab that can call it is the one
+// runtime.getitab builds out of F's Method array, and cmd/link writes -1 in
+// that entry unless something says Q is reached.
+type L interface{ Q() int }
+
+type F int
+
+func (f F) Q() int { return int(f) + 7 }
+
 type E int
 
 func (e E) M() int { return int(e) }
@@ -84,6 +96,14 @@ func Assert(v any) I { return v.(I) }
 //
 //go:noinline
 func Try(v any) (I, bool) { i, ok := v.(I); return i, ok }
+
+// AssertL asserts and calls in the same function, which is the only shape that
+// tests the marker on a type assertion cache. A caller that gc compiled emits
+// a marker of its own for the method it selects, so a call made there proves
+// nothing about the one this compiler writes.
+//
+//go:noinline
+func AssertL(v any) int { return v.(L).Q() }
 
 // Narrow is the conversion between two interfaces that are not the same type.
 // It is the comma-ok assertion with the answer dropped.
@@ -177,6 +197,9 @@ func BoxJ(n int) J { return B(n) }
 
 //go:noinline
 func BoxJE(n int) J { return E(n) }
+
+//go:noinline
+func BoxF(n int) any { return F(n) }
 `
 
 // cacheImporter is compiled by gc, so runtime.GC and the linkname are the
@@ -272,6 +295,8 @@ func main() {
 			os.Exit(1)
 		}
 		want("narrow", lib.Narrow(lib.BoxJ(4)).M(), 4)
+		// Q reaches the program through the cache's marker and nothing else.
+		want("assert unshared method", lib.AssertL(lib.BoxF(5)), 12)
 		want("class nil", lib.Class(nil), -1)
 		want("class J before B", lib.Class(b), 1030)
 		want("class I", lib.Class(a), 3007)
