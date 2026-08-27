@@ -2048,6 +2048,13 @@ func isMapIndex(n Expr) bool {
 // already names storage is left where it is, because a load has no effect to
 // order against.
 func (l *lowerer) mapOperands(idx Expr, pos syntax.Pos) (desc, m, key Expr, why string) {
+	// The index's own statements run immediately before it, as they do for
+	// every other expression. l.expr flushes them, and a map index never
+	// reaches l.expr as a destination: it becomes a call to runtime.mapassign
+	// and this is where the operands are read. A range clause is what puts
+	// them there, so "for m[f()], v = range s" read an unassigned temporary
+	// as the key and, once the map itself was held too, as a nil map.
+	l.flush(idx)
 	mv := l.mapOperand(l.expr(idx.X))
 	_, _, why = mapKeyElem(mv())
 	if why != "" {

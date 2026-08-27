@@ -196,7 +196,32 @@ func main() {
 		break
 	}
 	fmt.Println("range", r, x[0], x[1])
+
+	// A map index as the destination the loop writes first. It becomes a call
+	// to runtime.mapassign rather than a location, so the operands held in
+	// front of it are read where that call reads them and nowhere else.
+	mf := map[int]int{}
+	var w int
+	for mf[three()], w = range []int{7, 8} {
+	}
+	fmt.Println("mapfirst", mf[3], w)
+
+	ms := map[int]int{}
+	u := 0
+	for u, ms[u] = range []int{7, 8} {
+	}
+	fmt.Println("mapsecond", u, ms[0], ms[1])
+
+	// The blank identifier as the destination the operands are held in front
+	// of. Nothing is stored into it and the operands are still evaluated.
+	bl := []int{10, 20}
+	for _, bl[three()-3] = range []int{7, 8} {
+	}
+	fmt.Println("blank", bl[0], bl[1])
 }
+
+//go:noinline
+func three() int { return 3 }
 `
 
 // TestToolexecAssignsInParallel compares every form of the statement against

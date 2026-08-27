@@ -3796,3 +3796,41 @@ func lowerFindFor(fn *Func) *Node {
 	}
 	return out
 }
+
+// TestLowerRunsTheStatementsAMapDestinationHolds is the one destination that
+// never reaches lower.expr.
+//
+// A map index as a destination becomes a call to runtime.mapassign, so the
+// statements the builder attached to it are flushed where its operands are
+// read and nowhere else. A range clause is what attaches them: it holds every
+// destination's operands in front of the first destination it writes, and the
+// first destination may be the map index.
+//
+// Without the flush the key and the map itself were unassigned temporaries, so
+// "for m[one()], v = range s" inserted under the zero key and then, once the
+// map was held too, assigned to a nil map and panicked. one() was not called
+// at all, which is what this asserts.
+func TestLowerRunsTheStatementsAMapDestinationHolds(t *testing.T) {
+	fn := lowerOK(t, `func f(m map[int]int, s []int) {
+	var v int
+	for m[one()], v = range s {
+	}
+	_ = v
+}`)
+	if !lowerCalled(fn, "runtime.mapassign") {
+		t.Fatalf("the destination is not a map insert:\n%s", buildDump(fn))
+	}
+	called := false
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OCall && n.X != nil && n.X.Op == OGlobal && n.X.Obj != nil &&
+				n.X.Obj.Name == "p.one" {
+				called = true
+			}
+			return true
+		})
+	}
+	if !called {
+		t.Errorf("the key expression is never evaluated:\n%s", buildDump(fn))
+	}
+}
