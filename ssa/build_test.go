@@ -2232,3 +2232,51 @@ func TestBuildWithoutAContextRegister(t *testing.T) {
 		t.Errorf("a function with no closure reads the context register %d times", n)
 	}
 }
+
+// TestBuildRefusesAnInterfaceConversionThatChangesTheLeadingWord pins the
+// distinction the identity path used to miss.
+//
+// A non-empty interface leads with an *itab and an empty one leads with a
+// *_type. Both are two words of the same size and both report kind Interface,
+// so a conversion between them satisfies "same kind, same size" and used to
+// return its operand unchanged. That left an *itab where the runtime reads a
+// type descriptor, which is why panic(err) died inside the runtime with "name
+// offset out of range" instead of printing its value.
+//
+// The conversion reads the descriptor out of the itab behind a nil check, the
+// way cmd/compile's walkConvInterface does, and specs/032 owns it. Until it is
+// built the mismatch is refused, because a refusal is the honest answer and
+// the wrong answer was not.
+func TestBuildRefusesAnInterfaceConversionThatChangesTheLeadingWord(t *testing.T) {
+	tEface := mkType(&ir.Type{Kind: ir.Interface, EmptyIface: true})
+	tIface := mkType(&ir.Type{Kind: ir.Interface})
+	if tEface.Size != tIface.Size {
+		t.Fatalf("the two interface layouts are %d and %d bytes, so this test no longer pins what it says", tEface.Size, tIface.Size)
+	}
+
+	for _, tt := range []struct {
+		name     string
+		from, to *ir.Type
+		refuse   bool
+	}{
+		{"non-empty to empty", tIface, tEface, true},
+		{"empty to non-empty", tEface, tIface, true},
+		{"empty to empty", tEface, tEface, false},
+		{"non-empty to non-empty", tIface, tIface, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			src := obj("src", tt.from, ir.ClassLocal)
+			dst := obj("dst", tt.to, ir.ClassLocal)
+			fn := fun("convert", []*ir.Object{src, dst},
+				asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tt.to}),
+			)
+			_, err := Build(fn)
+			if tt.refuse && err == nil {
+				t.Fatal("the conversion built, so an itab reaches a slot the runtime reads a type descriptor out of")
+			}
+			if !tt.refuse && err != nil {
+				t.Fatalf("a conversion between two interfaces of the same shape was refused: %v", err)
+			}
+		})
+	}
+}

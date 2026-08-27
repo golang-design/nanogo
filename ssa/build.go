@@ -1386,7 +1386,23 @@ func (b *builder) convert(n ir.Expr) *Value {
 		b.errorf(InvNone, "a conversion with no type")
 		return x
 	}
-	if from.Kind == to.Kind && from.Size == to.Size {
+	// Two interface types are the same width and the same kind, and the word
+	// they lead with is not the same word. A non-empty interface leads with an
+	// *itab and an empty one leads with a *_type, so returning the value
+	// unchanged puts an *itab where the runtime reads a type descriptor. That
+	// is how panic(err) died in the runtime with "name offset out of range"
+	// rather than printing its value: nothing below the IR could tell the two
+	// apart, because both are one kind and one size.
+	//
+	// The conversion itself reads the type descriptor out of the itab, behind a
+	// nil check, and specs/032-type-descriptors-and-itabs.md owns it. It is not
+	// built, so the mismatch is refused below rather than compiled into a wrong
+	// answer.
+	sameShape := from.Kind == to.Kind && from.Size == to.Size
+	if from.Kind == ir.Interface && to.Kind == ir.Interface {
+		sameShape = sameShape && from.EmptyIface == to.EmptyIface
+	}
+	if sameShape {
 		return x
 	}
 	op, ok := convertOp(from, to)
