@@ -18,7 +18,7 @@ fixed contract.
 
 ## What is built, and what is not
 
-**The table is built and gated.** `rtsym` holds 120 symbols, checked against
+**The table is built and gated.** `rtsym` holds 121 symbols, checked against
 2,435 functions parsed out of the runtime's source: 0 missing, 0 differing.
 Nine of them are defined in assembly, and a second test checks that each symbol
 exists, because no Go source states their signatures.
@@ -32,7 +32,7 @@ checkable. The check is the same: the type's spelling is compared against the
 runtime's source, so a field inserted ahead of `enabled`, or padding that stops
 the four-byte load from being valid, is a build failure.
 
-**The 120 symbols and the contract below are not the same set, in either
+**The 121 symbols and the contract below are not the same set, in either
 direction.** Every call the sections below name is in the table now:
 `decoderune` was the last one missing and the `range` row over a string is its
 caller. `rtsym` holds calls those sections do not enumerate at all: the
@@ -158,7 +158,7 @@ unexported, so none appears in export data and `go/importer` finds none of them:
 a probe against the installed toolchain returned nothing for any of them. The
 test parses `GOROOT/src/runtime` directly.
 
-**And the runtime's source is not one directory.** Ten of the 120 are not
+**And the runtime's source is not one directory.** Ten of the 121 are not
 declared in package `runtime`. `runtime.morestack_noctxt` and
 `runtime.gcWriteBarrier1` through `gcWriteBarrier8` are written in
 `runtime/asm_arm64.s` and have no Go declaration anywhere, so the table records
