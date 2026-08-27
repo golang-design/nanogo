@@ -1685,3 +1685,42 @@ func TestAllocateOperandsInTheArgumentAreaNeedNoScratchRegister(t *testing.T) {
 		}
 	}
 }
+
+// TestAllocateCallResultsDoNotShareARegister is the machine fact the
+// linearisation hides.
+//
+// A call defines every one of its results at once, in the registers the
+// convention names, and the linearisation gives each OpSelectN a position of
+// its own. Two results of one call then have ranges that do not meet, and the
+// scan gives them one register. The code generator moves the first result into
+// the register the second arrived in, and the second reads what the move
+// wrote.
+//
+// A result nobody reads is what makes the case reachable, because its range is
+// one position wide and ends before the next result begins. It still names an
+// ABI location the code generator moves out of, which is why it cannot simply
+// be dropped: ssa/lower.go keeps it for that reason.
+//
+// runtime.decoderune is the first call in this compiler with two results where
+// a caller reads only the second, and a range over a string that asks for no
+// rune is the program that produces it. Before this, that loop advanced by the
+// rune's value rather than by its width and stopped after two iterations.
+func TestAllocateCallResultsDoNotShareARegister(t *testing.T) {
+	f, e, mem := raFunc("two")
+	call := e.NewValue(0, OpStaticCall, MemType, mem)
+	unread := e.NewValue(0, OpSelectN, tInt, call)
+	unread.AuxInt = 0
+	read := e.NewValue(0, OpSelectN, tInt, call)
+	read.AuxInt = 1
+	use := e.NewValue(0, OpAdd, tInt, read, read)
+	raRet(e, call, use)
+
+	al := raAllocate(t, f, raTarget())
+	first, second := al.Home[unread.ID], al.Home[read.ID]
+	if first.Kind != LocReg || second.Kind != LocReg {
+		t.Fatalf("the results are at %v and %v, want two registers", first, second)
+	}
+	if first.Reg == second.Reg {
+		t.Errorf("both results of the call are in %v", first)
+	}
+}

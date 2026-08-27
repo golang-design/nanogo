@@ -566,6 +566,21 @@ func (an *regAnalysis) ranges() {
 		for _, v := range b.Values {
 			if an.tracked[v.ID] {
 				an.extend(v.ID, an.pos[v.ID])
+				if c := selectedCall(v); c != nil {
+					// A call defines every one of its results at once, in the
+					// registers the convention names, and the linearisation
+					// gives each OpSelectN a position of its own. Without this
+					// two results of one call have ranges that do not meet,
+					// and the scan gives them one register: the code generator
+					// then moves the first result into the register the second
+					// arrived in, and the second reads what the move wrote.
+					//
+					// A result nobody reads is what makes the case reachable.
+					// Its range is one position wide, so it ends before the
+					// next result begins, and it still names an ABI location
+					// the code generator moves out of.
+					an.extend(v.ID, an.pos[c.ID])
+				}
 			}
 			if v.Op == OpPhi {
 				// The copies that realise a phi run at the end of a
@@ -607,6 +622,21 @@ func (an *regAnalysis) ranges() {
 			}
 		}
 	}
+}
+
+// selectedCall returns the call a value reads a result of.
+//
+// The results of one call are defined together and cannot share a register,
+// which is what ranges uses it for.
+func selectedCall(v *Value) *Value {
+	if v.Op != OpSelectN || len(v.Args) == 0 {
+		return nil
+	}
+	c := v.Args[0]
+	if c == nil || !c.Op.IsCall() {
+		return nil
+	}
+	return c
 }
 
 func (an *regAnalysis) extend(id ID, p int32) {
