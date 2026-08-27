@@ -605,11 +605,13 @@ import "fmt"
 //go:noinline
 func id(s string) string { return s }
 
-// The loop bodies here call nothing. A call inside the body puts the byte
-// index live across it, and the phi that joins the two arms of the decode then
-// needs a copy from one stack slot to another, which ssagen.Emit has no case
-// for. That is a gap of its own, shared with test/divmod.go and
-// test/stackobj2.go in Go's corpus, and this program is about the row.
+//go:noinline
+func bump(x int) int { return x + 1 }
+
+// The loop bodies call. A call puts the byte index live across it, and the phi
+// that joins the two arms of the decode then reads one stack slot and writes
+// another, which ssagen.Emit refused until it grew that move. The bodies
+// counted with n+1 while it did.
 func main() {
 	for _, s := range []string{
 		"",
@@ -627,16 +629,16 @@ func main() {
 		for i, r := range id(s) {
 			idx[n] = i
 			runes[n] = int(r)
-			n = n + 1
+			n = bump(n)
 		}
 		k := 0
 		for i := range id(s) {
 			keys[k] = i
-			k = k + 1
+			k = bump(k)
 		}
 		c := 0
 		for range id(s) {
-			c = c + 1
+			c = bump(c)
 		}
 		fmt.Println("bytes", len(s), "runes", n, k, c)
 		for j := 0; j < n; j++ {
