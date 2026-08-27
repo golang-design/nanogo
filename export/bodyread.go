@@ -513,6 +513,10 @@ func (r *bodyReader) forStmt() *ForStmt {
 		// follows for the key and for the value. The operand's type is in
 		// the stream, because gc writes a reshape node carrying it in
 		// front of the expression.
+		//
+		// The test is types2.CoreType, which is the writer's own test on
+		// the writer's own type, so the two sides agree by construction
+		// and not by this reader guessing what gc decided.
 		xtyp := exprTypeOf(c.X)
 		if xtyp == nil {
 			r.refuse("the range operand carries no type, so whether a map descriptor follows cannot be decided")
@@ -791,7 +795,8 @@ func (r *bodyReader) expr1(kind ExprKind, typ types2.Type) Expr {
 		e.Pos = r.pos()
 		e.Index = r.expr()
 
-		// The descriptor of a map follows only where the operand is one.
+		// The descriptor of a map follows only where the operand is one,
+		// by the writer's own test on the writer's own type.
 		xtyp := exprTypeOf(e.X)
 		if xtyp == nil {
 			r.refuse("the indexed operand carries no type, so whether a map descriptor follows cannot be decided")
