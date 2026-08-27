@@ -282,6 +282,20 @@ type Target struct {
 	// case: the callee reads them where the convention says, not where the
 	// allocator put them.
 	UseReg func(v *Value, i int) (Reg, bool)
+
+	// ABIPlaces reports that the convention, and not the instruction, decides
+	// where a value finds every one of its operands. A call and a return are
+	// the cases, and it is what tells the two meanings of a false from UseReg
+	// apart: an operand of an ordinary instruction, which the allocator
+	// places, and an operand the convention put in the argument area, which
+	// the code generator stores there and reads no register for.
+	//
+	// The allocator needs the difference because a call and a return have as
+	// many operands as the program wrote arguments, and a scratch register per
+	// operand would be a demand no machine can meet. A target that leaves this
+	// nil says every operand of every value is read from a register the
+	// allocator names.
+	ABIPlaces func(v *Value) bool
 }
 
 // RegName returns the name of r, or a number when the target does not describe
@@ -512,6 +526,7 @@ func NewArm64Target() *Target {
 	// and the policy stays in one file.
 	t.DefReg = func(v *Value) (Reg, bool) { return ABIDefReg(t, v) }
 	t.UseReg = func(v *Value, i int) (Reg, bool) { return ABIUseReg(t, v, i) }
+	t.ABIPlaces = ABIPlacesOperands
 
 	return t
 }

@@ -1516,16 +1516,45 @@ func ABIDefReg(t *Target, v *Value) (Reg, bool) {
 	return NoReg, false
 }
 
+// ABIPlacesOperands reports whether the convention, and not the instruction,
+// decides where a value finds each of its operands.
+//
+// A call and a return are the cases, and they are the whole of ABIUseReg's
+// domain: the predicate and the placement below cannot drift, because the
+// placement asks the predicate first.
+//
+// The register allocator reads it for a second reason. An operand the
+// convention puts in a register is named by ABIUseReg. An operand it puts in
+// the outgoing argument area is written there by a store of its own, which
+// materialises it into one register and holds it no longer than that store. So
+// a call and a return read no operand out of a scratch register, and the
+// number of operands they have, which no machine bounds, never becomes a
+// scratch demand.
+func ABIPlacesOperands(v *Value) bool {
+	if v == nil {
+		return false
+	}
+	return v.Op.IsCall() || v.Op == OpMakeResult || v.Op == OpARM64RET
+}
+
 // ABIUseReg returns the register the convention fixes for argument i of a
 // value.
 //
 // A call's operands and a return's values are the cases: the callee reads them
 // where the convention says, not where the allocator happened to put them.
-// Naming the register here is what keeps a call with more spilled operands
-// than there are scratch registers from failing to allocate, and it is what
-// lets the code generator move each operand straight into its home.
+// Naming the register here is what keeps a call with spilled operands from
+// failing to allocate, and it is what lets the code generator move each
+// operand straight into its home.
+//
+// False has two meanings and the allocator has to tell them apart, which is
+// what ABIPlacesOperands is for: an operand of an ordinary instruction, which
+// the allocator places itself, and an operand of a call or a return that the
+// convention put in the argument area rather than a register.
 func ABIUseReg(t *Target, v *Value, i int) (Reg, bool) {
 	if t == nil || v == nil || i < 0 || i >= len(v.Args) {
+		return NoReg, false
+	}
+	if !ABIPlacesOperands(v) {
 		return NoReg, false
 	}
 	if r, ok := abiIndirectEntryReg(t, v, i); ok {
@@ -1537,10 +1566,8 @@ func ABIUseReg(t *Target, v *Value, i int) (Reg, bool) {
 	switch {
 	case v.Op.IsCall():
 		out, lo, _, err = ABICallArgs(t, v)
-	case v.Op == OpMakeResult || v.Op == OpARM64RET:
-		out, _, err = ABIResults(t, abiOperandTypes(v, 0))
 	default:
-		return NoReg, false
+		out, _, err = ABIResults(t, abiOperandTypes(v, 0))
 	}
 	if err != nil {
 		return NoReg, false

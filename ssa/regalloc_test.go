@@ -1552,3 +1552,136 @@ func TestPhiOfMemoryAndOfARematerialisedValue(t *testing.T) {
 		t.Errorf("the copy of a rematerialised argument is %+v", last.Copies[0])
 	}
 }
+
+// merge returns a function whose last block has n predecessors, with no
+// critical edge on any of them.
+//
+// The arms are chained rather than fanned out, because a block branches two
+// ways at most. Each arm block has one successor, so every edge into the join
+// can carry copies at the end of its predecessor.
+func merge(n int) (f *Func, arms []*Block, join *Block, mem *Value) {
+	f = NewFunc("merge")
+	entry := f.Entry
+	mem = entry.NewValue(0, OpInitMem, MemType)
+	join = f.NewBlock(BlockRet)
+	join.Control = join.NewValue(0, OpMakeResult, MemType, mem)
+
+	for i := 0; i < n; i++ {
+		arm := f.NewBlock(BlockPlain)
+		arms = append(arms, arm)
+		arm.AddEdgeTo(join)
+	}
+	at := entry
+	for i := 0; i < n-1; i++ {
+		at.Kind = BlockIf
+		at.Control = at.NewValue(0, OpConstBool, tBool)
+		at.AddEdgeTo(arms[i])
+		if i == n-2 {
+			// The last branch takes the last two arms.
+			at.AddEdgeTo(arms[n-1])
+			break
+		}
+		next := f.NewBlock(BlockPlain)
+		at.AddEdgeTo(next)
+		at = next
+	}
+	return f, arms, join, mem
+}
+
+// TestAllocatePhiOfManyArmsNeedsNoScratchRegister is the merge a select with
+// several arms builds.
+//
+// A phi is not an instruction. The code generator emits nothing for it and
+// resolvePhis turns it into a move on each edge, so the allocation must name
+// no register for its operands. Naming one drew a scratch register per
+// predecessor, which is a demand no machine bounds: this target reserves two
+// and the phi below has five operands, and reserving a third would only move
+// the refusal to a merge of four arms.
+//
+// The operands are constants, so each one is rematerialised and has no
+// register home, which is the case that reached the scratch registers. A
+// switch that assigns a different constant in each arm is the Go program.
+func TestAllocatePhiOfManyArmsNeedsNoScratchRegister(t *testing.T) {
+	const arms = 5
+	f, blocks, join, mem := merge(arms)
+	args := make([]*Value, 0, arms)
+	for i, b := range blocks {
+		c := b.NewValue(0, OpConstInt, tInt)
+		c.AuxInt = int64(i + 1)
+		args = append(args, c)
+	}
+	phi := join.NewValue(0, OpPhi, tInt, args...)
+	use := join.NewValue(0, OpAdd, tInt, phi, phi)
+	raRet(join, mem, use)
+
+	tg := raTarget()
+	if len(tg.Scratch[ClassInt]) != 2 {
+		t.Fatalf("the target reserves %d integer scratch registers; this test is about a phi wider than that",
+			len(tg.Scratch[ClassInt]))
+	}
+	al := raAllocate(t, f, tg)
+
+	for i, r := range al.Args[phi.ID] {
+		if r != NoReg {
+			t.Errorf("operand %d of the phi is read from %s, and a phi reads no register",
+				i, tg.RegName(r))
+		}
+	}
+	if len(al.Edges) != arms {
+		t.Fatalf("the join has %d predecessors and the allocation has %d copy sequences:\n%s",
+			arms, len(al.Edges), al)
+	}
+	for _, e := range al.Edges {
+		if len(e.Copies) != 1 || e.Copies[0].Src.Kind != LocNone {
+			t.Errorf("the edge b%d -> b%d carries %v, want one recomputation of the arm's constant",
+				e.Pred, e.Succ, e.Copies)
+		}
+	}
+}
+
+// TestAllocateOperandsInTheArgumentAreaNeedNoScratchRegister is the call with
+// more arguments than the convention has registers for.
+//
+// specs/030-abi.md places such an operand in the outgoing argument area. The
+// code generator writes it there with a store of its own, which materialises
+// it into one register and holds it no longer than that store, so the call
+// reads no register for it. Drawing a scratch register per such operand made
+// the demand grow with the parameter list, which no machine bounds.
+func TestAllocateOperandsInTheArgumentAreaNeedNoScratchRegister(t *testing.T) {
+	f, e, mem := raFunc("frameargs")
+	args := make([]*Value, 0, 4)
+	for i := 0; i < 4; i++ {
+		c := e.NewValue(0, OpConstInt, tInt)
+		c.AuxInt = int64(i)
+		args = append(args, c)
+	}
+	raRet(e, mem, args...)
+	ret := e.Control
+
+	tg := raTarget()
+	if len(tg.Scratch[ClassInt]) != 2 {
+		t.Fatalf("the target reserves %d integer scratch registers; this test is about a value wider than that",
+			len(tg.Scratch[ClassInt]))
+	}
+	// The convention gives the first two values a register each and leaves the
+	// rest in the argument area.
+	tg.ABIPlaces = func(v *Value) bool { return v.Op == OpMakeResult }
+	tg.UseReg = func(v *Value, i int) (Reg, bool) {
+		if v.Op != OpMakeResult || i >= 2 {
+			return NoReg, false
+		}
+		return []Reg{raR0, raR1}[i], true
+	}
+	al := raAllocate(t, f, tg)
+
+	got := al.Args[ret.ID]
+	want := []Reg{raR0, raR1, NoReg, NoReg, NoReg}
+	if len(got) != len(want) {
+		t.Fatalf("the return has %d operand registers for %d operands:\n%s", len(got), len(want), al)
+	}
+	for i, r := range want {
+		if got[i] != r {
+			t.Errorf("operand %d is read from %s, want %s", i, tg.RegName(got[i]), tg.RegName(r))
+		}
+	}
+}

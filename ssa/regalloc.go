@@ -147,12 +147,26 @@ func (e *AllocError) Error() string { return "ssa: regalloc: " + e.Func + ": " +
 // ScratchError reports an instruction that needs more scratch registers than
 // the target reserves.
 //
-// It is a bound of the design rather than a bug in the input. A value is read
-// from its slot into a scratch register at each use, a rematerialised value is
+// It is a bound of the design rather than a bug in the input. A value in a
+// slot is read into a scratch register at each use, a rematerialised value is
 // recomputed into one, and a spilled result of a two-address instruction needs
-// one of its own, so a target that reserves two cannot serve an instruction
-// with three spilled operands. The error names the operation and the counts,
-// so that the fix, which is to reserve one more, is obvious.
+// one of its own. The demand of one instruction is therefore the number of its
+// distinct operands the code generator materialises, plus one on a two-address
+// machine, and the target must reserve as many as its widest instruction has.
+// On arm64 that is three, from the indexed stores and from MADD and MSUB, and
+// the machine is three-address so a spilled result adds nothing.
+//
+// The bound holds only because the values whose operand count no machine
+// bounds draw nothing. A phi has one operand per predecessor and a call or a
+// return has one per argument, and assignOperands says why neither reads an
+// operand out of a scratch register. Counting either would make the demand
+// unbounded, and then no fixed reservation could serve it and raising the
+// count would only move the failure.
+//
+// So this error means the machine grew an instruction wider than the target
+// reserves for. The error names the operation and the counts, and
+// TestArm64ScratchCoversTheOperationTable fails on the same change before any
+// program does.
 type ScratchError struct {
 	Func  string
 	Value ID
@@ -1059,12 +1073,31 @@ func (an *regAnalysis) classOf(id ID) RegClass {
 // its class and stored from there; reusing an operand's scratch register is
 // safe, because an instruction reads its sources before it writes its
 // destination.
+//
+// Two kinds of value read no operand out of a scratch register, and saying so
+// is what gives the scratch demand a bound.
+//
+// A phi is not an instruction. resolvePhis turns it into a move on each edge,
+// and the code generator emits nothing for the phi itself, so a register named
+// for operand i would be a register nothing reads.
+//
+// A call and a return read their operands where specs/030-abi.md puts them.
+// UseReg names the register for an operand the convention puts in one, and an
+// operand it puts in the argument area is written there by a store of its own,
+// which materialises it into one register and holds it no longer than that
+// store.
+//
+// Both have an operand count the machine does not bound: a phi has one per
+// predecessor, a call one per argument. Drawing a scratch register for them
+// would make the demand unbounded, and a target that reserves a fixed number
+// could then be defeated by a wider select or a longer parameter list.
 func (an *regAnalysis) assignOperands(a *Alloc) error {
 	t := an.t
 	for _, b := range an.order {
 		for _, v := range b.Values {
 			regs := make([]Reg, len(v.Args))
 			var used [NumRegClass]int
+			abiPlaced := t.ABIPlaces != nil && t.ABIPlaces(v)
 			for i, arg := range v.Args {
 				regs[i] = NoReg
 				if arg == nil || IsMemory(arg) {
@@ -1080,12 +1113,25 @@ func (an *regAnalysis) assignOperands(a *Alloc) error {
 						"the target calls v%d rematerialisable and its type %v does not fit one register",
 						arg.ID, arg.Type)}
 				}
+				if v.Op == OpPhi {
+					// A phi reads nothing here. Its operands become moves on
+					// the edges, which resolvePhis places from the operands'
+					// homes.
+					continue
+				}
 				if r, fixed := t.UseReg(v, i); fixed {
 					// specs/030-abi.md fixes where a call reads its operands.
 					// The move from the operand's home into that register is
 					// the code generator's, and the register is named here so
 					// that it knows to make it.
 					regs[i] = r
+					continue
+				}
+				if abiPlaced {
+					// The convention put this operand in the argument area
+					// rather than a register. The code generator writes it
+					// there with a store of its own and the instruction reads
+					// no register for it.
 					continue
 				}
 				if !an.remat[arg.ID] && a.Home[arg.ID].Kind == LocReg {
@@ -1547,6 +1593,12 @@ func verifyOverlap(f *Func, a *Alloc, an *regAnalysis, add addViolation) {
 
 // verifyOperands checks that every instruction names where it reads each
 // operand from.
+//
+// It mirrors assignOperands case for case, the two kinds of value that read no
+// operand out of a scratch register included: a register named for an operand
+// of a phi, or for an operand a call or a return leaves in the argument area,
+// is a register the code generator never reads, and naming one is how the
+// scratch demand became unbounded.
 func verifyOperands(f *Func, a *Alloc, an *regAnalysis, add addViolation) {
 	t := a.Target
 	for _, b := range an.order {
@@ -1556,6 +1608,7 @@ func verifyOperands(f *Func, a *Alloc, an *regAnalysis, add addViolation) {
 				add(AllocInvOperand, b.ID, v.ID, "%d operand registers for %d arguments", len(regs), len(v.Args))
 				continue
 			}
+			abiPlaced := t.ABIPlaces != nil && t.ABIPlaces(v)
 			for i, arg := range v.Args {
 				r := regs[i]
 				if arg == nil || IsMemory(arg) || (!an.tracked[arg.ID] && !an.remat[arg.ID]) {
@@ -1564,10 +1617,26 @@ func verifyOperands(f *Func, a *Alloc, an *regAnalysis, add addViolation) {
 					}
 					continue
 				}
+				if v.Op == OpPhi {
+					if r != NoReg {
+						add(AllocInvOperand, b.ID, v.ID,
+							"operand %d of a phi names %s, and a phi reads no register: its operands are moved on the edges",
+							i, t.RegName(r))
+					}
+					continue
+				}
 				if fixed, ok := t.UseReg(v, i); ok {
 					if r != fixed {
 						add(AllocInvOperand, b.ID, v.ID, "the ABI reads operand %d from %s and the allocation names %s",
 							i, t.RegName(fixed), t.RegName(r))
+					}
+					continue
+				}
+				if abiPlaced {
+					if r != NoReg {
+						add(AllocInvOperand, b.ID, v.ID,
+							"operand %d travels in the argument area and names %s, and no register is read for it",
+							i, t.RegName(r))
 					}
 					continue
 				}

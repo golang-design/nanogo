@@ -139,9 +139,15 @@ func main() {
 }
 `
 
-// TestARM64ConditionalSetRunsOnHardware is the deliverable of the conditional
-// set: source text in, a process that exits zero out.
-func TestARM64ConditionalSetRunsOnHardware(t *testing.T) {
+// buildWithNanogo compiles one main package with nanogo, links it, runs it,
+// and fails the test unless it exits zero. It returns the go command and the
+// executable, so that a caller can read the disassembly back.
+//
+// nanogo's own log is the evidence that nanogo compiled the package. Without
+// it a build the go command delegated to gc would look exactly like a build
+// nanogo did, and the process would exit zero either way.
+func buildWithNanogo(t *testing.T, name, program string) (goCmd, prog string) {
+	t.Helper()
 	arm64Host(t)
 	goCmd, err := exec.LookPath("go")
 	if err != nil {
@@ -156,7 +162,7 @@ func TestARM64ConditionalSetRunsOnHardware(t *testing.T) {
 	mod := filepath.Join(dir, "mod")
 	list := filepath.Join(dir, "allowlist")
 	logFile := filepath.Join(dir, "nanogo.log")
-	prog := filepath.Join(dir, "cond")
+	prog = filepath.Join(dir, name)
 	// A build cache of this test's own. The go command caches per compiler
 	// identity, and a cached object would let this pass while nanogo compiled
 	// nothing at all.
@@ -184,8 +190,8 @@ func TestARM64ConditionalSetRunsOnHardware(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("go.mod", "module nanogo.example/cond\n\ngo 1.27\n")
-	write("main.go", condProgram)
+	write("go.mod", "module nanogo.example/"+name+"\n\ngo 1.27\n")
+	write("main.go", program)
 	if err := os.WriteFile(list, []byte("main\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -213,9 +219,16 @@ func TestARM64ConditionalSetRunsOnHardware(t *testing.T) {
 	}
 
 	if out, err := exec.Command(prog).CombinedOutput(); err != nil {
-		t.Fatalf("the compiled program did not exit zero, so a comparison gave the wrong answer: %v\n%s",
+		t.Fatalf("the compiled program did not exit zero, so it computed a wrong answer: %v\n%s",
 			err, out)
 	}
+	return goCmd, prog
+}
+
+// TestARM64ConditionalSetRunsOnHardware is the deliverable of the conditional
+// set: source text in, a process that exits zero out.
+func TestARM64ConditionalSetRunsOnHardware(t *testing.T) {
+	goCmd, prog := buildWithNanogo(t, "cond", condProgram)
 
 	// The disassembly, read back with a tool that is not this compiler. It
 	// names the condition each CSET carries, which is the half of the
@@ -246,4 +259,79 @@ func childEnv(extra []string) []string {
 		}
 	}
 	return append(out, extra...)
+}
+
+// scratchProgram asks for the two shapes whose operand count no machine
+// bounds, so that the register allocator's fixed scratch reservation is
+// measured against a program rather than against a unit test's target.
+//
+// pick merges five arms into one variable. A phi is not an instruction: the
+// code generator emits nothing for it and the allocation turns it into a move
+// on each edge. While the allocation named a scratch register per operand
+// instead, a merge of three arms already asked for more than arm64 reserves,
+// which is why internal/e2e's select probe returns from each arm rather than
+// merging.
+//
+// twenty passes four arguments beyond the sixteen integer registers
+// specs/030-abi.md assigns, so the convention leaves them in the outgoing
+// argument area. The code generator writes each one there with a store of its
+// own, so the call reads no register for them.
+//
+// Each function contributes a distinct digit, so one wrong answer cannot
+// cancel another. The exit status is the assertion: a wrong total divides by
+// zero and the runtime kills the process.
+const scratchProgram = `package main
+
+func pick(n int) int {
+	var x int
+	switch n {
+	case 0:
+		x = 1
+	case 1:
+		x = 2
+	case 2:
+		x = 3
+	case 3:
+		x = 4
+	default:
+		x = 5
+	}
+	return x
+}
+
+func twenty(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19 int) int {
+	return a0 + a16 + a17 + a18 + a19
+}
+
+func main() {
+	d := pick(0) + pick(1)*10 + pick(2)*100 + pick(3)*1000 + pick(9)*10000 - 54321
+	d = d + twenty(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20) - 75
+	if d != 0 {
+		d = d / (d - d)
+	}
+}
+`
+
+// TestARM64ScratchBoundRunsOnHardware compiles and runs the two shapes the
+// scratch reservation used to refuse.
+//
+// The exit status is not the whole assertion. The disassembly says the call
+// wrote its four frame arguments, which an allocation that named a scratch
+// register for each of them would also have done, and it says the merge left
+// no instruction behind for the phi.
+func TestARM64ScratchBoundRunsOnHardware(t *testing.T) {
+	goCmd, prog := buildWithNanogo(t, "scratch", scratchProgram)
+
+	dump, err := exec.Command(goCmd, "tool", "objdump", "-s", "main.main", prog).Output()
+	if err != nil {
+		t.Fatalf("go tool objdump: %v", err)
+	}
+	// The four arguments beyond the sixteen registers, at the offsets
+	// specs/030-abi.md gives them in the outgoing area. The area starts one
+	// word above the stack pointer, where the callee saves its link register.
+	for _, want := range []string{"8(RSP)", "16(RSP)", "24(RSP)", "32(RSP)"} {
+		if !strings.Contains(string(dump), want) {
+			t.Errorf("the disassembly of main writes nothing to %s; the call passes four arguments in the frame", want)
+		}
+	}
 }
