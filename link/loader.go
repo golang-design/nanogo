@@ -88,10 +88,13 @@ type Loader struct {
 }
 
 // A synthetic symbol is one the linker built. It has a name, a version,
-// and the symbols it refers to, and no object holds it.
+// the symbols it refers to, and the space it takes in the output, and no
+// object holds it.
 type synthetic struct {
 	name    string
 	ver     int
+	kind    Kind
+	size    uint32
 	targets []Global
 }
 
@@ -453,12 +456,20 @@ func (l *Loader) Resolve(o *Object, r obj.SymRef) Global {
 const objSynthetic = -2
 
 // addSynthetic records a symbol the linker built and returns it. A name
-// that already exists is reused, so a second call replaces the targets
-// rather than adding a second symbol of one name.
-func (l *Loader) addSynthetic(name string, ver int, targets []Global) Global {
+// a previous call already built is reused, so a second call replaces the
+// targets rather than adding a second symbol of one name.
+func (l *Loader) addSynthetic(name string, ver int, kind Kind, size uint32, targets []Global) Global {
+	if ver < len(l.byName) {
+		if g, ok := l.byName[ver][name]; ok {
+			if syn := l.synthetic(g); syn != nil {
+				syn.kind, syn.size, syn.targets = kind, size, targets
+				return g
+			}
+		}
+	}
 	g := Global(len(l.objSyms))
 	l.objSyms = append(l.objSyms, objSym{objSynthetic, uint32(len(l.synth))})
-	l.synth = append(l.synth, synthetic{name: name, ver: ver, targets: targets})
+	l.synth = append(l.synth, synthetic{name: name, ver: ver, kind: kind, size: size, targets: targets})
 	if ver < len(l.byName) {
 		l.byName[ver][name] = g
 	}

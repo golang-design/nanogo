@@ -76,7 +76,7 @@ func (l *Loader) initTaskSym(root, name string) Global {
 			targets = append(targets, g)
 		}
 	}
-	return l.addSynthetic(name, VerABI0, targets)
+	return l.addSynthetic(name, VerABI0, Kxxx, 0, targets)
 }
 
 // MainInitTasks is the list the program runs at startup, or 0.
