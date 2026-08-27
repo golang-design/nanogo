@@ -456,6 +456,8 @@ type T struct {
 }
 
 func (t T) M() int  { return t.A }
+func (t T) Self() T { return t }
+func (t T) Take(int) {}
 func (t *T) P() int { return t.B }
 
 type C struct{ A, B int }
@@ -508,6 +510,39 @@ func buildFuncOf(t *testing.T, p *Package, name string) *Func {
 	}
 	t.Fatalf("no function %s", name)
 	return nil
+}
+
+// TestBuildEvaluatesAMethodReceiverBeforeTheArguments is the order the
+// specification gives an expression: left to right.
+//
+// The receiver of a method call stands to the left of the argument list, so a
+// receiver that is itself a call runs first. A receiver left in the tree runs
+// where the call is built instead, which is after the argument's own temporary
+// was emitted, and the two calls then happen in the wrong order. Nothing below
+// this reports it: both calls happen, both results are right, and only their
+// side effects say which ran first.
+func TestBuildEvaluatesAMethodReceiverBeforeTheArguments(t *testing.T) {
+	p := buildSource(t, "func order(t T) { t.Self().Take(t.M()) }\n")
+	fn := buildFuncOf(t, p, "order")
+
+	// The receiver's call goes into a temporary where it stands, so it is the
+	// first call the statement list performs.
+	calls := buildFind(fn, OCall)
+	var names []string
+	for _, c := range calls {
+		if c.X != nil && c.X.Obj != nil {
+			names = append(names, c.X.Obj.Name)
+		}
+	}
+	want := []string{"p.T.Self", "p.T.M", "p.T.Take"}
+	if len(names) != len(want) {
+		t.Fatalf("the body calls %v, want %v:\n%s", names, want, buildDump(fn))
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("the body calls %v, want %v:\n%s", names, want, buildDump(fn))
+		}
+	}
 }
 
 // TestBuildIndexesAnInterfaceCallInMethodOrder pins the one number a call

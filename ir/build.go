@@ -2397,7 +2397,12 @@ func (b *builder) methodCall(x *syntax.CallExpr, sel *syntax.SelectorExpr, s *ty
 		return b.badExpr(x.Pos())
 	}
 	fsig, _ := fn.Type().(*types2.Signature)
-	recv, recvType := b.fieldPath(b.expr(sel.X), b.typeOf(sel.X), s.Index()[:len(s.Index())-1])
+	// b.operand and not b.expr: the receiver is evaluated before the
+	// arguments, so a receiver that is a call goes into a temporary where it
+	// stands. Without it "t.a(1).a(t.b(2))" calls b before a, because the
+	// argument's own temporary is emitted first and the receiver's call is
+	// left in the tree.
+	recv, recvType := b.fieldPath(b.operand(sel.X), b.typeOf(sel.X), s.Index()[:len(s.Index())-1])
 	n := &Node{Op: OCall, Pos: x.Pos(), Type: b.resultType(fsig)}
 	if x.HasDots {
 		n.Index = spread
