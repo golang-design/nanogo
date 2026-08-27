@@ -73,12 +73,18 @@ func exportBodies(cfg *Config, pkg *types2.Package, info *types2.Info, fset *syn
 //
 // Two skips, and each is a property of the declaration rather than of its
 // body. A declaration with no block is satisfied by assembly or by a
-// linkname, and there is no body to carry. A declaration carrying any //go:
-// directive is skipped because the writer carries no directive at all
-// (specs/016-directives-and-pragmas.md): gc's inliner refuses //go:noinline,
-// //go:norace, //go:nocheckptr, //go:cgo_unsafe_args, //go:uintptrescapes,
-// //go:uintptrkeepalive and //go:yeswritebarrierrec outright, and it would
-// read a pragma field of zero and inline what the source forbade.
+// linkname, and there is no body to carry. A declaration carrying a //go:
+// directive the driver records is skipped because the writer carries no
+// directive at all (specs/016-directives-and-pragmas.md): gc's inliner
+// refuses //go:noinline, //go:norace, //go:nocheckptr, //go:cgo_unsafe_args,
+// //go:uintptrescapes, //go:uintptrkeepalive and //go:yeswritebarrierrec
+// outright, and it would read a pragma field of zero and inline what the
+// source forbade.
+//
+// A verb the driver does not record is not one of the seven and does not skip
+// the declaration. //go:linkname is the one that reaches here: the form that
+// gives a body away leaves the body in place, and the form that takes one has
+// no block and is skipped above.
 //
 // The blank name is skipped because nothing can name it, so nothing can
 // inline it.

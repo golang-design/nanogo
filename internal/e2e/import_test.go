@@ -826,9 +826,24 @@ func TestGcInlinesABodyNanogoWrote(t *testing.T) {
 	files := map[string]string{
 		"go.mod": "module nanogo.example/inline\n\ngo 1.27\n",
 		"lib/lib.go": "package lib\n\n" +
-			"func Double(x int) int { return x + x }\n",
+			"func Double(x int) int { return x + x }\n\n" +
+			// A local and a branch, so the body carries statements and the
+			// locals gc numbers from the signature's arity.
+			"func Abs(x int) int {\n\ty := x\n\tif y < 0 {\n\t\ty = -y\n\t}\n\treturn y\n}\n\n" +
+			// A call to another declaration of the same package, so the body
+			// names an object element the writer allocated.
+			"func Quad(x int) int { return Double(Double(x)) }\n\n" +
+			// A method, whose object element is written inside its type's and
+			// whose extension data is paired with it by position.
+			"type Counter struct{ N int }\n\n" +
+			"func (c Counter) Get() int { return c.N }\n\n" +
+			"func (c *Counter) Add(d int) { c.N += d }\n",
 		"main.go": "package main\n\nimport (\n\t\"os\"\n\n\t\"nanogo.example/inline/lib\"\n)\n\n" +
-			"func main() { os.Exit(lib.Double(21)) }\n",
+			"func main() {\n" +
+			"\tc := lib.Counter{N: lib.Abs(-3)}\n" +
+			"\tc.Add(lib.Quad(2) - lib.Double(4))\n" +
+			"\tos.Exit(lib.Double(c.Get()) + 36)\n" +
+			"}\n",
 	}
 	h := setup(t, files, []string{"nanogo.example/inline/lib"})
 
@@ -840,8 +855,19 @@ func TestGcInlinesABodyNanogoWrote(t *testing.T) {
 		t.Fatalf("nanogo delegated the library, so gc read gc's own export data:\n%s",
 			strings.Join(h.decisions(t), "\n"))
 	}
-	if !strings.Contains(out, "inlining call to lib.Double") {
-		t.Fatalf("gc did not inline the body nanogo wrote; -m said:\n%s", out)
+	for _, want := range []string{
+		"inlining call to lib.Double",
+		"inlining call to lib.Abs",
+		"inlining call to lib.Quad",
+		"inlining call to lib.Counter.Get",
+		"inlining call to lib.(*Counter).Add",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("gc did not report %q; -m said:\n%s", want, out)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 
 	b, err := exec.Command(filepath.Join(h.mod, "prog")).CombinedOutput()
