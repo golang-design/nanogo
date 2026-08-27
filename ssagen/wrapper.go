@@ -115,60 +115,6 @@ func MethodWrappers(types []*ir.Type) ([]*ir.Func, error) {
 	return out, nil
 }
 
-// MethodSymbol returns the linker symbol of a method of t.
-//
-// ptrRecv chooses between the two spellings: pkg.T.M for a value receiver and
-// pkg.(*T).M for a pointer one. The spelling is ir.Build's, because the method
-// this names is the one ir.Build compiled, and a wrapper generated under a
-// second spelling would be a symbol the descriptor names and nothing defines.
-//
-// The rule is gc's ir.MethodSym with one clause left out. gc qualifies an
-// unexported method by its own package when that package is not the receiver
-// type's, which distinguishes two unexported methods of one name declared in
-// two packages. nanogo's front end does not spell that clause either
-// (ir.Build's funcSym), so adding it here would produce a name for the wrapper
-// that the method it calls does not have.
-func MethodSymbol(t *ir.Type, m ir.Method, ptrRecv bool) (string, error) {
-	name, err := receiverName(t)
-	if err != nil {
-		return "", err
-	}
-	if m.Name == "" {
-		return "", fmt.Errorf("ssagen: a method of %s has no name", t)
-	}
-	if ptrRecv {
-		return t.PkgPath + ".(*" + name + ")." + m.Name, nil
-	}
-	return t.PkgPath + "." + name + "." + m.Name, nil
-}
-
-// receiverName returns the identifier a method symbol spells the receiver
-// with: the defined type's name with its import path taken off.
-//
-// ir.Type.Name is qualified by the import path and ir.Type.PkgPath holds that
-// path, so the identifier is what is left. The last dot is not the separator
-// (an instantiation's name holds the dots of its type arguments), which is why
-// the prefix is taken off rather than searched for.
-func receiverName(t *ir.Type) (string, error) {
-	if t == nil || t.Name == "" {
-		return "", fmt.Errorf("ssagen: a method wrapper needs a defined receiver type")
-	}
-	name := t.Name
-	if t.PkgPath != "" {
-		if !strings.HasPrefix(name, t.PkgPath+".") {
-			return "", fmt.Errorf("ssagen: the name of %s is not qualified by its package %q", t, t.PkgPath)
-		}
-		name = name[len(t.PkgPath)+1:]
-	}
-	if i := strings.IndexByte(name, '['); i >= 0 {
-		// A generic instantiation. ir.Build's funcSym spells the method of
-		// every instantiation with the origin's name, so the wrapper is
-		// spelled the same way and reaches the same symbol.
-		name = name[:i]
-	}
-	return name, nil
-}
-
 // methodWrapper builds (*T).M for a value receiver method M of T.
 //
 // The body is one statement:
@@ -183,7 +129,7 @@ func receiverName(t *ir.Type) (string, error) {
 // may be spelled and panicwrap is not in it, so the message is the fault's
 // rather than the wrapper's, and the behaviour is the same.
 func methodWrapper(t *ir.Type, m ir.Method) (*ir.Func, error) {
-	sym, err := MethodSymbol(t, m, true)
+	sym, err := ir.MethodSymbol(t, m, true)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +175,7 @@ func methodWrapper(t *ir.Type, m ir.Method) (*ir.Func, error) {
 			Name: fmt.Sprintf(".r%d", i), Type: rt, Class: ir.ClassResult, Pos: wrapperPos,
 		})
 	}
-	target, err := MethodSymbol(t, m, false)
+	target, err := ir.MethodSymbol(t, m, false)
 	if err != nil {
 		return nil, err
 	}

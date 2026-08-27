@@ -289,6 +289,67 @@ func ExportedName(name string) bool {
 	return unicode.IsUpper(r)
 }
 
+// MethodSymbol returns the linker symbol of a method of t.
+//
+// ptrRecv chooses between the two spellings: pkg.T.M for a value receiver and
+// pkg.(*T).M for a pointer one. The spelling is Build's, because the method
+// this names is the one Build compiled, and a wrapper generated under a second
+// spelling would be a symbol a descriptor names and nothing defines.
+//
+// The rule is gc's ir.MethodSym with one clause left out. gc qualifies an
+// unexported method by its own package when that package is not the receiver
+// type's, which distinguishes two unexported methods of one name declared in
+// two packages. nanogo's front end does not spell that clause either (funcSym),
+// so adding it here would produce a name for the wrapper that the method it
+// calls does not have.
+//
+// It is here with the descriptor names rather than with the wrapper generator
+// because two packages read it. ssagen generates the wrapper and rtype writes
+// the descriptor row that names it, and rtype cannot ask ssagen: ssagen already
+// imports rtype for the descriptor a stack map and an algorithm need. Two
+// spellings of one wrapper would be a descriptor pointing at a function nothing
+// defines.
+func MethodSymbol(t *Type, m Method, ptrRecv bool) (string, error) {
+	name, err := receiverName(t)
+	if err != nil {
+		return "", err
+	}
+	if m.Name == "" {
+		return "", fmt.Errorf("ir: a method of %s has no name", t)
+	}
+	if ptrRecv {
+		return t.PkgPath + ".(*" + name + ")." + m.Name, nil
+	}
+	return t.PkgPath + "." + name + "." + m.Name, nil
+}
+
+// receiverName returns the identifier a method symbol spells the receiver
+// with: the defined type's name with its import path taken off.
+//
+// Type.Name is qualified by the import path and Type.PkgPath holds that path,
+// so the identifier is what is left. The last dot is not the separator (an
+// instantiation's name holds the dots of its type arguments), which is why the
+// prefix is taken off rather than searched for.
+func receiverName(t *Type) (string, error) {
+	if t == nil || t.Name == "" {
+		return "", fmt.Errorf("ir: a method symbol needs a defined receiver type")
+	}
+	name := t.Name
+	if t.PkgPath != "" {
+		if !strings.HasPrefix(name, t.PkgPath+".") {
+			return "", fmt.Errorf("ir: the name of %s is not qualified by its package %q", t, t.PkgPath)
+		}
+		name = name[len(t.PkgPath)+1:]
+	}
+	if i := strings.IndexByte(name, '['); i >= 0 {
+		// A generic instantiation. funcSym spells the method of every
+		// instantiation with the origin's name, so the wrapper is spelled the
+		// same way and reaches the same symbol.
+		name = name[:i]
+	}
+	return name, nil
+}
+
 // MethodOrder returns ms in the order gc writes a method array, which is a
 // copy and leaves ms alone.
 //

@@ -198,7 +198,7 @@ func TestMethodSymbolSpellsTheReceiver(t *testing.T) {
 	c := check(t, wrapperSource)
 	base := c.namedType(t, "counter")
 	for _, m := range base.Methods {
-		got, err := MethodSymbol(base, m, m.PtrOnly)
+		got, err := ir.MethodSymbol(base, m, m.PtrOnly)
 		if err != nil {
 			t.Fatalf("MethodSymbol %s: %v", m.Name, err)
 		}
@@ -255,7 +255,7 @@ func TestMethodWrapperRuns(t *testing.T) {
 			// The method the wrapper calls, compiled from its declaration,
 			// and the wrapper itself. Both go into the one object, which is
 			// what the driver does.
-			method, err := MethodSymbol(c.namedType(t, "counter"), methodNamed(t, c, "counter", methodOf(tc2.sym)), false)
+			method, err := ir.MethodSymbol(c.namedType(t, "counter"), methodNamed(t, c, "counter", methodOf(tc2.sym)), false)
 			if err != nil {
 				t.Fatal(err)
 			}
