@@ -72,7 +72,7 @@ probes 95
 
 probe refused append-int
 probe refused append-slice
-probe refused array-local
+probe ok array-local
 probe refused asm-package
 probe refused buildinfo
 probe ok buildinfo-named
@@ -115,11 +115,11 @@ probe ok int-arith
 probe ok make-byte-slice
 probe refused make-method-slice
 probe ok make-struct-slice
-probe refused map-comma-ok
-probe refused map-delete-len
-probe refused map-literal
-probe refused map-make-assign
-probe refused map-range
+probe ok map-comma-ok
+probe ok map-delete-len
+probe ok map-literal
+probe ok map-make-assign
+probe ok map-range
 probe ok method-call
 probe ok multi-assign
 probe ok multivalue-regs

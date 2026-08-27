@@ -48,11 +48,14 @@ pass matched args.go
 pass matched armimm.go
 pass rejected assign.go
 pass rejected assign1.go
+pass matched atomicload.go
 pass rejected blank1.go
 pass rejected bombad.go
 pass rejected cannotassign.go
 pass matched char_lit.go
+pass matched clear.go
 pass matched closure1.go
+pass matched closure2.go
 pass matched closure7.go
 pass rejected cmp6.go
 pass rejected cmplx.go
@@ -60,6 +63,7 @@ pass rejected complit1.go
 pass matched compos.go
 pass rejected const1.go
 pass rejected const2.go
+pass matched const4.go
 pass rejected const5.go
 pass rejected const6.go
 pass matched const8.go
@@ -79,6 +83,7 @@ pass compiled empty.go
 pass matched env.go
 pass compiled eof.go
 pass compiled eof1.go
+pass matched escape3.go
 pass matched float_lit.go
 pass rejected float_lit3.go
 pass matched floatcmp.go
@@ -101,8 +106,10 @@ pass matched if.go
 pass rejected import1.go
 pass rejected import5.go
 pass rejected import6.go
+pass matched indirect.go
 pass rejected indirect1.go
 pass rejected init.go
+pass matched initcomma.go
 pass rejected initexp.go
 pass rejected initializerr.go
 pass rejected initloop.go
@@ -122,6 +129,8 @@ pass rejected method1.go
 pass rejected method2.go
 pass rejected method6.go
 pass rejected named1.go
+pass matched newexpr.go
+pass matched peano.go
 pass matched printbig.go
 pass rejected range2.go
 pass matched range3.go
