@@ -128,10 +128,17 @@ What nanogo compiles:
 
 	Interfaces. A value of a concrete type goes into an interface with
 	methods, a call through such an interface reaches the method, and an
-	assertion or a type switch on it names a concrete type. The empty
-	interface works the same way. What the two forms carry differs: an
-	empty interface leads with the dynamic type's descriptor and one with
-	methods leads with the itab of that pair (specs/032).
+	assertion or a type switch on it names a concrete type or another
+	interface. A value also converts from one interface to another. The
+	empty interface works the same way. What the two forms carry differs:
+	an empty interface leads with the dynamic type's descriptor and one
+	with methods leads with the itab of that pair (specs/032).
+
+	Which itab implements an interface is not known until the value is,
+	so an assertion to one, a type switch case that names one, and a
+	conversion between two of them are a call to runtime.typeAssert or
+	runtime.interfaceSwitch. Each call reads a cache nanogo writes into
+	the object and the runtime fills in as the program runs.
 
 	print and println of integers, strings and booleans, with any number
 	of operands.
@@ -144,19 +151,6 @@ What nanogo refuses, by name, with the reason:
 
 	defer of print or println. A builtin is not a function value, so there
 	is nothing to hand the runtime.
-
-	An assertion whose target is an interface, and a type switch case
-	that names one. Which itab implements the target is not known until
-	the value is, so cmd/compile calls runtime.typeAssert with an
-	*abi.TypeAssert and runtime.interfaceSwitch with an
-	*abi.InterfaceSwitch, and nanogo writes neither descriptor
-	(specs/032). A target that is a concrete type is one comparison
-	against a link-time constant and works, and so does a switch over
-	concrete cases.
-
-	A conversion between two interfaces with methods that are not the
-	same type. The destination's itab is not the source's, and finding it
-	is the same call.
 
 	A generic function.
 
