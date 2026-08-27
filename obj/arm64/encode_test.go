@@ -249,9 +249,26 @@ func compare(t *testing.T, lines []string, want []uint32) {
 // ---------------------------------------------------------------------------
 // Operand sweeps
 
-// sweepRegs is every allocatable register plus the zero register. R18 is not
-// in it, because AllocatableRegs does not return it.
-func sweepRegs() []Reg { return append(AllocatableRegs(), ZR) }
+// sweepRegs is every integer register the code generator can put in an
+// instruction, plus the zero register.
+//
+// That is the allocatable registers and the scratch registers together, and
+// not the allocatable ones alone. A scratch register carries a value the same
+// way any other does: ssagen moves through one, spills through one and breaks
+// a parallel copy cycle with one, so an encoding that is wrong for R16 is
+// wrong in emitted code. Sweeping only what the allocator hands out leaves
+// exactly the registers the code generator reaches for itself untested.
+//
+// This was found when R25 moved from allocatable to scratch and the swept
+// count fell by eleven thousand, which said the sweep was following the
+// allocator rather than the encoder. R18 is in neither set and stays out.
+func sweepRegs() []Reg {
+	out := append(AllocatableRegs(), ZR)
+	for _, r := range []Reg{RegTrampLo, RegTrampHi, RegScratchThird} {
+		out = append(out, r)
+	}
+	return out
+}
 
 // smallRegs is the subset used where the sweep is over triples.
 var smallRegs = []Reg{R0, R7, R15, R19, R25, ZR}

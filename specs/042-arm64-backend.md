@@ -279,7 +279,7 @@ It is not in this deck's scope but nothing here excludes it.
 
 What is gated today:
 
-- **Differential disassembly** per [041](041-instruction-encoding.md): 981,124
+- **Differential disassembly** per [041](041-instruction-encoding.md): 998,947
   encodings agree with `go tool asm`. The figure is the encoder package's own
   count, printed by its `TestMain`, and never a sum of the per-test log lines.
 - **Source text to a running process.** `ssagen`'s `TestLinkAndRun` compiles a

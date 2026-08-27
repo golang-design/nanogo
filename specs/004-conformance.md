@@ -239,7 +239,7 @@ output rather than for a program's behaviour:
 
 | Comparison | Scale | Oracle |
 | --- | --- | --- |
-| arm64 instruction encodings | 981,124, counted by the package itself | `go tool asm` |
+| arm64 instruction encodings | 998,947, counted by the package itself | `go tool asm` |
 | Runtime symbol signatures | 70 checked against 2,435 runtime functions | the runtime source |
 | Function prologues | 101 instructions, 2 stack constants | `go tool asm`, `internal/abi` |
 | Link and run | 18 cases, source text to a running process | the expected exit status, hand written |

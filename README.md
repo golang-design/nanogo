@@ -365,7 +365,7 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | [`types2`](types2/) | see below | a fork of the Go type checker, re-pointed at nanogo's tree: 613 subtests, a 375-entry errorcheck corpus, and it type-checks nanogo's own source |
 | [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 537 packages agree with `go list` |
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
-| [`obj/arm64`](obj/arm64/) | 99% | 981,124 encodings agree with `go tool asm`, with none disagreeing |
+| [`obj/arm64`](obj/arm64/) | 99% | 998,947 encodings agree with `go tool asm`, with none disagreeing |
 | [`ir`](ir/) | 94% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 41,084 functions and 4,191,767 nodes |
 | [`ssa`](ssa/) | 96% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant |
 | [`ssa/rules`](ssa/rules/) | 97% | the arm64 rule set, checked by lowering the corpus and by a verifier after every rule |

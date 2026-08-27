@@ -132,7 +132,7 @@ not needed. On `amd64` it is, and [043](043-amd64-backend.md) owns it.
   sweep of operand values, compare nanogo's bytes against what `go tool asm`
   produces for the equivalent instruction. This is an exact oracle and it is
   exhaustive over the operand ranges, not sampled. The measured total is
-  **981,124 comparisons with zero disagreements**.
+  **998,947 comparisons with zero disagreements**.
 
   The package counts them itself. `comparisons` is an atomic that every
   comparison increments, and `TestMain` prints the total when the package
