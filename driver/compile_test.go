@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"golang.design/x/nanogo/export"
+	"golang.design/x/nanogo/export/pkgbits"
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
 	"golang.design/x/nanogo/rtype"
@@ -1008,7 +1009,7 @@ func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
 
 	verifyToolchain = func() (*obj.Toolchain, error) { return nil, errors.New("no go command") }
 	err := writeOutput(&Config{Package: "strconv", Output: filepath.Join(t.TempDir(), "o.a")},
-		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"), false)
+		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"), false, nil)
 	if err == nil || !strings.Contains(err.Error(), "strconv") || !strings.Contains(err.Error(), "no go command") {
 		t.Errorf("writeOutput = %v, want the probe failure with the package named", err)
 	}
@@ -1019,7 +1020,7 @@ func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
 	verifyToolchain = func() (*obj.Toolchain, error) { return &obj.Toolchain{Header: "not a header\n"}, nil }
 	out := filepath.Join(t.TempDir(), "o.a")
 	err = writeOutput(&Config{Package: "strconv", Output: out, Pack: true},
-		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"), false)
+		obj.NewPackage("strconv"), types2.NewPackage("strconv", "strconv"), false, nil)
 	if err == nil || !strings.Contains(err.Error(), "strconv") {
 		t.Errorf("writeOutput = %v, want the writer's refusal with the package named", err)
 	}
@@ -1303,4 +1304,82 @@ func F() []func() {
 			}
 		})
 	}
+}
+
+// TestCompileWritesInlinableBodies is the driver's half of the body wiring:
+// the archive nanogo writes carries the bodies an importer can inline.
+//
+// internal/e2e has the check that matters, where gc reads one and inlines it.
+// This one is the unit form and names what the driver decides: which
+// declarations are offered at all.
+func TestCompileWritesInlinableBodies(t *testing.T) {
+	needGoCommand(t)
+	arm64Only(t)
+	const src = `package p
+
+func Add(a, b int) int { return a + b }
+
+//go:noinline
+func Slow(a, b int) int { return a - b }
+
+func Later(f func()) { defer f() }
+`
+	out, err := compileSource(t, src, func(c *Config) {
+		c.Package = "xtest/p"
+		c.Pack = true
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	names := archiveBodies(t, "xtest/p", out)
+	if len(names) != 1 || names[0] != "Add" {
+		t.Fatalf("the archive carries bodies for %v, want only Add", names)
+	}
+}
+
+// TestCompileSkipsABodyADirectiveForbids pins the two skips separately, so a
+// change that widened either one is reported as itself.
+func TestCompileSkipsABodyADirectiveForbids(t *testing.T) {
+	needGoCommand(t)
+	arm64Only(t)
+	for _, tc := range []struct{ name, decl string }{
+		{"noinline", "//go:noinline\nfunc F(a int) int { return a }\n"},
+		{"nosplit", "//go:nosplit\nfunc F(a int) int { return a }\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := compileSource(t, "package p\n\n"+tc.decl, func(c *Config) {
+				c.Package = "xtest/" + tc.name
+				c.Pack = true
+			})
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			if names := archiveBodies(t, "xtest/"+tc.name, out); len(names) != 0 {
+				t.Fatalf("the archive carries bodies for %v, want none", names)
+			}
+		})
+	}
+}
+
+// archiveBodies returns the declarations whose bodies an archive carries.
+func archiveBodies(t *testing.T, path, file string) []string {
+	t.Helper()
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := export.Payload(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := pkgbits.NewPkgDecoder(path, string(payload))
+	_, bodies, err := export.ReadBodies(types2.NewContext(), map[string]*types2.Package{}, dec)
+	if err != nil {
+		t.Fatalf("reading the bodies back: %v", err)
+	}
+	names := make([]string, len(bodies))
+	for i, b := range bodies {
+		names[i] = b.Name
+	}
+	return names
 }

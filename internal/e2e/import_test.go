@@ -808,3 +808,50 @@ func TestGcReflectsOverATypeNanogoDescribed(t *testing.T) {
 		t.Fatalf("the program exited %d, want 42; the number is the check that failed\n%s", code, b)
 	}
 }
+
+// TestGcInlinesABodyNanogoWrote is the check the function body wiring is
+// measured by, and the only one where gc is the reader.
+//
+// nanogo compiles the library, so the export data gc reads is nanogo's, the
+// body element is nanogo's and every element index that body names is one
+// nanogo's writer allocated. gc decodes the element into its own IR and
+// substitutes it at the call, so a reference that named the wrong element is
+// a program that computes the wrong answer or a compiler that stops.
+//
+// -gcflags=-m is what makes the evidence positive. A build that carried no
+// body at all links and runs exactly the same, so the program running proves
+// nothing on its own: the line naming the inlined call is what says gc reached
+// the element.
+func TestGcInlinesABodyNanogoWrote(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module nanogo.example/inline\n\ngo 1.27\n",
+		"lib/lib.go": "package lib\n\n" +
+			"func Double(x int) int { return x + x }\n",
+		"main.go": "package main\n\nimport (\n\t\"os\"\n\n\t\"nanogo.example/inline/lib\"\n)\n\n" +
+			"func main() { os.Exit(lib.Double(21)) }\n",
+	}
+	h := setup(t, files, []string{"nanogo.example/inline/lib"})
+
+	out, err := h.build(t, "-gcflags=nanogo.example/inline=-m", "-o", "prog", ".")
+	if err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if !compiled(h.decisions(t), "nanogo.example/inline/lib") {
+		t.Fatalf("nanogo delegated the library, so gc read gc's own export data:\n%s",
+			strings.Join(h.decisions(t), "\n"))
+	}
+	if !strings.Contains(out, "inlining call to lib.Double") {
+		t.Fatalf("gc did not inline the body nanogo wrote; -m said:\n%s", out)
+	}
+
+	b, err := exec.Command(filepath.Join(h.mod, "prog")).CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("the program did not run: %v\n%s", err, b)
+	}
+	if code != 42 {
+		t.Errorf("the program exited %d, want 42\n%s", code, b)
+	}
+}

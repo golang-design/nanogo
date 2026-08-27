@@ -138,6 +138,19 @@ func (r *Reader) Read(path, file string) (pkg *types2.Package, err error) {
 	return pkg, nil
 }
 
+// Payload returns the unified export data one gc archive carries.
+//
+// It is [Definition] from the other side, and it is what a reader that wants
+// the bytes rather than the package needs: [pkgbits.NewPkgDecoder] takes
+// exactly this, and [ReadBodies] takes the decoder.
+func Payload(archive []byte) ([]byte, error) {
+	def, err := packageDefinition(archive)
+	if err != nil {
+		return nil, err
+	}
+	return unified(def)
+}
+
 // packageDefinition returns the __.PKGDEF member of a gc archive.
 //
 // The members are walked rather than assumed, although gc writes __.PKGDEF

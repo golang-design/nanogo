@@ -108,7 +108,7 @@ func Compile(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return writeOutput(cfg, out, pkg, hasInit)
+	return writeOutput(cfg, out, pkg, hasInit, exportBodies(cfg, pkg, info, fset, files))
 }
 
 // checkSupported refuses the inputs nanogo has no answer for, before it reads
@@ -1150,18 +1150,19 @@ var verifyToolchain = obj.VerifyToolchain
 // writeOutput writes the object to -o, as an archive when -pack asked for one.
 //
 // The archive carries the export data as well, so that a package nanogo
-// compiled can be imported (specs/015-export-data.md). The export data is
+// compiled can be imported (specs/015-export-data.md), with the function
+// bodies an importer can inline. The export data is
 // written whether or not -pack asked for an archive, because its fingerprint
 // goes into the object's header: an importing object records the same value
 // in its Autolib entry and the linker refuses a build whose two copies
 // disagree. A bare object has nowhere to put the __.PKGDEF member, so it
 // carries the fingerprint and not the data.
-func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package, hasInit bool) error {
+func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package, hasInit bool, bodies *export.Source) error {
 	tc, err := verifyToolchain()
 	if err != nil {
 		return fmt.Errorf("%s: %v", cfg.Package, err)
 	}
-	payload, fingerprint, err := export.Write(pkg, hasInit, nil)
+	payload, fingerprint, err := export.Write(pkg, hasInit, bodies)
 	if err != nil {
 		return err
 	}
