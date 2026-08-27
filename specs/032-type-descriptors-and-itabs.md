@@ -151,7 +151,7 @@ Four things stop a descriptor, and each names itself in the refusal:
 | --- | --- |
 | a method | the `Method` array, whose `Ifn` and `Tfn` are `TextOff`s to code |
 | a struct or an array whose parts do not compare as one region of memory | the `Equal` closure, which points at code |
-| a map whose key needs a generated hash | the `Hasher` closure, which the runtime calls on every operation and which may not be nil |
+| a map whose key needs a generated hash | the *body* of that hash. `ssagen` writes one and `driver/compile.go` finds it by scanning a descriptor's own relocations for its own type's `type:.hash.` symbol, and a map's `Hasher` names the **key's**, so nothing generates it. Refusing here is what keeps that from becoming an unresolved `type:.hash.K` at link time |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
 Writing a tail that claims a type has no methods is the failure the first row
@@ -832,7 +832,7 @@ before them. `gc`'s own spelling of that interface,
 `interface { Read() int; Ärger() int; example.com/outer.flush() int }`, was read
 out of a compiled object rather than reasoned about.
 
-### The map's group type is synthesised, and only its name is missing
+### The map's group type is synthesised, and nothing about it is missing now
 
 This spec said a map was refused because its descriptor "names the runtime's
 group type, which specs/032 does not carry". Two things in that sentence were
