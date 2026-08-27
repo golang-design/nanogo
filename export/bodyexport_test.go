@@ -364,3 +364,30 @@ func Abs(x int) int {
 		t.Errorf("the body is offered at cost %d, want %d", kept[0].Cost, MaxInlineCost)
 	}
 }
+
+// TestWriteDoesNotOfferABodyTheFileCannotPair is the rule that keeps the
+// private root's list answerable.
+//
+// The entry names its declaration rather than pointing at it, so an entry
+// naming a declaration the file holds no element for is one no reader can
+// pair with anything. nanogo's own reader refuses such a file by name.
+func TestWriteDoesNotOfferABodyTheFileCannotPair(t *testing.T) {
+	const src = `package p
+
+func Add(a, b int) int { return a + b }
+
+func sub(a, b int) int { return a - b }
+`
+	payload, _, funcs := writeSource(t, "xtest/pair", src, nil)
+	if len(funcs) != 2 {
+		t.Fatalf("built %d bodies, want 2", len(funcs))
+	}
+	bodies := readBack(t, "xtest/pair", payload)
+	if len(bodies) != 1 || bodies[0].Name != "Add" {
+		names := make([]string, len(bodies))
+		for i, b := range bodies {
+			names[i] = b.Name
+		}
+		t.Fatalf("the file carries bodies for %v, want only Add", names)
+	}
+}
