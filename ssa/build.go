@@ -1520,7 +1520,11 @@ const itabTypeOffset = ir.PtrSize
 // this compiler has to define and specs/032 has no writer for one.
 func (b *builder) concreteToInterface(n ir.Expr, x *Value, from, to *ir.Type) *Value {
 	if !to.EmptyIface {
-		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v, which leads with the itab of that pair and specs/032 defines no itab", from, to))
+		// Two things are missing and naming one of them would send the next
+		// reader to a wall they cannot see. specs/032 writes no itab, and the
+		// concrete type's own descriptor is refused by rtype until every
+		// method has the two ABI wrappers Ifn and Tfn.
+		b.errorf(InvNone, "%s: a conversion from %v to %v is not built yet. Its type word is the itab of that pair. specs/032 writes no itab, and a descriptor for a type with methods needs the two ABI wrappers rtype refuses one without", n.Op, from, to)
 		return b.zeroValue(to)
 	}
 	word := b.typeWord(n, from)
