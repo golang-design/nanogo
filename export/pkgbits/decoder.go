@@ -365,6 +365,14 @@ func (r *Decoder) Uint64() uint64 {
 // Len decodes and returns a non-negative int value from the element bitstream.
 func (r *Decoder) Len() int { x := r.Uint64(); v := int(x); assert(uint64(v) == x); return v }
 
+// Int decodes and returns an int value from the element bitstream.
+//
+// It is signed, unlike [Decoder.Len]. A function body writes a negative
+// length where an element list may carry keys, and a negative field index
+// where a struct literal names a promoted field, so a reader of a body needs
+// both widths.
+func (r *Decoder) Int() int { x := r.Int64(); v := int(x); assert(int64(v) == x); return v }
+
 // Uint decodes and returns a uint value from the element bitstream.
 func (r *Decoder) Uint() uint { x := r.Uint64(); v := uint(x); assert(uint64(v) == x); return v }
 

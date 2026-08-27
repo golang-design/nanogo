@@ -77,7 +77,8 @@ that is not here is upstream's.
 | `encoder.go`: `DumpTo` returns its error | Upstream asserts it away. The caller is writing a file the build asked for. |
 | `encoder.go`: `fmtFrames` is not ported | It formats the writer's stack for a sync marker, and there are none. |
 | `sync.go`: `fmtFrames` and `walkFrames` are dropped | They format the reader's own backtrace for a desync report, and the panic below carries that backtrace already. |
-| `decoder.go`: `SyncMarkers`, `TotalElems`, `Int` and `Strings` are dropped | The linker calls them; neither half here does. |
+| `decoder.go`: `SyncMarkers`, `TotalElems` and `Strings` are dropped | The linker calls them; neither half here does. |
+| `decoder.go`: `Int` is back | The body reader calls it. A body writes a negative length where an element list may carry keys, and a negative field index where a struct literal names a promoted field, so both widths are read. |
 | `codes.go`: the `Code` interface and the `Marker`/`Value` methods are back | Only the encoder calls them, and there is an encoder now. |
 | `decoder.go`: `PeekPkgPath` and `PeekObj` are back | They answer what an element is without decoding it, which is what a writer checking its own output needs. |
 | `decoder.go`: `NewPkgDecoder`'s header reads report truncation by name | Upstream asserts. A file the build handed nanogo has to be reported as a file, and "assertion failed" names nothing. |
