@@ -389,6 +389,10 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// its own. checkExportedTypes decided the set and refused the package if
 	// any of it could not be written, so nothing here can fail on it.
 	needed := append([]*ir.Type{}, owed...)
+	// The itabs the constructed code names, unioned over the package the same
+	// way. Only ssa.Build and ir.Lower name one, and both report what they
+	// named, because cmd/link defines no go:itab. symbol.
+	var itabs []ir.Itab
 	// The data symbols of the package-level variables. They go in before any
 	// function is compiled, so that a variable nanogo cannot write is refused
 	// by name and position rather than reported by the linker as an undefined
@@ -438,7 +442,7 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 					"A function compiled without it collects the referent while the callee is reading it",
 			}
 		}
-		r, types, err := compileFunc(cfg, fn, target, out, fset)
+		r, types, its, err := compileFunc(cfg, fn, target, out, fset)
 		if err != nil {
 			return nil, false, err
 		}
@@ -450,6 +454,7 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 			initFns = append(initFns, ref)
 		}
 		needed = append(needed, types...)
+		itabs = append(itabs, its...)
 	}
 	// A package with no function body is not refused. internal/goarch and
 	// internal/goos are constants and type aliases only, so what gc produces
@@ -467,6 +472,22 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// A method wrapper is owed by whoever writes the descriptor that names it,
 	// and a descriptor this object reached through another one is as much its
 	// own as a root is.
+	// An itab points at the interface's descriptor and the concrete type's,
+	// and cmd/link resolves both by name, so the object that writes the itab
+	// owes both. They join the roots before the set is closed, because the
+	// method wrappers an itab's Fun entries name are decided by the closed set
+	// and generatedFuncs reads that set.
+	for _, it := range itabs {
+		refs, err := rtype.ItabReferenced(it.Type, it.Iface)
+		if err != nil {
+			return nil, false, &UnsupportedError{
+				Package: cfg.Package,
+				What:    "a conversion its code makes to an interface with methods",
+				Detail:  err.Error(),
+			}
+		}
+		needed = append(needed, refs...)
+	}
 	types, err := descriptorSet(cfg, needed)
 	if err != nil {
 		return nil, false, err
@@ -486,7 +507,7 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 			return nil, false, err
 		}
 	}
-	if err := addDescriptors(cfg, out, types, generated); err != nil {
+	if err := addDescriptors(cfg, out, types, itabs, generated); err != nil {
 		return nil, false, err
 	}
 	// The record goes in last. It names the init function by the reference
@@ -538,9 +559,25 @@ func addGenerated(cfg *Config, out *obj.Package, target *ssa.Target, fset *synta
 			// and one type is in the closure once per path that reached it.
 			continue
 		}
-		r, ts, err := compileFunc(cfg, fn, target, out, fset)
+		r, ts, its, err := compileFunc(cfg, fn, target, out, fset)
 		if err != nil {
 			return nil, nil, err
+		}
+		if len(its) > 0 {
+			// A generated function converts nothing to an interface: a method
+			// wrapper adjusts its receiver and tail-calls, and an equality or
+			// hash routine reads memory. So an itab named here would mean the
+			// generator grew a construct whose own wrappers this pass would
+			// have to close over a second time, and the closure above runs
+			// once. It is reported rather than dropped, because a dropped itab
+			// is an undefined symbol at link.
+			return nil, nil, &UnsupportedError{
+				Package: cfg.Package,
+				What:    "the generated function " + fn.Sym,
+				Detail: "it converts a value to an interface with methods, and the descriptor closure that " +
+					"decides which wrappers an itab needs is taken before the generated functions are compiled; " +
+					"specs/032-type-descriptors-and-itabs.md owns the gap",
+			}
 		}
 		// Duplicate-tolerant, as gc marks it. Every package that writes a
 		// descriptor naming this wrapper generates the wrapper too, because
@@ -662,7 +699,21 @@ func algFuncs(t *ir.Type, set []rtype.Symbol) ([]*ir.Func, error) {
 // from another object and would not be collected into runtime.typelinks.
 // specs/032 says AddHashedDef for all of them, and it is wrong about the
 // first one.
-func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, generated map[string]bool) error {
+//
+// # The itabs
+//
+// They go in the same two passes and not in a pass of their own, because an
+// itab points at the interface's descriptor and the concrete type's, and this
+// object defines both. A second pass with its own tables would emit a
+// non-package reference for a name this object already defines, and cmd/link
+// would resolve the reference to the definition it merged rather than to the
+// one beside it, if it resolved it at all.
+//
+// Each is one symbol, a named non-package definition, dupok. Named and not
+// hashed for the reason a descriptor is named, and one reason more: cmd/link
+// collects a go:itab. symbol into runtime.itablinks by its name prefix, and it
+// reads no name for a symbol in the hashed index space.
+func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.Itab, generated map[string]bool) error {
 	// defs and refs are lookup tables and are never ranged over
 	// (specs/053-determinism.md). A symbol is emitted once however many types
 	// name it: two descriptors share one pointer bitmask whenever their
@@ -712,6 +763,35 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, generated m
 			} else {
 				defs[s.Name] = out.AddHashedDef(d)
 			}
+			syms = append(syms, d)
+			relocs = append(relocs, s.Relocs)
+		}
+	}
+	for _, it := range itabs {
+		set, err := rtype.Itab(it.Type, it.Iface)
+		if err != nil {
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "a conversion its code makes to an interface with methods",
+				Detail:  err.Error(),
+			}
+		}
+		for _, s := range set {
+			if _, ok := defs[s.Name]; ok {
+				// Two functions convert the same pair, or two passes named it.
+				continue
+			}
+			d := &obj.Symbol{
+				Name:  s.Name,
+				Type:  s.Kind,
+				Size:  uint32(len(s.Data)),
+				Align: s.Align,
+				Data:  s.Data,
+			}
+			if s.Dupok {
+				d.Flag |= obj.SymFlagDupok
+			}
+			defs[s.Name] = out.AddNonPkgDef(d)
 			syms = append(syms, d)
 			relocs = append(relocs, s.Relocs)
 		}
@@ -796,7 +876,7 @@ func targetABI(r rtype.Reloc, generated map[string]bool) uint16 {
 //
 // The stage is named ir.Lower and not "lowering" because ssa.Lower is in the
 // same list, and a refusal has to say which of the two spec decks owns the gap.
-func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package, fset *syntax.FileSet) (*ssagen.Result, []*ir.Type, error) {
+func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package, fset *syntax.FileSet) (*ssagen.Result, []*ir.Type, []ir.Itab, error) {
 	var (
 		f      *ssa.Func
 		a      *ssa.Alloc
@@ -833,7 +913,7 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 	}
 	for _, p := range passes {
 		if err := p.run(); err != nil {
-			return nil, nil, unsupportedFunc(cfg, fset, fn, p.name, err)
+			return nil, nil, nil, unsupportedFunc(cfg, fset, fn, p.name, err)
 		}
 	}
 	// Two passes name descriptors and the package owes both sets. ir.Lower
@@ -844,7 +924,12 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 	// rather than the compiler's: "relocation target type:main.myInt not
 	// defined". type:int and type:string hide it, because the runtime defines
 	// those already.
-	return r, append(needed, f.Descriptors...), nil
+	//
+	// The itabs are a third set and only ssa.Build names them. An itab is not
+	// a descriptor: it is named per (concrete type, interface) pair, cmd/link
+	// collects it into runtime.itablinks by name, and rtype writes it from a
+	// different encoder.
+	return r, append(needed, f.Descriptors...), f.Itabs, nil
 }
 
 // unsupportedFunc is the refusal every pass of compileFunc reports.

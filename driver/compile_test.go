@@ -377,7 +377,7 @@ func TestAddDescriptorsEmitsEachSymbolOnce(t *testing.T) {
 	write := func(types []*ir.Type) []byte {
 		t.Helper()
 		p := obj.NewPackage("p")
-		if err := addDescriptors(&Config{Package: "p"}, p, types, nil); err != nil {
+		if err := addDescriptors(&Config{Package: "p"}, p, types, nil, nil); err != nil {
 			t.Fatalf("addDescriptors: %v", err)
 		}
 		b, err := p.Bytes()
@@ -396,6 +396,143 @@ func TestAddDescriptorsEmitsEachSymbolOnce(t *testing.T) {
 	}
 }
 
+// TestAddDescriptorsWritesAnItabAsANamedDefinition is the index-space half of
+// specs/032's itab.
+//
+// cmd/link collects a go:itab. symbol into runtime.itablinks by its name, and
+// it reads no name for a symbol in the hashed index space. So an itab written
+// as a hashed definition is a table the runtime never registers, and a program
+// that asserts on the pair misses every time. The dupok flag is the other half:
+// every package that converts the pair writes the itab, and cmd/link merges
+// them by name only when they say they tolerate a duplicate.
+func TestAddDescriptorsWritesAnItabAsANamedDefinition(t *testing.T) {
+	seven, coder := itabPair(t)
+	p := obj.NewPackage("p")
+	itabs := []ir.Itab{{Type: seven, Iface: coder}, {Type: seven, Iface: coder}}
+	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{coder, seven}, itabs, nil); err != nil {
+		t.Fatalf("addDescriptors: %v", err)
+	}
+	name, err := ir.ItabSymbol(seven, coder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sym := findNonPkgDef(p, name)
+	if sym == nil {
+		t.Fatalf("the object holds no named definition of %s; it defines %v", name, defNames(p))
+	}
+	if sym.Flag&obj.SymFlagDupok == 0 {
+		t.Error("the itab is not dupok, so two packages that convert the pair are two definitions of one name")
+	}
+	// Once, however many conversions named it. A second definition would move
+	// every later symbol index.
+	n := 0
+	for _, d := range defNames(p) {
+		if d == name {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d definitions of %s, want one", n, name)
+	}
+	if _, err := p.Bytes(); err != nil {
+		t.Fatalf("the object does not write: %v", err)
+	}
+}
+
+// TestAddDescriptorsResolvesAnItabAgainstItsOwnDescriptors is why the itabs go
+// through the same two passes as the descriptors.
+//
+// An itab points at the interface's descriptor and the concrete type's, and
+// this object defines both. A pass with tables of its own would emit a
+// non-package reference for a name the object already defines, which is a
+// second symbol where the linker needs one.
+func TestAddDescriptorsResolvesAnItabAgainstItsOwnDescriptors(t *testing.T) {
+	seven, coder := itabPair(t)
+	p := obj.NewPackage("p")
+	itabs := []ir.Itab{{Type: seven, Iface: coder}}
+	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{coder, seven}, itabs, nil); err != nil {
+		t.Fatalf("addDescriptors: %v", err)
+	}
+	name, err := ir.ItabSymbol(seven, coder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sym := findNonPkgDef(p, name)
+	if sym == nil {
+		t.Fatalf("the object holds no definition of %s", name)
+	}
+	for _, want := range []string{"type:main.coder", "type:main.seven"} {
+		found := false
+		for _, r := range sym.Relocs {
+			if d := p.Def(r.Sym); d != nil && d.Name == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the itab does not point at this object's own definition of %s", want)
+		}
+	}
+}
+
+// itabPair builds a concrete type, an interface it implements, and nothing
+// else. The two are written by hand rather than compiled, so that the check
+// above is about the object writer and not about the front end.
+func itabPair(t *testing.T) (concrete, iface *ir.Type) {
+	t.Helper()
+	i64 := &ir.Type{Kind: ir.Int64, Name: "int"}
+	if err := ir.Layout(i64); err != nil {
+		t.Fatal(err)
+	}
+	sig := &ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{i64}}
+	if err := ir.Layout(sig); err != nil {
+		t.Fatal(err)
+	}
+	iface = &ir.Type{Kind: ir.Interface, Name: "main.coder", PkgPath: "main",
+		Methods: []ir.Method{{Name: "code", Sig: sig}}}
+	concrete = &ir.Type{Kind: ir.Int64, Name: "main.seven", PkgPath: "main", Basic: "int",
+		Methods: []ir.Method{{Name: "code", Sig: sig}}}
+	for _, ty := range []*ir.Type{iface, concrete} {
+		if err := ir.Layout(ty); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return concrete, iface
+}
+
+// TestCompileEmitsAnItab is the same claim made through a compile.
+//
+// The conversion names the itab and nothing else does, so the object owes the
+// itab, both descriptors, and the wrapper the itab's one Fun entry names.
+// main.seven is not stored directly in an interface, so that entry is the
+// pointer-receiver form, which no declaration defines and ssagen generates.
+// Without the generated definition the object writes and the link reports the
+// wrapper as undefined.
+func TestCompileEmitsAnItab(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	src := "package main\n\ntype coder interface{ code() int }\n\n" +
+		"type seven int\n\nfunc (s seven) code() int { return int(s) }\n\n" +
+		"var sink coder\n\nfunc main() { sink = seven(7) }\n"
+	out, err := compileSource(t, src, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"go:itab.main.seven,main.coder", // the itab, under ir.ItabSymbol's name
+		"type:main.coder",               // the interface's descriptor, which the itab points at
+		"type:main.seven",               // the concrete type's
+		"main.(*seven).code",            // the Fun entry, which is a generated wrapper
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("the object does not carry %q", want)
+		}
+	}
+}
+
 // TestAddDescriptorsMarksATypeUsedInIface checks that rtype's request reaches
 // the object.
 //
@@ -408,7 +545,7 @@ func TestAddDescriptorsMarksATypeUsedInIface(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := obj.NewPackage("p")
-	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{elem}, nil); err != nil {
+	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{elem}, nil, nil); err != nil {
 		t.Fatalf("addDescriptors: %v", err)
 	}
 	sym := findNonPkgDef(p, "type:int")
@@ -441,7 +578,7 @@ func TestAddDescriptorsRefusesATypeWithNoMethodSet(t *testing.T) {
 	if err := ir.Layout(defined); err != nil {
 		t.Fatal(err)
 	}
-	err := addDescriptors(&Config{Package: "p"}, obj.NewPackage("p"), []*ir.Type{defined}, nil)
+	err := addDescriptors(&Config{Package: "p"}, obj.NewPackage("p"), []*ir.Type{defined}, nil, nil)
 	if err == nil {
 		t.Fatal("addDescriptors accepted a type whose method set is unknown")
 	}
