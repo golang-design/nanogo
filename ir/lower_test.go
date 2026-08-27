@@ -1757,7 +1757,6 @@ func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
 type W struct{ P *int }
 
 func f(v any) W { return v.(W) }`, OTypeAssert, "its own data word"},
-		{"a type switch on an interface case", `func f(v any) int { switch v.(type) { case error: return 1 }; return 0 }`, OTypeSwitch, "runtime.interfaceSwitch"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},
 		{"range over a function", `func f(it func(func(int) bool)) { for v := range it { use(v) } }`, ORange, "range over func"},
 		{"println of an interface", `func f(v any) { println(v) }`, OPrintln, "an operand of interface"},
@@ -4149,5 +4148,244 @@ func TestLowerInterfaceToTheEmptyInterfaceIsALoad(t *testing.T) {
 	_, c := lowerAll(t, `func f(r interface{ M() int }) any { return r }`)
 	if len(c.TypeAsserts) != 0 {
 		t.Errorf("the pass collected %v, and every type is a value of the empty interface", c.TypeAsserts)
+	}
+}
+
+// lowerReadsObject reports whether any statement in ss reads o.
+func lowerReadsObject(ss []Stmt, o *Object) bool {
+	found := false
+	for _, s := range ss {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OLocal && n.Obj == o {
+				found = true
+			}
+			return true
+		})
+	}
+	return found
+}
+
+// lowerSwitchItab returns the object runtime.interfaceSwitch wrote its itab
+// into, which is the second destination of the assignment that holds the call.
+func lowerSwitchItab(fn *Func) *Object {
+	var out *Object
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op != OAssign || len(n.Args) != 2 || n.Y == nil || n.Y.Op != OCall {
+				return true
+			}
+			if x := n.Y.X; x != nil && x.Op == OGlobal && x.Obj != nil && x.Obj.Name == "runtime.interfaceSwitch" {
+				out = n.Args[1].Obj
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// TestLowerTypeSwitchOverInterfaceCases is specs/032's type switch row.
+//
+// The answer to "does this dynamic type implement I" is a search over a method
+// set, so a run of interface cases is one call to runtime.interfaceSwitch with
+// a cache this package defines. The runtime walks the cases in the order the
+// symbol lists them and returns the index of the first that matches, so the
+// order in the symbol is the order the source wrote.
+func TestLowerTypeSwitchOverInterfaceCases(t *testing.T) {
+	fn, c := lowerAll(t, `
+type R interface{ M() int }
+
+type S interface {
+	M() int
+	N() int
+}
+
+func f(v any) int {
+	switch v.(type) {
+	case S:
+		return 1
+	case R:
+		return 2
+	}
+	return 0
+}`)
+	if !lowerCalled(fn, "runtime.interfaceSwitch") {
+		t.Fatalf("the switch calls %v, want runtime.interfaceSwitch:\n%s", lowerCalls(fn), buildDump(fn))
+	}
+	if len(c.InterfaceSwitches) != 1 {
+		t.Fatalf("the pass collected %d caches, want one for the one run of interface cases", len(c.InterfaceSwitches))
+	}
+	sw := c.InterfaceSwitches[0]
+	if len(sw.Cases) != 2 {
+		t.Fatalf("the cache lists %d cases, want two", len(sw.Cases))
+	}
+	if sw.Cases[0].Name != "p.S" || sw.Cases[1].Name != "p.R" {
+		t.Errorf("the cache lists %v then %v, want p.S then p.R: the runtime returns the first that matches",
+			sw.Cases[0].Name, sw.Cases[1].Name)
+	}
+	want, err := InterfaceSwitchSymbol(fn.Sym, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sw.Sym != want {
+		t.Errorf("the cache is named %s, want %s", sw.Sym, want)
+	}
+	if !lowerGlobal(fn, want) {
+		t.Errorf("the tree does not name %s:\n%s", want, buildDump(fn))
+	}
+}
+
+// TestLowerTypeSwitchKeepsSourceOrder is the rule that decides which clause a
+// type satisfying two cases reaches.
+//
+// A concrete case and an interface case that the same type satisfies are two
+// runs, and the runs stay in the order the source wrote them. cmd/compile
+// reorders them, all the concrete before all the interface, and it is correct
+// there because an earlier pass removes a case a preceding one shadows.
+// Nothing removes one here.
+func TestLowerTypeSwitchKeepsSourceOrder(t *testing.T) {
+	fn, c := lowerAll(t, `
+type R interface{ M() int }
+
+type W int
+
+func (w W) M() int { return int(w) }
+
+func f(v any) int {
+	switch v.(type) {
+	case R:
+		return 1
+	case W:
+		return 2
+	}
+	return 0
+}`)
+	if len(c.InterfaceSwitches) != 1 {
+		t.Fatalf("the pass collected %d caches, want one", len(c.InterfaceSwitches))
+	}
+	// The interface run was written first, so the concrete run is what the
+	// interface run falls into when it matches nothing: it sits inside a
+	// clause with no case expression. A tree that tested W first would put
+	// that comparison at the top and run the second clause for a W, which the
+	// specification does not.
+	names := func(ss []Stmt, name string) bool {
+		found := false
+		for _, s := range ss {
+			Walk(s, func(n *Node) bool {
+				if n.Op == OGlobal && n.Obj != nil && n.Obj.Name == name {
+					found = true
+				}
+				return true
+			})
+		}
+		return found
+	}
+	if !names(fn.Body, "type:p.W") {
+		t.Fatalf("the tree never compares against type:p.W:\n%s", buildDump(fn))
+	}
+	nested := false
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OCase && len(n.Args) == 0 && names(n.Body, "type:p.W") {
+				nested = true
+			}
+			return true
+		})
+	}
+	if !nested {
+		t.Errorf("the concrete case is tested before the interface case the source wrote first:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerTypeSwitchBindsTheItabTheRuntimeReturned is the clause variable of
+// a case naming one interface.
+//
+// The variable's type is that interface, so its first word is an itab built
+// for it. The word the operand carries was built for the guard's interface,
+// and an itab holds the concrete type's methods in the order its own interface
+// lists them, so passing the operand along unchanged calls through a slot that
+// holds another method.
+func TestLowerTypeSwitchBindsTheItabTheRuntimeReturned(t *testing.T) {
+	fn, _ := lowerAll(t, `
+type R interface{ M() int }
+
+func f(v any) int {
+	switch t := v.(type) {
+	case R:
+		return t.M()
+	}
+	return 0
+}`)
+	tab := lowerSwitchItab(fn)
+	if tab == nil {
+		t.Fatalf("no assignment holds the two results of runtime.interfaceSwitch:\n%s", buildDump(fn))
+	}
+	var body []Stmt
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OCase && len(n.Args) == 1 && len(n.Body) > 0 {
+				body = append(body, n.Body...)
+			}
+			return true
+		})
+	}
+	if len(body) == 0 {
+		t.Fatalf("no clause body:\n%s", buildDump(fn))
+	}
+	if !lowerReadsObject(body, tab) {
+		t.Errorf("no clause reads the itab the runtime returned:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerTypeSwitchOverTheEmptyInterfaceMakesNoCall keeps the case that
+// needs none.
+//
+// Every non-nil dynamic type is a value of the empty interface, so the case
+// matches with no test, and every case written after it is unreachable.
+func TestLowerTypeSwitchOverTheEmptyInterfaceMakesNoCall(t *testing.T) {
+	fn, c := lowerAll(t, `func f(v any) int {
+	switch v.(type) {
+	case any:
+		return 1
+	}
+	return 0
+}`)
+	if len(c.InterfaceSwitches) != 0 {
+		t.Errorf("the pass collected %v for a case every type satisfies", c.InterfaceSwitches)
+	}
+	if lowerCalled(fn, "runtime.interfaceSwitch") {
+		t.Errorf("the switch calls the runtime for an answer that is always yes:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerTypeSwitchOverConcreteCasesIsStillOneSwitch is the row that was
+// already built, kept.
+//
+// A dynamic type is at most one of a list of concrete cases, because two
+// identical cases are a compile error, so the order does not matter and one
+// switch on the first word is the whole test.
+func TestLowerTypeSwitchOverConcreteCasesIsStillOneSwitch(t *testing.T) {
+	fn, c := lowerAll(t, `func f(v any) int {
+	switch v.(type) {
+	case int:
+		return 1
+	case string:
+		return 2
+	}
+	return 0
+}`)
+	if len(c.InterfaceSwitches) != 0 || lowerCalled(fn, "runtime.interfaceSwitch") {
+		t.Errorf("a switch over concrete types reached the runtime:\n%s", buildDump(fn))
+	}
+	n := 0
+	for _, s := range fn.Body {
+		Walk(s, func(x *Node) bool {
+			if x.Op == OSwitch {
+				n++
+			}
+			return true
+		})
+	}
+	if n != 1 {
+		t.Errorf("the switch became %d switches, want one", n)
 	}
 }

@@ -4744,14 +4744,21 @@ func (l *lowerer) typeSwitchStmt(n *Node) {
 		l.emit(n)
 		return
 	}
+	plan, why := typeSwitchPlan(n)
+	if why != "" {
+		l.refuse(n, why)
+		pre := l.pop()
+		l.emit(pre...)
+		l.emit(n)
+		return
+	}
+	if plan.hasInterface() {
+		l.typeSwitchGrouped(n, x, plan, pos)
+		return
+	}
 	clauses := make([]Stmt, 0, len(n.Body))
 	ok := true
 	for _, c := range n.Body {
-		if c == nil || c.Op != OCase {
-			l.refuse(n, "a clause that is not a case node")
-			ok = false
-			continue
-		}
 		if !l.typeSwitchCase(n, c, x) {
 			ok = false
 		}
@@ -4766,6 +4773,343 @@ func (l *lowerer) typeSwitchStmt(n *Node) {
 		return
 	}
 	l.emit(&Node{Op: OSwitch, Pos: pos, Type: voidType, Init: pre, X: x.word(ifaceTyp), Body: clauses})
+}
+
+// A typeCase is one case expression of a type switch, paired with the clause
+// it selects.
+//
+// The clause is an index and not the node, because two case expressions of one
+// clause may end up in two different tests and both have to name the same
+// answer.
+type typeCase struct {
+	typ    *Type
+	clause int
+}
+
+// caseKind separates the three answers a case expression needs.
+type caseKind int
+
+const (
+	caseConcrete caseKind = iota // a comparison against a link-time constant
+	caseIface                    // a search the runtime makes and caches
+	caseAny                      // the empty interface, which every dynamic type satisfies
+)
+
+func kindOfCase(t *Type) caseKind {
+	switch {
+	case t.Kind != Interface:
+		return caseConcrete
+	case t.EmptyIface:
+		return caseAny
+	}
+	return caseIface
+}
+
+// A typeSwitchLayout is what the clauses of a type switch say.
+type typeSwitchLayout struct {
+	// cases are every case expression that names a type, in source order.
+	// The order is the answer: a dynamic type may satisfy an interface case
+	// and be a concrete case as well, and the specification runs the first
+	// clause that matches.
+	cases []typeCase
+
+	// nilClause is the clause "case nil" selects, or -1. An interface holding
+	// nothing has no dynamic type, so it matches that clause and no other.
+	nilClause int
+}
+
+func (p typeSwitchLayout) hasInterface() bool {
+	for _, c := range p.cases {
+		if kindOfCase(c.typ) != caseConcrete {
+			return true
+		}
+	}
+	return false
+}
+
+// typeSwitchPlan reads the clauses of a type switch.
+//
+// The second result is the reason the switch cannot be read.
+func typeSwitchPlan(n *Node) (typeSwitchLayout, string) {
+	p := typeSwitchLayout{nilClause: -1}
+	for i, c := range n.Body {
+		if c == nil || c.Op != OCase {
+			return p, "a clause that is not a case node"
+		}
+		for _, a := range c.Args {
+			if a == nil || a.Type == nil {
+				return p, "a case with no type"
+			}
+			if a.Op == OConst {
+				// case nil. ir.Build gives it the guard's type and no value,
+				// because there is no type to name.
+				p.nilClause = i
+				continue
+			}
+			p.cases = append(p.cases, typeCase{typ: a.Type, clause: i})
+		}
+	}
+	return p, ""
+}
+
+// ifaceSwitchResult is what runtime.interfaceSwitch returns: the index of the
+// case that matched, and the itab for that case and the dynamic type.
+//
+// The itab is unsafe.Pointer and not a number, because it is live in a
+// register across the call's return and the collector reads the register map
+// off this type. It points into memory the runtime never collects, so the
+// collector finds no object for it and passes over it, which is what it does
+// for the type word of every interface value.
+var ifaceSwitchResult = func() *Type {
+	t := &Type{Kind: Tuple, Fields: []Field{
+		{Name: "r0", Type: lowerInt},
+		{Name: "r1", Type: lowerUnsafePtr},
+	}}
+	if err := Layout(t); err != nil {
+		panic("ir: the result of runtime.interfaceSwitch does not lay out: " + err.Error())
+	}
+	return t
+}()
+
+// typeSwitchGrouped lowers a type switch that names at least one interface.
+//
+// # Why the shape is a selection and then a switch
+//
+// A switch over concrete types alone is one switch on the first word, because
+// a dynamic type is at most one of the cases: two identical cases are a
+// compile error. An interface case breaks that. A type may satisfy an
+// interface case and be a concrete case as well, and the specification runs
+// the clause the source wrote first, so the tests have to run in source order
+// and the first match has to win.
+//
+// So the tests choose a clause and the clauses are a switch on that choice:
+//
+//	sel := -1
+//	if x.tab == nil {
+//		sel = <the clause case nil selects>
+//	} else {
+//		<the case tests, in source order, each falling into the next>
+//	}
+//	switch sel {
+//	case 0: <clause 0>
+//	...
+//	default: <the default clause>
+//	}
+//
+// The clauses stay in one ir.OSwitch, which is what keeps a break inside a
+// clause bound to the switch it is written in. A chain of gotos would have
+// nothing for it to bind to.
+//
+// # Why the nil test is first
+//
+// runtime.interfaceSwitch calls runtime.getitab, which does not take a nil
+// type. gc's walkSwitchType emits the same test in the same place. An
+// interface holding nothing also matches case nil and matches nothing else,
+// so the test is the answer and not only a guard.
+//
+// # Why the grouping is the source's and not gc's
+//
+// gc processes every concrete case before every interface case, which reorders
+// them, and it is correct there because an earlier pass has already removed a
+// case that a preceding one shadows. Nothing removes one here. Consecutive
+// cases of one kind are grouped instead, so a run is one test and the runs
+// stay in the order they were written.
+func (l *lowerer) typeSwitchGrouped(n *Node, x *ifaceRef, p typeSwitchLayout, pos syntax.Pos) {
+	fail := func(why string) {
+		l.refuse(n, why)
+		pre := l.pop()
+		l.emit(pre...)
+		l.emit(n)
+	}
+	sel := l.tempObj(lowerInt, pos)
+	l.emit(define(pos, ref(sel, pos), intConst(pos, lowerInt, -1)))
+	// The itab runtime.interfaceSwitch returned, which is the first word of
+	// the variable a clause naming one interface binds. One temporary for the
+	// whole switch: only the run that matched wrote it, and only the clause
+	// that run selected reads it.
+	tab := l.tempObj(lowerUnsafePtr, pos)
+	l.emit(define(pos, ref(tab, pos), l.zeroOf(lowerUnsafePtr, pos)))
+
+	tests, ok := l.typeSwitchGroups(n, x, p.cases, sel, tab, pos)
+	if !ok {
+		fail("a case this switch cannot test")
+		return
+	}
+	guard := &Node{Op: OIf, Pos: pos, Type: voidType, X: x.isNotNil(pos), Body: tests}
+	if p.nilClause >= 0 {
+		guard.Else = []Stmt{Assign(pos, ref(sel, pos), intConst(pos, lowerInt, int64(p.nilClause)))}
+	}
+	l.emit(guard)
+
+	clauses := make([]Stmt, 0, len(n.Body))
+	good := true
+	for i, c := range n.Body {
+		if !l.typeSwitchCaseGrouped(n, c, i, x, tab) {
+			good = false
+		}
+		clauses = append(clauses, c)
+	}
+	pre := l.pop()
+	if !good {
+		l.emit(pre...)
+		l.emit(n)
+		return
+	}
+	l.emit(&Node{Op: OSwitch, Pos: pos, Type: voidType, Init: pre, X: ref(sel, pos), Body: clauses})
+}
+
+// typeSwitchGroups builds the case tests of a type switch, in source order.
+//
+// One run of consecutive cases of one kind is one test, and a run that does
+// not match falls into the next through the default clause of its own switch.
+// The recursion is what nests them: the tail is built first and placed inside
+// the head, so the statements come out in the order the source wrote the
+// cases.
+//
+// A run of concrete types is a switch on the first word against link-time
+// constants. A run of interfaces with methods is one call to
+// runtime.interfaceSwitch, which walks its cases in order and returns the
+// index of the first the dynamic type implements. The empty interface is
+// neither: every dynamic type is a value of it, so the case matches with no
+// test and every case after it is unreachable.
+func (l *lowerer) typeSwitchGroups(n *Node, x *ifaceRef, cases []typeCase, sel, tab *Object, pos syntax.Pos) ([]Stmt, bool) {
+	if len(cases) == 0 {
+		return nil, true
+	}
+	kind := kindOfCase(cases[0].typ)
+	if kind == caseAny {
+		return []Stmt{Assign(pos, ref(sel, pos), intConst(pos, lowerInt, int64(cases[0].clause)))}, true
+	}
+	k := 1
+	for k < len(cases) && kindOfCase(cases[k].typ) == kind {
+		k++
+	}
+	rest, ok := l.typeSwitchGroups(n, x, cases[k:], sel, tab, pos)
+	if !ok {
+		return nil, false
+	}
+	pick := func(c typeCase) Stmt {
+		return Assign(pos, ref(sel, pos), intConst(pos, lowerInt, int64(c.clause)))
+	}
+	clauses := make([]Stmt, 0, k+1)
+	var head []Stmt
+	var tag Expr
+	if kind == caseConcrete {
+		for _, c := range cases[:k] {
+			word, why := x.want(c.typ, pos)
+			if word == nil {
+				l.refuse(n, why)
+				return nil, false
+			}
+			clauses = append(clauses, &Node{Op: OCase, Pos: pos, Type: voidType,
+				Args: []Expr{word}, Body: []Stmt{pick(c)}})
+		}
+		tag = x.word(ifaceTyp)
+	} else {
+		ifaces := make([]*Type, 0, k)
+		for _, c := range cases[:k] {
+			ifaces = append(ifaces, c.typ)
+		}
+		cache, why := l.switchCache(ifaces, pos)
+		if cache == nil {
+			l.refuse(n, why)
+			return nil, false
+		}
+		idx := l.tempObj(lowerInt, pos)
+		head = []Stmt{&Node{
+			Op: OAssign, Pos: pos, Type: voidType,
+			Args: []Expr{ref(idx, pos), ref(tab, pos)},
+			Y: &Node{
+				Op: OCall, Pos: pos, Type: ifaceSwitchResult,
+				X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.interfaceSwitch")},
+				Args: []Expr{cache, x.dynamic(x.word(ifaceTyp), pos)},
+			},
+		}}
+		for i, c := range cases[:k] {
+			clauses = append(clauses, &Node{Op: OCase, Pos: pos, Type: voidType,
+				Args: []Expr{intConst(pos, lowerInt, int64(i))}, Body: []Stmt{pick(c)}})
+		}
+		tag = ref(idx, pos)
+	}
+	if len(rest) > 0 {
+		// The default clause of this run is the next run, which is what makes
+		// a run that matches nothing fall through in source order.
+		clauses = append(clauses, &Node{Op: OCase, Pos: pos, Type: voidType, Body: rest})
+	}
+	return append(head, &Node{Op: OSwitch, Pos: pos, Type: voidType, X: tag, Body: clauses}), true
+}
+
+// typeSwitchCaseGrouped rewrites one clause of a grouped type switch in place
+// and reports whether every part of it was rewritten.
+//
+// The clause is selected by its index rather than by a type, because the tests
+// ran before it and chose one. The default clause keeps no case expression, so
+// a choice no clause names reaches it.
+func (l *lowerer) typeSwitchCaseGrouped(n, c *Node, index int, x *ifaceRef, tab *Object) bool {
+	pos := c.Pos
+	ok := true
+	var single *Type
+	if len(c.Args) == 1 && c.Args[0] != nil && c.Args[0].Op != OConst && c.Args[0].Type != nil {
+		single = c.Args[0].Type
+	}
+	if len(c.Args) > 0 {
+		c.Args = []Expr{intConst(pos, lowerInt, int64(index))}
+	}
+
+	l.push()
+	if o := c.Obj; o != nil && o.Name != "_" && o.Type != nil {
+		switch {
+		case single != nil && single.Kind == Interface:
+			// A clause naming exactly one interface. The variable's type is
+			// that interface, so its first word is an itab built for it, and
+			// the word the operand carries was built for the guard's
+			// interface. Passing the operand along unchanged would call
+			// through a slot that holds another method.
+			word, why := l.typeSwitchIfaceWord(x, single, tab, pos)
+			if word == nil {
+				l.refuse(n, why)
+				ok = false
+				break
+			}
+			l.emit(Assign(pos, ref(o, pos), l.makeIface(single, word, x.word(ifaceData), pos)))
+		case o.Type.Kind == Interface:
+			// The default clause, a clause listing several types, and case
+			// nil. The variable keeps the guard's type and its value.
+			l.emit(Assign(pos, ref(o, pos), x.value()))
+		case single != nil:
+			v, why := l.ifaceValue(x.word(ifaceData), o.Type, pos)
+			if v == nil {
+				l.refuse(n, why)
+				ok = false
+				break
+			}
+			l.emit(Assign(pos, ref(o, pos), v))
+		default:
+			l.refuse(n, "a clause whose variable is a "+o.Type.Kind.String()+" and whose case list is not one type")
+			ok = false
+		}
+	}
+	pre := l.pop()
+	c.Body = append(pre, l.stmts(c.Body)...)
+	return ok
+}
+
+// typeSwitchIfaceWord is the first word of the variable a clause naming one
+// interface binds.
+//
+// For an interface with methods it is the itab runtime.interfaceSwitch
+// returned, which it built for that case and the dynamic type. For the empty
+// interface it is the dynamic type's descriptor, which the operand carries or
+// holds one field inside its itab; the load is safe because the nil test ran
+// before any case test did.
+func (l *lowerer) typeSwitchIfaceWord(x *ifaceRef, t *Type, tab *Object, pos syntax.Pos) (Expr, string) {
+	if !t.EmptyIface {
+		if tab == nil {
+			return nil, "a clause naming an interface with methods in a switch that made no lookup"
+		}
+		return ref(tab, pos), ""
+	}
+	return x.dynamic(x.word(ifaceTyp), pos), ""
 }
 
 // typeSwitchCase lowers one clause of a type switch in place and reports
@@ -4792,7 +5136,12 @@ func (l *lowerer) typeSwitchCase(n, c *Node, x *ifaceRef) bool {
 			continue
 		}
 		if a.Type.Kind == Interface {
-			l.refuse(n, "a case that names an interface, whose answer is which itab implements it: cmd/compile calls runtime.interfaceSwitch with an *abi.InterfaceSwitch, and specs/032 writes no such descriptor")
+			// typeSwitchPlan sends a switch with any interface case to the
+			// grouped row before this one runs, so reaching here is a plan
+			// that disagrees with the clauses it read. It is reported rather
+			// than compared, because comparing the first word against an
+			// interface's descriptor tests a word the value never holds.
+			l.refuse(n, "a case that names an interface in a switch the plan read as concrete")
 			ok = false
 			continue
 		}
