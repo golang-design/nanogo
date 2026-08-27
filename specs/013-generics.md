@@ -59,15 +59,24 @@ tree, and 5,968 body elements of 371 standard library packages come out as
 ([015](015-export-data.md) has the oracle). So both directions exist: a body
 can be read out of an archive and a body can be built out of source.
 
+**A body reaches a file now, on the other of the two paths.** nanogo writes
+the bodies an importer can inline and `gc` reads one and inlines it into
+another package ([015](015-export-data.md) has the measurement). That path
+carries no dictionary, which is why it went first: the private root's list
+names an ordinary declaration and every reference in the body is to an element
+the writer allocated.
+
 One thing is still owed and it is not this spec's. `export/writer.go` names a
 declaration with type parameters and refuses to encode it, because a generic
 body names types derived from the enclosing type parameters and every such
-name is a slot of an object dictionary the writer fills with four zeros. The
-builder refuses a generic declaration for the same reason rather than
-inventing a slot: a slot written as an ordinary type reference is a type `gc`
-reads without complaint, which is a wrong answer and not a refusal. Until the
-four counts are real, a package nanogo compiles cannot export a generic, which
-is what is left of [003](003-sequencing.md)'s M2 gate.
+name is a slot of an object dictionary the writer fills with four zeros. Three
+places refuse rather than invent a slot: the builder refuses a generic
+declaration, the writer refuses the declaration, and the writer's resolver
+refuses any dictionary slot a body names. A slot written as an ordinary type
+reference is a type `gc` reads without complaint, which is a wrong answer and
+not a refusal. Until the four counts are real, a package nanogo compiles
+cannot export a generic, which is what is left of
+[003](003-sequencing.md)'s M2 gate.
 
 The encoder is also what the stenciler will write through, when an
 instantiated body has to reach a file rather than only `ir`.

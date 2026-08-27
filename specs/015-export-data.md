@@ -32,7 +32,10 @@ Both directions, for everything but a generic declaration.
 | `-importcfg` parsing | `driver/importcfg.go` | built; all four directives, in separate tables, and an unknown directive is an error |
 | Function bodies, the reader | `export/body.go`, `export/bodyread.go`, `export/bodies.go` | built; every body of every standard library package decodes, and the decode is exact |
 | Function bodies, the element encoder | `export/bodywrite.go` | built; every body element of every standard library package is written back byte for byte as `gc` wrote it |
-| Function bodies, the builder | nowhere | **not written**; the encoder writes a body from the tree of `export/body.go`, and nothing turns `syntax` plus the checker's record into one; see below |
+| Function bodies, the builder | `export/bodybuild.go` | built; `syntax` plus the checker's record becomes the tree of `export/body.go`, and 5,968 elements of 371 packages encode to `gc`'s own bytes |
+| Function bodies, the writer's resolver | `export/bodyexport.go` | built; a body built from `syntax` carries no element index, and this allocates every one it names and refuses what it cannot allocate |
+| Which bodies are offered | `driver/export.go`, `export/bodyinline.go` | built; the driver decides by what the declaration is and `export` by what its body holds. `gc` reads one and inlines it (`internal/e2e/import_test.go`) |
+| Positions | `export/writer.go` | built for a declaration nanogo compiled and for a body it carries; absent for a declaration of another package |
 
 `driver/importer.go` turns an import path into a file through `-importcfg` and
 hands it to the reader, so a package that imports compiles.
@@ -134,15 +137,15 @@ importer that instantiates it, with a message naming neither the generic nor
 the package that wrote it.
 
 So the writer refuses rather than writing something a build would get halfway
-through. **The refusal stands.** Lifting it needs two things that are still
-owed: a builder from `syntax` plus the checker's record into the body tree,
-and the dictionary that building fills as a side effect. `objDict` writes zero
-for every count today, and every one of them is populated while a body is
-built, by `gc`'s `rtype`, `itab`, `convRTTI` and `varDictIndex` calls. A
-missing entry there is a dictionary slot `gc` reads as a different type, which
-is a wrong answer and not a refusal. The element encoder below is the half
-that is built, and it fills no count: it writes back the slots a tree already
-carries.
+through. **The refusal stands.** One of the two things it needed is built: the
+builder from `syntax` plus the checker's record into the body tree, and the
+writer that carries a body into a file. What is left is the dictionary that
+building fills as a side effect. `objDict` writes zero for every count today,
+and every one of them is populated while a body is built, by `gc`'s `rtype`,
+`itab`, `convRTTI` and `varDictIndex` calls. A missing entry there is a
+dictionary slot `gc` reads as a different type, which is a wrong answer and
+not a refusal, so the writer's resolver refuses a slot rather than numbering
+one.
 
 The `types2` fork carries a hand-written `srcimporter_test.go`, which
 type-checks an imported package from source. Upstream's `importer_test.go` is
@@ -222,6 +225,15 @@ refusal states from the other side.
 The measurement says the same. In the archives the pinned toolchain writes,
 `slices` holds 85 body elements and its private root lists 2 of them. The
 other 83 are generic bodies, reached through `funcExt` alone.
+
+**Both fields gate the first path, and they are written in two places.** The
+private root's entry says where the body is, and the declaration's extension
+data says whether the declaration has one at all: `gc` reads `fn.Inl == nil`
+first and looks the body up only if it is not. So a file whose list holds an
+entry the extension data does not agree with is a file `gc` accepts and never
+inlines from, and nanogo's own reader cannot see the disagreement, because it
+walks the list. `internal/e2e/import_test.go` is what couples the two, by
+asserting on what `-gcflags=-m` reports.
 
 ### What the reader decodes into, and why it is not a syntax tree
 
@@ -394,6 +406,74 @@ the four counts to be real: a slot written as an ordinary type reference is a
 type `gc` reads without complaint, which is a silent wrong answer rather than
 a refusal.
 
+### The writer's resolver, and why nothing is guessed
+
+`export/bodyexport.go` is the second `bodyRefs`. `elemRefs` answers with the
+index the archive a body was read from already gave it, which is what makes
+the round trip a byte comparison. A tree built from `syntax` has no index at
+all, so `declRefs` allocates one for every type, object, package, string,
+position base and nested body the body names, and **refuses what it cannot
+allocate.**
+
+**A dictionary slot is asked for too, and refused.** The encoder wrote one
+straight out of the tree, because the tree it was written for came from an
+archive whose dictionary held the slot. A tree the writer produces has no such
+dictionary: `objDict` writes four zeros, so a slot would be a type `gc`
+resolves to whatever the empty dictionary gives it. `bodyRefs` therefore has a
+sixth method, `dictIdx`, which `elemRefs` answers with the slot and `declRefs`
+refuses.
+
+**A refused body must leave no hole behind.** By the time the writer refuses,
+it has claimed element indices it will never fill, and a claimed index that
+holds nothing is exactly the declaration `gc` reads as a different one. So the
+decision is made first, by writing the body into a package the caller never
+sees. Which elements a body needs is a property of the types and the
+declarations it names and not of the indices they land at, so a body that
+writes into an empty package writes into the real one: allocation is memoized,
+and a memoized entry is one that already succeeded. The holes stay in the
+probe, which is thrown away.
+
+### Which bodies are offered, and at what price
+
+A body is optional data. The declaration is written either way, so a body that
+cannot be carried is left out rather than made a refusal of the package. Two
+sides decide, and the split follows what each can see.
+
+| Decided by | Skips | Why |
+| --- | --- | --- |
+| `driver/export.go` | a declaration with no block | it is satisfied by assembly or by a linkname and there is no body |
+| `driver/export.go` | a declaration carrying a `//go:` directive the driver records | the writer carries no directive at all ([016](016-directives-and-pragmas.md)), and `gc`'s inliner refuses seven of them outright. `gc` would read a pragma field of zero and inline what the source forbade |
+| `driver/export.go` | a declaration the builder refuses | a generic one and a loop over a function |
+| `export/bodyexport.go` | a body whose elements cannot be allocated | above |
+| `export/bodyexport.go` | a declaration the file holds no element for | the private root's entry names its declaration rather than pointing at it, so an entry for a declaration nothing in the file names is one no reader can pair |
+| `export/bodyinline.go` | a body calling `recover`, `GetCallerPC` or `GetCallerSP` | each answers about the function it stands in, and inlining moves it |
+| `export/bodyinline.go` | a body with a `go` or `defer` statement, a function literal or a runtime helper | narrowness, and [024](024-inlining-and-devirtualization.md) owns widening it |
+
+**`gc` runs no check of its own on an imported body.** `inline.CanInline`
+decides inlinability for a function `gc` compiles and writes the answer into
+the export data, and `gc`'s reader takes the answer as given. So every rule
+`CanInline` enforces is the exporting compiler's rule to enforce, and the
+first two rows of the second half are the ones that produce a wrong program
+rather than a slow one.
+
+**The price is a policy and not a measurement.** `MaxInlineCost` is `gc`'s
+`inlineMaxBudget`, which is the cost of the largest body `gc`'s default budget
+accepts. nanogo runs no inliner and measures no hairiness
+([024](024-inlining-and-devirtualization.md)), and 80 is the conservative end
+of both readings `gc` makes of the field:
+
+$$
+\underbrace{\texttt{cost} \le 80}_{\text{a normal caller inlines it}}
+\qquad
+\underbrace{\texttt{cost} > 20}_{\text{a big caller does not}}
+\qquad
+\underbrace{\text{a caller is charged } 80}_{\text{so no caller is made inlinable by it}}
+$$
+
+An understated price would make `gc` inline into a caller `gc` measured as too
+expensive, and would make that caller look cheap enough to be inlined in turn.
+Neither is a wrong answer, and both are claims nanogo has not measured.
+
 ### Two things the format does that its writer does not say
 
 Both were found by the oracle and neither is in `noder/writer.go`, because
@@ -426,12 +506,26 @@ position is unknown, which is a gap in [052](052-diagnostics.md). Closing it
 needs a `FileSet` that can hold a foreign file's line table, which is a change
 to `syntax` and not to the reader.
 
-The writer has the same gap in mirror image: every position it writes is
-absent, so the position base section is empty and a `gc` diagnostic about a
-declaration nanogo compiled says the position is unknown. Closing that one
-needs no change to `syntax`, only the file names and line numbers the compiled
-files already have, and the `-trimpath` rewriting that makes them the same on
-two machines ([053](053-determinism.md)).
+The writer had the same gap in mirror image and no longer has it: a
+declaration nanogo compiled carries where it stands, and so does every
+position inside a body it exports. A declaration of another package still
+writes an absent position, because the reader dropped the one `gc` wrote and
+the writer has nothing to put back.
+
+**That gap was not only a diagnostic.** `gc` rebases every position of an
+inlined body onto the call it inlined into, and it rebases the parameters with
+the rest (`noder/reader.go`'s `inlPosBase`). An absent position has no base to
+rebase, so the first body nanogo exported stopped `gc` with
+`internal compiler error: panic: no old PosBase`, naming neither the
+declaration nor the package that wrote it.
+
+**The file name a position base holds is `-trimpath` applied to the parsed
+path, and nothing else.** `gc` writes `objabi.AbsFile`'s form, which joins a
+relative path against the process working directory and rewrites a `GOROOT`
+prefix to `$GOROOT`. Both make the bytes depend on where the compiler ran,
+which [053](053-determinism.md) forbids. `driver/compile.go`'s `TrimPath` is
+what the object's own line table already records, and one compiler must not
+report two names for one file.
 
 Two further things the writer does not carry, each of which an importer can
 observe. A `//go:` directive of any kind. The driver records fourteen verbs and
@@ -452,14 +546,10 @@ record and says it has none never runs its initialisation and nothing reports
 it, and a package that says it has one and has none is a link failure naming a
 symbol nothing defines.
 
-Function bodies are read now, and the element that carries one is written
-back. What is missing between the two is the builder: nothing turns `syntax`
-plus the checker's record into a body tree, so nothing nanogo writes carries a
-body. That leaves one gap and not two: an importer can reach the body of a
-generic another package declares, and nanogo cannot yet hand one to an
-importer of its own. [024](024-inlining-and-devirtualization.md) is unblocked
-from the reading side by the same work and is otherwise untouched, because
-nothing inlines yet.
+Function bodies reach a file now, on the inlining path and not on the generic
+one. `gc` reads a body nanogo wrote and inlines it into another package
+(`internal/e2e/import_test.go`). What is still owed is the generic path, which
+needs the object dictionary below.
 
 ## What is in it
 
@@ -507,11 +597,11 @@ The costs are real and are accepted:
    The reader here measures 1,948 lines including the container's read half and
    the archive, against an estimate of 7,000 for the whole component.
 
-   What is left of the estimate is the function bodies. The write half measures
-   2,380 lines: `export/pkgbits/encoder.go` at 371, `export/writer.go` at 799,
-   `driver/archive.go` at 124 and `export/bodywrite.go` at 1,086. What is
-   still owed on that side is the builder that produces a body tree from
-   `syntax`.
+   The write half measures 4,944 lines: `export/pkgbits/encoder.go` at 371,
+   `export/writer.go` at 897, `driver/archive.go` at 124,
+   `export/bodywrite.go` at 1,112, `export/bodybuild.go` at 1,963,
+   `export/bodyexport.go` at 382 and `export/bodyinline.go` at 95. What is
+   still owed on that side is the object dictionary.
 3. **Both directions are required, and which one comes first depends on where
    the allowlist starts.** A leaf package has no imports, so compiling it with
    nanogo exercises no reader, but anything that imports it reads what nanogo
@@ -754,27 +844,58 @@ What the body builder has:
 - Refusal by name: a generic declaration and a loop over a function are
   `BodyError`s naming the declaration (`TestBuildBodyRefusals`).
 
+What the writer's body path has:
+
+- End to end, with `gc` as the reader. nanogo compiles a library and `gc`
+  compiles an importer of it with `-gcflags=-m`, and `gc` reports that it
+  inlined a plain function, a function with a local and a branch, a function
+  that calls another declaration of the same package, a method on a value
+  receiver and a method on a pointer receiver. The program runs and gives the
+  right answer (`internal/e2e/import_test.go`).
+  **`-m` is what makes the evidence positive.** A build carrying no body links
+  and runs exactly the same, so the program running proves nothing on its own,
+  and the line naming the inlined call is what says `gc` reached the element.
+  It is also the only check that couples the two fields `gc` gates on: the
+  private root's list and the extension data's inlinable-body bit are written
+  in two places, and nanogo's reader walks only the first.
+- The writer's own resolver, read back: a package written from source, with
+  its bodies, decodes with no byte and no reference left over
+  (`export/bodyexport_test.go`).
+- Refusal by name: a body naming a slot of an object dictionary, a type the
+  writer has no element for or a declaration the checker recorded no object
+  for is refused rather than numbered.
+
 What the writer still needs:
 
-- A body reaching a file at all. `export.Write` takes a `*types2.Package`, and
-  a body needs the files and the `types2.Info` the driver already holds
-  (`driver/compile.go`). Three things follow from wiring it:
-  `checkFiles` does not fill `Info.FileVersions`, which is what decides the
-  Go 1.22 loop variable rule per file and is silently wrong for a file with an
-  older `//go:build`; the writer has never allocated a `SectionPosBase`
-  element, because every position nanogo wrote until now was the absent one;
-  and the file name that element holds is a driver decision, since `gc` writes
-  the `objabi.AbsFile` form and a parse holds the path it was given.
-- The writer's own resolver: encoding a built body asks for the element index
-  of every type, object, package, string, position base and nested body it
-  names. What it cannot allocate it has to refuse, because an index it guesses
-  is a declaration `gc` reads as a different one.
 - Generic bodies: an importer instantiates a generic declared in a package it
   only has export data for, and the instantiation compiles and runs. This is
   the whole of what is refused, and it needs the object dictionary to be real
   and [013](013-generics.md)'s stenciler.
+- A real inlining cost. `MaxInlineCost` is a policy and not a measurement, and
+  [024](024-inlining-and-devirtualization.md) owns replacing it.
+- A widening of the shapes offered, which the same spec owns.
 
 ## What was wrong
+
+**The Go 1.22 loop variable rule was said to be wrong for a file with an older
+`//go:build`, and it is wrong for the whole package.** `checkFiles` passed a
+nil `Info.FileVersions`, and `types2` fills that map only when it is there to
+fill, so the builder read "no version" for every file and treated it as the
+current release. The per-file part of the claim cannot happen: nanogo's
+`syntax.File` carries no version of its own, so a `//go:build` line that names
+one never reaches the checker and every file of the package takes
+`Config.GoVersion`, which is `-lang`. So the bug is a module declaring
+`go 1.21`, whose loops nanogo built under the Go 1.22 rule. It was latent
+until a body reached a file and went live with it, which is why it was fixed
+before the wiring rather than after.
+
+**A body was expected to reach `gc` without a real position, and it cannot.**
+The writer wrote an absent position everywhere, and an absent position is what
+`gc` stops on the first time it inlines: it rebases an inlined body's
+positions onto the call, parameters included, and there is no base to rebase.
+The message names neither the declaration nor the package. So writing a
+declaration's position was a prerequisite of the body path and not the
+diagnostic improvement it was filed as.
 
 **The writer's demonstration named `internal/goarch` and `internal/goos` as a
 pair before the pair worked.** For a while only `internal/goos` was on that
