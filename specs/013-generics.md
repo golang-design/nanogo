@@ -44,20 +44,20 @@ a package, its files and the checker's `Info`, and one decoded body is none of
 the three. A per-function entry point is the thing the reader cannot supply
 from its side, and it is what this spec asks [020](020-ir.md) for.
 
-**The body reader is built and the export data writer still refuses a generic
-declaration.** [015](015-export-data.md) reads the body of a generic another
+**The body reader is built, and the writer carries a generic declaration.** [015](015-export-data.md) reads the body of a generic another
 package declares: every body element of all 375 standard library packages
 decodes, 820 of them through the path a generic takes, into a tree
 `export/body.go` owns. So the stenciler has its input now, and what it takes
 is not `syntax` and not `ir` but the format's own statement and expression
 codes, with the types resolved and the local variables numbered.
 
-**The builder is built too, and the refusal that is left is the dictionary.**
+**The builder is built too, and it builds a generic body now.**
 `export/bodybuild.go` turns `syntax` plus the checker's record into the same
-tree, and 5,968 body elements of 371 standard library packages come out as
+tree, and 6,150 body elements of 371 standard library packages come out as
 `gc`'s own tree for the same function, none differing
-([015](015-export-data.md) has the oracle). So both directions exist: a body
-can be read out of an archive and a body can be built out of source.
+([015](015-export-data.md) has the oracle). 182 of them are generic bodies. So
+both directions exist: a body can be read out of an archive and a body can be
+built out of source.
 
 **A body reaches a file now, on the other of the two paths.** nanogo writes
 the bodies an importer can inline and `gc` reads one and inlines it into
@@ -66,17 +66,32 @@ carries no dictionary, which is why it went first: the private root's list
 names an ordinary declaration and every reference in the body is to an element
 the writer allocated.
 
-One thing is still owed and it is not this spec's. `export/writer.go` names a
-declaration with type parameters and refuses to encode it, because a generic
-body names types derived from the enclosing type parameters and every such
-name is a slot of an object dictionary the writer fills with four zeros. Three
-places refuse rather than invent a slot: the builder refuses a generic
-declaration, the writer refuses the declaration, and the writer's resolver
-refuses any dictionary slot a body names. A slot written as an ordinary type
-reference is a type `gc` reads without complaint, which is a wrong answer and
-not a refusal. Until the four counts are real, a package nanogo compiles
-cannot export a generic, which is what is left of
-[003](003-sequencing.md)'s M2 gate.
+**A generic function reaches a file, and `gc` instantiates it.**
+`export/bodydict.go` numbers the slots a generic body names, and it is one
+allocator: the builder fills the dictionary while it builds the body and
+`objDict` writes the same lists out, so the slot the body names and the entry
+the dictionary holds cannot disagree. The writer carries a generic function
+with its dictionary and its body, because the format has no shape for a
+generic declaration that does not name a body. `gc` reads a library of generic
+functions nanogo wrote, stencils each at two concrete type arguments, and the
+program links and runs ([015](015-export-data.md) has the measurement).
+
+Four generic shapes are refused by name, each because its dictionary is not
+the one a body carries: a generic type declaration and a method of one, whose
+dictionary spans the type and every method it declares; a method with type
+parameters of its own, whose dictionary holds the receiver's ahead of them; a
+generic declaration of another package, whose body and dictionary live in that
+package's archive; and a type declared inside a generic declaration, whose
+every use carries the enclosing type parameters implicitly.
+
+**What is left of [003](003-sequencing.md)'s M2 gate is `ir`, not the format.**
+`ir/build.go` reports a generic function declaration as an error rather than
+skipping it, so a package that declares one is a package nanogo refuses to
+compile, and the writer never sees it. A generic declaration has no run-time
+representation in the package that declares it: `gc` emits nothing for one
+either, and every instantiation is code the importing package generates. So
+what the builder owes is to skip the declaration rather than to fail on it,
+and the export data is already there when it does.
 
 The encoder is also what the stenciler will write through, when an
 instantiated body has to reach a file rather than only `ir`.
