@@ -28,8 +28,10 @@ text-assembly seam in [000](000-decisions.md) decision 3.
 | The canonical name, both spellings | `ir/rtype.go` | built; the expected spellings were read out of a `gc` object with `go tool nm`, and the hash below re-checks the link string against a running `gc` binary |
 | The descriptor bytes | `rtype/` | built for the types below, including a defined type's `UncommonType` tail and a struct's field array, checked field by field against `reflect` |
 | The reference from generated code | `ir/lower.go` | built for `new`, `&T{...}`, a slice literal and `make([]T, n)`, and the pass runs in a real compile |
+| The interface value itself | `ssa/build.go` | built for a conversion to an **empty** interface, and for a conversion of an interface with methods to one |
+| The reference from an interface conversion | `ssa/build.go` | named, in `ssa.Func.Descriptors`. **`driver/compile.go` does not read that field yet**, so a conversion of a type the runtime does not already carry a descriptor for links against nothing |
 | The descriptor as a data symbol in the object | `driver/compile.go` | built; a named `dupok` definition, and the data it points at is hashed |
-| Itabs | nowhere | **not built**; the concrete side's method set is in the IR and the interface side's is not |
+| Itabs | nowhere | **not built**; the `Fun` array needs the same ABI wrappers a method's descriptor row is refused for |
 
 The `gclocals·` and `go:string.` rows of the namespace table are produced
 elsewhere. `ssagen/stackmap.go` builds the stack maps, `ssa/decompose.go` names
@@ -46,6 +48,13 @@ What reaches a running program: a variadic call, a slice literal, `make` of a
 slice, `new` of a defined struct type, and a method call on a value or a
 pointer receiver. Those compile, link against the real runtime and run, and
 `internal/e2e` runs a collection over what one of them allocated.
+
+Interface construction joins that list. `any` holding an `int` or a `string`,
+`panic` of either, `panic` of an `error`, and `fmt.Println` all compile, link
+and print what `gc` prints. `panic` of an interface with methods is the one
+that proves the guarded load: the descriptor comes out of the itab, and the
+value that used to reach the runtime made it die with "name offset out of
+range" instead of printing.
 
 A refusal from `rtype` arrives after the function it came from has compiled,
 because lowering can name `main.point` without trouble and only the encoder
@@ -165,13 +174,129 @@ array, which holds the same `Ifn` wrappers the method rows above are refused
 for, and the interface side for a **literal** interface, which carries no
 method names because it is not a `*types2.Named`.
 
-What is above them is not `ssa.Build`. `OTypeAssert` and `OTypeSwitch` are in
-`ir.goSpecificOps` and have no row in the lowering table, so `ir/lower.go`
-refuses each with "no row of the lowering table is built for it yet" and the
-node never reaches SSA construction. No program reaches an itab today whatever
-this spec builds. The distinction matters to anyone measuring what a change
-buys: a row refused in the lowering pass is not evidence about SSA
-construction, and this spec named the wrong pass.
+A type assertion and a type switch still stop above SSA. `OTypeAssert` and
+`OTypeSwitch` are in `ir.goSpecificOps` and have no row in the lowering table,
+so `ir/lower.go` refuses each with "no row of the lowering table is built for
+it yet" and the node never reaches SSA construction. The distinction matters to
+anyone measuring what a change buys: a row refused in the lowering pass is not
+evidence about SSA construction.
+
+**One program does reach an itab, and it is a conversion and not an
+assertion.** `var c coder = seven{}` converts a concrete type to an interface
+with methods, and the type word of that value is the itab of the pair.
+`ssa/build.go` refuses it and the refusal names both walls, because naming one
+sends the next reader to a wall they cannot see: this spec writes no itab, and
+`rtype` refuses `main.seven`'s own descriptor until its one method has the two
+wrappers.
+
+## The interface value in SSA
+
+An interface is two words and no arm64 instruction holds one, so it is built as
+a value and specs/025's decomposition takes it apart before selection. Three
+operations of `ssa/op.go`, and none of them survives that pass:
+
+| Operation | Meaning |
+| --- | --- |
+| `IMake(word, data)` | the interface value the two words are |
+| `ITab(iface)` | the first word |
+| `IData(iface)` | the second word |
+
+Which word the first one is does not appear in the operations. It is an `*itab`
+for an interface with methods and a `*_type` for one without, and the fact is
+the value's type, `ir.Type.EmptyIface`. An operation that named one of them
+would leave the other with no operation to be built from.
+
+`CheckDecomposed` names a survivor. The three have no machine form, so one that
+reaches lowering is a bug in the pass that owed its removal, and lowering finds
+it only by panicking.
+
+### The two words of a concrete conversion
+
+The shape is `cmd/compile`'s `walkConvInterface`, minus the cases that only
+avoid an allocation.
+
+The type word is the concrete type's descriptor, named by `ir.TypeSymbol`. The
+data word is `dataWord`'s answer:
+
+| The value | The data word |
+| --- | --- |
+| one machine word wide, and that word holds a pointer | the value itself |
+| a string | `runtime.convTstring` |
+| a slice | `runtime.convTslice` |
+| a scalar 8, 4 or 2 bytes wide, aligned to its width | `runtime.convT64`, `convT32`, `convT16` |
+| anything else | **refused**, by name |
+
+The first row is `types.IsDirectIface`, which is width and pointerness and not
+a kind test. A `uintptr` is one word and holds no pointer, so it is boxed. A
+one-field struct holding a pointer is not pointer shaped and is not boxed.
+
+A float is reinterpreted before the call. `convT64` declares `uint64`, and
+[030](030-abi.md) places an argument by the type of the value, so a float left
+as a float is written to a floating-point register and read out of an integer
+one.
+
+Two shapes have no answer here and each names itself. A one-byte type is
+`runtime.staticuint64s` indexed by the value, and anything wider than the
+by-value helpers is `runtime.convT` or `convTnoptr` with the address of a copy
+in the frame, which construction has no slot to make: it decided which objects
+live in the frame before it built any expression.
+
+### An interface with methods becomes an empty one by a load
+
+```
+typeWord := unsafe.Pointer(itab)
+if typeWord != nil {
+    typeWord = itab.Type
+}
+e = iface{typeWord, data}
+```
+
+The data word is carried across unchanged. The type word is not: the source
+leads with an `*itab` and the destination leads with a `*_type`, and the
+descriptor is the itab's **second** word, `internal/abi.ITab.Type`. A test
+reads that offset out of the installed runtime's `internal/abi/iface.go`
+rather than trusting the constant, because a wrong offset hands the runtime the
+`*InterfaceType` where it reads the `*Type` and every field it reads after that
+is another field.
+
+The guard is not optional. A nil interface has a nil first word and reading a
+field through it faults. The join is an ordinary phi over an ordinary variable,
+which is what `&&` and `||` already build in `ssa/build.go`.
+
+The other direction is refused. An `*itab` is the method table of one
+(interface, concrete type) pair, so nothing in an interface value holds one
+that was not put there and the conversion is a runtime lookup rather than a
+load. `cmd/compile` gives it to `runtime.typeAssert`.
+
+### Identity between two interfaces is the link string
+
+Every interface is two words of one width and reports one kind, so "same kind,
+same size" is true of every pair and says nothing. Two facts separate a pair
+and neither is visible below the IR: which word the value leads with, and which
+interface an `*itab` was built for. An itab lists the concrete type's methods
+in the order its own interface declares them, so an itab built for
+`io.ReadWriter` has two entries where `io.Reader` reads one.
+
+`ir.TypeLinkString` is therefore the test, because two types have one link
+string exactly when they are one type. `walkConvInterface` answers the same
+question the same way: it reaches its I2I path for every pair that is not
+identical, whatever the method sets are.
+
+### The set a package owes is two sets, and only one is collected
+
+`ir.LowerAndCollect` reports the descriptors the lowering table names. A
+conversion to an interface reaches no row of that table, so the descriptors
+construction names are a second set, carried on `ssa.Func.Descriptors` in
+first-use order.
+
+`driver/compile.go` does not union that field into `needed` yet. Until it does,
+a conversion of a type the runtime already carries a descriptor for links, and
+a conversion of any other type reaches the linker as
+
+    main.main: relocation target type:main.myInt not defined
+
+The fix is one line where `compileFunc` returns: the types the built function
+named join the types the lowered tree named.
 
 ## The type descriptor
 
