@@ -726,6 +726,48 @@ func TestCompileRefusesAGenericFunction(t *testing.T) {
 	}
 }
 
+// TestCompileRefusesALifetimeDirective covers the two directives whose whole
+// meaning is object lifetime.
+//
+// //go:uintptrescapes and //go:uintptrkeepalive say that a uintptr argument
+// keeps its referent alive across the call, which is an obligation on the
+// caller, and no pass in nanogo discharges it. A function compiled without it
+// runs until a collection happens while the callee is reading the object,
+// which is the failure specs/016-directives-and-pragmas.md rule 1 exists to
+// prevent: a directive in the correctness group that is recorded and dropped.
+//
+// internal/gotest/testdata/go/test/uintptrescapes3.go is the corpus file that
+// showed it, and the refusal is what turns a wrong answer into a diagnostic.
+func TestCompileRefusesALifetimeDirective(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		src  string
+	}{
+		{"uintptrescapes", "package main\n\n//go:uintptrescapes\nfunc f(p uintptr) {}\n\nfunc main() { f(0) }\n"},
+		{"uintptrkeepalive", "package main\n\n//go:uintptrkeepalive\nfunc f(p uintptr) {}\n\nfunc main() { f(0) }\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := compileSource(t, tt.src, nil)
+			if err == nil {
+				t.Fatal("Compile accepted a directive it records and does not honour")
+			}
+			var ue *UnsupportedError
+			if !errors.As(err, &ue) {
+				t.Fatalf("the failure is not an UnsupportedError: %v", err)
+			}
+			for _, want := range []string{"//go:" + tt.name, "f", "alive"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the message does not carry %q:\n%v", want, err)
+				}
+			}
+		})
+	}
+	// A function with no such directive is not refused by it.
+	if _, err := compileSource(t, "package main\n\n//go:noinline\nfunc f(p uintptr) {}\n\nfunc main() { f(0) }\n", nil); err != nil {
+		t.Errorf("a function carrying an ordinary directive was refused: %v", err)
+	}
+}
+
 // TestTheTargetDecidesTheArchCheck covers the refusal a build for an
 // architecture nanogo has no backend for gets.
 //

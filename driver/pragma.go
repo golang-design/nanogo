@@ -210,6 +210,42 @@ func checkDirectives(f *syntax.File, report func(syntax.Error)) {
 	})
 }
 
+// lifetimePragmas are the directives whose whole meaning is object lifetime.
+//
+// //go:uintptrkeepalive says a uintptr parameter keeps its referent alive for
+// the duration of the call, and //go:uintptrescapes says it keeps it alive
+// past the call as well and implies the first. Both put an obligation on the
+// caller: it has to hold the pointer the uintptr was made from, and
+// specs/023-escape-analysis.md owns the pass that would.
+//
+// No pass does, so a function that carries one is refused. The alternative is
+// a program that collects an object while a system call is reading it, which
+// is the outcome specs/016-directives-and-pragmas.md rule 1 names: a directive
+// in the correctness group that is recorded and not honoured is not a missing
+// optimisation.
+const lifetimePragmas = uintptrKeepAlive | uintptrEscapes
+
+// LifetimeDirective returns the directive a declaration carries that nanogo
+// records and cannot honour, and the position it is at.
+//
+// The name is returned rather than the flag, because the only use of the
+// answer is a diagnostic and a reader needs the word they wrote.
+func LifetimeDirective(p syntax.Pragma) (string, syntax.Pos, bool) {
+	q := asPragma(p)
+	if q == nil || q.flag&lifetimePragmas == 0 {
+		return "", syntax.Pos(0), false
+	}
+	for _, at := range q.list {
+		switch {
+		case at.flag&uintptrEscapes != 0:
+			return "//go:uintptrescapes", at.pos, true
+		case at.flag&uintptrKeepAlive != 0:
+			return "//go:uintptrkeepalive", at.pos, true
+		}
+	}
+	return "", syntax.Pos(0), false
+}
+
 // asPragma recovers the driver's record from the parser's opaque interface.
 func asPragma(p syntax.Pragma) *pragma {
 	q, _ := p.(*pragma)

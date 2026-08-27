@@ -231,10 +231,15 @@ func parseFiles(cfg *Config) ([]*syntax.File, *syntax.FileSet, error) {
 // is that it runs where that call is not allowed.
 //
 // nanogo does not compile the runtime today, and the runtime is the only
-// consumer of that group, so nothing reachable is miscompiled by this yet. The
-// gap is gated by TestDirectivesAreRecordedButNotHonoured rather than left as
-// an absence, because the day nanogo reaches a package that uses the
+// consumer of most of that group, so most of it miscompiles nothing reachable
+// yet. The gap is gated by TestDirectivesAreRecordedButNotHonoured rather than
+// left as an absence, because the day nanogo reaches a package that uses the
 // directive, the failure has no diagnostic at all.
+//
+// Two of them are not in that position and are refused instead. See
+// [LifetimeDirective]: //go:uintptrescapes and //go:uintptrkeepalive are
+// written by ordinary code that calls into a system, they were recorded and
+// dropped, and the corpus caught the program that came out.
 //
 // What the record does buy is the other half of the rule: a directive that no
 // declaration can use is now reported rather than dropped in silence. See
@@ -423,6 +428,15 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 				return nil, false, fmt.Errorf("%s: missing function body", position(fset, fn.Pos, fn.Name))
 			}
 			continue
+		}
+		if d, pos, ok := LifetimeDirective(fn.Pragma); ok {
+			return nil, false, &UnsupportedError{
+				Package: cfg.Package,
+				What:    d + " on function " + fn.Name + " at " + position(fset, pos, fn.Name),
+				Detail: "the directive makes a uintptr argument keep its referent alive across the call, " +
+					"and no pass holds the pointer for it (specs/023-escape-analysis.md). " +
+					"A function compiled without it collects the referent while the callee is reading it",
+			}
 		}
 		r, types, err := compileFunc(cfg, fn, target, out, fset)
 		if err != nil {

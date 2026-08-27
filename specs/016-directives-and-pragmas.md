@@ -120,9 +120,20 @@ Getting one of these wrong produces a program that is wrong, not slow.
 | `//go:yeswritebarrierrec` | Stops the recursive check above. | [034](034-write-barriers.md) |
 | `//go:systemstack` | Must run on the system stack; calling it from a user stack is an error the compiler inserts a check for. | [035](035-goroutines-and-stack-growth.md) |
 | `//go:linkname a b` | Binds local symbol `a` to external symbol `b`, in either direction. Not recognised by `pragmaVerb`, so not recorded either. | [032](032-type-descriptors-and-itabs.md) |
-| `//go:uintptrescapes` | A `uintptr` argument keeps the referent alive across the call. | [023](023-escape-analysis.md) |
-| `//go:uintptrkeepalive` | The same, without forcing escape. | [023](023-escape-analysis.md) |
+| `//go:uintptrescapes` | A `uintptr` argument keeps the referent alive across the call. **Refused.** | [023](023-escape-analysis.md) |
+| `//go:uintptrkeepalive` | The same, without forcing escape. **Refused.** | [023](023-escape-analysis.md) |
 | `//go:cgo_unsafe_args` | Argument area may be addressed as one block. | out of scope; [000](000-decisions.md) decision 8 |
+
+The two `uintptr` directives are refused rather than recorded and dropped, and
+they are the only ones in this table that are. The rest of the group is written
+by the runtime, which nanogo does not compile, so nothing reachable is
+miscompiled by dropping them. These two are written by ordinary code that hands
+a pointer to a system as an integer, and dropping them collects the object while
+the callee is reading it.
+[`uintptrescapes3.go`](../internal/gotest/testdata/go/test/uintptrescapes3.go)
+is the corpus file that showed it: it printed four failures rather than nothing.
+`driver.LifetimeDirective` is the refusal and
+[023](023-escape-analysis.md) owns the pass that would lift it.
 
 `//go:nosplit` deserves its own note. The budget is a fixed number of bytes of
 stack available below the guard, shared by the whole nosplit call chain. The
