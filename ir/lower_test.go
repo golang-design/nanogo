@@ -1909,6 +1909,49 @@ func TestLowerMapValueIsEvaluatedBeforeTheInsert(t *testing.T) {
 	}
 }
 
+// TestLowerMapOperandIsEvaluatedOnce pins the property the map rows depend on.
+//
+// len reads the operand twice, by the nil check and by the load, and a map
+// index reads it once and still has to evaluate it before the key, which is the
+// specification's order for an index expression. Neither is safe over an
+// expression that calls.
+//
+// ir.Build hoists such an operand into a temporary before this pass sees it, so
+// no shape reaches the second evaluation today. That is the builder's answer to
+// a question of this pass's own, and mapOperand is this pass's: the rows below
+// evaluate the operand into storage themselves and read the storage. The test
+// is here so that the property is checked rather than inherited.
+func TestLowerMapOperandIsEvaluatedOnce(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+	}{
+		{"len", `func f(p func() *map[int]int) int { return len(*p()) }`},
+		{"clear", `func f(p func() *map[int]int) { clear(*p()) }`},
+		{"a read", `func f(p func() *map[int]int) int { return (*p())[1] }`},
+		{"a write", `func f(p func() *map[int]int) { (*p())[1] = 2 }`},
+		{"range", `func f(p func() *map[int]int) { for k := range *p() { use(k) } }`},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			calls := 0
+			for _, s := range fn.Body {
+				Walk(s, func(n *Node) bool {
+					// The operand is an indirect call through a parameter, so
+					// it is the one call whose callee is not a symbol.
+					if n.Op == OCall && n.X != nil && n.X.Op == OLocal {
+						calls++
+					}
+					return true
+				})
+			}
+			if calls != 1 {
+				t.Errorf("the operand is evaluated %d times, want once:\n%s", calls, buildDump(fn))
+			}
+		})
+	}
+}
+
 // TestLowerMapKeyCrossesAsAPointer checks the shape of every keyed call.
 //
 // The descriptor, the map and the address of the key, in that order. The map

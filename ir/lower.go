@@ -1639,6 +1639,35 @@ func (l *lowerer) mapArg(m Expr) Expr {
 	return &Node{Op: OConvert, Pos: m.Pos, Type: lowerUnsafePtr, X: m}
 }
 
+// mapOperand evaluates a map operand and returns a factory for references to
+// its value.
+//
+// The two helpers already in this file are each wrong for it, in opposite
+// directions. stable leaves an expression that names storage where it is, and
+// *p() names storage: reading it twice, or reading it after the key, calls p
+// again, and len reads it twice while the specification evaluates a map index's
+// operand before its index. hold spills everything that is not a constant,
+// which is right for a call and a frame slot for nothing where the operand is a
+// variable.
+//
+// So the rule is the builder's own stable: a name is already a value and is
+// left alone, and everything else is evaluated into a temporary now. A node is
+// a tree that later passes rewrite in place, so each reader takes its own
+// reference rather than sharing one.
+//
+// ir.Build hoists an operand that calls before this pass sees it, so no shape
+// reaches the second evaluation today. The rule is here because the order of
+// evaluation is this pass's answer and not the builder's to give.
+func (l *lowerer) mapOperand(m Expr) func() Expr {
+	switch m.Op {
+	case OConst, OLocal, OGlobal:
+		return func() Expr { return cloneExpr(m) }
+	}
+	o := l.spill(m)
+	pos := m.Pos
+	return func() Expr { return ref(o, pos) }
+}
+
 // mapKeyElem returns the key and element types of a map operand, or the reason
 // it is not one.
 func mapKeyElem(m Expr) (key, elem *Type, why string) {
@@ -1677,16 +1706,16 @@ func isMapIndex(n Expr) bool {
 // already names storage is left where it is, because a load has no effect to
 // order against.
 func (l *lowerer) mapOperands(idx Expr, pos syntax.Pos) (desc, m, key Expr, why string) {
-	mv := l.stable(l.expr(idx.X))
-	_, _, why = mapKeyElem(mv)
+	mv := l.mapOperand(l.expr(idx.X))
+	_, _, why = mapKeyElem(mv())
 	if why != "" {
 		return nil, nil, nil, why
 	}
-	desc, why = l.descriptor(mv.Type, pos)
+	desc, why = l.descriptor(mv().Type, pos)
 	if desc == nil {
 		return nil, nil, nil, why
 	}
-	return desc, l.mapArg(mv), l.valueAddr(l.expr(idx.Y)), ""
+	return desc, l.mapArg(mv()), l.valueAddr(l.expr(idx.Y)), ""
 }
 
 // mapPtrCall builds a map symbol whose result is a pointer to the element.
@@ -1939,15 +1968,17 @@ func (l *lowerer) mapLit(n Expr) Expr {
 // down because a target where they differ would need the truncation gc emits.
 func (l *lowerer) mapLen(n Expr) Expr {
 	pos := n.Pos
-	m := l.stable(n.X)
+	// Read twice, by the check and by the load, so the operand is evaluated
+	// once: len(*p()) calls p once and not twice.
+	m := l.mapOperand(n.X)
 	out := l.tempObj(n.Type, pos)
 	l.emit(define(pos, ref(out, pos), intConst(pos, n.Type, 0)))
 	word := &Node{Op: ODeref, Pos: pos, Type: lowerUint64,
-		X: &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(lowerUint64), X: l.mapArg(m)}}
+		X: &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(lowerUint64), X: l.mapArg(m())}}
 	l.emit(&Node{
 		Op: OIf, Pos: pos, Type: voidType,
 		X: &Node{Op: OCompare, Op1: syntax.Neq, Pos: pos, Type: lowerBool,
-			X: l.mapArg(cloneExpr(m)), Y: l.zeroOf(lowerUnsafePtr, pos)},
+			X: l.mapArg(m()), Y: l.zeroOf(lowerUnsafePtr, pos)},
 		Body: []Stmt{Assign(pos, ref(out, pos),
 			&Node{Op: OConvert, Pos: pos, Type: n.Type, X: word})},
 	})
@@ -1957,13 +1988,13 @@ func (l *lowerer) mapLen(n Expr) Expr {
 // mapClear builds clear(m).
 func (l *lowerer) mapClear(n Expr) Expr {
 	pos := n.Pos
-	m := l.stable(n.X)
-	desc, why := l.descriptor(m.Type, pos)
+	m := l.mapOperand(n.X)
+	desc, why := l.descriptor(m().Type, pos)
 	if desc == nil {
 		l.refuse(n, why)
 		return n
 	}
-	return runtimeCall(pos, "runtime.mapclear", desc, l.mapArg(m))
+	return runtimeCall(pos, "runtime.mapclear", desc, l.mapArg(m()))
 }
 
 // mapIterType is internal/runtime/maps.Iter, which the compiler builds because
@@ -2070,10 +2101,10 @@ func (l *lowerer) rangeMap(n *Node, x Expr) {
 		l.emit(n)
 		return
 	}
-	m := l.stable(x)
+	m := l.mapOperand(x)
 	it := l.tempObj(mapIterType, pos)
 	l.zero(it, pos)
-	l.emit(runtimeCall(pos, "runtime.mapIterStart", desc, l.mapArg(m),
+	l.emit(runtimeCall(pos, "runtime.mapIterStart", desc, l.mapArg(m()),
 		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: l.addrOf(ref(it, pos))}))
 	// The setup goes in the loop's own init list and not in front of the loop,
 	// for the reason rangeStmt gives: a statement between a label and the loop
