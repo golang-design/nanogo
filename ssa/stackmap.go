@@ -348,9 +348,12 @@ func bitmapSym(name string, data []byte) *goobj.Symbol {
 // it rather than a pointer, so the field is a relocation of four bytes. A
 // caller that cannot supply the symbol gets an error rather than a record with
 // a zero in it: the runtime would read that zero as an offset into the module
-// and scan whatever it finds. The address-taken locals stay covered by the
-// locals bitmap either way, so a caller without specs/032 can leave the table
-// out.
+// and scan whatever it finds.
+//
+// A caller with no descriptor for a type leaves that object out of
+// FrameItem.StackObject instead of calling here and failing. ComputeLiveness
+// then keeps the object live for the whole function, because the table is what
+// describes it below its last address and there is none.
 func (m *StackMaps) ObjectsSym(name string, gcdata func(*ir.Type) (goobj.SymRef, bool)) (*goobj.Symbol, error) {
 	if len(m.Objects) == 0 {
 		return nil, nil
