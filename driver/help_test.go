@@ -36,7 +36,6 @@ func TestHelpStatesTheLimits(t *testing.T) {
 		"map operation",     // probes/map-make-assign
 		"channel operation", // probes/chan-buffered
 		"A method value",    // probes/defer-method-value
-		"Floating point",
 		"generic function",
 		`imports "C"`,
 		"-race",
@@ -44,12 +43,19 @@ func TestHelpStatesTheLimits(t *testing.T) {
 		LogEnv,
 		"-fallback",
 		"specs/050-driver.md",
-		// The failures with no diagnostic. A user meets these as a crash
-		// or as a wrong answer, so the help has to name them.
+		// The failures with no diagnostic. The probe corpus reaches none
+		// of them now, so what the help has to name is the two the corpus
+		// cannot sample for: a local that outlives its frame and a pointer
+		// store with no barrier. Both are silent and neither is a refusal.
 		"What nanogo does not announce",
-		"wider than four machine registers",
 		"go:embed",
-		"name offset out of range",
+		"escape",
+		"write barrier",
+		// The two result shapes the convention refuses. These replaced the
+		// crash that used to be pinned here as "wider than four machine
+		// registers", which stopped being true when the ABI pass learned to
+		// split a call's results.
+		"sixteen result registers",
 		// This pin used to hold a limitation and now holds a
 		// capability. probes/buildinfo-named was recorded wrong until
 		// nanogo build started writing the modinfo line, and the pin

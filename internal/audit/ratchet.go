@@ -73,24 +73,32 @@ const ratchetHeader = `# What the probe corpus proved about nanogo, on the day t
 # README.md, doc.go or driver/help.go has just become false, and it has to be
 # corrected in the same change that lifted the refusal.
 #
-# One wrong row is recorded, not hidden. It is a real bug with no fix yet, and
-# it is documented:
+# There is no wrong row. Every program in this corpus that nanogo compiles
+# behaves the way the same program compiled by gc behaves. Three rows used to
+# sit here and each left in a different way:
 #
-#	panic-fires       panic on an operand that is already an interface dies
-#	                  with "runtime: name offset out of range"
+#	buildinfo-named   ok. nanogo build writes the modinfo line, so
+#	                  runtime/debug.ReadBuildInfo answers.
+#	embed-directive   refused. nanogo build reads the embed patterns out of
+#	                  the go list answer it already reads and will not compile
+#	                  a package carrying a go:embed directive. A refusal is not
+#	                  the whole fix and is the right resting state until the
+#	                  front end exists, because a variable that is silently
+#	                  empty is worse than a build that stops.
+#	panic-fires       refused. A non-empty interface leads with an *itab and an
+#	                  empty one leads with a *_type, and the conversion between
+#	                  them was the identity, so an *itab reached the slot the
+#	                  runtime reads a descriptor out of.
 #
-# Two rows that used to sit beside it are gone. buildinfo-named is ok: nanogo
-# build writes the modinfo line, so runtime/debug.ReadBuildInfo answers.
-# embed-directive is refused: nanogo build reads the embed patterns out of the
-# same go list answer it already reads, and will not compile a package that
-# carries a go:embed directive. A refusal is not the whole fix, and it is the
-# right resting state until the front end exists, because a variable that is
-# silently empty is worse than a build that stops.
+# That last fix took panic-iface from ok to refused, which this file records as
+# a fall. The fall is intentional and reviewed. panic-iface holds the identical
+# construct and passes nil, so the miscompiled path never ran: it was ok because
+# the probe did not reach the bug, not because the program was compiled right.
+# The conversion reads the descriptor out of the itab behind a nil check, the
+# way cmd/compile's walkConvInterface does, and specs/032 owns it.
 #
-# That row, the go:embed refusal, and the compiler crash that keeps
-# struct-return-wide refused, are pinned as exact strings in
-# driver/help_test.go: "name offset out of range", "go:embed" and
-# "wider than four machine registers". That coupling is deliberate. Changing one
+# The go:embed refusal is pinned as an exact string in driver/help_test.go:
+# "go:embed". That coupling is deliberate. Changing one
 # fails that test, which forces the documentation to be corrected in the same
 # change rather than months later.
 #

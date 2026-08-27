@@ -200,8 +200,9 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
 - Every map operation and every channel operation, including a package-level
   variable whose type is a channel.
 - `range` over a string, and a conversion between `string` and `[]byte`.
-- Floating point: arithmetic, a parameter, a result, and `println` of a float.
-- A local array.
+- A local array. The refusal is the register allocator's, not the array's:
+  an indexed store wants three integer scratch registers and the target
+  reserves two.
 - `make` of a slice whose element type has methods, or is an interface.
   `make([]byte, n)` and `make([]T, n)` for a method-free struct `T` compile;
   `make([]C, n)` where `C` has one method is refused, because the descriptor
@@ -214,24 +215,28 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
   `embed.FS` structure is unbuilt, and a variable nanogo compiled would be its
   zero value at run time.
 
-One refusal reads as a crash. A function that returns a value wider than four
-machine registers stops the build with `panic: ssa: lower: Store: no arm64
-rule lowered this operation` and a Go stack trace, naming no position in your
-source. No program comes out, so it is a refusal, but it is a poor one.
+Two result shapes the convention refuses: a result the sixteen result
+registers cannot hold, and a wide result the call site does not write to one
+place, such as `return g()` or `h(g())`. A result the registers do hold
+compiles however many of them it takes.
 
-### One failure nanogo does not announce
+### What nanogo does not announce
 
-This costs more than any refusal, because nothing is said at compile time and
-a program comes out that behaves differently from the one `gc` builds. It is
-what the probe corpus found, and a corpus is a sample, so there may be
-another.
+Nothing the probe corpus reaches. Every program in it that nanogo compiles
+behaves the way the same program compiled by `gc` behaves. That is a
+measurement over 95 programs compiled twice and run twice, and a corpus is a
+sample, so it is not a proof.
+
+Two costs the corpus cannot sample for, both silent and neither a refusal:
 
 | What you write | What happens |
 | --- | --- |
-| `panic(err)` where the operand is already an interface | it compiles, and the runtime dies with `runtime: name offset out of range` instead of printing the panic |
+| a pointer to a local whose address escapes its frame | the pointer outlives the frame, because escape analysis is unbuilt |
+| any pointer store | no write barrier is emitted, so a collection concurrent with the store may free memory that is still reachable |
 
-It is a bug with no fix yet. Until there is one, do not put a
-nanogo-compiled package into a program you care about.
+Neither shows up in a short program that does not collect, which is why the
+corpus does not carry them. Do not put a nanogo-compiled package into a
+program you care about.
 
 ## What nanogo does not do
 

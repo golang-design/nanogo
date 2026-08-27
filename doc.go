@@ -43,11 +43,12 @@
 // generics, and a package with a go:embed directive in it are refused, each
 // with a message that names the function, the position and the construct.
 //
-// Two failures have no such diagnostic, and they cost more than any refusal.
-// A function that returns a value wider than four machine registers crashes
-// the compiler. A panic of a value that is already an interface compiles and
-// the runtime then dies reading a type descriptor. "nanogo help" describes
-// both, and internal/audit/testdata/probes reproduces them.
+// No program the probe corpus reaches behaves differently from the one gc
+// builds. That is a measurement over 95 programs compiled twice and run
+// twice, not a proof. Two costs it cannot sample for remain: a pointer to a
+// local that escapes its frame outlives that frame, and a pointer store emits
+// no write barrier. "nanogo help" describes both, and
+// internal/audit/testdata/probes is the corpus.
 //
 // nanogo emits arm64 machine code, and a build for another GOARCH is refused
 // before anything is compiled. darwin/arm64 is the target the tests run on.

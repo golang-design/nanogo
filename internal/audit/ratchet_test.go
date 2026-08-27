@@ -115,12 +115,11 @@ func TestRatchetHeaderStatesTheRuleAndTheCoupling(t *testing.T) {
 		"doc.go",                   //
 		"driver/help.go",           //
 		"driver/help_test.go",      // the coupling that keeps them honest
-		"go:embed",                 // and the three phrases it pins
-		"name offset out of range", //
-		"wider than four machine",  //
-		"buildinfo-named",          // the three wrong rows, named
-		"embed-directive",          //
+		"go:embed",                 // and the phrase it pins
+		"buildinfo-named",          // the three rows that used to be wrong,
+		"embed-directive",          // each named with the way it left
 		"panic-fires",              //
+		"panic-iface",              // and the reviewed fall that came with the last one
 		"specs/053-determinism.md", // why it is sorted
 	} {
 		if !strings.Contains(text, want) {

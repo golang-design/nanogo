@@ -148,8 +148,12 @@ What nanogo refuses, by name, with the reason:
 
 	A conversion to an interface, a type assertion, and a type switch.
 	The first is why fmt.Println is refused: every argument to fmt
-	converts to any. It is also why panic("boom") is refused, while
-	panic(err) whose operand is already an interface is not.
+	converts to any. It is also why panic("boom") is refused, and why
+	panic(err) is: an error is a non-empty interface and it converts to
+	any, which reads the type descriptor out of the itab. That last
+	conversion used to be the identity, which put an itab where the
+	runtime reads a descriptor, and the program died inside the runtime
+	instead of printing the panic (specs/032).
 
 	recover, when its result is read.
 
@@ -160,10 +164,9 @@ What nanogo refuses, by name, with the reason:
 
 	range over a string, and a conversion between string and []byte.
 
-	Floating point: arithmetic, a parameter, a result, and println of a
-	float.
-
-	A local array.
+	A local array. The refusal is the register allocator's, not the
+	array's: an indexed store wants three integer scratch registers and
+	the target reserves two (specs/026-register-allocation.md).
 
 	make of a slice whose element type has methods, or is an interface.
 	make([]byte, n) and make([]T, n) for a method-free struct T compile;
@@ -186,22 +189,26 @@ What nanogo refuses, by name, with the reason:
 	cgo out of scope. Instrumentation such as -race goes to gc, because
 	nanogo does not implement the flags it needs.
 
-One refusal that reads as a crash:
-
-	A function that returns a value wider than four machine registers
-	stops the build with "panic: ssa: lower: Store: no arm64 rule lowered
-	this operation" and a Go stack trace, naming no position in your
-	source. No program comes out, so it is a refusal, but it is a poor one.
+	A function whose result the sixteen result registers cannot hold, and
+	a wide result the call site does not write to one place, such as
+	return g() or h(g()). A result that the registers do hold compiles,
+	however many of them it takes: the four-register bound was a bound on
+	decomposition and not on the convention (specs/030-abi.md).
 
 What nanogo does not announce:
 
-	One failure produces a program that behaves differently from the one
-	gc builds, with nothing said at compile time. It is what the probe
-	corpus found, and a corpus is a sample, so there may be another.
+	Nothing the probe corpus reaches. Every program in it that nanogo
+	compiles behaves the way the same program compiled by gc behaves. A
+	corpus is a sample, so this is a measurement and not a proof, and the
+	sample is 95 programs compiled twice and run twice.
 
-	panic of a value that is already an interface compiles, and the
-	runtime then dies with "runtime: name offset out of range" instead of
-	printing the panic. The type descriptor it reaches for is wrong.
+	Two limits it cannot sample for you. A pointer to a local whose
+	address escapes its frame outlives that frame, because escape
+	analysis is unbuilt (specs/023-escape-analysis.md). A pointer store
+	emits no write barrier, so a collection concurrent with a store may
+	free memory that is still reachable (specs/034-write-barriers.md).
+	Neither shows up as a wrong answer in a short program that does not
+	collect, which is why the corpus does not carry them.
 
 What a nanogo-compiled package cannot do:
 
