@@ -114,6 +114,38 @@ never allocatable. On `amd64` a call's displacement is 32 bits, `cmd/link` has
 no trampoline pass for the target, and nanogo needs none: this section is an
 `arm64` obligation and not a general one.
 
+## How it gets built, and what proves each stage
+
+The pipeline above is the design. This is the order to build it in, and the
+reason for the order is that nanogo starts from an unusual position: it already
+**writes** every structure a Go linker consumes, and `cmd/link` accepts all of
+it. The reading side is what does not exist. So each stage below has an oracle
+that is already in the tree, and none of them needs the stage after it.
+
+| Stage | What proves it |
+| --- | --- |
+| Read a `goobj` archive back into symbols, relocations and aux records | Round trip: read what `obj` wrote and compare against the structures that produced it. `go tool nm` and `go tool objdump` are the second opinion, and both already read nanogo's objects |
+| Reachability from the entry point | The set nanogo keeps against the set `cmd/link -dumpdep` reports for the same program |
+| Address assignment over text, rodata, data and bss | Section sizes against `cmd/link`'s for the same objects, which [040](040-object-format.md)'s tests already link |
+| `pclntab` | A panic deep in a call chain prints the same stack, with the same line numbers, as the `cmd/link` build of the same source. `runtime.Callers` agrees |
+| `moduledata` | The runtime starts. Nothing subtler is needed: a wrong `moduledata` does not boot |
+| Mach-O, then ELF | The program runs, and `otool`/`readelf` agree with the same tool run on `cmd/link`'s output |
+
+Two things make this tractable that would not be true for a linker written
+against a format nobody else reads.
+
+The first is that **every stage can be checked against `cmd/link` on the same
+input**, because both linkers consume the same objects. A stage that disagrees
+is wrong, and the disagreement names itself.
+
+The second is that **`pclntab` is the only stage whose failure is quiet**. A
+wrong reachability set fails to link. A wrong layout fails to link or faults at
+the first call. A wrong `moduledata` does not reach `main`. But a wrong
+`pclntab` produces a program that runs correctly until something asks where it
+is, and then lies: a traceback with the wrong function, a collector reading
+another frame's stack map. It is the stage to build with the most evidence per
+line, and the only one where "the program works" proves nothing.
+
 ## Scope, stated as exclusions
 
 | Excluded | Consequence |
