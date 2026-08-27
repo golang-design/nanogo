@@ -39,6 +39,7 @@ format and the code that wrote it come from the same tree by construction.
 | `reader.go` | `src/cmd/compile/internal/importer/ureader.go` |
 | `support.go` | `src/cmd/compile/internal/importer/support.go` |
 | `read.go` | written here; see below |
+| `body.go`, `bodyread.go`, `bodies.go` | `src/cmd/compile/internal/noder/reader.go`'s function body half, and `linker.go` for how a body is reached; see below |
 | `writer.go` | `src/cmd/compile/internal/noder/writer.go` and `linker.go`; see below |
 
 ## Which upstream reader, and why
@@ -53,11 +54,10 @@ non-test lines for the `types2` reader against 925 for its `go/types` twin.
 File for file, `reader.go` here is 645 lines against `ureader.go`'s 642.
 
 The third reader, `cmd/compile/internal/noder`, is the one `gc` itself uses and
-is the one that carries function bodies. It is not ported. What that defers is
-in [specs/015](../specs/015-export-data.md): inlining across packages
-([024](../specs/024-inlining-and-devirtualization.md)) and instantiating a
-generic declared in another package ([013](../specs/013-generics.md)) both need
-bodies, and this reader has none.
+is the one that carries function bodies. Its function body half is ported in
+`bodyread.go`, so a body reaches nanogo now. Its declaration half is not
+ported and does not need to be: the `types2` reader above is what produces the
+declarations.
 
 `gc` reads what nanogo writes with two readers, not one. `noder.readPackage`
 walks the object list and `importer.ReadPackage`, the reader ported here,
@@ -95,6 +95,28 @@ that is not here is upstream's.
 | `enableAlias` and its branch are removed | It selects between the alias representations of two `go/types` releases. nanogo is pinned to one. |
 | `readerTypeBound` is removed | Unused upstream as well. |
 | `ObjFunc` decodes a promoted generic method instead of asserting it cannot appear | See below. |
+
+### The body reader, `body.go`, `bodyread.go` and `bodies.go`
+
+`noder/reader.go` decodes a body into `gc`'s IR, type checking each node as it
+builds it. This port decodes the same bytes into a tree of its own. The reason
+is in [specs/015](../specs/015-export-data.md) and the short form is three
+facts: the encoding has nodes no Go source can spell, `types2.Info` cannot be
+filled from outside `types2` because `TypeAndValue` carries an unexported
+mode, and `ir.Build` takes a package rather than a function.
+
+| Change | Why |
+| --- | --- |
+| The tree is `export`'s own, named after the format's statement and expression codes | The three facts above. Its consumer is [013](../specs/013-generics.md)'s stenciler. |
+| No node is type checked as it is built | Upstream reads a node's type off the result of type checking it. Here the type comes out of the stream: `gc` writes a reshape node carrying the type in front of nearly every expression, and the decoder attaches it to the node it wrapped. That answers the four places the decoding depends on a type, which are the map descriptor after an index, the map descriptor in a range clause, the element encoding of a composite literal, and the descriptor after a call of `append`, `copy`, `delete` or `unsafe.Slice`. |
+| A type the stream does not carry is refused rather than assumed | Every one of those four branches has a default that reads fewer bytes. A guess would drop a field silently. |
+| The decode is exact, and a body that leaves a byte or a reference is refused | The oracle. See [specs/015](../specs/015-export-data.md). |
+| An operator ordinal that is not one of the 32 a body can carry is refused by number | The field is `gc`'s `ir.Op` ordinal and nothing translates it, so an ordinal outside the set is a stream from another release or a desync. |
+| `pos` keeps the position base as an index and does not resolve it | The declaration reader's gap, from the same cause. The element the index names is never visited. |
+| The constant decoder is written here rather than called on the container | `pkgbits.Decoder.Value` resolves a string reference through the container, which the element's reference coverage check cannot see. |
+| The WebAssembly fields of a function's extension data are not read | They are written only where the compiling toolchain targeted wasm, and nanogo reads the archives of its own target ([specs/030](../specs/030-abi.md)). |
+| `bodies.go` has no upstream file | Upstream finds a body through global maps its own compilation filled. nanogo has no such compilation, so the two paths a body is reached by are walked directly: the private root's list and each declaration's extension data. |
+| The extension data of a defined type is read with no branch, and a function's with one | `linker.go` re-encodes an object's extension data when the object has a definition in `gc`'s IR and copies the writer's bytes when it does not. A generic function has no definition and a generic type does, so a type has one shape and a function has two. `gc`'s own `typeExt` reader has no branch, which is what settles it. |
 
 ### The writer, `writer.go`
 
