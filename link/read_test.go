@@ -63,9 +63,12 @@ func newSample() *sample {
 
 	p.AddDef(&obj.Symbol{
 		Name: "example.com/round.F", ABI: obj.ABIInternal, Type: obj.STEXT,
-		Size: 8, Align: 4, Flag: obj.SymFlagNoSplit | obj.SymFlagLeaf,
-		Flag2: obj.SymFlagPkgInit,
-		Data:  []byte{1, 2, 3, 4, 5, 6, 7, 8},
+		Size: 8, Align: 4,
+		Flag: obj.SymFlagNoSplit | obj.SymFlagLeaf | obj.SymFlagTypelink |
+			obj.SymFlagReflectMethod | obj.SymFlagLocal,
+		Flag2: obj.SymFlagPkgInit | obj.SymFlagLinkname | obj.SymFlagLinknameStd |
+			obj.SymFlagABIWrapper | obj.SymFlagWasmExport,
+		Data: []byte{1, 2, 3, 4, 5, 6, 7, 8},
 		Relocs: []obj.Reloc{
 			{Off: 4, Size: 4, Type: obj.R_CALLARM64, Sym: s.nonPkgRef},
 			{Off: 0, Size: 0, Type: obj.R_USEIFACE, Sym: s.pkgRef},
@@ -129,7 +132,7 @@ func TestRoundTrip(t *testing.T) {
 	if o.Fingerprint != s.pkg.Fingerprint {
 		t.Errorf("fingerprint is %v, the writer put %v", o.Fingerprint, s.pkg.Fingerprint)
 	}
-	if o.Flags != obj.ObjFlagStd || !o.Std() {
+	if o.Flags != obj.ObjFlagStd || !o.Std() || o.Shared() || o.FromAssembly() || o.Unlinkable() {
 		t.Errorf("flags are %#x, the writer put %#x", o.Flags, uint32(obj.ObjFlagStd))
 	}
 	if o.Trailing != 0 {
@@ -168,11 +171,23 @@ func TestRoundTrip(t *testing.T) {
 	if f.Size != 8 || f.Align != 4 || !bytes.Equal(f.Data, []byte{1, 2, 3, 4, 5, 6, 7, 8}) {
 		t.Errorf("size %d align %d data %v", f.Size, f.Align, f.Data)
 	}
-	if !f.NoSplit() || !f.Leaf() || !f.PkgInit() {
-		t.Errorf("flags %#x %#x lost a bit the caller set", f.Flag, f.Flag2)
+	for name, got := range map[string]bool{
+		"NoSplit": f.NoSplit(), "Leaf": f.Leaf(), "Typelink": f.Typelink(),
+		"ReflectMethod": f.ReflectMethod(), "Local": f.Local(),
+		"PkgInit": f.PkgInit(), "Linkname": f.Linkname(), "LinknameStd": f.LinknameStd(),
+		"ABIWrapper": f.ABIWrapper(), "WasmExport": f.WasmExport(),
+	} {
+		if !got {
+			t.Errorf("the %s flag was lost, and the caller set it", name)
+		}
 	}
-	if f.Dupok() || f.GoType() || f.UsedInIface() {
-		t.Errorf("flags %#x %#x hold a bit the caller did not set", f.Flag, f.Flag2)
+	for name, got := range map[string]bool{
+		"Dupok": f.Dupok(), "GoType": f.GoType(), "UsedInIface": f.UsedInIface(),
+		"Itab": f.Itab(), "Dict": f.Dict(),
+	} {
+		if got {
+			t.Errorf("the %s flag is set, and the caller did not set it", name)
+		}
 	}
 	// The writer sorts relocations by offset and breaks ties by type, so
 	// the order in the object is not the order the caller gave.
@@ -675,4 +690,36 @@ func fmtInt(i int) string {
 		i /= 10
 	}
 	return string(out)
+}
+
+// TestObjectFlags checks the header bits the linker reads before it reads
+// any symbol.
+func TestObjectFlags(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		flags uint32
+		want  func(*Object) bool
+	}{
+		{"shared", obj.ObjFlagShared, (*Object).Shared},
+		{"from assembly", obj.ObjFlagFromAssembly, (*Object).FromAssembly},
+		{"unlinkable", obj.ObjFlagUnlinkable, (*Object).Unlinkable},
+		{"standard library", obj.ObjFlagStd, (*Object).Std},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := obj.NewPackage("example.com/flags")
+			p.Flags = c.flags
+			p.AddDef(&obj.Symbol{Name: "example.com/flags.V", Type: obj.SNOPTRBSS, Size: 8, Align: 8})
+			var buf bytes.Buffer
+			if err := p.WriteObject(&buf, testHeader); err != nil {
+				t.Fatal(err)
+			}
+			o, err := ReadObject(buf.Bytes(), "flags.o", "example.com/flags")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.want(o) {
+				t.Errorf("the object does not report the %s flag, and the flags are %#x", c.name, o.Flags)
+			}
+		})
+	}
 }
