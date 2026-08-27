@@ -671,6 +671,13 @@ func (l *lowerer) stmt(s Stmt) {
 
 	case OAssign:
 		l.flush(s)
+		if len(s.Args) == 2 && s.Y != nil && s.Y.Op == ORecv {
+			// v, ok = <-c. The value pair has no node of its own, so the row
+			// is built here rather than in expr: expr returns one expression
+			// and this statement wants two.
+			l.recvAssign(s)
+			return
+		}
 		s.X = l.expr(s.X)
 		for i := range s.Args {
 			s.Args[i] = l.expr(s.Args[i])
@@ -834,6 +841,10 @@ func (l *lowerer) expr(n Expr) Expr {
 		return l.lenCap(n)
 	case OSlice:
 		return l.sliceExpr(n)
+	case OSend:
+		return l.chanSend(n)
+	case ORecv:
+		return l.chanRecv(n)
 	case OClose:
 		return runtimeCall(n.Pos, "runtime.closechan", n.X)
 	case OPanic:
@@ -1230,6 +1241,152 @@ func (l *lowerer) makeExpr(n Expr) Expr {
 // needs storage to land in. Both are frame slots here, and both are safe as
 // frame slots: the call reads or writes the storage and keeps no pointer to
 // it.
+
+// chanArg returns a channel value as the *hchan every channel symbol takes.
+//
+// A channel is one word and the runtime's parameter is a pointer, so the
+// conversion is a relabelling. It is written down rather than left out because
+// the word must reach the collector as a pointer: the argument bitmap of the
+// call is read off the argument types, and a channel described as a number
+// would let the hchan be freed while the call is blocked in it.
+func (l *lowerer) chanArg(c Expr) Expr {
+	return &Node{Op: OConvert, Pos: c.Pos, Type: lowerUnsafePtr, X: c}
+}
+
+// elemAddr copies a value into a fresh frame slot and returns the slot's
+// address, as the unsafe.Pointer the runtime takes.
+//
+// The copy is not avoidable by taking the address of a variable that already
+// names storage. runtime.chansend1 may block before it copies, so the address
+// it is given must name storage no other goroutine writes; the specification
+// evaluates the sent value before the communication begins, and a variable the
+// program keeps assigning is not that value. The copy is also what keeps the
+// program's own variables out of the frame: taking their address would make
+// every variable ever sent a frame slot.
+func (l *lowerer) elemAddr(v Expr) Expr {
+	return &Node{Op: OConvert, Pos: v.Pos, Type: lowerUnsafePtr,
+		X: l.addrOf(ref(l.spill(v), v.Pos))}
+}
+
+// elemSlot returns a fresh frame slot for the element a receive lands in, and
+// its address.
+//
+// The slot is not cleared first. Every receive symbol writes the slot on every
+// path: a receive from a closed channel writes the zero value rather than
+// leaving the slot as it was.
+func (l *lowerer) elemSlot(t *Type, pos syntax.Pos) (*Object, Expr) {
+	o := l.tempObj(t, pos)
+	addr := l.addrOf(ref(o, pos))
+	return o, &Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: addr}
+}
+
+// chanElem returns the element type of a channel operand, or the reason it is
+// not one.
+func chanElem(c Expr) (*Type, string) {
+	if c == nil || c.Type == nil {
+		return nil, "a channel operand with no type"
+	}
+	if c.Type.Kind != Chan {
+		return nil, "a channel operation on " + c.Type.Kind.String()
+	}
+	if c.Type.Elem == nil {
+		return nil, "a channel with no element type"
+	}
+	return c.Type.Elem, ""
+}
+
+// chanSend builds a send statement.
+func (l *lowerer) chanSend(n Expr) Expr {
+	elem, why := chanElem(n.X)
+	if elem == nil {
+		l.refuse(n, why)
+		return n
+	}
+	if n.Y == nil || n.Y.Type == nil {
+		l.refuse(n, "a send of an operand with no type")
+		return n
+	}
+	// The channel is read into the call's operand before the value is spilled,
+	// which is the source's order: the specification evaluates the channel
+	// operand first.
+	ch := l.chanArg(n.X)
+	return runtimeCall(n.Pos, "runtime.chansend1", ch, l.elemAddr(n.Y))
+}
+
+// chanRecv builds the one-value receive.
+//
+// The value comes back through the frame slot and not in a register, because
+// runtime.chanrecv1 returns nothing at all. The two-value form is recvAssign,
+// which calls runtime.chanrecv2 for the same reason: its one result is whether
+// a value arrived, and the value itself still comes back through the slot.
+func (l *lowerer) chanRecv(n Expr) Expr {
+	elem, why := chanElem(n.X)
+	if elem == nil {
+		l.refuse(n, why)
+		return n
+	}
+	pos := n.Pos
+	ch := l.chanArg(n.X)
+	o, addr := l.elemSlot(elem, pos)
+	l.emit(runtimeCall(pos, "runtime.chanrecv1", ch, addr))
+	return ref(o, pos)
+}
+
+// recvAssign builds the two-value receive: v, ok = <-c.
+//
+// It is a statement row rather than an expression one because the IR has no
+// node for a value pair, and it does not need one: runtime.chanrecv2 returns
+// the one bool and writes the element through the pointer, so the call has a
+// single result and the destinations are two ordinary assignments after it.
+//
+// Both destinations are written after the call and neither before it, which is
+// the specification's order for a multi-value assignment. A destination that
+// names no storage, which is the blank identifier, is not written at all: the
+// receive has already happened and the store would be for nobody.
+func (l *lowerer) recvAssign(s Stmt) {
+	rv := s.Y
+	ch := l.expr(rv.X)
+	elem, why := chanElem(ch)
+	if elem == nil {
+		l.refuse(rv, why)
+		l.emit(s)
+		return
+	}
+	pos := s.Pos
+	arg := l.chanArg(ch)
+	o, addr := l.elemSlot(elem, pos)
+	got := l.tempObj(lowerBool, pos)
+	l.emit(define(pos, ref(got, pos), &Node{
+		Op: OCall, Pos: pos, Type: lowerBool,
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.chanrecv2")},
+		Args: []Expr{arg, addr},
+	}))
+	l.assignTo(s, 0, ref(o, pos))
+	l.assignTo(s, 1, ref(got, pos))
+}
+
+// assignTo writes one value into destination i of a multi-value assignment,
+// keeping the statement's own sense of whether it declares its destinations.
+func (l *lowerer) assignTo(s Stmt, i int, val Expr) {
+	if i >= len(s.Args) {
+		return
+	}
+	dst := s.Args[i]
+	if dst == nil || namesNoStorage(dst) {
+		return
+	}
+	out := Assign(s.Pos, l.expr(dst), val)
+	out.Op1 = s.Op1
+	l.emit(out)
+}
+
+// namesNoStorage reports whether a destination is the blank identifier.
+//
+// ir.Build gives it the void type, so a store into it would be a store of a
+// value into a location of no size.
+func namesNoStorage(dst Expr) bool {
+	return dst.Op == OLocal && dst.Obj != nil && dst.Obj.Name == "_"
+}
 
 // makeChan builds make of a channel.
 //

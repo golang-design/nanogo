@@ -884,6 +884,164 @@ func TestLowerRangeEvaluatesTheOperandOnce(t *testing.T) {
 	}
 }
 
+// TestLowerChannelRows is specs/031's channel group as a checklist.
+//
+// Every one of these is a runtime call and none of them reads the hchan. A row
+// that loaded a field of the channel instead would be reading a layout the
+// runtime owns, and it would fault on a nil channel, which is a legal operand
+// of all of them.
+func TestLowerChannelRows(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		want string
+	}{
+		{"send", `func f(c chan int) { c <- 1 }`, "runtime.chansend1"},
+		{"send to a send-only channel", `func f(c chan<- int) { c <- 1 }`, "runtime.chansend1"},
+		{"receive", `func f(c chan int) int { return <-c }`, "runtime.chanrecv1"},
+		{"receive from a receive-only channel", `func f(c <-chan int) int { return <-c }`, "runtime.chanrecv1"},
+		{"a receive whose value nobody reads", `func f(c chan int) { <-c }`, "runtime.chanrecv1"},
+		{"the two-value receive", `func f(c chan int) bool { _, ok := <-c; return ok }`, "runtime.chanrecv2"},
+		{"close", `func f(c chan int) { close(c) }`, "runtime.closechan"},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if !lowerCalled(fn, tc.want) {
+				t.Errorf("%s was not called; the calls are %v:\n%s",
+					tc.want, lowerCalls(fn), buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerChannelElementCrossesAsAPointer checks the second argument of the
+// send and receive symbols.
+//
+// The element crosses the call through memory in both directions, so the
+// argument is the address of a frame slot converted to unsafe.Pointer. A
+// register would be the wrong shape for an element wider than one, and the
+// symbol takes a pointer for every element type alike.
+func TestLowerChannelElementCrossesAsAPointer(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		call string
+	}{
+		{"send", `func f(c chan T) { c <- T{1, 2} }`, "runtime.chansend1"},
+		{"receive", `func f(c chan T) T { return <-c }`, "runtime.chanrecv1"},
+		{"the two-value receive", `func f(c chan T) bool { _, ok := <-c; return ok }`, "runtime.chanrecv2"},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			call := findCall(fn, tc.call)
+			if call == nil {
+				t.Fatalf("%s was not called:\n%s", tc.call, buildDump(fn))
+			}
+			if len(call.Args) != 2 {
+				t.Fatalf("%s has %d arguments, want 2:\n%s", tc.call, len(call.Args), buildDump(fn))
+			}
+			// The channel and the element are both unsafe.Pointer, so the
+			// collector reads both words of the frame as pointers while the
+			// call is blocked inside the runtime.
+			for i, a := range call.Args {
+				if a.Type == nil || a.Type.Kind != UnsafePtr {
+					t.Errorf("argument %d is %v, want unsafe.Pointer:\n%s", i, a.Type, buildDump(fn))
+				}
+			}
+			elem := call.Args[1]
+			if elem.Op != OConvert || elem.X == nil || elem.X.Op != OAddr {
+				t.Errorf("the element is not the address of a slot:\n%s", buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerSendCopiesTheValue is the part of the send row that is not a
+// convenience.
+//
+// runtime.chansend1 may block before it copies, so the address it is given has
+// to name storage no other goroutine writes. Handing it the address of the
+// program's own variable would send whatever that variable held when the
+// communication completed rather than when the statement ran, and it would
+// make every variable ever sent a frame slot.
+func TestLowerSendCopiesTheValue(t *testing.T) {
+	fn := lowerOK(t, `func f(c chan int, x int) { c <- x }`)
+	call := findCall(fn, "runtime.chansend1")
+	if call == nil {
+		t.Fatalf("runtime.chansend1 was not called:\n%s", buildDump(fn))
+	}
+	slot := call.Args[1].X.X
+	if slot == nil || slot.Op != OLocal || slot.Obj == nil {
+		t.Fatalf("the element address does not name a local:\n%s", buildDump(fn))
+	}
+	if !strings.HasPrefix(slot.Obj.Name, ".lowertmp_") {
+		t.Errorf("the send passes the address of %s and not of a copy:\n%s",
+			slot.Obj.Name, buildDump(fn))
+	}
+	for _, o := range fn.Params {
+		if o.Name == "x" && o.Addrtaken {
+			t.Error("the send took the address of the parameter it sends")
+		}
+	}
+}
+
+// TestLowerTwoValueReceiveWritesBothDestinations checks the order and the
+// count of the stores the comma-ok receive makes.
+//
+// Both destinations are written after the call and neither before it. A blank
+// destination is not written at all: it names no storage, so the store would
+// be into a location of no size.
+func TestLowerTwoValueReceiveWritesBothDestinations(t *testing.T) {
+	for _, tc := range []struct {
+		row   string
+		body  string
+		want  []string
+		count int
+	}{
+		{"both named", `func f(c chan int) bool { v, ok := <-c; use(v); return ok }`, []string{"v", "ok"}, 2},
+		{"a blank value", `func f(c chan int) bool { _, ok := <-c; return ok }`, []string{"ok"}, 1},
+		{"a blank flag", `func f(c chan int) int { v, _ := <-c; return v }`, []string{"v"}, 1},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			call := findCall(fn, "runtime.chanrecv2")
+			if call == nil {
+				t.Fatalf("runtime.chanrecv2 was not called:\n%s", buildDump(fn))
+			}
+			// The statements after the call that write a name the source
+			// wrote, in order.
+			var got []string
+			seen := false
+			for _, s := range fn.Body {
+				if !seen {
+					Walk(s, func(n *Node) bool {
+						if n == call {
+							seen = true
+						}
+						return true
+					})
+					continue
+				}
+				if s.Op != OAssign || s.X == nil || s.X.Op != OLocal || s.X.Obj == nil {
+					continue
+				}
+				if strings.HasPrefix(s.X.Obj.Name, ".lowertmp_") {
+					continue
+				}
+				got = append(got, s.X.Obj.Name)
+			}
+			if len(got) != tc.count {
+				t.Fatalf("%d stores after the call, want %d:\n%s", len(got), tc.count, buildDump(fn))
+			}
+			for i, want := range tc.want {
+				if got[i] != want {
+					t.Errorf("store %d writes %s, want %s:\n%s", i, got[i], want, buildDump(fn))
+				}
+			}
+		})
+	}
+}
+
 // TestLowerSliceExpressionRows is specs/020's row: bounds checks plus pointer
 // arithmetic.
 func TestLowerSliceExpressionRows(t *testing.T) {
