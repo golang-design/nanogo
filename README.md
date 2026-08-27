@@ -147,13 +147,23 @@ list, and `sh run.sh` in that directory reproduces it.
 - Calls: recursive, variadic, methods on a value and on a pointer receiver,
   and a call into a package the Go toolchain compiled, as `os.Exit` and
   `say.Number` above show. A function with an empty body compiles.
-- Slice literals, `make([]int, n)`, `len`, index and slice expressions, and
-  `range` over a slice or over an integer.
-- Strings: a literal, `len`, concatenation, indexing, comparison, and a string
-  as a parameter or a result.
+- Floating point: arithmetic, a parameter, a result, and `println` of a float.
+- Slice literals, `make([]int, n)`, `len`, index and slice expressions,
+  `append` in both forms, and `range` over a slice or over an integer.
+- Strings: a literal, `len`, concatenation, indexing, comparison, a string as
+  a parameter or a result, `range` over one, and the conversions to and from
+  `[]byte` and `[]rune`.
+- Maps: `make`, a literal, read, comma-ok read, write, `delete`, `len`,
+  `clear`, and `range`.
+- Channels: `make`, send, receive in both forms, `close`, `len`, `cap`,
+  `range`, and `select` with any number of arms and a default.
+- Interfaces: converting a value to one, calling a method through one,
+  comparing two, an assertion to a concrete type in both forms, and a type
+  switch over concrete cases. The itab is nanogo's and a method called through
+  it may be compiled by either compiler.
 - A struct type declared in the package being compiled: a composite literal,
-  reading and writing a field, and passing one by value. A struct up to four
-  machine words is returned by value.
+  reading and writing a field, and passing one by value. A struct is returned
+  by value in as many registers as the convention gives it.
 - `new`, and reading and writing through the pointer.
 - Package-level variables, including one whose initializer is an expression, a
   string, or a slice literal.
@@ -188,13 +198,11 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
 - `defer println(x)`. A builtin is not a function value, so there is nothing
   to hand the runtime.
 - An assertion whose target is an interface, and a type switch case that names
-  one. Both need the itab of that pair of types, which nothing writes yet.
-  An assertion to a concrete type works, and so does a switch over concrete
-  cases.
-- `make` of a slice whose element type has methods, or is an interface.
-  `make([]byte, n)` and `make([]T, n)` for a method-free struct `T` compile;
-  `make([]C, n)` where `C` has one method is refused, because the descriptor
-  for it needs the method's signature.
+  one. Both need the `abi.TypeAssert` and `abi.InterfaceSwitch` descriptors,
+  which nothing writes yet. An assertion to a concrete type works, and so does
+  a switch over concrete cases.
+- A conversion between two interfaces that are not the same type, for the same
+  reason.
 - Generics.
 - Taking the address of a variable the compiler keeps in a register.
 - A package with assembly in it, and a package that imports `"C"`.

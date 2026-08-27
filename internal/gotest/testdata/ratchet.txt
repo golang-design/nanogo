@@ -53,11 +53,14 @@ pass matched atomicload.go
 pass rejected blank1.go
 pass rejected bombad.go
 pass rejected cannotassign.go
+pass matched chanlinear.go
 pass matched char_lit.go
 pass matched clear.go
+pass matched closedchan.go
 pass matched closure1.go
 pass matched closure2.go
 pass matched closure4.go
+pass compiled closure6.go
 pass matched closure7.go
 pass rejected cmp6.go
 pass rejected cmplx.go
@@ -66,10 +69,13 @@ pass rejected complit1.go
 pass matched compos.go
 pass rejected const1.go
 pass rejected const2.go
+pass matched const3.go
 pass matched const4.go
 pass rejected const5.go
 pass rejected const6.go
+pass matched const7.go
 pass matched const8.go
+pass matched convert.go
 pass rejected convert1.go
 pass rejected convert2.go
 pass rejected convert3.go
@@ -80,7 +86,9 @@ pass rejected ddd1.go
 pass matched decl.go
 pass rejected declbad.go
 pass matched defer.go
+pass matched deferfin.go
 pass matched defernil.go
+pass matched devirtualization_nil_panics.go
 pass rejected directive.go
 pass rejected directive2.go
 pass matched divmod.go
@@ -110,6 +118,7 @@ pass matched gc.go
 pass matched gc1.go
 pass matched gcstring.go
 pass rejected goto.go
+pass matched heapsampling.go
 pass matched helloworld.go
 pass matched if.go
 pass rejected import1.go
@@ -130,6 +139,7 @@ pass rejected label.go
 pass rejected label1.go
 pass matched linkmain_run.go
 pass matched linkobj.go
+pass matched linkx_run.go
 pass matched literal.go
 pass rejected mainsig.go
 pass rejected makechan.go
@@ -140,6 +150,7 @@ pass rejected map1.go
 pass matched mapclear.go
 pass rejected method1.go
 pass rejected method2.go
+pass matched method3.go
 pass rejected method6.go
 pass rejected named1.go
 pass matched newexpr.go
@@ -149,8 +160,11 @@ pass matched range.go
 pass rejected range2.go
 pass matched range3.go
 pass rejected recover5.go
+pass matched reflectmethod4.go
+pass compiled reflectmethod8.go
 pass matched rename.go
 pass rejected rename1.go
+pass matched reorder2.go
 pass rejected return.go
 pass compiled rune.go
 pass rejected runtime.go
@@ -167,6 +181,7 @@ pass matched stackobj3.go
 pass matched strcopy.go
 pass matched string_lit.go
 pass matched stringrange.go
+pass matched struct0.go
 pass rejected switch2.go
 pass rejected switch3.go
 pass rejected switch4.go
@@ -174,6 +189,7 @@ pass rejected switch5.go
 pass rejected switch6.go
 pass rejected switch7.go
 pass matched tinyfin.go
+pass compiled torture.go
 pass rejected typecheck.go
 pass rejected typecheckloop.go
 pass matched typeswitch1.go
@@ -188,4 +204,5 @@ pass matched utf.go
 pass rejected varerr.go
 pass matched varinit.go
 pass rejected weak.go
+pass matched winbatch.go
 pass matched zerosize.go

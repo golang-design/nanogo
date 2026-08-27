@@ -94,7 +94,7 @@ probe refused defer-builtin
 probe ok defer-closure
 probe ok defer-func
 probe ok defer-in-loop
-probe refused defer-method-value
+probe ok defer-method-value
 probe ok defer-order
 probe ok defer-recover-panic
 probe refused embed-directive
@@ -107,13 +107,13 @@ probe ok go-stmt-closure
 probe ok go-stmt-nochan
 probe ok goroutine-sync
 probe ok iface-convert
-probe refused iface-method
+probe ok iface-method
 probe ok iface-slice
 probe ok import-call
 probe ok init-func
 probe ok int-arith
 probe ok make-byte-slice
-probe refused make-method-slice
+probe ok make-method-slice
 probe ok make-struct-slice
 probe ok map-comma-ok
 probe ok map-delete-len
