@@ -1952,6 +1952,149 @@ func (l *lowerer) mapClear(n Expr) Expr {
 	return runtimeCall(pos, "runtime.mapclear", desc, l.mapArg(m))
 }
 
+// mapIterType is internal/runtime/maps.Iter, which the compiler builds because
+// the collector needs a pointer map for it and only a type carries one.
+//
+// It must stay in step with internal/runtime/maps/table.go, and
+// cmd/compile/internal/reflectdata.MapIterType is gc's copy of the same
+// declaration. Six of the twelve words hold pointers, and a frame slot
+// described with the wrong six lets the collector free a table an iteration is
+// walking.
+//
+//	type Iter struct {
+//		key   unsafe.Pointer // must be first
+//		elem  unsafe.Pointer // must be second
+//		typ   unsafe.Pointer
+//		m     *Map
+//		groupSlotOffset uint64
+//		dirOffset       uint64
+//		clearSeq        uint64
+//		globalDepth     uint8
+//		dirIdx          int
+//		tab             *table
+//		group           unsafe.Pointer
+//		entryIdx        uint64
+//	}
+//
+// The two named pointers are named because walk/range.go reads them: key is the
+// loop's condition and both are the iteration variables. The rest are the
+// runtime's and are here only so that the frame slot is the right size, the
+// right alignment and the right pointer map.
+//
+// It carries no name, for the reason rtypeType and scaseType carry none: a name
+// would make TypeSymbol produce a descriptor gc never emits.
+var mapIterType = func() *Type {
+	t := &Type{Kind: Struct, Fields: []Field{
+		{Name: "key", Type: lowerUnsafePtr},
+		{Name: "elem", Type: lowerUnsafePtr},
+		{Name: "typ", Type: lowerUnsafePtr},
+		{Name: "m", Type: lowerUnsafePtr},
+		{Name: "groupSlotOffset", Type: lowerUint64},
+		{Name: "dirOffset", Type: lowerUint64},
+		{Name: "clearSeq", Type: lowerUint64},
+		{Name: "globalDepth", Type: lowerByte},
+		{Name: "dirIdx", Type: lowerInt},
+		{Name: "tab", Type: lowerUnsafePtr},
+		{Name: "group", Type: lowerUnsafePtr},
+		{Name: "entryIdx", Type: lowerUint64},
+	}}
+	if err := Layout(t); err != nil {
+		panic("ir: maps.Iter does not lay out: " + err.Error())
+	}
+	if t.Size != 96 {
+		panic(fmt.Sprintf("ir: maps.Iter is %d bytes and internal/runtime/maps declares 96", t.Size))
+	}
+	return t
+}()
+
+// The fields of a maps.Iter that this file reads.
+const (
+	iterKey  = 0
+	iterElem = 1
+)
+
+// rangeMap builds a range over a map.
+//
+// specs/020-ir.md's row and specs/031's shape:
+//
+//	var it maps.Iter
+//	runtime.mapIterStart(desc, m, &it)
+//	for it.key != nil {
+//		k := *(*K)(it.key)
+//		v := *(*V)(it.elem)
+//		body
+//		runtime.mapIterNext(&it)
+//	}
+//
+// mapIterStart and not mapiterinit. runtime.mapiterinit still exists, as a
+// //go:linkname shim in runtime/linkname_shim.go, and it takes a
+// *runtime.linknameIter rather than a *maps.Iter. The two are different structs
+// with different layouts, so a call built for that name would write through the
+// wrong offsets into this frame.
+//
+// The iterator is cleared before the call. maps.Iter.Init returns early for a
+// nil or empty map without touching key, so a slot holding a key from a
+// previous execution of the same statement would make the loop run again over a
+// map that has nothing in it. gc clears it too, in order.go's newTemp.
+//
+// The loop is not an index loop: a map has no length to stop at and no element
+// to index. It ends when the iteration sets key to nil, which is the same fact
+// maps.Iter.Key reports.
+func (l *lowerer) rangeMap(n *Node, x Expr) {
+	pos := n.Pos
+	key, elem, why := mapKeyElem(x)
+	if why != "" {
+		l.refuse(n, why)
+		l.emit(l.pop()...)
+		l.emit(n)
+		return
+	}
+	desc, why := l.descriptor(x.Type, pos)
+	if desc == nil {
+		l.refuse(n, why)
+		l.emit(l.pop()...)
+		l.emit(n)
+		return
+	}
+	m := l.stable(x)
+	it := l.tempObj(mapIterType, pos)
+	l.zero(it, pos)
+	l.emit(runtimeCall(pos, "runtime.mapIterStart", desc, l.mapArg(m),
+		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: l.addrOf(ref(it, pos))}))
+	// The setup goes in the loop's own init list and not in front of the loop,
+	// for the reason rangeStmt gives: a statement between a label and the loop
+	// takes the name the loop needs.
+	init := l.pop()
+
+	iterField := func(i int) Expr {
+		return &Node{Op: OField, Pos: pos, Type: lowerUnsafePtr, X: ref(it, pos), Index: i}
+	}
+
+	l.push()
+	// The destinations are written before the body, so that the per-iteration
+	// declaration ir.Build put at the head of the body copies a value that is
+	// already there.
+	if len(n.Args) > 0 && n.Args[0] != nil {
+		l.store(pos, 0, n.Args[0], l.mapElem(iterField(iterKey), key, pos))
+	}
+	if len(n.Args) > 1 && n.Args[1] != nil {
+		l.store(pos, 0, n.Args[1], l.mapElem(iterField(iterElem), elem, pos))
+	}
+	for _, st := range n.Body {
+		l.stmt(st)
+	}
+	body := l.pop()
+
+	l.emit(&Node{
+		Op: OFor, Pos: pos, Type: voidType, Init: init,
+		X: &Node{Op: OCompare, Op1: syntax.Neq, Pos: pos, Type: lowerBool,
+			X: iterField(iterKey), Y: l.zeroOf(lowerUnsafePtr, pos)},
+		Body: body,
+		Post: []Stmt{runtimeCall(pos, "runtime.mapIterNext",
+			&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: l.addrOf(ref(it, pos))})},
+	})
+}
+
 // range.
 //
 // specs/020-ir.md gives range six rows. Three are built here: slice, array and
@@ -2025,7 +2168,10 @@ func (l *lowerer) rangeStmt(n *Node) {
 		bail("a range over a string needs the UTF-8 decode of specs/020's row")
 		return
 	case x.Type.Kind == Map:
-		bail("a range over a map needs runtime.mapIterStart and runtime.mapIterNext, and the row that calls them is not built")
+		// The map loop has no index and no bound, so it is built whole rather
+		// than through the index loop below. The statements the operand needed
+		// are on the sink and rangeMap takes them.
+		l.rangeMap(n, x)
 		return
 	case x.Type.Kind == Chan:
 		// The channel loop has no index and no bound, so it is built whole

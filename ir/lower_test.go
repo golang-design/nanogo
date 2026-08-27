@@ -1747,11 +1747,6 @@ func TestLowerRefusals(t *testing.T) {
 type G[X any] struct{ V X }
 
 func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
-		// mapIterStart and not mapiterinit. runtime.mapiterinit still exists,
-		// as a //go:linkname shim taking a different struct layout, so a row
-		// built for the name in the older prose would write past the end of a
-		// maps.Iter frame slot.
-		{"range over a map", `func f(m map[int]int) { for k := range m { use(k) } }`, ORange, "runtime.mapIterStart"},
 		{"range over a string", `func f(s string) { for i := range s { use(i) } }`, ORange, "UTF-8"},
 		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
 		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
@@ -1994,6 +1989,85 @@ func TestLowerMapLengthReadsTheFirstWordBehindANilCheck(t *testing.T) {
 	// rather than reading the second word.
 	if _, err := lowerFunc(t, `func f(m map[int]int) int { return len(m) }`, "f"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestLowerRangeOverAMap is the iteration row, and the row whose two names
+// must not be spelled from memory.
+//
+// The compiler's entry points are runtime.mapIterStart and runtime.mapIterNext.
+// runtime.mapiterinit and runtime.mapiternext still exist, as //go:linkname
+// shims in runtime/linkname_shim.go, and they take a *runtime.linknameIter
+// rather than a *maps.Iter. The two structs have different layouts, so a call
+// built for those names writes through the wrong offsets into this frame.
+// cmd/compile/internal/walk/range.go names the two this row calls.
+func TestLowerRangeOverAMap(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+	}{
+		{"no variables", `func f(m map[int]int) { for range m { none() } }`},
+		{"the key", `func f(m map[int]int) { for k := range m { use(k) } }`},
+		{"the key and the element", `func f(m map[int]int) { for k, v := range m { use(k + v) } }`},
+		{"the element alone", `func f(m map[int]int) { for _, v := range m { use(v) } }`},
+		{"a map of a struct", `func f(m map[int]T) { for _, v := range m { use(v.A) } }`},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			for _, want := range []string{"runtime.mapIterStart", "runtime.mapIterNext"} {
+				if !lowerCalled(fn, want) {
+					t.Errorf("%s was not called: %v\n%s", want, lowerCalls(fn), buildDump(fn))
+				}
+			}
+			for _, never := range []string{"runtime.mapiterinit", "runtime.mapiternext"} {
+				if lowerCalled(fn, never) {
+					t.Errorf("%s takes a *runtime.linknameIter and the frame slot is a maps.Iter", never)
+				}
+			}
+			// The iterator is cleared before the call. maps.Iter.Init returns
+			// early for an empty map without touching key, so a slot holding a
+			// key from a previous execution of the same statement would make
+			// the loop run over a map with nothing in it.
+			if !lowerCalled(fn, "runtime.memclrHasPointers") {
+				t.Errorf("the iterator is not cleared: %v\n%s", lowerCalls(fn), buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerMapIteratorMatchesTheRuntimesLayout is the frame slot the collector
+// reads.
+//
+// internal/runtime/maps.Iter is not written down anywhere the compiler can
+// read, so this pass declares it and cmd/compile/internal/reflectdata.
+// MapIterType is gc's copy of the same declaration. Six of the twelve words
+// hold pointers into the table, and a slot described with the wrong six lets
+// the collector free a table an iteration is walking.
+func TestLowerMapIteratorMatchesTheRuntimesLayout(t *testing.T) {
+	if mapIterType.Size != 96 {
+		t.Errorf("a maps.Iter is %d bytes, want 96", mapIterType.Size)
+	}
+	if mapIterType.Align != PtrSize {
+		t.Errorf("a maps.Iter is aligned to %d, want %d", mapIterType.Align, PtrSize)
+	}
+	// The words that hold a pointer, by index, from
+	// internal/runtime/maps/table.go: key, elem, typ, m, tab and group.
+	want := map[int64]bool{0: true, 1: true, 2: true, 3: true, 9: true, 10: true}
+	for i := int64(0); i*PtrSize < mapIterType.Size; i++ {
+		got := len(mapIterType.PtrBits) > int(i/8) && mapIterType.PtrBits[i/8]&(1<<uint(i%8)) != 0
+		if got != want[i] {
+			t.Errorf("word %d holds a pointer: %v, want %v", i, got, want[i])
+		}
+	}
+	// The two the loop reads are the first two, which is what walk/range.go
+	// depends on and what the runtime's own comment says twice.
+	for i, name := range []string{"key", "elem"} {
+		if f := mapIterType.Fields[i]; f.Name != name || f.Type.Kind != UnsafePtr {
+			t.Errorf("field %d is %s %s, want %s unsafe.Pointer", i, f.Name, f.Type, name)
+		}
+	}
+	if iterKey != 0 || iterElem != 1 {
+		t.Errorf("the loop reads fields %d and %d, want 0 and 1", iterKey, iterElem)
 	}
 }
 
