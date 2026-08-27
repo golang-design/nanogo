@@ -241,7 +241,7 @@ measures both orders:
 | Measurement | Functions |
 | --- | --- |
 | reach SSA construction with no lowering pass | 20,731 |
-| get past construction once the lowering pass has run, which is what the driver does | 38,665 |
+| get past construction once the lowering pass has run, which is what the driver does | 39,206 |
 | lower completely to arm64 machine operations | 17,809 |
 | carry a stack map | 20,668 |
 
@@ -301,7 +301,7 @@ package:
 | `syntax` | 99% | [010](010-scanner-and-positions.md), [011](011-parser-and-ast.md) |
 | `types2` | excluded | [012](012-type-checking.md); gated by upstream's suite |
 | `loader` | 98% | [014](014-package-loader.md), G1 half |
-| `ir` | 92% | [020](020-ir.md); builds 536 packages of the distribution |
+| `ir` | 91% | [020](020-ir.md); builds 536 packages of the distribution |
 | `ssa` | 96% | [021](021-ssa-construction.md), with the verifier of that spec |
 | `ssa/rules` | 97% | [025](025-lowering-and-rules.md), [042](042-arm64-backend.md) |
 | `ssagen` | 90% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |
@@ -309,7 +309,7 @@ package:
 | `obj/arm64` | 99% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
 | `rtsym` | 100% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |
 | `rtype` | 91% | [032](032-type-descriptors-and-itabs.md) |
-| `export` | 93% | [015](015-export-data.md) |
+| `export` | 91% | [015](015-export-data.md) |
 | `export/pkgbits` | 93% | [015](015-export-data.md) |
 | `driver` | 95% | [050](050-driver.md), [051](051-build-integration.md) |
 | `internal/covercheck` | 97% | the gate itself |
