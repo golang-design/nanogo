@@ -177,6 +177,9 @@ var Deferred = []struct {
 	Reason string
 }{
 	{ssa.OpConstString, "a string constant is two words, and specs/025's decomposition splits it into its symbol and its length before selection sees it"},
+	{ssa.OpIMake, "an interface value is two words, and specs/025's decomposition replaces it with the two words before selection sees it"},
+	{ssa.OpITab, "a read of an interface's first word becomes that word once decomposition has split the interface"},
+	{ssa.OpIData, "a read of an interface's data word becomes that word once decomposition has split the interface"},
 }
 
 // ---------------------------------------------------------------------------

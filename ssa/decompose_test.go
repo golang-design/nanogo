@@ -74,6 +74,10 @@ var (
 		{Type: decStr}, {Type: decInt}, {Type: decIface},
 	}})
 	decPtrStr = decLaid(&ir.Type{Kind: ir.Ptr, Elem: decStr, Name: "*string"})
+
+	// The type of a word that holds a pointer the type system no longer
+	// describes: an *itab, a *_type, or the data word of an interface.
+	decUnsafe = decLaid(&ir.Type{Kind: ir.UnsafePtr, Name: "unsafe.Pointer"})
 )
 
 // ---------------------------------------------------------------------------
@@ -2341,4 +2345,135 @@ func TestStringSymNameReachesTheValue(t *testing.T) {
 	if got, want := decStringSymName(t, "hi"), `go:string."hi"`; got != want {
 		t.Errorf("the decomposed constant names %q, want %q", got, want)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Interface construction
+
+// TestDecomposeInterfaceConstruction asserts the invariant the three
+// interface operations of specs/032 depend on: none of them survives this pass.
+//
+// IMake, ITab and IData have no machine form and no lowering rule, because an
+// interface value is two words and no instruction holds one. They exist to be
+// removed here: an IMake becomes its two words and a read of one word becomes
+// the word itself. A survivor reaches lowering, which has no rule for it and
+// panics naming it, so this test is what keeps the operations honest.
+func TestDecomposeInterfaceConstruction(t *testing.T) {
+	p := newDecFn()
+	word := p.arg(decUnsafe, "word")
+	data := p.arg(decUnsafe, "data")
+	iface := p.v(ssa.OpIMake, decIface, word, data)
+	f := p.ret(p.v(ssa.OpITab, decUnsafe, iface), p.v(ssa.OpIData, decUnsafe, iface))
+
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if vs := ssa.CheckDecomposed(f); len(vs) != 0 {
+		t.Errorf("a value wider than a register survived: %v", vs)
+	}
+	decNoIfaceOps(t, f)
+
+	// The two words come back in the order they went in. A swap would pass the
+	// data word where the callee reads a descriptor.
+	res := f.Blocks[0].Control
+	if got := len(res.Args); got != 3 {
+		t.Fatalf("the return takes %d arguments, want the two words and memory", got)
+	}
+	if decOrigin(res.Args[0]) != word {
+		t.Errorf("the first result is not the first word")
+	}
+	if decOrigin(res.Args[1]) != data {
+		t.Errorf("the second result is not the data word")
+	}
+}
+
+// TestDecomposeInterfaceMakeStore asserts that a constructed interface stored
+// to memory becomes one store per word, at the offsets the two words sit at.
+func TestDecomposeInterfaceMakeStore(t *testing.T) {
+	p := newDecFn()
+	word := p.arg(decUnsafe, "word")
+	data := p.arg(decUnsafe, "data")
+	dst := p.arg(decPtr, "dst")
+	iface := p.v(ssa.OpIMake, decIface, word, data)
+	st := p.v(ssa.OpStore, ssa.MemType, dst, iface, p.mem)
+	st.AuxInt = decIface.Size
+	p.mem = st
+	f := p.ret()
+
+	ssa.Decompose(f)
+	decVerified(t, f)
+	decNoIfaceOps(t, f)
+
+	var stores []*ssa.Value
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == ssa.OpStore {
+				stores = append(stores, v)
+			}
+		}
+	}
+	if len(stores) != 2 {
+		t.Fatalf("the store became %d stores, want one per word", len(stores))
+	}
+	for i, want := range []*ssa.Value{word, data} {
+		if got := decOrigin(stores[i].Args[1]); got != want {
+			t.Errorf("store %d writes %v, want %v", i, got, want)
+		}
+		if stores[i].AuxInt != ir.PtrSize {
+			t.Errorf("store %d is %d bytes wide, want one word", i, stores[i].AuxInt)
+		}
+	}
+	if stores[0].Args[0] != stores[1].Args[0].Args[0] {
+		t.Errorf("the two stores do not write one object")
+	}
+	if stores[1].Args[0].Op != ssa.OpOffPtr || stores[1].Args[0].AuxInt != ir.PtrSize {
+		t.Errorf("the data word is not written one word above the first")
+	}
+}
+
+// TestDecomposeInterfaceWordTypes asserts both words keep a pointer type.
+//
+// A word typed as an integer would hide it from
+// specs/027-liveness-and-stackmaps.md, and nothing would fail until a
+// collection ran while the value was live.
+func TestDecomposeInterfaceWordTypes(t *testing.T) {
+	p := newDecFn()
+	// The data word arrives as an integer, which is what a boxing helper's
+	// result would look like if nothing retyped it.
+	word := p.arg(decUnsafe, "word")
+	data := p.arg(decInt, "data")
+	iface := p.v(ssa.OpIMake, decIface, word, data)
+	f := p.ret(p.v(ssa.OpITab, decUnsafe, iface), p.v(ssa.OpIData, decUnsafe, iface))
+
+	ssa.Decompose(f)
+	decVerified(t, f)
+	decNoIfaceOps(t, f)
+
+	res := f.Blocks[0].Control
+	for i, a := range res.Args[:2] {
+		if !a.Type.HasPointers() {
+			t.Errorf("word %d has type %v, which the collector does not scan", i, a.Type)
+		}
+	}
+}
+
+// decNoIfaceOps fails when an interface construction operation survived.
+func decNoIfaceOps(t *testing.T, f *ssa.Func) {
+	t.Helper()
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			switch v.Op {
+			case ssa.OpIMake, ssa.OpITab, ssa.OpIData:
+				t.Errorf("b%d %s survived decomposition, and lowering has no rule for it", b.ID, v.LongString())
+			}
+		}
+	}
+}
+
+// decOrigin follows the copies decomposition leaves behind, so a test can name
+// the value a part came from.
+func decOrigin(v *ssa.Value) *ssa.Value {
+	for v != nil && v.Op == ssa.OpCopy && len(v.Args) == 1 {
+		v = v.Args[0]
+	}
+	return v
 }

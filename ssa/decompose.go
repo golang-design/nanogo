@@ -595,7 +595,7 @@ func (d *decomposer) candidate(v *Value) bool {
 		return false
 	}
 	switch v.Op {
-	case OpLoad, OpPhi, OpCopy, OpArg, OpConstNil:
+	case OpLoad, OpPhi, OpCopy, OpArg, OpConstNil, OpIMake:
 		return true
 	case OpSelectN:
 		// The index counts the machine words of the result area after this
@@ -641,6 +641,9 @@ func (d *decomposer) readersOK(v *Value) bool {
 			if !d.orderOK(u) {
 				return false
 			}
+		case OpITab, OpIData:
+			// One word of an interface, which is one of the parts. rewrite
+			// redirects the read to it and the read stops existing.
 		default:
 			return false
 		}
@@ -895,6 +898,20 @@ func (d *decomposer) makeParts(b *Block, v *Value) (before, parts []*Value) {
 		for _, lf := range ls {
 			parts = append(parts, d.zeroPart(b, v.Pos, lf.typ))
 		}
+
+	case OpIMake:
+		// The two words are already values, so the parts are copies of them
+		// rather than fresh computations. A copy and not the argument itself:
+		// a part is spliced into the block ahead of the value it replaces, and
+		// splicing a value that is already in a block would put it in twice.
+		//
+		// The part carries the leaf's type and not the argument's, which is
+		// what keeps the collector's view right. Both leaves of an interface
+		// are unsafe.Pointer, and a data word that arrived as an integer would
+		// otherwise leave a frame slot the collector does not scan.
+		for i, lf := range ls {
+			parts = append(parts, d.mk(b, v.Pos, OpCopy, lf.typ, v.Args[i]))
+		}
 	}
 	return before, parts
 }
@@ -1043,6 +1060,11 @@ func (d *decomposer) rewrite() {
 				if len(v.Args) == 2 && d.isSplit(v.Args[0]) {
 					d.expandStringOrder(b, v, &out)
 				}
+			case OpITab, OpIData:
+				if d.expandIfaceWord(v) {
+					v.dead = true
+					continue
+				}
 			case OpStaticCall, OpClosureCall, OpInterCall, OpMakeResult:
 				d.spliceArgs(v)
 			case OpSelectN:
@@ -1166,6 +1188,35 @@ func (d *decomposer) expandSliceNil(v *Value) {
 		return
 	}
 	setArgs(v, xs[0], ys[0])
+}
+
+// expandIfaceWord redirects a read of one interface word to the part that holds
+// it, and reports whether the read is gone.
+//
+// The first word is part zero and the data word is part one, which is the
+// order flatten lists them in and the order the two words sit in memory. It is
+// not a choice this pass may make differently: specs/030-abi.md places the
+// parts of an argument in that order, and a swap here would pass the data word
+// where the callee reads a descriptor.
+//
+// A read of a value the plan left whole is left alone. Every interface has two
+// parts and two is inside the bound, so this is not reachable from a function
+// ssa.Build produced. If it ever is, lowering has no rule for the operation and
+// says so by name, which is a better answer than a guess made here.
+func (d *decomposer) expandIfaceWord(v *Value) bool {
+	if len(v.Args) != 1 || !d.isSplit(v.Args[0]) {
+		return false
+	}
+	ps := d.parts[v.Args[0].ID]
+	i := 0
+	if v.Op == OpIData {
+		i = 1
+	}
+	if i >= len(ps) {
+		return false
+	}
+	d.replaceAll(v, ps[i])
+	return true
 }
 
 // spliceArgs replaces every whole-value argument of a call or a return by its

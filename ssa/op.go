@@ -84,6 +84,22 @@ const (
 	OpCvtFloatToFloat
 	OpBitcast // a reinterpretation of the same bits, such as pointer to uintptr
 
+	// Interface construction, of specs/032-type-descriptors-and-itabs.md.
+	//
+	// An interface value is two words and no instruction builds one, so it is
+	// built here as a value and specs/025's decomposition replaces it with the
+	// two words it is made of. That is the same treatment a string constant
+	// gets and for the same reason.
+	//
+	// Which word the first one is does not appear here. It is an *itab for an
+	// interface with methods and a *_type for one without, the runtime reads
+	// the two differently, and the fact is the value's type:
+	// ir.Type.EmptyIface. An operation that named one of them would give the
+	// other no operation to be built with.
+	OpIMake // IMake(word, data) -> the interface value the two words are
+	OpITab  // ITab(iface) -> the first word
+	OpIData // IData(iface) -> the second word
+
 	// Memory.
 	OpInitMem // the memory a function starts with. Entry block only
 	OpLoad    // Load(addr, mem)
@@ -200,6 +216,10 @@ var opInfos = [opCount]opInfo{
 	OpCvtFloatToInt:   {name: "CvtFloatToInt", argLen: 1},
 	OpCvtFloatToFloat: {name: "CvtFloatToFloat", argLen: 1},
 	OpBitcast:         {name: "Bitcast", argLen: 1},
+
+	OpIMake: {name: "IMake", argLen: 2},
+	OpITab:  {name: "ITab", argLen: 1},
+	OpIData: {name: "IData", argLen: 1},
 
 	OpInitMem: {name: "InitMem", argLen: 0, makesMem: true},
 	OpLoad:    {name: "Load", argLen: 2, takesMem: true},
