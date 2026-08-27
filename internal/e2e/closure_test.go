@@ -261,9 +261,9 @@ func handle(n int) {
 	code = n
 }
 
-func boom(v error) {
+func boom(xs []int) {
 	defer handle(7)
-	panic(v)
+	_ = xs[3]
 }
 
 func main() {
@@ -271,6 +271,14 @@ func main() {
 	os.Exit(code)
 }
 `
+
+// The panic is raised by the runtime, out of a bounds check, and not written
+// as a panic statement. What this program proves is that a deferred call
+// carrying an operand still lets the callee recover, and the wrapper the
+// operand needs is what could break it. The value the panic carries is
+// incidental to that. A panic statement would make the program depend on a
+// conversion to an interface as well, which is refused, so the test would
+// stop proving anything about defer the day that refusal moved.
 
 // TestToolexecRecoversFromAWrappedDefer runs a defer whose call has an
 // operand and whose callee recovers.
