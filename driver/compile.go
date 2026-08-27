@@ -446,7 +446,28 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// non-package definition, which is what makes that safe: the index space
 	// of NonPkgRefs continues that of NonPkgDefs, so a definition added after
 	// ssagen's references would move every one of them.
-	if err := addDescriptors(cfg, out, needed); err != nil {
+	//
+	// The closure is taken here rather than inside addDescriptors because the
+	// generated functions are decided by the closed set and not by the roots.
+	// A method wrapper is owed by whoever writes the descriptor that names it,
+	// and a descriptor this object reached through another one is as much its
+	// own as a root is.
+	types, err := descriptorSet(cfg, needed)
+	if err != nil {
+		return nil, false, err
+	}
+	extra, err := addGenerated(cfg, out, target, fset, types)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(extra) > 0 {
+		// A generated function names descriptors of its own. They are roots
+		// like any other, so the set is closed again over them.
+		if types, err = descriptorSet(cfg, append(types, extra...)); err != nil {
+			return nil, false, err
+		}
+	}
+	if err := addDescriptors(cfg, out, types); err != nil {
 		return nil, false, err
 	}
 	// The record goes in last. It names the init function by the reference
@@ -473,15 +494,54 @@ func isPackageInit(p *ir.Package, fn *ir.Func) bool {
 	return false
 }
 
+// addGenerated compiles the functions a descriptor names and no declaration
+// defines, and returns the descriptors those functions name.
+//
+// A descriptor's Method holds two code pointers and one of them can be a
+// function the compiler generates: a value receiver method reached through a
+// one-word receiver needs a wrapper that loads the receiver through a pointer.
+// ssagen decides the set from the method sets of the types whose descriptors
+// this object writes, which is the same point gc decides it at.
+//
+// The functions go through compileFunc, the same passes a declared function
+// goes through. A generated function that took a shorter path would be a
+// second code generator, and the first bug it hit would be one the pipeline
+// already handles.
+func addGenerated(cfg *Config, out *obj.Package, target *ssa.Target, fset *syntax.FileSet, types []*ir.Type) ([]*ir.Type, error) {
+	fns, err := ssagen.MethodWrappers(types)
+	if err != nil {
+		return nil, &UnsupportedError{
+			Package: cfg.Package,
+			What:    "a method whose descriptor needs a generated wrapper",
+			Detail:  err.Error(),
+		}
+	}
+	var needed []*ir.Type
+	for _, fn := range fns {
+		r, ts, err := compileFunc(cfg, fn, target, out, fset)
+		if err != nil {
+			return nil, err
+		}
+		// Duplicate-tolerant, as gc marks it. Every package that writes a
+		// descriptor naming this wrapper generates the wrapper too, because
+		// neither can know which of them the linker will keep, and the two
+		// definitions are the same function compiled from the same method set.
+		r.Text.Flag |= obj.SymFlagDupok
+		if _, err := r.Add(out); err != nil {
+			return nil, &UnsupportedError{Package: cfg.Package, What: "the generated function " + fn.Sym, Detail: err.Error()}
+		}
+		needed = append(needed, ts...)
+	}
+	return needed, nil
+}
+
 // addDescriptors writes the type descriptors of the types the code names.
 //
-// A type reaches this list because the lowering pass could *name* it. Whether
-// its bytes can be filled in is a second question, and specs/032 keeps the two
-// apart: an ir.Type carries no method set, so rtype refuses a defined type and
-// a pointer to one because a descriptor that claimed an empty method set would
-// make reflect report one and an itab find no functions. That refusal arrives
-// here, after the function it came from compiled, so it names the type rather
-// than the function.
+// The list is descriptorSet's answer and is already closed, so nothing here
+// discovers a type. A type reached this far because the lowering pass named it
+// and rtype could write it, which is the check descriptorSet made: a type that
+// could be named and not written stops there, after the function it came from
+// compiled, so the refusal names the type rather than the function.
 //
 // The descriptor itself is a named definition and the data it points at is
 // content-addressable. That is gc's split, not a choice: cmd/link reads no
@@ -503,18 +563,6 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type) error {
 		syms   []*obj.Symbol
 		relocs [][]rtype.Reloc
 	)
-	// A descriptor names other descriptors, and cmd/link resolves each by
-	// name, so the object owes the closure and not only the roots. The
-	// descriptors the runtime owns are left out of it: the runtime is in every
-	// link and gc refers to its copies rather than emitting a second one.
-	types, err := descriptorClosure(types)
-	if err != nil {
-		return &UnsupportedError{
-			Package: cfg.Package,
-			What:    "a type its code needs a descriptor for",
-			Detail:  err.Error(),
-		}
-	}
 	for _, t := range types {
 		set, err := rtype.Descriptor(t)
 		if err != nil {

@@ -98,6 +98,30 @@ func checkExportedTypes(cfg *Config, pkg *types2.Package, fset *syntax.FileSet) 
 	return owed, nil
 }
 
+// descriptorSet returns the descriptors this object owes, closed over what
+// each one names, and reports what it cannot write in the caller's terms.
+//
+// A descriptor names other descriptors, and cmd/link resolves each by name, so
+// the object owes the closure and not only the roots. The descriptors the
+// runtime owns are left out of it: the runtime is in every link and gc refers
+// to its copies rather than emitting a second one.
+//
+// It is separate from the walk below so that the set can be taken before the
+// descriptors are written. The generated functions of specs/030-abi.md are
+// decided by the closed set, and a set taken inside the writer would be taken
+// after the point where they had to be compiled.
+func descriptorSet(cfg *Config, roots []*ir.Type) ([]*ir.Type, error) {
+	types, err := descriptorClosure(roots)
+	if err != nil {
+		return nil, &UnsupportedError{
+			Package: cfg.Package,
+			What:    "a type its code needs a descriptor for",
+			Detail:  err.Error(),
+		}
+	}
+	return types, nil
+}
+
 // descriptorClosure returns the roots and every descriptor they reach, in
 // first-use order.
 //
