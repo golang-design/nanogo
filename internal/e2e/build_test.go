@@ -176,18 +176,18 @@ func TestBuildSaysWhatItDidNotCompile(t *testing.T) {
 
 // The program nanogo cannot compile.
 //
-// append has no row in specs/020-ir.md's lowering table, so the call reaches
-// SSA construction intact and is refused there.
+// min over floats is refused rather than built, because the language
+// propagates a NaN operand to the result and a compare and a select do not.
+// The construct has to be one the pipeline still refuses, and append, which
+// this program used before, is built now.
 const unsupportedProgram = `package main
 
-func grow(xs []int) []int {
-	return append(xs, 1)
+func smaller(a, b float64) float64 {
+	return min(a, b)
 }
 
 func main() {
-	xs := []int{1}
-	xs = grow(xs)
-	d := len(xs) - 2
+	d := int(smaller(2, 3)) - 2
 	if d != 0 {
 		d = d / (d - d)
 	}
@@ -213,7 +213,7 @@ func TestBuildRefusesByNameAndWritesNothing(t *testing.T) {
 	// The message names the function, its position and the construct, which
 	// are the three things that say what to do next. The position is the
 	// function's own, because that is what an ir.Func carries.
-	for _, want := range []string{"function grow", "main.go:3:6", "append"} {
+	for _, want := range []string{"function smaller", "main.go:3:6", "min"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the failure does not name %q:\n%s", want, out)
 		}
