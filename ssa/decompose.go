@@ -119,9 +119,9 @@ type decomposer struct {
 	leafCache map[*ir.Type][]partLeaf
 	ptrCache  map[*ir.Type]*ir.Type
 
-	tInt   *ir.Type
-	tByte  *ir.Type
-	tBool  *ir.Type
+	tInt  *ir.Type
+	tByte *ir.Type
+	tBool *ir.Type
 
 	// users lists the values that read each value, indexed by identifier.
 	// Value.uses is construction bookkeeping and is documented as stale, so
