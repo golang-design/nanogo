@@ -1145,3 +1145,98 @@ func main() { _ = box() }
 		t.Error("the archive refers to type:main.local and does not define it, so a program that converts one to an interface cannot link")
 	}
 }
+
+// findPkgDef returns a definition of the object's own package index space.
+func findPkgDef(p *obj.Package, name string) *obj.Symbol {
+	for i := uint32(0); ; i++ {
+		s := p.Def(obj.SymRef{PkgIdx: obj.PkgIdxSelf, SymIdx: i})
+		if s == nil {
+			return nil
+		}
+		if s.Name == name {
+			return s
+		}
+	}
+}
+
+// TestAddDescriptorsWritesACacheAsAPackageDefinition is specs/032's rule for
+// the two runtime caches, which is the opposite of every other symbol here.
+//
+// A descriptor and an itab are canonical and duplicate tolerant, so cmd/link
+// merges two copies by name in the non-package index space. A cache must not
+// be merged: the runtime installs a table into it with a compare-and-swap, so
+// one symbol shared by two sites would be two questions writing one table. It
+// is therefore a package definition, in a writable section, aligned to a
+// pointer, and it carries the linker name of its own Go type, without which
+// cmd/link stops with "missing Go type information for global symbol".
+func TestAddDescriptorsWritesACacheAsAPackageDefinition(t *testing.T) {
+	_, coder := itabPair(t)
+	p := obj.NewPackage("main")
+	asserts := []ir.TypeAssert{{Sym: "main.f..typeAssert.0", Iface: coder, CanFail: true}}
+	switches := []ir.InterfaceSwitch{{Sym: "main.g..interfaceSwitch.0", Cases: []*ir.Type{coder}}}
+	if err := addDescriptors(&Config{Package: "main"}, p, []*ir.Type{coder}, nil, asserts, switches, nil); err != nil {
+		t.Fatalf("addDescriptors: %v", err)
+	}
+	for _, tc := range []struct{ name, gotype string }{
+		{"main.f..typeAssert.0", "type:internal/abi.TypeAssert"},
+		{"main.g..interfaceSwitch.0", "type:internal/abi.InterfaceSwitch"},
+	} {
+		sym := findPkgDef(p, tc.name)
+		if sym == nil {
+			t.Errorf("the object holds no package definition of %s; it defines %v", tc.name, defNames(p))
+			continue
+		}
+		if findNonPkgDef(p, tc.name) != nil {
+			t.Errorf("%s is also a non-package definition, where cmd/link merges by name", tc.name)
+		}
+		if sym.Type != obj.SDATA {
+			t.Errorf("%s is %v, and the runtime stores into it", tc.name, sym.Type)
+		}
+		if sym.Align != ir.PtrSize {
+			t.Errorf("%s is aligned to %d, and the install is an atomic compare-and-swap on the first word", tc.name, sym.Align)
+		}
+		if sym.Flag&obj.SymFlagDupok != 0 {
+			t.Errorf("%s tolerates a duplicate, and two caches are two tables", tc.name)
+		}
+		if sym.Flag&obj.SymFlagLocal == 0 {
+			t.Errorf("%s is not local, and it belongs to one function of one package", tc.name)
+		}
+		if len(sym.Aux) != 1 || sym.Aux[0].Type != obj.AuxGotype {
+			t.Fatalf("%s carries %v, want one AuxGotype entry", tc.name, sym.Aux)
+		}
+		// internal/abi defines the descriptor, so the entry is a reference and
+		// not one of this object's definitions.
+		if sym.Aux[0].Sym.PkgIdx == obj.PkgIdxSelf {
+			t.Errorf("the Go type of %s is a definition of this package, and internal/abi owns it", tc.name)
+		}
+	}
+	b, err := p.Bytes()
+	if err != nil {
+		t.Fatalf("the object does not write: %v", err)
+	}
+	// The names reach the object's string table through the RefName block,
+	// which is what makes cmd/link resolve them by name.
+	for _, tc := range []string{"type:internal/abi.TypeAssert", "type:internal/abi.InterfaceSwitch"} {
+		if !bytes.Contains(b, []byte(tc)) {
+			t.Errorf("the object never names %s, so cmd/link has no Go type to read the pointer map out of", tc)
+		}
+	}
+}
+
+// TestAddDescriptorsRefusesTwoCachesOfOneName is the identity rule stated as a
+// check rather than assumed.
+//
+// Two definitions of one name would move every later symbol index, and the
+// runtime would write one table for two questions.
+func TestAddDescriptorsRefusesTwoCachesOfOneName(t *testing.T) {
+	_, coder := itabPair(t)
+	p := obj.NewPackage("main")
+	same := ir.TypeAssert{Sym: "main.f..typeAssert.0", Iface: coder}
+	err := addDescriptors(&Config{Package: "main"}, p, []*ir.Type{coder}, nil, []ir.TypeAssert{same, same}, nil, nil)
+	if err == nil {
+		t.Fatal("two caches of one name were written")
+	}
+	if !strings.Contains(err.Error(), "two sites name one cache") {
+		t.Errorf("the refusal is %q", err)
+	}
+}
