@@ -218,6 +218,32 @@ func main() {
 	for _, bl[three()-3] = range []int{7, 8} {
 	}
 	fmt.Println("blank", bl[0], bl[1])
+
+	// The other three range lowerings. Each has a loop body of its own and
+	// each writes the index before the element, which is what the hoist
+	// depends on. The map holds one entry, so the order it iterates in is
+	// not part of the comparison.
+	sr := []rune{10, 20, 30, 40}
+	si := 1
+	for si, sr[si] = range "abc" {
+	}
+	fmt.Println("strrange", si, int(sr[0]), int(sr[1]), int(sr[2]), int(sr[3]))
+
+	mr := map[int]int{5: 1}
+	mv := []int{10, 20}
+	mi := 1
+	for mi, mv[mi] = range mr {
+	}
+	fmt.Println("maprange", mi, mv[0], mv[1])
+
+	ch := make(chan int, 2)
+	ch <- 7
+	close(ch)
+	cv := []int{10, 20}
+	ci := 1
+	for cv[ci] = range ch {
+	}
+	fmt.Println("chanrange", cv[0], cv[1])
 }
 
 //go:noinline
