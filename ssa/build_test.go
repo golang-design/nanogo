@@ -15,6 +15,10 @@ import (
 	"strings"
 	"testing"
 
+	"go/ast"
+	"go/parser"
+	"go/token"
+
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/syntax"
 	"golang.design/x/nanogo/types2"
@@ -2233,8 +2237,8 @@ func TestBuildWithoutAContextRegister(t *testing.T) {
 	}
 }
 
-// TestBuildRefusesAnInterfaceConversionThatChangesTheLeadingWord pins the
-// distinction the identity path used to miss.
+// TestBuildInterfaceConversionByLeadingWord pins the distinction the identity
+// path used to miss.
 //
 // A non-empty interface leads with an *itab and an empty one leads with a
 // *_type. Both are two words of the same size and both report kind Interface,
@@ -2243,26 +2247,30 @@ func TestBuildWithoutAContextRegister(t *testing.T) {
 // type descriptor, which is why panic(err) died inside the runtime with "name
 // offset out of range" instead of printing its value.
 //
-// The conversion reads the descriptor out of the itab behind a nil check, the
-// way cmd/compile's walkConvInterface does, and specs/032 owns it. Until it is
-// built the mismatch is refused, because a refusal is the honest answer and
-// the wrong answer was not.
-func TestBuildRefusesAnInterfaceConversionThatChangesTheLeadingWord(t *testing.T) {
-	tEface := mkType(&ir.Type{Kind: ir.Interface, EmptyIface: true})
+// The pair is not symmetric. Reading the descriptor out of an itab is a load,
+// and it is built. Going the other way is not a load at all: an *itab is the
+// method table of one (interface, concrete type) pair and nothing in an
+// interface value holds one that was not put there, so the conversion is a
+// runtime lookup and it is refused by name.
+func TestBuildInterfaceConversionByLeadingWord(t *testing.T) {
+	tEmpty := mkType(&ir.Type{Kind: ir.Interface, EmptyIface: true})
 	tIface := mkType(&ir.Type{Kind: ir.Interface})
-	if tEface.Size != tIface.Size {
-		t.Fatalf("the two interface layouts are %d and %d bytes, so this test no longer pins what it says", tEface.Size, tIface.Size)
+	if tEmpty.Size != tIface.Size {
+		t.Fatalf("the two interface layouts are %d and %d bytes, so this test no longer pins what it says", tEmpty.Size, tIface.Size)
 	}
 
 	for _, tt := range []struct {
 		name     string
 		from, to *ir.Type
 		refuse   bool
+		// identity reports that the value comes out of the conversion
+		// unchanged, which is true only when the two are one type.
+		identity bool
 	}{
-		{"non-empty to empty", tIface, tEface, true},
-		{"empty to non-empty", tEface, tIface, true},
-		{"empty to empty", tEface, tEface, false},
-		{"non-empty to non-empty", tIface, tIface, false},
+		{"non-empty to empty", tIface, tEmpty, false, false},
+		{"empty to non-empty", tEmpty, tIface, true, false},
+		{"empty to empty", tEmpty, tEmpty, false, true},
+		{"non-empty to non-empty", tIface, tIface, false, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			src := obj("src", tt.from, ir.ClassLocal)
@@ -2270,12 +2278,18 @@ func TestBuildRefusesAnInterfaceConversionThatChangesTheLeadingWord(t *testing.T
 			fn := fun("convert", []*ir.Object{src, dst},
 				asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tt.to}),
 			)
-			_, err := Build(fn)
-			if tt.refuse && err == nil {
-				t.Fatal("the conversion built, so an itab reaches a slot the runtime reads a type descriptor out of")
+			f, err := Build(fn)
+			if tt.refuse {
+				if err == nil {
+					t.Fatal("the conversion built, so an itab reaches a slot the runtime reads a type descriptor out of")
+				}
+				return
 			}
-			if !tt.refuse && err != nil {
-				t.Fatalf("a conversion between two interfaces of the same shape was refused: %v", err)
+			if err != nil {
+				t.Fatalf("the conversion was refused: %v", err)
+			}
+			if made := findOp(f, OpIMake) != nil; made == tt.identity {
+				t.Errorf("the conversion made a new interface value: %v, and the identity was expected: %v\n%s", made, tt.identity, f)
 			}
 		})
 	}
@@ -2577,5 +2591,135 @@ func TestDirectIfaceIsWidthAndPointerness(t *testing.T) {
 		if got := directIface(tt.typ); got != tt.want {
 			t.Errorf("directIface(%s) is %v, want %v", tt.name, got, tt.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Interface to interface
+
+// TestBuildConvertsANonEmptyInterfaceToAnEmptyOne pins the shape of the
+// conversion: a guarded load of the itab's descriptor, not a reinterpretation.
+func TestBuildConvertsANonEmptyInterfaceToAnEmptyOne(t *testing.T) {
+	tErr := mkType(&ir.Type{Kind: ir.Interface, Name: "error", Methods: []ir.Method{
+		{Name: "Error", Sig: mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{tString}})},
+	}})
+	src := obj("src", tErr, ir.ClassLocal)
+	dst := obj("dst", tEface, ir.ClassLocal)
+	f := build(t, fun("convert", []*ir.Object{src, dst},
+		asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tEface}),
+	))
+
+	mk := findOp(f, OpIMake)
+	if mk == nil {
+		t.Fatalf("no interface was made:\n%s", f)
+	}
+	if mk.Args[1].Op != OpIData {
+		t.Errorf("the data word is %v, want the source's data word carried across", mk.Args[1].Op)
+	}
+	word := mk.Args[0]
+	if word.Op != OpPhi || len(word.Args) != 2 {
+		t.Fatalf("the type word is %v with %d arguments, want a join of the two paths:\n%s", word.Op, len(word.Args), f)
+	}
+
+	// One path is the itab itself, which is nil, and the other is the load.
+	var tab, load *Value
+	for _, a := range word.Args {
+		switch a.Op {
+		case OpITab:
+			tab = a
+		case OpLoad:
+			load = a
+		}
+	}
+	if tab == nil || load == nil {
+		t.Fatalf("the join is over %v and %v, want the itab and a load of its descriptor:\n%s", word.Args[0].Op, word.Args[1].Op, f)
+	}
+	if tab.Args[0] != mk.Args[1].Args[0] {
+		t.Error("the two words are read out of two different values")
+	}
+	addr := load.Args[0]
+	if addr.Op != OpOffPtr || addr.AuxInt != ir.PtrSize {
+		t.Errorf("the descriptor is loaded from %v [%d], want one word into the itab", addr.Op, addr.AuxInt)
+	}
+	if addr.Args[0] != tab {
+		t.Error("the load does not read the itab the guard tested")
+	}
+
+	// The load is guarded, because a nil interface has a nil first word.
+	guard := load.Block
+	if len(guard.Preds) != 1 {
+		t.Fatalf("the load is in a block with %d predecessors, want the one the guard branches to", len(guard.Preds))
+	}
+	from := guard.Preds[0]
+	if from.Kind != BlockIf {
+		t.Fatalf("the block before the load is %v, want a branch on the itab", from.Kind)
+	}
+	if c := from.Control; c.Op != OpNeq || c.Args[0] != tab || c.Args[1].Op != OpConstNil {
+		t.Errorf("the guard is %v, want the itab compared against nil", c.LongString())
+	}
+	if from.Succs[0] != guard {
+		t.Error("the load is on the false side of the guard, so a nil interface faults")
+	}
+
+	// The word and the data word both carry a pointer type, or the collector
+	// stops seeing one of them.
+	for i, a := range mk.Args {
+		if !a.Type.HasPointers() {
+			t.Errorf("word %d has type %v, which the collector does not scan", i, a.Type)
+		}
+	}
+}
+
+// TestItabTypeOffsetMatchesTheRuntime reads the offset out of the runtime
+// nanogo links against rather than trusting the constant.
+//
+// A wrong offset hands the runtime the *InterfaceType where it reads the
+// *Type, and every field it reads after that is another field. That failure
+// prints as a name offset out of range, deep inside the runtime, with nothing
+// pointing back here.
+func TestItabTypeOffsetMatchesTheRuntime(t *testing.T) {
+	path := filepath.Join(runtime.GOROOT(), "src", "internal", "abi", "iface.go")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		if os.Getenv("NANOGO_REQUIRE_CORPUS") == "1" {
+			t.Fatalf("NANOGO_REQUIRE_CORPUS=1 and %s does not parse: %v", path, err)
+		}
+		t.Skipf("no runtime source at %s: %v", path, err)
+	}
+
+	var fields []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok || ts.Name.Name != "ITab" {
+			return true
+		}
+		st, ok := ts.Type.(*ast.StructType)
+		if !ok {
+			return true
+		}
+		for _, f := range st.Fields.List {
+			for _, name := range f.Names {
+				fields = append(fields, name.Name)
+			}
+		}
+		return false
+	})
+	if len(fields) == 0 {
+		t.Fatalf("%s declares no ITab, so this test no longer reads the layout it checks", path)
+	}
+	// Every field before Type is one word: Inter is a pointer.
+	want := -1
+	for i, name := range fields {
+		if name == "Type" {
+			want = i * int(ir.PtrSize)
+			break
+		}
+	}
+	if want < 0 {
+		t.Fatalf("ITab is %v and has no Type field", fields)
+	}
+	if int64(want) != itabTypeOffset {
+		t.Errorf("ITab is %v, so Type is at %d, and itabTypeOffset is %d", fields, want, itabTypeOffset)
 	}
 }

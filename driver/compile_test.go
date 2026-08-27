@@ -665,15 +665,15 @@ func TestCompileReportsAPassFailure(t *testing.T) {
 
 	// The same shape out of Compile, which is what proves the loop calls the
 	// wrapper and that the position is the function's own and not the file's.
-	// A conversion to an interface is what ssa.Build refuses today, and when
-	// that closes this subtest takes the next construct and the one above does
-	// not move.
+	// A conversion from a string to a byte slice is what ssa.Build refuses
+	// today, and when that closes this subtest takes the next construct and
+	// the one above does not move.
 	t.Run("out of Compile", func(t *testing.T) {
 		arm64Only(t)
 		needGoCommand(t)
-		_, err := compileSource(t, "package main\n\nfunc f() any { return 1 }\n", nil)
+		_, err := compileSource(t, "package main\n\nfunc f(s string) []byte { return []byte(s) }\n", nil)
 		if err == nil {
-			t.Fatal("Compile accepted a conversion to an interface")
+			t.Fatal("Compile accepted a conversion from a string to a byte slice")
 		}
 		for _, want := range []string{"function f", "a.go:3:6", "ssa.Build"} {
 			if !strings.Contains(err.Error(), want) {

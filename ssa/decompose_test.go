@@ -2477,3 +2477,32 @@ func decOrigin(v *ssa.Value) *ssa.Value {
 	}
 	return v
 }
+
+// TestCheckDecomposedNamesASurvivingInterfaceOp asserts the invariant is
+// checkable and not only true by construction.
+//
+// The three operations have no machine form, so a survivor is a bug in this
+// pass and lowering only finds it by panicking. CheckDecomposed is what a test
+// and a future caller can ask instead.
+func TestCheckDecomposedNamesASurvivingInterfaceOp(t *testing.T) {
+	for _, op := range []ssa.Op{ssa.OpIMake, ssa.OpITab, ssa.OpIData} {
+		p := newDecFn()
+		word := p.arg(decUnsafe, "word")
+		var v *ssa.Value
+		if op == ssa.OpIMake {
+			v = p.v(op, decUnsafe, word, word)
+		} else {
+			v = p.v(op, decUnsafe, word)
+		}
+		f := p.ret(v)
+
+		vs := ssa.CheckDecomposed(f)
+		if len(vs) == 0 {
+			t.Errorf("%v survived and nothing reported it", op)
+			continue
+		}
+		if !strings.Contains(vs[0].String(), op.String()) {
+			t.Errorf("the violation is %q and does not name %v", vs[0], op)
+		}
+	}
+}

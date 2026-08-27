@@ -1444,14 +1444,72 @@ func (b *builder) convertInterface(n ir.Expr, x *Value, from, to *ir.Type) *Valu
 		return x
 	}
 	if from.Kind == ir.Interface {
-		if sameType(from, to) {
+		switch {
+		case sameType(from, to):
 			return x
+		case to.EmptyIface:
+			return b.ifaceToEmpty(n, x, to)
 		}
-		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v", from, to))
-		return x
+		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v, which cmd/compile gives to runtime.typeAssert because the destination's itab is not the source's", from, to))
+		return b.zeroValue(to)
 	}
 	return b.concreteToInterface(n, x, from, to)
 }
+
+// ifaceToEmpty converts an interface with methods to an empty interface.
+//
+// The data word is carried across unchanged and the type word is not. The
+// source leads with an *itab and the destination leads with a *_type, and the
+// descriptor is the itab's second field, so the conversion is a load and not a
+// reinterpretation.
+//
+// The load is guarded. A nil interface has a nil first word, and reading a
+// field through it faults. walkConvInterface builds the same guard:
+//
+//	typeWord := unsafe.Pointer(itab)
+//	if typeWord != nil {
+//		typeWord = itab.Type
+//	}
+//	e = iface{typeWord, data}
+//
+// The join is an ordinary phi over an ordinary variable, which is what
+// shortCircuit does for && and || and for the same reason: nothing here has to
+// know that it is building a phi.
+func (b *builder) ifaceToEmpty(n ir.Expr, x *Value, to *ir.Type) *Value {
+	tab := b.value(OpITab, unsafePtrType, n.Pos, x)
+	data := b.value(OpIData, unsafePtrType, n.Pos, x)
+
+	word := &ir.Object{Name: "typeword", Type: unsafePtrType, Class: ir.ClassLocal, Pos: n.Pos}
+	b.write(word, b.cur, tab)
+
+	nonNil := b.value(OpNeq, b.boolType, n.Pos, tab, b.value(OpConstNil, unsafePtrType, n.Pos))
+	read := b.f.NewBlock(BlockPlain)
+	done := b.f.NewBlock(BlockPlain)
+	b.cur.Kind = BlockIf
+	b.cur.Control = nonNil
+	b.cur.AddEdgeTo(read)
+	b.cur.AddEdgeTo(done)
+	b.seal(read)
+
+	b.cur = read
+	addr := b.value(OpOffPtr, b.ptrTo(unsafePtrType), n.Pos, tab)
+	addr.AuxInt = itabTypeOffset
+	b.write(word, b.cur, b.load(addr, unsafePtrType, n.Pos))
+	b.jump(done)
+
+	b.seal(done)
+	b.cur = done
+	return b.value(OpIMake, to, n.Pos, b.read(word, done), data)
+}
+
+// itabTypeOffset is the offset of internal/abi.ITab.Type, the descriptor of the
+// concrete type an itab was built for.
+//
+// ITab is Inter, then Type, then Hash and Fun, so the descriptor is the second
+// word. Read out of the installed runtime's internal/abi/iface.go and not
+// recalled: a wrong offset here hands the runtime an *InterfaceType where it
+// reads a *Type, and every field it then reads is another field.
+const itabTypeOffset = ir.PtrSize
 
 // concreteToInterface builds the interface value that holds x.
 //

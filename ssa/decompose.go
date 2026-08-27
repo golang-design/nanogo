@@ -122,7 +122,6 @@ type decomposer struct {
 	tInt   *ir.Type
 	tByte  *ir.Type
 	tBool  *ir.Type
-	tUnsaf *ir.Type
 
 	// users lists the values that read each value, indexed by identifier.
 	// Value.uses is construction bookkeeping and is documented as stale, so
@@ -356,14 +355,17 @@ func (d *decomposer) boolType() *ir.Type {
 
 // unsafeType returns the type of a word that holds a pointer to something the
 // type system no longer describes: an itab, or the data word of an interface.
-func (d *decomposer) unsafeType() *ir.Type {
-	if d.tUnsaf == nil {
-		d.tUnsaf = &ir.Type{
-			Kind: ir.UnsafePtr, Size: ir.PtrSize, Align: ir.PtrSize,
-			PtrBits: []byte{1}, Name: "unsafe.Pointer",
-		}
-	}
-	return d.tUnsaf
+func (d *decomposer) unsafeType() *ir.Type { return unsafePtrType }
+
+// unsafePtrType is that type, made once.
+//
+// One value and not one per caller. Construction gives an interface's words
+// this type and this pass gives the parts it splits the value into the same
+// one, and the two must not be able to drift: a word described as anything but
+// a pointer is a live pointer the collector does not see.
+var unsafePtrType = &ir.Type{
+	Kind: ir.UnsafePtr, Size: ir.PtrSize, Align: ir.PtrSize,
+	PtrBits: []byte{1}, Name: "unsafe.Pointer",
 }
 
 func (d *decomposer) scalarType(k ir.Kind) *ir.Type {
@@ -1719,6 +1721,19 @@ func CheckDecomposed(f *Func) []Violation {
 	var out []Violation
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
+			switch v.Op {
+			case OpIMake, OpITab, OpIData:
+				// An interface value is two words, so none of the three has a
+				// machine form and lowering has no rule for any of them. They
+				// are reported here rather than left to the panic lowering
+				// raises, because this is the pass that owed their removal.
+				out = append(out, Violation{
+					Invariant: InvOpForm,
+					Block:     b.ID,
+					Value:     v.ID,
+					Detail:    fmt.Sprintf("%v survived decomposition, and no rule lowers it", v.Op),
+				})
+			}
 			if !Multiword(v.Type) {
 				continue
 			}
