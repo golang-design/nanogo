@@ -1198,6 +1198,10 @@ func TestLowerSelectRow(t *testing.T) {
 		{"one receive", `func f(c chan int) { select { case v := <-c: use(v) } }`, 1, 0, 1, true, 1},
 		{"one send", `func f(c chan int) { select { case c <- 1: none() } }`, 1, 1, 0, true, 1},
 		{"a receive and a default", `func f(c chan int) { select { case <-c: none(); default: none() } }`, 1, 0, 1, false, 2},
+		// A blank destination names no storage, so the chosen arm writes
+		// neither it nor, in the second case, the flag beside it.
+		{"a blank value", `func f(c chan int) { select { case _ = <-c: none() } }`, 1, 0, 1, true, 1},
+		{"a blank pair", `func f(c chan int) { select { case _, _ = <-c: none() } }`, 1, 0, 1, true, 1},
 		{"a send and a receive", `func f(a, b chan int) { select { case <-a: none(); case b <- 1: none() } }`, 2, 1, 1, true, 2},
 		{"two sends and two receives", `func f(a, b chan int) { select { case <-a: none(); case b <- 1: none(); case <-b: none(); case a <- 2: none() } }`, 4, 2, 2, true, 4},
 	} {
@@ -1272,6 +1276,65 @@ func TestLowerSelectRow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLowerSelectFindsTheCommunication is the rule that decides which part of
+// a clause runs on entry.
+//
+// ir.Build puts the communication in the clause's Init, with the operand
+// temporaries in front of it and the destination copies after it where a
+// destination's type is not the element's. Both neighbours can look like the
+// communication: the operand of "case c <- <-d:" is hoisted into a temporary
+// assigned from a receive, and a blank pair puts the receive into temporaries
+// and copies out of them. So the communication is the last statement that is
+// one, and this case fails for a search that runs from the front.
+func TestLowerSelectFindsTheCommunication(t *testing.T) {
+	t.Run("a hoisted receive in the operand", func(t *testing.T) {
+		fn := lowerOK(t, `func f(c, d chan int) { select { case c <- <-d: none() } }`)
+		sw := fn.Body[0]
+		// The inner receive is the send's right-hand side, which the
+		// specification evaluates on entry, so it is in the setup and not in
+		// the chosen arm.
+		if !stmtsCall(sw.Init, "runtime.chanrecv1") {
+			t.Errorf("the hoisted receive does not run on entry:\n%s", buildDump(fn))
+		}
+		// One case, and it is the send.
+		call := findCall(fn, "runtime.selectgo")
+		if got := constOf(t, call.Args[3]); got != 1 {
+			t.Errorf("selectgo is told %d sends, want 1:\n%s", got, buildDump(fn))
+		}
+	})
+
+	t.Run("a blank pair", func(t *testing.T) {
+		fn := lowerOK(t, `func f(c chan int) { select { case _, _ = <-c: none() } }`)
+		sw := fn.Body[0]
+		call := findCall(fn, "runtime.selectgo")
+		if call == nil {
+			t.Fatalf("runtime.selectgo was not called:\n%s", buildDump(fn))
+		}
+		if got := constOf(t, call.Args[4]); got != 1 {
+			t.Errorf("selectgo is told %d receives, want 1:\n%s", got, buildDump(fn))
+		}
+		// The copies into the blanks are the clause's own, and they run only
+		// if this communication is the one that happened.
+		if len(sw.Body) != 1 || len(sw.Body[0].Body) < 2 {
+			t.Fatalf("the destination copies are not in the chosen arm:\n%s", buildDump(fn))
+		}
+	})
+}
+
+// stmtsCall reports whether a statement list calls a runtime function.
+func stmtsCall(list []Stmt, name string) bool {
+	found := false
+	for _, s := range list {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OCall && n.X != nil && n.X.Op == OGlobal && n.X.Obj != nil && n.X.Obj.Name == name {
+				found = true
+			}
+			return true
+		})
+	}
+	return found
 }
 
 // TestLowerSelectSendsComeFirst checks the split selectgo is told about.
@@ -2081,7 +2144,22 @@ func TestLowerRefusesAMalformedTree(t *testing.T) {
 		})
 	}
 
-	// A range whose operand has no type, and one over a kind with no row.
+	// A statement the checker never produces. The channel and select rows are
+	// here rather than in the source-level table because the checker refuses
+	// every one of these before lowering sees it, and the refusals still have
+	// to hold: a tree built by hand is what a later pass that rewrites one
+	// produces.
+	chanInt := &Type{Kind: Chan, Elem: lowerInt, ChanDir: SendRecv}
+	dirless := &Type{Kind: Chan, Elem: lowerInt}
+	for _, tp := range []*Type{chanInt, dirless} {
+		if err := Layout(tp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noType := func() Expr { return &Node{Op: OLocal} }
+	comm := func(init ...Stmt) Stmt {
+		return &Node{Op: OCase, Type: voidType, Init: init}
+	}
 	for _, tc := range []struct {
 		what string
 		n    Stmt
@@ -2093,6 +2171,48 @@ func TestLowerRefusesAMalformedTree(t *testing.T) {
 		{"a range over an integer with two variables", &Node{Op: ORange, Type: voidType,
 			X:    local(lowerInt, "n"),
 			Args: []Expr{local(lowerInt, "i"), local(lowerInt, "v")}}, "two variables"},
+		{"a range over a channel with no element type", &Node{Op: ORange, Type: voidType,
+			X: local(chn, "c")}, "a channel with no element type"},
+		{"a range over a channel with two variables", &Node{Op: ORange, Type: voidType,
+			X:    local(chanInt, "c"),
+			Args: []Expr{local(lowerInt, "v"), local(lowerBool, "ok")}}, "two variables"},
+
+		{"a send to nothing", &Node{Op: OSend, Type: voidType}, "a channel operand with no type"},
+		{"a send to an integer", &Node{Op: OSend, Type: voidType, X: local(lowerInt, "n"),
+			Y: intConst(0, lowerInt, 1)}, "a channel operation on int"},
+		{"a send to a channel with no element type", &Node{Op: OSend, Type: voidType,
+			X: local(chn, "c"), Y: intConst(0, lowerInt, 1)}, "a channel with no element type"},
+		{"a send of an operand with no type", &Node{Op: OSend, Type: voidType,
+			X: local(chanInt, "c"), Y: noType()}, "a send of an operand with no type"},
+		{"a receive from an integer", &Node{Op: ORecv, Type: lowerInt,
+			X: local(lowerInt, "n")}, "a channel operation on int"},
+		{"a two-value receive from an integer", &Node{Op: OAssign, Type: voidType,
+			Args: []Expr{local(lowerInt, "v"), local(lowerBool, "ok")},
+			Y:    &Node{Op: ORecv, Type: lowerInt, X: local(lowerInt, "n")}},
+			"a channel operation on int"},
+
+		{"a make of a channel with no element type", &Node{Op: OMake, Type: chn},
+			"a make of a channel with no element type"},
+		{"a make of a channel with two bounds", &Node{Op: OMake, Type: chanInt,
+			Args: []Expr{intConst(0, lowerInt, 1), intConst(0, lowerInt, 2)}},
+			"a make of a channel with 2 bounds"},
+		{"a make of a channel with no direction", &Node{Op: OMake, Type: dirless},
+			"a channel's direction is not in the IR type"},
+
+		{"a select with no clauses", &Node{Op: OSelect, Type: voidType}, "runtime.block"},
+		{"a select whose clause is not a case", &Node{Op: OSelect, Type: voidType,
+			Body: []Stmt{{Op: OBlock, Type: voidType}}}, "not a case"},
+		{"a select with two defaults", &Node{Op: OSelect, Type: voidType,
+			Body: []Stmt{comm(), comm()}}, "two default clauses"},
+		{"a select clause that communicates nothing", &Node{Op: OSelect, Type: voidType,
+			Body: []Stmt{comm(&Node{Op: OBlock, Type: voidType})}},
+			"a select clause whose communication is a block"},
+		{"a select clause over an integer", &Node{Op: OSelect, Type: voidType,
+			Body: []Stmt{comm(&Node{Op: ORecv, Type: lowerInt, X: local(lowerInt, "n")})}},
+			"a channel operation on int"},
+		{"a select clause sending an operand with no type", &Node{Op: OSelect, Type: voidType,
+			Body: []Stmt{comm(&Node{Op: OSend, Type: voidType, X: local(chanInt, "c"), Y: noType()})}},
+			"sends an operand with no type"},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			fn := &Func{Name: "f", Type: funcType}

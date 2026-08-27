@@ -145,6 +145,27 @@ func selectSendAndReceive() int {
 	return total + <-empty
 }
 
+// selectBlank is the shape the clause list takes apart wrongly if the
+// communication is looked for from the front. Both destinations are blank, so
+// ir.Build puts the receive into temporaries and copies out of them, and the
+// last statement of the clause is a copy rather than the receive.
+func selectBlank() int {
+	c := make(chan int, 1)
+	d := make(chan int, 1)
+	c <- 1
+	select {
+	case _, _ = <-c:
+		// The operand of a send is evaluated on entry, so the receive from d
+		// below runs whether or not this clause is the one chosen.
+	}
+	d <- 2
+	e := make(chan int, 1)
+	select {
+	case e <- <-d:
+	}
+	return <-e
+}
+
 // selectClosed reads the second result. A closed channel is always ready, and
 // the receive reports that no value arrived.
 func selectClosed() int {
@@ -193,6 +214,10 @@ func main() {
 		d = d / (d - d)
 	}
 	d = selectClosed() - 9
+	if d != 0 {
+		d = d / (d - d)
+	}
+	d = selectBlank() - 2
 	if d != 0 {
 		d = d / (d - d)
 	}

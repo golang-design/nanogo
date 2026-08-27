@@ -1390,10 +1390,10 @@ func (l *lowerer) recvAssign(s Stmt) {
 
 // assignTo writes one value into destination i of a multi-value assignment,
 // keeping the statement's own sense of whether it declares its destinations.
+//
+// The caller reaches here only for a statement with two destinations, which is
+// what the interception in stmt matches on, so the index is in range.
 func (l *lowerer) assignTo(s Stmt, i int, val Expr) {
-	if i >= len(s.Args) {
-		return
-	}
 	dst := s.Args[i]
 	if dst == nil || namesNoStorage(dst) {
 		return
@@ -1814,6 +1814,7 @@ var selectResult = func() *Type {
 type selectCase struct {
 	clause *Node  // the OCase the source wrote
 	pre    []Stmt // the operand temporaries ir.Build hoisted out of it
+	post   []Stmt // the destination copies it emitted after the communication
 	send   bool
 	ch     Expr
 	val    Expr   // the sent value, for a send
@@ -1844,10 +1845,11 @@ func (l *lowerer) selectStmt(n *Node) {
 			bail("a select whose clause is not a case")
 			return
 		}
-		// ir.Build puts the communication statement in the clause's Init, and
-		// the operand temporaries it needed in front of it. So the
-		// communication is the last statement and the rest is scaffolding the
-		// select runs on entry.
+		// ir.Build puts the communication statement in the clause's Init,
+		// with the operand temporaries it needed in front of it and, where a
+		// destination's type differs from the value's, the copies that convert
+		// after it. So a clause with no Init is the default, and the rest is
+		// three parts.
 		if len(c.Init) == 0 {
 			if deflt != nil {
 				bail("a select with two default clauses")
@@ -1856,8 +1858,18 @@ func (l *lowerer) selectStmt(n *Node) {
 			deflt = c
 			continue
 		}
-		comm := c.Init[len(c.Init)-1]
-		k := &selectCase{clause: c, pre: c.Init[:len(c.Init)-1]}
+		at := commIndex(c.Init)
+		if at < 0 {
+			bail("a select clause whose communication is a " + c.Init[len(c.Init)-1].Op.String())
+			return
+		}
+		comm := c.Init[at]
+		// What comes before the communication is evaluated on entry, which is
+		// where the specification evaluates a channel operand and a sent
+		// value. What comes after it copies the received value into a
+		// destination whose type is not the element's, and that runs only if
+		// this communication is the one that happened.
+		k := &selectCase{clause: c, pre: c.Init[:at], post: c.Init[at+1:]}
 		switch {
 		case comm.Op == OSend:
 			k.send, k.ch, k.val = true, comm.X, comm.Y
@@ -1871,9 +1883,6 @@ func (l *lowerer) selectStmt(n *Node) {
 			} else {
 				k.dsts = comm.Args
 			}
-		default:
-			bail("a select clause whose communication is a " + comm.Op.String())
-			return
 		}
 		cases = append(cases, k)
 	}
@@ -1975,6 +1984,9 @@ func (l *lowerer) selectStmt(n *Node) {
 		if len(k.dsts) > 1 {
 			l.selectAssign(k, 1, ref(received, pos), pos)
 		}
+		for _, s := range k.post {
+			l.stmt(s)
+		}
 		for _, s := range k.clause.Body {
 			l.stmt(s)
 		}
@@ -1987,6 +1999,29 @@ func (l *lowerer) selectStmt(n *Node) {
 	}
 	l.emit(&Node{Op: OSwitch, Pos: pos, Type: voidType,
 		Init: init, X: ref(chosen, pos), Body: clauses})
+}
+
+// commIndex returns the position of the communication statement in a select
+// clause's init list, or a negative number when there is none.
+//
+// The search runs from the end and not from the front, and the direction is
+// the whole of what makes it right. A statement in front of the communication
+// may be a receive of its own: ir.Build hoists the operand of "case c <- <-d:"
+// into a temporary, and that temporary is assigned from a receive. A statement
+// after it never is: what follows is a copy out of a temporary the
+// communication wrote.
+func commIndex(list []Stmt) int {
+	for i := len(list) - 1; i >= 0; i-- {
+		s := list[i]
+		if s == nil {
+			continue
+		}
+		if s.Op == OSend || s.Op == ORecv ||
+			(s.Op == OAssign && s.Y != nil && s.Y.Op == ORecv) {
+			return i
+		}
+	}
+	return -1
 }
 
 // selectAssign writes one destination of a chosen receive clause.
