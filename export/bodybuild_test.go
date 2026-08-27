@@ -445,10 +445,24 @@ type buildCensus struct {
 	mismatched int
 	refused    map[string]int
 
+	// stmts and exprs count the encodings the bodies that matched used, so
+	// that an encoding no standard library body exercises is named rather
+	// than counted as proved. The corpus only holds the bodies gc chose to
+	// export, so a shape it does not hold is a shape this oracle is blind
+	// to.
+	stmts map[StmtKind]int
+	exprs map[ExprKind]int
+
 	failures []string
 }
 
-func newBuildCensus() *buildCensus { return &buildCensus{refused: make(map[string]int)} }
+func newBuildCensus() *buildCensus {
+	return &buildCensus{
+		refused: make(map[string]int),
+		stmts:   make(map[StmtKind]int),
+		exprs:   make(map[ExprKind]int),
+	}
+}
 
 func (c *buildCensus) fail(format string, args ...any) {
 	c.failures = append(c.failures, fmt.Sprintf(format, args...))
@@ -466,8 +480,159 @@ func (c *buildCensus) report(t *testing.T) {
 	for _, r := range reasons {
 		t.Logf("refused %d time(s): %s", c.refused[r], r)
 	}
+	var unused []string
+	for k := StmtKind(0); k < numStmtKinds; k++ {
+		if k != StmtEnd && c.stmts[k] == 0 {
+			unused = append(unused, "the "+k.String()+" statement")
+		}
+	}
+	for k := ExprKind(0); k < numExprKinds; k++ {
+		// The reshape node is folded onto the expression it wraps, so it is
+		// never a node of its own.
+		if k != ExprReshape && c.exprs[k] == 0 {
+			unused = append(unused, "the "+k.String()+" expression")
+		}
+	}
+	if len(unused) != 0 {
+		t.Logf("no body that matched used %s, so the oracle says nothing about it", strings.Join(unused, ", "))
+	}
 	for _, f := range c.failures {
 		t.Errorf("%s", f)
+	}
+}
+
+// count records the encodings one built body used.
+func (c *buildCensus) count(b *Body) {
+	if b == nil {
+		return
+	}
+	c.countStmts(b.Stmts)
+}
+
+func (c *buildCensus) countStmts(list []Stmt) {
+	for _, s := range list {
+		c.stmts[s.stmtKind()]++
+		switch s := s.(type) {
+		case *BlockStmt:
+			c.countStmts(s.Body)
+		case *ExprStmt:
+			c.countExpr(s.X)
+		case *SendStmt:
+			c.countExpr(s.Chan)
+			c.countExpr(s.Value)
+		case *AssignStmt:
+			c.countAssign(s.Lhs)
+			c.countMulti(s.Rhs)
+		case *AssignOpStmt:
+			c.countExpr(s.Lhs)
+			c.countExpr(s.Rhs)
+		case *IncDecStmt:
+			c.countExpr(s.X)
+		case *CallStmt:
+			c.countExpr(s.Call)
+			c.countExpr(s.DeferAt)
+		case *ReturnStmt:
+			c.countMulti(s.Results)
+		case *IfStmt:
+			c.countStmts(s.Init)
+			c.countExpr(s.Cond)
+			if s.Then != nil {
+				c.countStmts(s.Then.Body)
+			}
+			c.countStmts(s.Else)
+		case *ForStmt:
+			if s.Range != nil {
+				c.countAssign(s.Range.Lhs)
+				c.countExpr(s.Range.X)
+			}
+			c.countStmts(s.Init)
+			c.countExpr(s.Cond)
+			c.countStmts(s.Post)
+			if s.Body != nil {
+				c.countStmts(s.Body.Body)
+			}
+		case *SwitchStmt:
+			c.countStmts(s.Init)
+			if s.Guard != nil {
+				c.countExpr(s.Guard.X)
+			}
+			c.countExpr(s.Tag)
+			for i := range s.Clauses {
+				for _, e := range s.Clauses[i].Exprs {
+					c.countExpr(e)
+				}
+				c.countStmts(s.Clauses[i].Body)
+			}
+		case *SelectStmt:
+			for i := range s.Clauses {
+				c.countStmts(s.Clauses[i].Comm)
+				c.countStmts(s.Clauses[i].Body)
+			}
+		}
+	}
+}
+
+func (c *buildCensus) countAssign(list []Assignee) {
+	for _, a := range list {
+		c.countExpr(a.Expr)
+	}
+}
+
+func (c *buildCensus) countMulti(m MultiExpr) {
+	c.countExpr(m.Expr)
+	for _, e := range m.Exprs {
+		c.countExpr(e)
+	}
+}
+
+func (c *buildCensus) countExpr(e Expr) {
+	if e == nil {
+		return
+	}
+	c.exprs[e.exprKind()]++
+	switch e := e.(type) {
+	case *CompLitExpr:
+		for i := range e.Elems {
+			c.countExpr(e.Elems[i].Key)
+			c.countExpr(e.Elems[i].Value)
+		}
+	case *FuncLitExpr:
+		c.count(e.Decoded)
+	case *FieldValExpr:
+		c.countExpr(e.X)
+	case *MethodValExpr:
+		c.countExpr(e.Recv)
+	case *RecvExpr:
+		c.countExpr(e.X)
+	case *IndexExpr:
+		c.countExpr(e.X)
+		c.countExpr(e.Index)
+	case *SliceExpr:
+		c.countExpr(e.X)
+		for _, x := range e.Index {
+			c.countExpr(x)
+		}
+	case *AssertExpr:
+		c.countExpr(e.X)
+	case *UnaryExpr:
+		c.countExpr(e.X)
+	case *BinaryExpr:
+		c.countExpr(e.X)
+		c.countExpr(e.Y)
+	case *CallExpr:
+		if e.Method != nil {
+			c.countExpr(e.Method.Recv)
+		}
+		c.countExpr(e.Fun)
+		c.countMulti(e.Args)
+	case *ConvertExpr:
+		c.countExpr(e.X)
+	case *NewExpr:
+		c.countExpr(e.Value)
+	case *MakeExpr:
+		for _, a := range e.Args {
+			c.countExpr(a)
+		}
 	}
 }
 
@@ -597,6 +762,7 @@ func (c *buildCensus) checkPackage(t *testing.T, sp sourcePackage, imp types2.Im
 			continue
 		}
 		c.matched++
+		c.count(got)
 	}
 }
 
