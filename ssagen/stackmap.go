@@ -72,30 +72,20 @@ func (e *emitter) buildTables(size int64) (*tables, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A function with no safepoint gets no bitmap: BuildStackMaps writes one
-	// per safepoint. That is what the reference compiler does as well for the
-	// locals map, and it is safe for as long as nothing reads a map for the
-	// frame. One thing does. A function with a stack-growth check reaches
+	// A function with no safepoint gets no bitmap from the safepoints, because
+	// BuildStackMaps writes one per safepoint. One thing reads a map for such
+	// a frame all the same: a function with a stack-growth check reaches
 	// runtime.morestack, and the stack copier reads the arguments bitmap of
 	// every frame it moves, the one that called morestack included
 	// (runtime/stack.go, adjustframe). With no bitmap the runtime throws
-	// "missing stackmap" there. The shape that reaches it is a leaf whose
-	// frame is at least StackSmall, which is an ordinary function and not a
-	// corner.
+	// "missing stackmap" there, and the shape that reaches it is ordinary: a
+	// leaf whose frame is at least StackSmall.
 	//
-	// What closes it is an entry stack map. gc's liveness adds one for the
-	// entry block whatever the function does (cmd/compile/internal/liveness,
-	// compact), so its count is never zero. ssa.BuildStackMaps has no entry
-	// safepoint, and building the arguments bitmap here instead would be a
-	// second answer to which words hold pointers, which specs/027 says must
-	// come from ir.Type.PtrBits through one path. So the function is refused
-	// rather than emitted with a map the collector cannot read.
-	if len(m.Locals.Maps) == 0 && !e.frame.nosplit && e.frame.args > 0 {
-		return nil, fmt.Errorf("the function makes no call, so it has no safepoint and no stack map, "+
-			"and its %d byte frame carries a stack-growth check whose copier reads the bitmap of "+
-			"its %d byte argument area: ssa.BuildStackMaps needs an entry stack map",
-			e.frame.size, e.frame.args)
-	}
+	// The stack-growth tail's own map closes it. Every function that emits a
+	// tail has one, whether or not it makes a call, which is the property gc
+	// gets from adding a stack map for the entry block of every function
+	// (cmd/compile/internal/liveness, compact). A leaf with a growable frame
+	// used to be refused here for want of it.
 
 	pcs := &ssa.PCMap{
 		FuncSize:    size,
@@ -109,6 +99,7 @@ func (e *emitter) buildTables(size int64) (*tables, error) {
 		// stack-growth tail.
 		EpilogueStart: size,
 		Unsafe:        e.unsafe,
+		GrowPC:        int64(e.growPC),
 	}
 	stackMap, err := m.StackMapPCData(pcs)
 	if err != nil {

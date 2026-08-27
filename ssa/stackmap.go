@@ -163,6 +163,10 @@ type StackMaps struct {
 	Index  []int32
 
 	Objects []StackObject
+
+	// GrowIndex is the stack map index of the stack-growth tail. See
+	// BuildStackMaps.
+	GrowIndex int32
 }
 
 // BuildStackMaps produces the maps of one function.
@@ -179,12 +183,22 @@ func BuildStackMaps(lv *Liveness, fr *Frame) (*StackMaps, error) {
 	m.Locals.NBit = fr.LocalsBits
 	m.Args.NBit = fr.ArgsBits
 
-	// The arguments bitmap is the same at every safepoint. The calling
-	// convention decides where the incoming arguments are, and nothing here
-	// narrows their liveness: an argument the caller still holds a copy of is
-	// live for as long as the frame is, and claiming otherwise would be the
-	// unsafe direction. specs/030-abi.md is where a narrower answer comes from.
+	// Two arguments bitmaps, and the difference between them is FrameArg.Spill.
+	//
+	// args is what every safepoint of the body uses. It describes the words
+	// the caller wrote and the callee reads, and nothing here narrows their
+	// liveness: an argument the caller still holds a copy of is live for as
+	// long as the frame is, and claiming otherwise would be the unsafe
+	// direction. specs/030-abi.md is where a narrower answer comes from.
+	//
+	// argsGrow adds the reserved words of the arguments that travel in
+	// registers. Only the stack-growth tail writes those, and only the stack
+	// map in effect inside the tail may say they hold a pointer: on the
+	// ordinary path they hold whatever the caller's frame left at that
+	// address, and a bitmap that describes them makes the collector follow it
+	// and the stack copier rewrite it.
 	args := make([]byte, int(fr.ArgsBits+7)/8)
+	argsGrow := make([]byte, len(args))
 	for _, a := range fr.Config.Args {
 		for w := int64(0); w*ptrSize < a.Type.Size; w++ {
 			if !ptrBitSet(a.Type.PtrBits, w) {
@@ -195,7 +209,10 @@ func BuildStackMaps(lv *Liveness, fr *Frame) (*StackMaps, error) {
 				return nil, fmt.Errorf("ssa: stackmap: %s: argument %s word %d is at %d, outside the %d bit arguments map",
 					lv.Func.Name, a.Name, w, a.Off+w*ptrSize, fr.ArgsBits)
 			}
-			args[b/8] |= 1 << uint(b%8)
+			argsGrow[b/8] |= 1 << uint(b%8)
+			if !a.Spill {
+				args[b/8] |= 1 << uint(b%8)
+			}
 		}
 	}
 
@@ -247,6 +264,23 @@ func BuildStackMaps(lv *Liveness, fr *Frame) (*StackMaps, error) {
 		// all of them.
 		m.Args.Maps = append(m.Args.Maps, append([]byte(nil), args...))
 		m.Index[k] = idx
+	}
+
+	// The stack-growth tail's own map. Its arguments bitmap is the full one,
+	// because the tail has just saved the argument registers into those words
+	// and runtime.morestack may copy the stack from there. Its locals bitmap
+	// is empty, because the tail runs before the frame is pushed, so there are
+	// no locals at the address the runtime would compute.
+	//
+	// It is also the map that makes a function with no call describable at
+	// all. Such a function has no safepoint and would carry no bitmap, and the
+	// stack copier reads the arguments bitmap of every frame it moves, the one
+	// that called runtime.morestack included.
+	m.GrowIndex = -1
+	if fr.Config.Grows {
+		m.GrowIndex = int32(len(m.Locals.Maps))
+		m.Locals.Maps = append(m.Locals.Maps, make([]byte, int(fr.LocalsBits+7)/8))
+		m.Args.Maps = append(m.Args.Maps, argsGrow)
 	}
 
 	for _, i := range fr.StackObjects() {
@@ -386,6 +420,12 @@ type PCMap struct {
 	// case: it is emitted code rather than a value, it re-executes the
 	// function, and specs/042-arm64-backend.md marks the whole of it.
 	Unsafe []PCRange
+
+	// GrowPC is the first instruction of the stack-growth tail, or zero when
+	// the function emits none. The tail is where the arguments that travel in
+	// registers are in their reserved words of the argument area, so it is the
+	// only place the arguments bitmap describes them.
+	GrowPC int64
 }
 
 // PCRange is a half-open range of program counters.
@@ -415,6 +455,11 @@ func (m *StackMaps) StackMapPCData(pcs *PCMap) ([]byte, error) {
 			return nil, fmt.Errorf("ssa: stackmap: %s: the safepoint at v%d has no program counter", m.Func.Name, sp.Value)
 		}
 		entries = append(entries, goobj.PCEntry{PC: pc, Value: m.Index[k]})
+	}
+	// The tail is the last thing in the function, so one entry at its first
+	// instruction covers it and nothing switches back.
+	if pcs.GrowPC > 0 && m.GrowIndex >= 0 {
+		entries = append(entries, goobj.PCEntry{PC: pcs.GrowPC, Value: m.GrowIndex})
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].PC < entries[j].PC })
 	return goobj.EncodePCData(dedupPC(entries), pcs.FuncSize, pcs.MinLC)

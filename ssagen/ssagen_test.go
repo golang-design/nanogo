@@ -845,6 +845,72 @@ func TestStackGrowthCopiesNanogoFrames(t *testing.T) {
 	t.Logf("200000 frames were grown, copied and unwound")
 }
 
+// TestStackGrowthCarriesAPointerArgument is the case
+// specs/027-liveness-and-stackmaps.md records as untested: a pointer carried
+// through a stack copy rather than an integer.
+//
+// The argument travels in a register, so between the caller's call instruction
+// and the callee's first store it exists nowhere the collector can see. The
+// one place it does is the stack-growth tail: the tail writes the argument
+// registers into their reserved words of the argument area before it calls
+// runtime.morestack, and the bitmap in effect there is the only one that
+// describes those words. Nothing else on the ordinary path writes them.
+//
+// The caller does not describe the pointer either. An operand that dies at a
+// call is the callee's to describe, so at every level of this recursion the
+// only copy of p on the stack is the one the tail wrote.
+//
+// What this measures and what it does not: the deepest frame reading the value
+// mk wrote is the evidence that the copier moved 200000 frames with nanogo's
+// maps and that the pointer arrived. It is not evidence that the tail's own
+// bitmap is the one that carried it, because a collection has to happen while
+// a growing frame is the only holder for that to be separable, and this
+// program allocates once and then only stack. The finaliser count is in the
+// answer so that a collection which did happen and found nothing is a number
+// rather than a value that happens to still be readable.
+func TestStackGrowthCarriesAPointerArgument(t *testing.T) {
+	hostRunsNanogoOutput(t)
+	goCmd := goTool(t)
+	tc := hostToolchain(t)
+	cfg := linkConfig(t)
+	const src = "type box struct{ n int }\n\n" +
+		"func run(a int, p *box) int {\n" +
+		"\tif a > 0 {\n\t\treturn run(a-1, p)\n\t}\n" +
+		"\treturn p.n\n}"
+	c := compile(t, "package main\n\n"+src+"\n", "run")
+	p := newMainPackage()
+	r := emit(t, c, p)
+	addFull(t, r, p)
+	const defs = `import (
+	"runtime"
+	"sync/atomic"
+)
+
+type box struct{ n int }
+
+var finalized int32
+
+//go:noinline
+func mk() *box {
+	b := new(box)
+	b.n = 1
+	runtime.SetFinalizer(b, func(*box) { atomic.AddInt32(&finalized, 1) })
+	return b
+}`
+	caller := compileCaller(t, goCmd, c.f.Sym, "package main\n\n"+defs+
+		"\n\nfunc run(a int, p *box) int\n\n"+
+		"func main() { println(run(200000, mk()) + 1000*int(atomic.LoadInt32(&finalized))) }\n")
+	out, err := runLinkedEnv(t, goCmd, tc, cfg, p, caller, []string{"GODEBUG=gccheckmark=1", "GOGC=1"})
+	if err != nil {
+		t.Fatalf("the program failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(out); got != "1" {
+		t.Fatalf("the recursion printed %q; the deepest frame reads the n mk wrote, which is 1, "+
+			"and a thousand of it is the finaliser having run", got)
+	}
+	t.Logf("200000 frames carried a pointer argument through the growth")
+}
+
 // exitWrapper compiles the main package that calls the function under test and
 // exits with its result. It is compiled by gc, so the test is a real
 // cross-toolchain call: gc's caller reaches nanogo's callee through

@@ -127,17 +127,25 @@ type FrameItem struct {
 	Obj *ir.Object
 
 	// StackObject marks an item the collector needs the extent and the type
-	// of, not only a pointer map: an address-taken local, whose address can be
-	// held anywhere. specs/027-liveness-and-stackmaps.md describes these
-	// through FUNCDATA_StackObjects.
+	// of, not only a pointer map: a local it can reach through a pointer
+	// rather than through the locals bitmap.
+	// specs/027-liveness-and-stackmaps.md describes these through
+	// FUNCDATA_StackObjects, and ssa/liveness.go stops describing such a local
+	// in the bitmap below the last address taken of it, so the table is what
+	// covers it there.
 	//
-	// An address-taken local that holds no pointer is not one. The table
-	// exists so that the collector can scan an object it reached through a
-	// pointer, and there is nothing in such an object to scan. The reference
-	// compiler applies the same condition, and a zero-sized local shows why it
-	// is more than an optimisation: its offset from Varp would be zero, and
-	// the runtime reads a non-negative offset as one into the incoming
-	// argument area.
+	// Every frame object qualifies, not only an address-taken one. A frame
+	// object that no source expression took the address of is in the frame
+	// because its type does not fit one value, and the code that reads it
+	// still reaches it through an address. The reference compiler has no such
+	// object: it keeps the value in SSA and lists only the address-taken ones.
+	//
+	// A local that holds no pointer is not one. The table exists so that the
+	// collector can scan an object it reached through a pointer, and there is
+	// nothing in such an object to scan. A zero-sized local shows why that is
+	// more than an optimisation: its offset from Varp would be zero, and the
+	// runtime reads a non-negative offset as one into the incoming argument
+	// area.
 	StackObject bool
 
 	// Off is the offset of the item from SP. LayoutFrame sets it.
@@ -205,7 +213,7 @@ func FrameItems(a *Alloc) ([]FrameItem, error) {
 			Size:        o.Type.Size,
 			Align:       o.Type.Align,
 			Obj:         o,
-			StackObject: o.Addrtaken && o.Type.HasPointers(),
+			StackObject: o.Type.HasPointers(),
 		})
 	}
 	for i := range items {
@@ -251,10 +259,31 @@ type FrameArg struct {
 	Name string
 	Off  int64
 	Type *ir.Type
+
+	// Spill marks an argument that travels in registers.
+	//
+	// The convention reserves its words in the argument area all the same, and
+	// the only code that writes them is the stack-growth tail: it saves the
+	// argument registers there, calls the runtime, and reads them back before
+	// re-entering the function
+	// (specs/035-goroutines-and-stack-growth.md). Nothing on the ordinary path
+	// writes them, so at every safepoint of the body those words hold whatever
+	// the caller's frame left there, and the arguments bitmap must not claim
+	// they hold a pointer. The bitmap in effect inside the tail does, because
+	// there they hold the arguments and the stack copier has to move them.
+	Spill bool
 }
 
 // FrameConfig is what the layout needs and cannot derive.
 type FrameConfig struct {
+	// Grows reports that the function emits a stack-growth tail.
+	//
+	// The layout does not read it. The stack maps do: the tail is where the
+	// arguments that travel in registers occupy their reserved words of the
+	// argument area, so it is the one place the arguments bitmap describes
+	// them, and a function without a tail needs no such bitmap.
+	Grows bool
+
 	// PtrSize is the width of a pointer. Zero means ir.PtrSize.
 	PtrSize int64
 

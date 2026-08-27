@@ -228,7 +228,6 @@ func main() { report(gcrun()) }
 // The object is passed and never mentioned again, so gc keeps no reference to
 // it: the argument is dead at the call in the caller's own liveness, and gc
 // does not write the argument area for a value that travels in a register.
-// What holds the object is the word the callee wrote there.
 const gcArgCallerSrc = gcHelpers + `
 func gcrun(p *int, n int) int
 
@@ -238,12 +237,16 @@ func main() { report(gcrun(mk(), 7)) }
 // gcArgFunc builds a function that takes a pointer, never reads it, and
 // collects.
 //
-// The arguments bitmap of specs/027-liveness-and-stackmaps.md is exact and is
-// the same at every safepoint, so it says the incoming word holds a pointer
-// whether or not the function reads it. The word is in the caller's frame and
-// the argument arrived in a register, so the callee has to write it: that is
-// what this case tests, and without the write the collector reads whatever the
-// last frame at that address left behind.
+// Nothing holds the object. The argument travels in a register, the caller let
+// it die at the call, and this function never stores it, so the collector must
+// free it. gc answers the same for the same program: `go build -gcflags=-live`
+// reports the pointer live only at the SetFinalizer that made it.
+//
+// The reserved word of the argument area is where a register argument would
+// be, and it is not an answer: only the stack-growth tail writes it, and only
+// the bitmap in effect inside the tail describes it. Before that rule this
+// case reported the object as surviving, which was the collector following a
+// word no instruction of this function had written.
 func gcArgFunc(t *testing.T, name string) *compiled {
 	t.Helper()
 	return hand(t, name, func(f *ssa.Func) {
@@ -293,11 +296,10 @@ func TestStackMapKeepsALiveSlotAndFreesADeadOne(t *testing.T) {
 		// it is live in the callee. Only the stack objects table can keep it,
 		// so this case is the table and nothing else.
 		{"reachable", gcReachFunc, gcCallerSrc, "result 24301 finalized 0 seen 24301"},
-		// The pointer is an argument the function never reads. The arguments
-		// bitmap says the incoming word holds a pointer at every safepoint,
-		// so the object survives, and it can only do so if the entry wrote
-		// the register into that word.
-		{"argument", gcArgFunc, gcArgCallerSrc, "result 7 finalized 0"},
+		// The pointer is an argument the function never reads, and it arrived
+		// in a register. Nothing on the stack holds the object, so it is
+		// freed, which is gc's answer for the same program.
+		{"argument", gcArgFunc, gcArgCallerSrc, "result 7 finalized 1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

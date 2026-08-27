@@ -41,7 +41,7 @@ and the one that needs no table.
 At a **safepoint**, for the frame of a function $f$, the compiler provides:
 
 - an **arguments** bitmap: which words of the incoming argument area hold
-  pointers;
+  pointers. Two of them, see below;
 - a **locals** bitmap: which words of the local frame area hold pointers;
 - a **stack objects** table: the address-taken locals the collector reaches
   through a pointer to them rather than through the locals bitmap.
@@ -51,6 +51,35 @@ bitmap for the current program counter through `PCDATA` index changes.
 
 Because Go's ABI has no callee-saved registers ([026](026-register-allocation.md)),
 no register map is needed. Everything live across a call is in the frame.
+
+### The argument area has two bitmaps, and the difference is the spill space
+
+[030](030-abi.md) reserves a word of the incoming argument area for every
+argument, including one that travels in a register. **Nothing on the ordinary
+path writes the reserved word of a register argument.** The only code that does
+is the stack-growth tail: it saves the argument registers there, calls
+`runtime.morestack`, reads them back and re-enters the function
+([035](035-goroutines-and-stack-growth.md)).
+
+So the bitmap in effect inside the tail describes those words and no other
+bitmap may. A bitmap that describes them at a safepoint of the body claims a
+word the function never wrote holds a pointer, and the collector then follows
+whatever the previous frame at that address left there. That is not a
+conservative answer, it is a wrong one, and it is what kept
+[`stackobj3.go`](../internal/gotest/testdata/go/test/stackobj3.go)'s heap
+object alive for the whole of `f`: the caller's last call had left the pointer
+in the first outgoing word.
+
+Between the caller's call instruction and the callee's first store, a register
+argument is in a register and nowhere else. That is safe for the reason it is
+safe in `gc`: the callee's prologue is an unsafe range, so no asynchronous
+preemption stops there, and the one synchronous stop in it is the call to
+`runtime.morestack`, which the tail's bitmap covers.
+
+The tail's map is also what a function with no call has. Such a function has no
+safepoint and so no bitmap from the safepoints, and the stack copier reads the
+arguments bitmap of every frame it moves. A leaf with a growable frame used to
+be refused for want of one.
 
 ## Evidence that the mechanism is understood
 
@@ -278,18 +307,21 @@ Testing is therefore adversarial rather than exhaustive:
 
 The first four are one test in `ssagen/gc_test.go`. It runs under
 `GODEBUG=gccheckmark=1,clobberfree=1` and `GOGC=1`, and it is the spike's shape:
-one function compiled twice, once with the slot live at the collection and once
-with an `OpVarKill` before it, so the difference between "survives" and "is
-freed" is the bitmap and nothing else. The pointer is in a frame object rather
-than in an argument, because the arguments bitmap would keep the object alive
-whatever the locals bitmap said.
+one function compiled twice, once with the object's address taken again below
+the collection and once with its last address above it, so the difference
+between "survives" and "is freed" is the bitmap and nothing else. A third case
+is the stack objects table on its own: the object is dead in the bitmap at the
+collection and a pointer to it is live in the callee, so only the table can
+keep it. That case is what found a pointer mask emitted into the wrong section.
 
-The fifth is `ssagen`'s stack-growth test, and it is weaker than this spec asks
-for. It recurses 200,000 frames under `gccheckmark`, so it does exercise the
-copier, but the value it carries through the growth is an integer. The
-assertion is that the integer arrives unchanged, which catches a bit set on a
-word that holds no pointer. A pointer carried through the growth is not tested
-yet.
+The fifth is `ssagen`'s stack-growth test, and there are two. The first
+recurses 200,000 frames under `gccheckmark` carrying an integer, and the
+assertion that the integer arrives unchanged catches a bit set on a word that
+holds no pointer. The second carries a pointer argument through the same
+growth, which this spec used to record as untested. Neither isolates the
+stack-growth tail's own bitmap: separating it needs a collection while a
+growing frame is the only holder of the object, and a recursion that allocates
+only stack does not produce one.
 
 ### The corpus
 

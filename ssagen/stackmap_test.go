@@ -267,29 +267,30 @@ func TestGclocalsNameIsGcs(t *testing.T) {
 	comparisons++
 }
 
-// TestALeafWithAGrowableFrameIsRefused records a gap in ssa.BuildStackMaps
-// and the refusal that keeps it out of a binary.
+// TestALeafWithAGrowableFrameCarriesTheGrowthMap is what closed a gap
+// ssa.BuildStackMaps had.
 //
-// A function that makes no call has no safepoint, so BuildStackMaps writes no
+// A function that makes no call has no safepoint, so the safepoints write no
 // bitmap at all. The runtime reads one anyway when such a function grows the
 // stack: runtime.morestack copies the frames and adjustframe reads the
-// arguments bitmap of the frame that called it, whatever its program counter
-// says about the locals. It throws "missing stackmap" when there is none, and
-// the shape that reaches it is ordinary: a leaf whose frame is at least
-// StackSmall, which is the frame that carries a growth check.
+// arguments bitmap of the frame that called it. It throws "missing stackmap"
+// when there is none, and the shape that reaches it is ordinary: a leaf whose
+// frame is at least StackSmall, which is the frame that carries a growth
+// check. Such a function used to be refused.
 //
-// gc never has the problem because its liveness adds a stack map for the
-// entry block of every function. The day ssa.BuildStackMaps does the same,
-// this test fails and the assertion becomes the value the function computes.
-func TestALeafWithAGrowableFrameIsRefused(t *testing.T) {
+// The stack-growth tail's own map is what it has now, and the pointer argument
+// is in it: the tail wrote that word before calling the runtime, so the copier
+// has to move it.
+func TestALeafWithAGrowableFrameCarriesTheGrowthMap(t *testing.T) {
 	// Enough values live at once to fill the registers many times over, so
-	// the frame is far past StackSmall, and one argument so that the
-	// arguments bitmap is one the runtime reads.
+	// the frame is far past StackSmall, and one pointer argument so that the
+	// arguments bitmap is one the runtime reads and one that has a bit.
 	const n = 64
 	c := hand(t, "bigleaf", func(f *ssa.Func) {
 		e := f.Entry
 		e.Kind = ssa.BlockRet
 		mem := e.NewValue(0, ssa.OpInitMem, ssa.MemType)
+		e.NewValue(0, ssa.OpArg, typePtrInt)
 		a := e.NewValue(0, ssa.OpArg, typeInt)
 		vals := make([]*ssa.Value, n)
 		for i := range vals {
@@ -301,12 +302,23 @@ func TestALeafWithAGrowableFrameIsRefused(t *testing.T) {
 		}
 		e.Control = e.NewValue(0, ssa.OpMakeResult, ssa.MemType, sum, mem)
 	})
-	_, err := Emit(c.f, c.a, obj.NewPackage("main"), Options{Sym: c.f.Sym})
-	if err == nil {
-		t.Fatal("a leaf with a growable frame and no stack map was emitted")
+	r, err := Emit(c.f, c.a, obj.NewPackage("main"), Options{Sym: c.f.Sym})
+	if err != nil {
+		t.Fatalf("a leaf with a growable frame was refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "entry stack map") {
-		t.Fatalf("the refusal is %v", err)
+	if n := len(r.maps.Locals.Maps); n != 1 {
+		t.Fatalf("%d bitmaps, want the one the stack-growth tail uses", n)
 	}
-	t.Logf("%v", err)
+	if r.maps.GrowIndex != 0 {
+		t.Fatalf("the growth map is index %d, and it is the only one", r.maps.GrowIndex)
+	}
+	// The pointer argument occupies the first word of the argument area, so
+	// the tail's bitmap has its first bit.
+	args := r.Funcdata[ssa.FUNCDATA_ArgsPointerMaps].Data
+	if len(args) < 9 {
+		t.Fatalf("the arguments bitmap is %d bytes", len(args))
+	}
+	if args[8]&1 == 0 {
+		t.Errorf("the tail's arguments bitmap is %#x, and the tail wrote a pointer into the first word", args[8])
+	}
 }

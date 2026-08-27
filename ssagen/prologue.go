@@ -290,9 +290,10 @@ func (e *emitter) layout() error {
 	// would be a second computation of something ir.Layout already did.
 	for i := range abi.In {
 		cfg.Args = append(cfg.Args, ssa.FrameArg{
-			Name: fmt.Sprintf("arg%d", i),
-			Off:  abi.In[i].Off,
-			Type: abi.In[i].Type,
+			Name:  fmt.Sprintf("arg%d", i),
+			Off:   abi.In[i].Off,
+			Type:  abi.In[i].Type,
+			Spill: abi.In[i].InReg,
 		})
 	}
 	// A result the registers could not hold occupies words of the same area
@@ -370,6 +371,9 @@ func (e *emitter) layout() error {
 	}
 
 	f.nosplit = f.size == 0 || (f.leaf && f.size < stackSmall)
+	// Whether a stack-growth tail is emitted is decided here and read by the
+	// stack maps, which give the tail a bitmap of its own.
+	e.fr.Config.Grows = !f.nosplit
 	return nil
 }
 
