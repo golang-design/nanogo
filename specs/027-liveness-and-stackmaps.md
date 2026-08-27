@@ -314,6 +314,30 @@ is the stack objects table on its own: the object is dead in the bitmap at the
 collection and a pointer to it is live in the callee, so only the table can
 keep it. That case is what found a pointer mask emitted into the wrong section.
 
+### What the object under test must be
+
+A case that asserts the collector **frees** an object asserts a negative, and a
+negative holds only if nothing else in the program keeps the object. Two rules
+make that true, and both are part of the test rather than of the compiler.
+
+**The object keeps a heap block to itself.** The runtime's tiny allocator serves
+an allocation that is smaller than 16 bytes and holds no pointer, and it packs
+several of them into one block. A finaliser set on such an allocation belongs to
+the block: `runtime/mfinal.go` accepts a finaliser on a pointer that is not the
+start of the block for exactly that case, and the finaliser then runs only once
+every allocation in the block is unreachable. Which allocations share a block is
+decided by everything else the program has allocated, which the test does not
+choose and which the host changes. `new(int)` is such an allocation, and with it
+the two cases that assert the object is freed reported no finaliser on some
+hosts while the bitmap they assert was already correct. The object is a
+`[4]int`, and a compile-time check in the program fails the build if it ever
+fits in a tiny block again.
+
+**The program runs at more than one GOMAXPROCS.** A retention can be invisible
+at one number of Ps and plain at another, and the host's core count picks the
+number when nothing else does. Each case is linked once and run at one P and at
+four, so the result does not depend on the machine CI runs on.
+
 The fifth is `ssagen`'s stack-growth test, and there are two. The first
 recurses 200,000 frames under `gccheckmark` carrying an integer, and the
 assertion that the integer arrives unchanged catches a bit set on a word that
