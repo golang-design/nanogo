@@ -25,6 +25,11 @@ type pkgReader struct {
 
 	pkgs []*types2.Package
 	typs []types2.Type
+
+	// nested counts the function literal bodies the body reader decoded, so
+	// that a caller can report the elements it read and not only the
+	// declarations it read them for.
+	nested int
 }
 
 // ReadPackage decodes one package from an already opened container.
@@ -36,7 +41,17 @@ type pkgReader struct {
 // Most callers want [Reader.Read], which opens the archive and turns a stream
 // it cannot decode into an error.
 func ReadPackage(ctxt *types2.Context, imports map[string]*types2.Package, input pkgbits.PkgDecoder) *types2.Package {
-	pr := pkgReader{
+	pkg, _ := readPackage(ctxt, imports, input)
+	return pkg
+}
+
+// readPackage is [ReadPackage] with the decoder it built kept.
+//
+// The body reader needs the same one: it resolves a type through the same
+// index tables, and two readers over one archive would produce two types2
+// types for one index.
+func readPackage(ctxt *types2.Context, imports map[string]*types2.Package, input pkgbits.PkgDecoder) (*types2.Package, *pkgReader) {
+	pr := &pkgReader{
 		PkgDecoder: input,
 
 		ctxt:    ctxt,
@@ -67,7 +82,7 @@ func ReadPackage(ctxt *types2.Context, imports map[string]*types2.Package, input
 	r.Sync(pkgbits.SyncEOF)
 
 	pkg.MarkComplete()
-	return pkg
+	return pkg, pr
 }
 
 type reader struct {
@@ -88,6 +103,33 @@ type readerDict struct {
 
 	derived      []derivedInfo
 	derivedTypes []types2.Type
+
+	// The runtime half of the dictionary, which the declaration reader does
+	// not read and a function body does. A body refers to a slot of one of
+	// these lists wherever it needs a descriptor whose identity depends on
+	// the type arguments (specs/015-export-data.md). [bodyDict] fills them.
+	typeParamMethodExprs []methodExprInfo
+	subdicts             []objInfo
+	rtypes               []typeInfo
+	itabs                []itabInfo
+}
+
+// See cmd/compile/internal/noder.readerMethodExprInfo.
+type methodExprInfo struct {
+	typeParamIdx int
+	method       Selector
+}
+
+// See cmd/compile/internal/noder.objInfo.
+type objInfo struct {
+	idx       pkgbits.Index
+	explicits []typeInfo
+}
+
+// See cmd/compile/internal/noder.itabInfo.
+type itabInfo struct {
+	typ   typeInfo
+	iface typeInfo
 }
 
 func (pr *pkgReader) newReader(k pkgbits.SectionKind, idx pkgbits.Index, marker pkgbits.SyncMarker) *reader {
