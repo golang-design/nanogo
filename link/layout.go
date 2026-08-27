@@ -143,9 +143,9 @@ type Layout struct {
 	TextStart, TextEnd uint64
 	TextLength         uint64
 
-	// GoType is the section that holds the type descriptors and the
-	// itabs. It is the one data section this stage lays out.
-	GoType *Section
+	// Sections holds the output sections this stage lays out, in the
+	// order the linker writes them.
+	Sections []*Section
 
 	addr []uint64
 	kind []Kind
@@ -194,8 +194,18 @@ func (l *Loader) Layout(r *Reachability, t *Target) *Layout {
 			a.kind[g] = a.group(g, s)
 		}
 	}
-	a.assignTypes(r)
+	a.assignData(r)
 	return a
+}
+
+// Section returns the output section of a name, or nil.
+func (a *Layout) Section(name string) *Section {
+	for _, s := range a.Sections {
+		if s.Name == name {
+			return s
+		}
+	}
+	return nil
 }
 
 // buildLibraries groups the objects into packages and records the import
@@ -410,6 +420,20 @@ const (
 // section a symbol lands in.
 func (a *Layout) group(g Global, s *Sym) Kind {
 	k := ObjKind(s.Type)
+	if !topLevel(s.Name, k) {
+		// A symbol with no name is a payload another symbol carries, and
+		// the carrier is what the section holds. Only the debugging
+		// kinds and the function descriptors have anonymous symbols the
+		// linker lays out on their own.
+		return Kxxx
+	}
+	if s.Name == symModuleData {
+		// The module descriptor is the structure the runtime walks at
+		// startup to find everything else, and the linker gives it a
+		// section of its own rather than leaving it in the zero filled
+		// data the compiler put it in.
+		return KMODULEDATA
+	}
 	if k == KNOPTRBSS && hasPrefix(s.Name, prefixGCMask) {
 		return KGCMASK
 	}
@@ -430,6 +454,27 @@ func (a *Layout) group(g Global, s *Sym) Kind {
 }
 
 func hasSuffix(s, p string) bool { return len(s) >= len(p) && s[len(s)-len(p):] == p }
+
+// symModuleData is the module descriptor of the program.
+const symModuleData = "runtime.firstmoduledata"
+
+// topLevel reports whether a symbol is laid out on its own.
+//
+// A symbol with no name is a part of another symbol, and the carrier is
+// what takes the space, so counting both would count its bytes twice.
+// The exceptions are the debugging kinds and the function descriptors,
+// where the anonymous symbol is what the section holds.
+func topLevel(name string, k Kind) bool {
+	if name != "" {
+		return true
+	}
+	switch k {
+	case KDWARFFCN, KDWARFABSFCN, KDWARFTYPE, KDWARFCONST, KDWARFCUINFO,
+		KDWARFRANGE, KDWARFLOC, KDWARFLINES, KGOFUNC:
+		return true
+	}
+	return false
+}
 
 // dataAlign is the alignment a data symbol is laid out at.
 //
@@ -453,46 +498,126 @@ func (a *Layout) dataAlign(g Global) int64 {
 	return align
 }
 
-// assignTypes lays out the section that holds the type descriptors and
-// the itabs.
+// The sections this stage lays out, and the ones it does not.
 //
-// It is the one data section a linker that has not built pclntab,
-// moduledata or the garbage collection data can lay out completely,
-// because every symbol in it comes out of an object. The three symbols
-// the linker adds to it are runtime.types, runtime.etypes and the type:*
-// carrier, and all three have size zero and an alignment the section
-// already has, so none of them moves a byte. specs/045-linker.md records
-// which sections are not in this position and why.
+// A section is laid out here when every symbol in it comes out of an
+// object, because then the two linkers have the same members and the
+// size is a number they must agree on. Five are in that position, and
+// what the linker adds to each of them has size zero:
 //
-// The section starts one pointer in, so that no type reference has offset
-// zero, and the section's own start is rounded to the largest alignment
-// any of its symbols asked for, so its length does not depend on what the
-// segment holds in front of it.
-func (a *Layout) assignTypes(r *Reachability) {
-	var syms []Global
+//	.go.module   the module descriptor, in a section of its own
+//	.noptrbss    the zero filled data that holds no pointer
+//	.go.type     the type descriptors and the itabs
+//	.go.func     the function descriptors
+//
+// The rest are not, and the reason is never that the arithmetic is
+// unknown. .rodata holds the garbage collection data for the globals and
+// the typelink and itablink tables, .gopclntab holds a structure of its
+// own, and .noptrdata and .data hold the FIPS brackets, none of which is
+// built. .bss is the one that is blocked on an input rather than on a
+// stage: the linker fills in three string variables that the compiler
+// left zero filled, which moves them from .bss to .data, and one of the
+// three is named by the import configuration rather than by the objects.
+// cmd/link also breaks a tie between two symbols of one size by its own
+// symbol numbering, which counts the symbols the unbuilt stages create,
+// so two symbols of one size can be laid out in an order this package
+// cannot predict. Within a size class that changes no total, because the
+// sizes are equal, but it does change an address.
+// specs/045-linker.md records the boundary.
+func (a *Layout) assignData(r *Reachability) {
+	buckets := make([][]Global, numKind)
 	for g := Global(1); g < Global(len(a.kind)); g++ {
-		if a.kind[g] == KTYPE && r.Reachable(g) {
-			syms = append(syms, g)
+		k := a.kind[g]
+		if k == Kxxx || k.IsText() || !r.Reachable(g) {
+			continue
 		}
+		buckets[k] = append(buckets[k], g)
 	}
-	a.sortTypes(syms)
+	for k := range buckets {
+		a.sortData(Kind(k), buckets[k])
+	}
 
-	sect := &Section{Name: ".go.type", Syms: syms, Align: a.target.Minalign}
-	for _, g := range syms {
+	// The module descriptor is one symbol in a section of its own, which
+	// is why it is not part of the zero filled data it was compiled as.
+	for _, g := range buckets[KMODULEDATA] {
+		a.addSection(&Section{
+			Name:   ".go.module",
+			Align:  a.dataAlign(g),
+			Length: uint64(a.symSize(g)),
+			Syms:   []Global{g},
+		})
+	}
+	a.addSection(a.dataSection(".noptrbss", 0, buckets, KNOPTRBSS, KGCMASK, KCOVERAGE_COUNTER))
+	// The type descriptors start one pointer into their section, so that
+	// no type reference has offset zero.
+	a.addSection(a.dataSection(".go.type", a.target.PtrSize, buckets, KTYPE))
+	a.addSection(a.dataSection(".go.func", 0, buckets, KGOFUNC))
+}
+
+func (a *Layout) addSection(s *Section) {
+	if s != nil {
+		a.Sections = append(a.Sections, s)
+	}
+}
+
+// dataSection lays out one section.
+//
+// The section starts at a multiple of the alignment its first kind asks
+// for, so the offsets it computes are the addresses modulo that multiple
+// and its length does not depend on what the segment holds in front of
+// it. skip is the space the linker leaves before the first symbol.
+func (a *Layout) dataSection(name string, skip int64, buckets [][]Global, kinds ...Kind) *Section {
+	sect := &Section{Name: name, Align: a.target.Minalign}
+	for _, g := range buckets[kinds[0]] {
 		if al := a.dataAlign(g); al > sect.Align {
 			sect.Align = al
 		}
 	}
-	// The start of the section is a multiple of its alignment, so the
-	// offsets below are the addresses modulo that multiple.
-	size := a.target.PtrSize
-	for _, g := range syms {
-		size = rndInt(size, a.dataAlign(g))
-		a.addr[g] = uint64(size)
-		size += int64(a.symSize(g))
+	size := skip
+	for _, k := range kinds {
+		for _, g := range buckets[k] {
+			size = rndInt(size, a.dataAlign(g))
+			a.addr[g] = uint64(size)
+			size += int64(a.symSize(g))
+			sect.Syms = append(sect.Syms, g)
+		}
 	}
 	sect.Length = uint64(size)
-	a.GoType = sect
+	return sect
+}
+
+// sortData puts one kind of data symbol in the order the linker lays it
+// out.
+//
+// The order is by size, so that the symbols an alignment forces a gap in
+// front of are gathered rather than spread through the section, and ties
+// are broken by the symbol's own number. That number is the linker's and
+// not the object's, so two symbols of one size may be laid out in an
+// order this package cannot predict, which changes an address and not a
+// total.
+//
+// runtime.zerobase is placed after the last symbol of size zero, so that
+// every zero sized symbol has its address. The type descriptors have an
+// order of their own, in [Layout.sortTypes].
+func (a *Layout) sortData(k Kind, syms []Global) {
+	if k == KTYPE {
+		a.sortTypes(syms)
+		return
+	}
+	zerobase := a.l.Lookup("runtime.zerobase", VerABI0)
+	sort.SliceStable(syms, func(i, j int) bool {
+		si, sj := syms[i], syms[j]
+		isz, jsz := a.symSize(si), a.symSize(sj)
+		switch {
+		case si == zerobase:
+			return jsz != 0
+		case sj == zerobase:
+			return isz == 0
+		case isz != jsz:
+			return isz < jsz
+		}
+		return si < sj
+	})
 }
 
 // sortTypes puts the type descriptors in the order the linker writes
@@ -501,8 +626,8 @@ func (a *Layout) assignTypes(r *Reachability) {
 // The descriptors a typelink names come first and in order of the string
 // the type calls itself, which is what lets the reflect package rely on
 // one descriptor per type string. The rest of the descriptors follow by
-// size, and the itabs come last, so that moduledata can name the three
-// ranges by their bounds alone.
+// size, and the itabs come last, so that the module descriptor can name
+// the three ranges by their bounds alone.
 func (a *Layout) sortTypes(syms []Global) {
 	l := a.l
 	type key struct {

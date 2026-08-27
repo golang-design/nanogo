@@ -93,22 +93,28 @@ func TestTextLayoutAgreesWithTheLinker(t *testing.T) {
 	}
 }
 
-// TestTypeSectionSizeAgreesWithTheLinker is specs/045-linker.md's oracle
-// for address assignment, over the one data section a linker at this
-// stage can lay out completely.
+// TestDataSectionSizesAgreeWithTheLinker is specs/045-linker.md's oracle
+// for address assignment, over the data sections a linker at this stage
+// can lay out completely.
 //
-// Every symbol in the type descriptor section comes out of an object, so
-// the section is closed and its size is a number the two linkers must
-// agree on. The other data sections are not closed: they hold pclntab,
-// moduledata, the garbage collection data for globals and the typelink
-// and itablink tables, none of which is built, and cmd/link breaks a tie
-// between two symbols of one size by its own symbol numbering, which
-// counts symbols those stages create. specs/045-linker.md records the
-// boundary.
-func TestTypeSectionSizeAgreesWithTheLinker(t *testing.T) {
+// Every symbol in these four comes out of an object, so the two linkers
+// have the same members and the size is a number they must agree on. The
+// other sections hold pclntab, the garbage collection data for the
+// globals, the typelink and itablink tables and the FIPS brackets, none
+// of which is built, and .bss holds the string variables the linker
+// fills in, one of which the import configuration names.
+func TestDataSectionSizesAgreeWithTheLinker(t *testing.T) {
 	target := TargetFor(runtime.GOOS, runtime.GOARCH)
 	if target == nil || runtime.GOOS != "darwin" {
 		t.Skipf("the section names this reads are Mach-O's, and this is %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	// The Mach-O name of a section is the linker's own with the dots
+	// replaced and the leading one doubled.
+	machoName := map[string]string{
+		".go.module": "__go_module",
+		".noptrbss":  "__noptrbss",
+		".go.type":   "__go_type",
+		".go.func":   "__go_func",
 	}
 	for _, b := range []*build{&hostBuild, &reflectBuild} {
 		t.Run(b.pkg, func(t *testing.T) {
@@ -120,15 +126,24 @@ func TestTypeSectionSizeAgreesWithTheLinker(t *testing.T) {
 			r := l.Deadcode(runtime.GOOS, runtime.GOARCH)
 			a := l.Layout(r, target)
 
-			size, ok := want["__go_type"]
-			if !ok {
-				t.Fatal("the executable has no __go_type section")
+			if len(a.Sections) != len(machoName) {
+				t.Fatalf("the layout built %d sections and this compares %d", len(a.Sections), len(machoName))
 			}
-			t.Logf("%d type descriptors and itabs, 0x%x bytes against the linker's 0x%x",
-				len(a.GoType.Syms), a.GoType.Length, size)
-			if a.GoType.Length != size {
-				t.Errorf("the type descriptor section is 0x%x bytes for cmd/link and 0x%x for nanogo",
-					size, a.GoType.Length)
+			for _, sect := range a.Sections {
+				name, ok := machoName[sect.Name]
+				if !ok {
+					t.Errorf("the layout built a section %s this test does not know", sect.Name)
+					continue
+				}
+				size, ok := want[name]
+				if !ok {
+					t.Errorf("the executable has no %s section", name)
+					continue
+				}
+				t.Logf("%-11s %5d symbols, 0x%x bytes", sect.Name, len(sect.Syms), sect.Length)
+				if sect.Length != size {
+					t.Errorf("%s is 0x%x bytes for cmd/link and 0x%x for nanogo", sect.Name, size, sect.Length)
+				}
 			}
 		})
 	}
