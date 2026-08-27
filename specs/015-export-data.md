@@ -327,8 +327,72 @@ makes the byte comparison meaningful and is exactly its limit: the round trip
 says nothing about how a tree built from `syntax` would find an index, because
 such a tree has none.
 
-**The builder is owed.** Until it exists nothing nanogo writes carries a body,
-because nothing builds one to encode.
+**A tree built from `syntax` has no index at all**, which is what the builder
+below is measured through.
+
+### The builder, and the oracle that measures it
+
+`export/bodybuild.go` turns `syntax` plus the checker's record into the tree of
+`export/body.go`. It is `noder/writer.go`'s function body half, building a tree
+rather than writing a bitstream, and `export/bodywrite.go` encodes what it
+built.
+
+The oracle is available before any generic declaration can be stenciled end to
+end. `gc`'s archive for a standard library package holds the tree `gc` built out
+of that function's source, and nanogo parses and type checks the same source.
+So one function has two trees that must be the same tree.
+
+The comparison is **not** the obvious one. Comparing nanogo's encoding with
+`gc`'s bytes cannot work: a body names a type, an object, a package, a string,
+a position base and another body by index, `gc`'s tree carries the index `gc`'s
+archive gave it, and a tree built from `syntax` has none. So both trees are
+encoded through one resolver that numbers a reference by **what it names**
+rather than by where it landed, and the two encodings are compared. With $B$
+the builder, $D$ the decoder, $E_s$ the encoder under that resolver, and $f$ a
+function whose source is $s(f)$ and whose element in `gc`'s archive is $b(f)$:
+
+$$
+E_s(B(s(f))) = E_s(D(b(f)))
+$$
+
+byte for byte, and reference table entry for entry. Since $E(D(b)) = b$ already
+holds byte for byte under the archive's own indices, equality here means the
+built tree is `gc`'s tree, up to a numbering the round trip proves from the
+other side. The one thing this cannot see is the numbering itself.
+
+| Claim | Number |
+| --- | --- |
+| body elements built from source and compared with `gc`'s own | 5,968 |
+| packages | 371 |
+| elements that differ from `gc`'s in one byte or one table entry | 0 |
+| declarations refused by name | 300 |
+
+The oracle bites. Dropping the reshape node fails 323 of 327 elements in the
+unattended set, dropping the one `Bool` that says a call spreads its last
+argument fails 6, and dropping the Go 1.22 loop variable rule fails 16.
+
+**What is refused, and why each is refused rather than built.** 292 generic
+declarations: a generic body names types derived from the enclosing type
+parameters, and every such name is a slot of an object dictionary the writer
+does not fill. 8 loops over a function: `gc` rewrites the loop into a closure
+and calls into the runtime before it writes anything, so `gc`'s tree is not a
+tree of that source at all.
+
+**What the corpus cannot see.** It holds only the bodies `gc` chose to export,
+so an encoding no exported body uses is one this oracle says nothing about. The
+test names them rather than counting them as proved. Five are never used over
+the whole standard library: `Sizeof`, `Alignof`, `Offsetof`, a function
+instantiation, and the runtime helper. The first four reach a body only where
+an operand is derived from a type parameter and the fifth only through the
+closure `gc` builds for a loop over a function, so all five are inside what is
+already refused.
+
+**What the builder does not change.** `export/writer.go` still refuses a
+generic declaration and still writes four zeros for the object dictionary
+(`objDict`). The builder fills no dictionary, and lifting that refusal needs
+the four counts to be real: a slot written as an ordinary type reference is a
+type `gc` reads without complaint, which is a silent wrong answer rather than
+a refusal.
 
 ### Two things the format does that its writer does not say
 
@@ -677,18 +741,38 @@ What the body encoder has:
   it is a `BodyError` naming the declaration, rather than an element with
   every byte after that field moved.
 
+What the body builder has:
+
+- The standard library, byte for byte against `gc`'s own tree for the same
+  function: 5,968 elements of 371 packages built from source, encoded, and
+  compared with `gc`'s element encoded the same way. 0 differ
+  (`export/bodybuild_test.go`). An unattended run builds 10 packages and the
+  sweep runs under `NANOGO_REQUIRE_CORPUS=1`.
+- The oracle is measured rather than assumed: three perturbations of the
+  builder are checked to fail, and the encodings no matched body used are
+  named rather than counted as proved.
+- Refusal by name: a generic declaration and a loop over a function are
+  `BodyError`s naming the declaration (`TestBuildBodyRefusals`).
+
 What the writer still needs:
 
-- The body builder: from `syntax` plus the checker's record into the tree of
-  `export/body.go`, with the dictionary it fills as it goes. The encoder above
-  takes it from there.
-- A way for a body to reach a file at all: `export.Write` takes a
-  `*types2.Package`, and building a body needs the files and the
-  `types2.Info` the driver already holds (`driver/compile.go`).
+- A body reaching a file at all. `export.Write` takes a `*types2.Package`, and
+  a body needs the files and the `types2.Info` the driver already holds
+  (`driver/compile.go`). Three things follow from wiring it:
+  `checkFiles` does not fill `Info.FileVersions`, which is what decides the
+  Go 1.22 loop variable rule per file and is silently wrong for a file with an
+  older `//go:build`; the writer has never allocated a `SectionPosBase`
+  element, because every position nanogo wrote until now was the absent one;
+  and the file name that element holds is a driver decision, since `gc` writes
+  the `objabi.AbsFile` form and a parse holds the path it was given.
+- The writer's own resolver: encoding a built body asks for the element index
+  of every type, object, package, string, position base and nested body it
+  names. What it cannot allocate it has to refuse, because an index it guesses
+  is a declaration `gc` reads as a different one.
 - Generic bodies: an importer instantiates a generic declared in a package it
   only has export data for, and the instantiation compiles and runs. This is
-  the whole of what is refused, and it needs the builder above and
-  [013](013-generics.md)'s stenciler.
+  the whole of what is refused, and it needs the object dictionary to be real
+  and [013](013-generics.md)'s stenciler.
 
 ## What was wrong
 

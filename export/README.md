@@ -41,6 +41,7 @@ format and the code that wrote it come from the same tree by construction.
 | `read.go` | written here; see below |
 | `body.go`, `bodyread.go`, `bodies.go` | `src/cmd/compile/internal/noder/reader.go`'s function body half, and `linker.go` for how a body is reached; see below |
 | `bodywrite.go` | the mirror of `bodyread.go`; see below |
+| `bodybuild.go` | `src/cmd/compile/internal/noder/writer.go`'s function body half, building a tree rather than a bitstream; see below |
 | `writer.go` | `src/cmd/compile/internal/noder/writer.go` and `linker.go`; see below |
 
 ## Which upstream reader, and why
@@ -142,6 +143,29 @@ match, the nested function literal bodies included.
 | The encoder refuses a tree whose optional field disagrees with the type beside it | A map descriptor, a range clause's conversions and a call's runtime type each follow only where the format has room for them, and the reader decides by the same test on the same type. A tree that carries one where the format has none, or leaves one out where it has room, moves every byte after it. |
 | A function literal's body is queued rather than written | The literal names an element and does not hold one, so whoever holds the elements writes each queued body after this one. |
 
+### The body builder, `bodybuild.go`
+
+`bodybuild.go` turns `syntax` plus the checker's record into the tree of
+`body.go`, which `bodywrite.go` then encodes. It is `noder/writer.go`'s
+function body half with the bitstream replaced by a tree, so the two are read
+against each other line by line.
+
+The oracle is `gc`'s own tree for the same function. `gc`'s archive holds the
+tree `gc` built out of a standard library function's source, and nanogo parses
+and type checks the same source, so one function has two trees that must be
+the same tree. Neither can supply the element indices of a package nanogo is
+not writing, so both are encoded through a resolver that numbers a reference
+by what it names, and the encodings are compared. 5,968 elements of 371
+packages match and none differ.
+
+| Change | Why |
+| --- | --- |
+| A generic declaration is refused | Its body names types derived from the enclosing type parameters, and every such name is a slot of an object dictionary `writer.go` fills with four zeros. A slot written as an ordinary type reference is a type `gc` reads without complaint. |
+| A loop over a function is refused | `gc` rewrites the loop into a closure and calls into the runtime before it writes anything, so `gc`'s tree is not a tree of that source. |
+| An increment is recognised by identity and not by absence | nanogo's parser gives `++` and `--` the shared `syntax.ImplicitOne` as their right side where `gc`'s parser gives them none. |
+| A negated constant condition folds the way `gc` folds it, including where `gc` looks wrong | `gc` returns the operand's own result for a negation rather than the negated one, and the value decides which arm of an `if` the element holds. No exported body has the shape the two disagree on, so the corpus cannot find this. |
+| Every type a body names is checked not to be derived | The check is what says a generic declaration was refused, rather than the builder assuming it. |
+
 ### The writer, `writer.go`
 
 The writer is not a port of one file. `noder/writer.go` encodes a package from
@@ -158,7 +182,7 @@ comes from `writer.go` for the public part of a declaration and from
 | No stub for a declaration of another package | A file's export data has no stub left except the universe's and unsafe's, and every reader asserts it. nanogo has no linker pass, so a foreign declaration the exported surface reaches is written out in full at the point it is reached. |
 | The public root lists every object in the file | This is `linker.go`'s list and not `writer.go`'s. `gc` builds its stub resolution table from it, so a root naming only nanogo's own declarations leaves `gc` unable to resolve, say, `io.Reader` in a `bufio` signature. |
 | `pos` writes an absent position | The mirror of the reader's gap. See below. |
-| No function body, and the private root lists none | `bodywrite.go` encodes a body and nothing builds one: a body is encoded from `syntax` plus the checker's record, and that half is not written. See [specs/015](../specs/015-export-data.md). |
+| No function body, and the private root lists none | `bodybuild.go` builds a body and `bodywrite.go` encodes one, and neither is reached from here: `export.Write` takes a `*types2.Package`, and a body needs the files and the `types2.Info` the driver holds. The resolver a built body is encoded through also has to be written, and has to refuse the element it cannot allocate. See [specs/015](../specs/015-export-data.md). |
 | A generic declaration is refused by name | See below. |
 | `funcExt` writes no `//go:` directive | The driver records the fourteen verbs its handler recognises, and their positions (`driver/pragma.go`, [specs/016](../specs/016-directives-and-pragmas.md)), and nothing carries them this far: the flag bits there are nanogo's own numbering and this field is read with `gc`'s. |
 | `funcExt` writes no linkname | `//go:linkname` is not one of those fourteen verbs, so the driver records nothing for the writer to drop ([016](../specs/016-directives-and-pragmas.md)). |

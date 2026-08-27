@@ -52,15 +52,22 @@ decodes, 820 of them through the path a generic takes, into a tree
 is not `syntax` and not `ir` but the format's own statement and expression
 codes, with the types resolved and the local variables numbered.
 
-Two things are still owed and neither is this spec's. `export/writer.go` names
-a declaration with type parameters and refuses to encode it, because writing
-one needs a body *builder* and the dictionary that building fills, and
-[015](015-export-data.md) has neither. The element that carries a body is
-written now: `export/bodywrite.go` encodes the tree back, and every body
-element of all 375 packages comes out byte for byte as `gc` wrote it. So what
-is missing is the step in front of it, from `syntax` plus the checker's record
-into the tree. Until then a package nanogo compiles cannot export a generic,
-which is what is left of [003](003-sequencing.md)'s M2 gate.
+**The builder is built too, and the refusal that is left is the dictionary.**
+`export/bodybuild.go` turns `syntax` plus the checker's record into the same
+tree, and 5,968 body elements of 371 standard library packages come out as
+`gc`'s own tree for the same function, none differing
+([015](015-export-data.md) has the oracle). So both directions exist: a body
+can be read out of an archive and a body can be built out of source.
+
+One thing is still owed and it is not this spec's. `export/writer.go` names a
+declaration with type parameters and refuses to encode it, because a generic
+body names types derived from the enclosing type parameters and every such
+name is a slot of an object dictionary the writer fills with four zeros. The
+builder refuses a generic declaration for the same reason rather than
+inventing a slot: a slot written as an ordinary type reference is a type `gc`
+reads without complaint, which is a wrong answer and not a refusal. Until the
+four counts are real, a package nanogo compiles cannot export a generic, which
+is what is left of [003](003-sequencing.md)'s M2 gate.
 
 The encoder is also what the stenciler will write through, when an
 instantiated body has to reach a file rather than only `ir`.
