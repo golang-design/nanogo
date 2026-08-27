@@ -101,21 +101,7 @@ func gcCompilesAnImporter(t *testing.T, goCmd, header, dir, path string, pkg *ty
 	t.Helper()
 	work := t.TempDir()
 
-	def, err := Definition(header, false, payload)
-	if err != nil {
-		return "", err
-	}
-	archive := filepath.Join(work, "p.a")
-	var b []byte
-	b = append(b, archiveMagic...)
-	b = append(b, fmt.Sprintf("%-16s%-12d%-6d%-6d%-8o%-10d`\n", definitionMember, 0, 0, 0, 0o644, len(def))...)
-	b = append(b, def...)
-	if len(def)%2 != 0 {
-		b = append(b, 0)
-	}
-	if err := os.WriteFile(archive, b, 0o600); err != nil {
-		return "", err
-	}
+	archive := pkgdefArchive(t, header, work, "p.a", payload)
 
 	var src strings.Builder
 	fmt.Fprintf(&src, "package importer\n\nimport p %q\n\n", path)
