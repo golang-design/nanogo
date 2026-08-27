@@ -141,12 +141,31 @@ allocator loses two.
 collapses a branch condition's live range to nothing and lets two live
 conditions share one register.
 
-**A copy from a slot to a slot has no encoding.** The reserved pair makes every
-reload possible, and the emitter's move table still has no arm for a copy whose
-source and destination are both slots. Such a copy fails the function with
-`no move from sN to sM`, and [042](042-arm64-backend.md) owns the table it is
-missing from. Ordinary code reaches it: `internal/stringslite.Index` is one
-case.
+**A copy from a slot to a slot is a load and a store.** `resolvePhis` emits one
+whenever a phi and one of its operands both live in the frame, which is two
+values live across a call in a loop. `arm64` has no memory-to-memory move, so
+[042](042-arm64-backend.md)'s move table stages it through `Scratch[class][1]`,
+the same register the rematerialising arm uses.
+
+The index is the whole of the correctness argument. `resolvePhis` breaks a
+cycle of edge copies with `Scratch[class][0]`, so a cycle of two slots becomes
+
+```text
+R16 <- s1
+s1  <- s0
+s0  <- R16
+```
+
+and R16 holds a value of the function across the slot-to-slot copy in the
+middle. Staging that copy through R16 as well would write one slot into both,
+which is a wrong answer with the right instruction count and no failure. The
+two registers are therefore taken from opposite ends of the reservation, and
+`TestSlotToSlotMoveDoesNotDestroyThePhiCycleTemporary` asserts the pair rather
+than describing it.
+
+Until the arm existed the copy failed the function with `no move from sN to
+sM`, which capped a loop at about one value live across a call and refused
+`test/divmod.go` and `test/stackobj2.go` of Go's own corpus.
 
 ## Constraints from the ABI
 

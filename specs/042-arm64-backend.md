@@ -240,6 +240,28 @@ answer for a spill, a reload, an outgoing argument and the stack-growth tail.
 `mem` also checks that the transferred register is in the file the operation
 transfers, because obj/arm64 panics on the mismatch rather than reporting it.
 
+### The move table
+
+`move` covers every pair of locations. A register to a register is `copyReg`, a
+slot to a register is the load, a register to a slot is the store, and nothing
+to a register is the recomputation [026](026-register-allocation.md) allows
+instead of a home. Two of the pairs have no instruction on this machine and are
+each a staged pair:
+
+| From | To | What is emitted |
+| --- | --- | --- |
+| nothing | a slot | the recomputation into `scratchFor(type)`, then the store |
+| a slot | a slot | the load into `scratchFor(type)`, then the store |
+
+`scratchFor` reads the type and not the width, so a `float64` stages through
+F31 and stores with `STR (D)`, and a `uint8` moves eight bits and not
+sixty-four. The register is the second of the file's reserved pair, because
+[026](026-register-allocation.md)'s phi cycle breaking holds a value in the
+first across the copies a broken cycle became.
+
+The destination with no kind is what the table's last arm now catches. It is a
+pass that lost the destination and not one that named an unusual pair.
+
 The gating follows. `ssa/macharm64_test.go`'s `TestARM64Encoders` puts every
 operation through `ARM64Encode` and `obj/arm64/float_test.go` compares 99,368
 floating-point encodings against `go tool asm`, as before.
