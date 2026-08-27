@@ -60,6 +60,7 @@ pass matched closure4.go
 pass matched closure7.go
 pass rejected cmp6.go
 pass rejected cmplx.go
+pass matched complit.go
 pass rejected complit1.go
 pass matched compos.go
 pass rejected const1.go
@@ -87,7 +88,9 @@ pass matched env.go
 pass compiled eof.go
 pass compiled eof1.go
 pass matched escape3.go
+pass matched finprofiled.go
 pass matched float_lit.go
+pass matched float_lit2.go
 pass rejected float_lit3.go
 pass matched floatcmp.go
 pass matched for.go
@@ -103,6 +106,7 @@ pass rejected funcdup.go
 pass rejected funcdup2.go
 pass matched gc.go
 pass matched gc1.go
+pass matched gcstring.go
 pass rejected goto.go
 pass matched helloworld.go
 pass matched if.go
@@ -121,6 +125,8 @@ pass matched intcvt.go
 pass matched iota.go
 pass rejected label.go
 pass rejected label1.go
+pass matched linkmain_run.go
+pass matched linkobj.go
 pass matched literal.go
 pass rejected mainsig.go
 pass rejected makechan.go
@@ -152,6 +158,8 @@ pass rejected slice3err.go
 pass matched slicecap.go
 pass matched stackobj.go
 pass matched stackobj3.go
+pass matched strcopy.go
+pass matched string_lit.go
 pass rejected switch2.go
 pass rejected switch3.go
 pass rejected switch4.go
@@ -166,8 +174,10 @@ pass rejected typeswitch2.go
 pass rejected typeswitch2b.go
 pass rejected typeswitch3.go
 pass rejected undef.go
+pass matched unsafe_slice_data.go
 pass matched unsafe_string_data.go
 pass rejected used.go
+pass matched utf.go
 pass rejected varerr.go
 pass matched varinit.go
 pass rejected weak.go

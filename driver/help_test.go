@@ -32,7 +32,6 @@ func TestHelpStatesTheLimits(t *testing.T) {
 		"export data",    // the archive carries it, so it can be imported
 		"assembly",       // the ABI wrapper that is not generated
 		"an interface",   // an assertion or a switch case naming one, which needs an itab
-		"append",         // probes/append-int
 		"A method value", // probes/defer-method-value
 		"generic function",
 		`imports "C"`,

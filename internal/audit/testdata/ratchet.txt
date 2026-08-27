@@ -70,8 +70,8 @@
 
 probes 95
 
-probe refused append-int
-probe refused append-slice
+probe ok append-int
+probe ok append-slice
 probe ok array-local
 probe refused asm-package
 probe ok buildinfo
@@ -134,7 +134,7 @@ probe ok pkg-var-computed
 probe ok pkg-var-slice
 probe ok pkg-var-string
 probe ok pkgvar-read
-probe refused pkgvar-write
+probe ok pkgvar-write
 probe ok print-int
 probe ok println-bool
 probe ok println-float
@@ -149,11 +149,11 @@ probe ok recover-novalue
 probe ok recover-valueread
 probe ok slice-ops
 probe ok stdlib-fmt
-probe refused string-convert
+probe ok string-convert
 probe ok string-literal
 probe ok string-ops
 probe ok string-param
-probe refused string-range
+probe ok string-range
 probe ok struct-arg-5
 probe ok struct-local
 probe ok struct-ptr-field

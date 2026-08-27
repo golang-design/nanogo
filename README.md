@@ -176,7 +176,7 @@ nanogo names the function, the position and the construct:
 
 ```console
 $ nanogo build .
-nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lower: ir: lowering main: append: no row of the lowering table is built for it yet
+nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lower: ir: lowering main: defer: the statement holds a print and not a call, so there is no function value to give the runtime
 ```
 
 - A method value, such as `f := t.M`, and `defer i.Close()` on an interface
@@ -191,8 +191,6 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
   one. Both need the itab of that pair of types, which nothing writes yet.
   An assertion to a concrete type works, and so does a switch over concrete
   cases.
-- `append`.
-- `range` over a string, and a conversion between `string` and `[]byte`.
 - `make` of a slice whose element type has methods, or is an interface.
   `make([]byte, n)` and `make([]T, n)` for a method-free struct `T` compile;
   `make([]C, n)` where `C` has one method is refused, because the descriptor
@@ -367,7 +365,7 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | [`export`](export/) | 96% | reads gc's export data for all 375 packages of the standard library, 13,518 declarations, and for a fixture carrying every encoding the format has, checked declaration by declaration |
 | [`export/pkgbits`](export/pkgbits/) | 93% | the container, ported from `internal/pkgbits` and exercised by every archive the reader above reads |
 | [`ssagen`](ssagen/) | 90% | emits machine code that **links and runs**, and stack maps a real collector honours |
-| [`rtsym`](rtsym/) | 96% | 120 runtime signatures checked against the runtime's own source |
+| [`rtsym`](rtsym/) | 96% | 121 runtime signatures checked against the runtime's own source |
 | [`rtype`](rtype/) | 93% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
 | [`driver`](driver/) | 95% | a real `go build -toolexec` completes |
 

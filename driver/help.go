@@ -152,10 +152,6 @@ What nanogo refuses, by name, with the reason:
 	interface's first word against that type's descriptor and works,
 	and so does a switch over concrete cases.
 
-	append.
-
-	range over a string, and a conversion between string and []byte.
-
 	make of a slice whose element type has methods, or is an interface.
 	make([]byte, n) and make([]T, n) for a method-free struct T compile;
 	make([]C, n) where C has one method is refused, because the descriptor

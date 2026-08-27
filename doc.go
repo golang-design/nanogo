@@ -37,8 +37,7 @@
 // their arguments, print and println, a closure with or without captures, and
 // a declared function used as a value all compile.
 //
-// A method value, defer of a method of an interface, defer of a builtin,
-// append, range over a string, a conversion between string and []byte, an
+// A method value, defer of a method of an interface, defer of a builtin, an
 // assertion or a type switch case naming an interface, generics, a package
 // with assembly in it, and a package with a go:embed directive in it are
 // refused, each with a message that names the function, the position and the
