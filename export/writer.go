@@ -66,14 +66,14 @@ func (e *UnsupportedError) Error() string {
 // allocate every element of is left out rather than guessed at: see
 // [writableBodies].
 func Write(pkg *types2.Package, hasInit bool, src *Source) (data []byte, fingerprint [8]byte, err error) {
-	var funcs []InlineFunc
+	var funcs, bodies []InlineFunc
 	var fset *syntax.FileSet
 	var file func(string) string
 	if src != nil {
-		fset, file = src.Fset, src.File
+		fset, file, bodies = src.Fset, src.File, src.Funcs
 		funcs = writableBodies(pkg, fset, file, src.Funcs)
 	}
-	pw := newPkgWriter(pkg, funcs, fset, file)
+	pw := newPkgWriter(pkg, funcs, bodies, fset, file)
 
 	// A declaration the writer cannot encode is reported by panicking, the
 	// way the reader reports a stream it cannot decode: the refusal is found
@@ -204,6 +204,13 @@ type pkgWriter struct {
 	// which is the shape of the inlining path.
 	inline map[types2.Object]*InlineFunc
 
+	// bodies holds every body the caller built, which is what a generic
+	// declaration needs. Its body is reached through its own extension data
+	// rather than through the private root, and it carries the dictionary
+	// the file's dictionary is written from, so a generic declaration with
+	// no entry here cannot be written at all.
+	bodies map[types2.Object]*InlineFunc
+
 	// lits holds the element claimed for each function literal a body
 	// named, which is filled in after the body that named it.
 	lits map[*FuncLitExpr]*pkgbits.Encoder
@@ -214,12 +221,15 @@ type pkgWriter struct {
 	// fset resolves a declaration's position. It is nil for a package
 	// written without its source, and every position is then absent.
 	fset *syntax.FileSet
-
-	refs *declRefs
 }
 
 // newPkgWriter returns a writer for one package.
-func newPkgWriter(pkg *types2.Package, funcs []InlineFunc, fset *syntax.FileSet, file func(string) string) *pkgWriter {
+//
+// inline are the declarations whose body the private root offers an importer
+// for inlining, and bodies is every body the caller built. The two are
+// separate because a generic declaration's body reaches an importer through
+// the declaration and never through the private root's list.
+func newPkgWriter(pkg *types2.Package, inline, bodies []InlineFunc, fset *syntax.FileSet, file func(string) string) *pkgWriter {
 	pw := &pkgWriter{
 		PkgEncoder:  pkgbits.NewPkgEncoder(Version),
 		curpkg:      pkg,
@@ -227,14 +237,17 @@ func newPkgWriter(pkg *types2.Package, funcs []InlineFunc, fset *syntax.FileSet,
 		typsIdx:     make(map[types2.Type]pkgbits.Index),
 		objsIdx:     make(map[types2.Object]pkgbits.Index),
 		posBasesIdx: make(map[string]pkgbits.Index),
-		inline:      make(map[types2.Object]*InlineFunc, len(funcs)),
+		inline:      make(map[types2.Object]*InlineFunc, len(inline)),
+		bodies:      make(map[types2.Object]*InlineFunc, len(bodies)),
 		lits:        make(map[*FuncLitExpr]*pkgbits.Encoder),
 		fileName:    file,
 		fset:        fset,
 	}
-	pw.refs = &declRefs{pw: pw}
-	for i := range funcs {
-		pw.inline[funcs[i].Obj] = &funcs[i]
+	for i := range inline {
+		pw.inline[inline[i].Obj] = &inline[i]
+	}
+	for i := range bodies {
+		pw.bodies[bodies[i].Obj] = &bodies[i]
 	}
 	return pw
 }
@@ -243,6 +256,11 @@ func newPkgWriter(pkg *types2.Package, funcs []InlineFunc, fset *syntax.FileSet,
 type writer struct {
 	*pkgbits.Encoder
 	p *pkgWriter
+
+	// dict is the dictionary of the declaration this element belongs to. It
+	// is nil for an element that belongs to no declaration, and a type
+	// written through it can then name no type parameter.
+	dict *Dict
 }
 
 func (pw *pkgWriter) newWriter(k pkgbits.SectionKind, marker pkgbits.SyncMarker) *writer {
@@ -350,9 +368,48 @@ func (pw *pkgWriter) pkgIdx(pkg *types2.Package) pkgbits.Index {
 
 // typ writes a use of typ.
 func (w *writer) typ(typ types2.Type) {
+	w.typeRef(w.p.typeRefOf(typ, w.dict))
+}
+
+// typeRef writes a reference to a type already resolved.
+//
+// A derived type is a slot of the enclosing declaration's dictionary and not
+// an element of the package, because there is one such type per
+// instantiation and the file holds no instantiation.
+func (w *writer) typeRef(t TypeUse) {
 	w.Sync(pkgbits.SyncType)
-	w.Bool(false) // not a derived type: the writer refuses type parameters
-	w.Reloc(pkgbits.SectionType, w.p.typIdx(typ))
+	if w.Bool(t.Derived) {
+		w.Len(int(t.Idx))
+		return
+	}
+	w.Reloc(pkgbits.SectionType, t.Idx)
+}
+
+// typeRefOf resolves a type to the dictionary slot or the element it is
+// written as.
+func (pw *pkgWriter) typeRefOf(typ types2.Type, dict *Dict) TypeUse {
+	if dict != nil {
+		slot, derived, err := dict.Derive(typ)
+		if err != nil {
+			pw.refuse(fmt.Sprintf("%v", typ), err.Error())
+		}
+		if derived {
+			return TypeUse{Derived: true, Idx: pkgbits.Index(slot), Type: typ}
+		}
+	}
+	return TypeUse{Idx: pw.typIdx(typ), Type: typ}
+}
+
+// derivedTypeIdx writes the element of a derived type and returns its index.
+//
+// The element is not interned. It names the slots of the dictionary it was
+// written for, so one type reached from two declarations is two elements.
+// That is the format's rule and not a choice this writer makes.
+func (pw *pkgWriter) derivedTypeIdx(typ types2.Type, dict *Dict) pkgbits.Index {
+	w := pw.newWriter(pkgbits.SectionType, pkgbits.SyncTypeIdx)
+	w.dict = dict
+	w.typDef(typ)
+	return w.Flush()
 }
 
 // typIdx returns the index of typ, writing its element if it is new.
@@ -361,10 +418,9 @@ func (w *writer) typ(typ types2.Type) {
 // expressed by the index and not by recursion: the index is claimed before
 // the element is written, so a struct with a pointer to itself terminates.
 func (pw *pkgWriter) typIdx(typ types2.Type) pkgbits.Index {
-	// A local alias only appears inside a function body, which this writer
-	// never encodes, but a package-scope alias to a local one can still be
-	// reached. Upstream strips the same way, to keep two local aliases from
-	// colliding on one symbol.
+	// A local alias appears inside a function body and a package-scope
+	// alias to a local one can be reached from the surface. Upstream strips
+	// the same way, to keep two local aliases from colliding on one symbol.
 	for {
 		alias, ok := typ.(*types2.Alias)
 		if !ok || isGlobal(alias.Obj()) {
@@ -379,7 +435,13 @@ func (pw *pkgWriter) typIdx(typ types2.Type) pkgbits.Index {
 
 	w := pw.newWriter(pkgbits.SectionType, pkgbits.SyncTypeIdx)
 	pw.typsIdx[typ] = w.Idx
+	w.typDef(typ)
+	return w.Flush()
+}
 
+// typDef writes the definition of one type into its own element.
+func (w *writer) typDef(typ types2.Type) {
+	pw := w.p
 	switch typ := typ.(type) {
 	default:
 		pw.refuse(fmt.Sprintf("%v", typ), fmt.Sprintf("the type is a %T, which the format has no tag for", typ))
@@ -409,7 +471,20 @@ func (pw *pkgWriter) typIdx(typ types2.Type) pkgbits.Index {
 		w.obj(typ.Obj(), typeArgs(typ.TypeArgs()))
 
 	case *types2.TypeParam:
-		pw.refuse(objName(typ.Obj()), genericReason)
+		// A type parameter is the dictionary's own numbering, which the
+		// reader resolves against the type arguments the instantiation
+		// supplied. Without a dictionary there is nothing to resolve it
+		// against, and an index written anyway is a type gc reads as
+		// whatever slot 0 happens to hold.
+		if w.dict == nil {
+			pw.refuse(objName(typ.Obj()), genericReason)
+		}
+		idx, ok := w.dict.TypeParamIndex(typ)
+		if !ok {
+			pw.refuse(objName(typ.Obj()), "the type parameter is not one the declaration's dictionary holds")
+		}
+		w.Code(pkgbits.TypeTypeParam)
+		w.Len(idx)
 
 	case *types2.Array:
 		w.Code(pkgbits.TypeArray)
@@ -462,13 +537,16 @@ func (pw *pkgWriter) typIdx(typ types2.Type) pkgbits.Index {
 		w.Code(pkgbits.TypeUnion)
 		w.unionType(typ)
 	}
-
-	return w.Flush()
 }
 
-// genericReason is the one refusal this writer makes on purpose.
-const genericReason = "the declaration is generic, and stenciling it in an importing package needs the " +
-	"function bodies specs/015-export-data.md's body reader would carry; nanogo writes declarations only"
+// genericReason is what a type parameter reached outside a dictionary means.
+//
+// The writer carries a generic function, whose dictionary is the one its body
+// was built against ([Dict]). Everywhere else a type parameter is a name with
+// no dictionary to resolve it, and an index written anyway is a type gc reads
+// as whatever that slot holds.
+const genericReason = "the type parameter is named where no object dictionary resolves it, and " +
+	"specs/013-generics.md has which generic shapes the writer carries"
 
 func typeArgs(l *types2.TypeList) []types2.Type {
 	if l.Len() == 0 {
@@ -581,12 +659,7 @@ func (pw *pkgWriter) objIdx(obj types2.Object) pkgbits.Index {
 		return idx
 	}
 
-	if tparams := objTypeParams(obj); len(tparams) != 0 {
-		pw.refuse(objName(obj), genericReason)
-	}
-	if f, ok := obj.(*types2.Func); ok && f.Signature().RecvTypeParams().Len() != 0 {
-		pw.refuse(objName(obj), genericReason)
-	}
+	dict := pw.dictOf(obj)
 
 	w := pw.newWriter(pkgbits.SectionObj, pkgbits.SyncObject1)
 	wext := pw.newWriter(pkgbits.SectionObjExt, pkgbits.SyncObject1)
@@ -598,6 +671,7 @@ func (pw *pkgWriter) objIdx(obj types2.Object) pkgbits.Index {
 		panic(fmt.Errorf("export: the four elements of %v got different indices", objName(obj)))
 	}
 
+	w.dict, wext.dict = dict, dict
 	code := w.doObj(wext, obj)
 	w.Flush()
 	wext.Flush()
@@ -606,10 +680,54 @@ func (pw *pkgWriter) objIdx(obj types2.Object) pkgbits.Index {
 	wname.Code(code)
 	wname.Flush()
 
-	wdict.objDict()
+	wdict.objDict(dict)
 	wdict.Flush()
 
 	return w.Idx
+}
+
+// dictOf returns the dictionary obj is written with.
+//
+// A declaration with no type parameter gets an empty one, and nothing it
+// names can be derived. A generic declaration gets the dictionary its body
+// was built with, because the slots the body names and the entries the
+// dictionary holds are one allocation ([Dict]) and a second one would be a
+// second numbering.
+//
+// Three generic shapes are refused by name, and each is refused because its
+// dictionary is not the one a body carries:
+//
+//   - A generic type declaration and a method of one share the type's
+//     dictionary, which spans the underlying type and every method the type
+//     declares. Nothing here assembles it.
+//   - A generic method's dictionary holds its receiver's type parameters
+//     ahead of its own, and the body builder does not build one.
+//   - A generic declaration of another package needs the body that package's
+//     archive holds, and the dictionary that archive numbered it against.
+func (pw *pkgWriter) dictOf(obj types2.Object) *Dict {
+	tparams := objTypeParams(obj)
+	fn, isFunc := obj.(*types2.Func)
+	rtparams := isFunc && fn.Signature().RecvTypeParams().Len() != 0
+	if len(tparams) == 0 && !rtparams {
+		return &Dict{Pkg: pw.curpkg}
+	}
+	if !isFunc {
+		pw.refuse(objName(obj), "the declaration is a generic type, and its dictionary spans the type and every method it declares")
+	}
+	if rtparams {
+		pw.refuse(objName(obj), "the declaration is a method with type parameters, and its dictionary holds the receiver's type parameters ahead of its own")
+	}
+	if obj.Pkg() != pw.curpkg {
+		pw.refuse(objName(obj), "the declaration is generic and belongs to another package, whose body and dictionary this writer does not read back")
+	}
+	fb := pw.bodies[obj]
+	if fb == nil || fb.Body == nil || fb.Body.Dict == nil {
+		pw.refuse(objName(obj), "the declaration is generic and no body was built for it, and a generic declaration cannot reach a file without one")
+	}
+	if !fb.Body.HasBlock {
+		pw.refuse(objName(obj), "the declaration is generic and has no body, and a generic declaration cannot reach a file without one")
+	}
+	return fb.Body.Dict
 }
 
 // doObj writes obj's public definition to w and its extension data to wext,
@@ -637,7 +755,7 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		sig := obj.Signature()
 		w.pos(obj.Pos())
 		w.Bool(false) // not a method with type parameters of its own
-		w.typeParamNames()
+		w.typeParamNames(objTypeParams(obj))
 		w.signature(sig)
 		w.pos(obj.Pos()) // the declaration's position, which the linker copies
 		wext.funcExt(obj, sig, false)
@@ -650,14 +768,14 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 			if alias, ok := rhs.(*types2.Alias); ok {
 				rhs = alias.Rhs()
 			}
-			w.typeParamNames()
+			w.typeParamNames(objTypeParams(obj))
 			w.typ(rhs)
 			return pkgbits.ObjAlias
 		}
 
 		named := obj.Type().(*types2.Named)
 		w.pos(obj.Pos())
-		w.typeParamNames()
+		w.typeParamNames(objTypeParams(obj))
 		wext.typeExt()
 		w.typ(named.Underlying())
 
@@ -682,37 +800,142 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 
 // objDict writes the dictionary an object needs to be read back.
 //
-// Every count is zero, because the writer refuses a generic declaration: no
-// implicit type parameter, no receiver or explicit type parameter, no derived
-// type, and none of the four runtime dictionary lists.
-func (w *writer) objDict() {
-	w.Len(0) // implicit type parameters
+// The dictionary is the one the body was built against ([Dict]), so the slots
+// the body names and the entries written here are one allocation and cannot
+// disagree. A declaration with no type parameter carries an empty dictionary,
+// which is eight zeros.
+//
+// The order is gc's objDict: the three type parameter counts, then the
+// constraints, then the derived types, then one flag per type parameter, then
+// the four runtime lists. The constraints come before the count of derived
+// types because a constraint can name a derived type of its own, and it takes
+// its slot there.
+func (w *writer) objDict(dict *Dict) {
+	w.dict = dict
+
+	w.Len(len(dict.Implicits))
 	if w.Version().Has(pkgbits.GenericMethods) {
-		w.Len(0) // receiver type parameters
+		w.Len(len(dict.Receivers))
+	} else if len(dict.Receivers) != 0 {
+		w.p.refuse("a generic method", "the stream's version has no encoding for a method with its own type parameters")
 	}
-	w.Len(0) // explicit type parameters
-	w.Len(0) // derived types
-	w.Len(0) // type parameter method expressions
-	w.Len(0) // subdictionaries
-	w.Len(0) // runtime types
-	w.Len(0) // itabs
+	w.Len(len(dict.TypeParams))
+
+	for _, tp := range dict.Receivers {
+		w.typ(tp.Constraint())
+	}
+	for _, tp := range dict.TypeParams {
+		w.typ(tp.Constraint())
+	}
+
+	// The derived types, each as a reference to an element of its own. The
+	// count is taken after the constraints and before the loop, because the
+	// element of a derived type names only slots already allocated: its
+	// components were walked before it was.
+	n := len(dict.Derived)
+	w.Len(n)
+	for i := range n {
+		w.Reloc(pkgbits.SectionType, w.p.derivedTypeIdx(dict.Derived[i], dict))
+	}
+	if len(dict.Derived) != n {
+		w.p.refuse("an object dictionary", fmt.Sprintf("writing its %d derived types named %d more", n, len(dict.Derived)-n))
+	}
+
+	// One flag per type parameter, saying whether its constraint is a
+	// method set. gc reads it to decide how far it may share one compiled
+	// body between type arguments.
+	for _, tps := range [][]*types2.TypeParam{dict.Implicits, dict.Receivers, dict.TypeParams} {
+		for _, tp := range tps {
+			iface, ok := tp.Underlying().(*types2.Interface)
+			if !ok {
+				w.p.refuse(objName(tp.Obj()), "the constraint of the type parameter is not an interface")
+			}
+			w.Bool(iface.IsMethodSet())
+		}
+	}
+
+	w.Len(len(dict.MethodExprs))
+	for _, m := range dict.MethodExprs {
+		w.Len(m.TypeParam)
+		w.selectorRef(m.Sel)
+	}
+
+	w.Len(len(dict.Subdicts))
+	for _, o := range dict.Subdicts {
+		w.objRef(o)
+	}
+
+	w.Len(len(dict.RTypes))
+	for _, t := range dict.RTypes {
+		w.typeRef(w.p.resolve(t, dict))
+	}
+
+	w.Len(len(dict.Itabs))
+	for _, it := range dict.Itabs {
+		w.typeRef(w.p.resolve(it.Type, dict))
+		w.typeRef(w.p.resolve(it.Iface, dict))
+	}
 }
 
-// typeParamNames writes an empty type parameter list.
-func (w *writer) typeParamNames() {
+// resolve gives a reference the body built the index it is written with.
+//
+// A derived reference already carries its slot. An ordinary one carries only
+// the type, because the builder had no package to allocate an element in.
+func (pw *pkgWriter) resolve(t TypeUse, dict *Dict) TypeUse {
+	if t.Derived {
+		return t
+	}
+	return pw.typeRefOf(t.Type, dict)
+}
+
+// objRef writes a use of one declaration at one instantiation, as the
+// dictionary holds it.
+func (w *writer) objRef(o ObjUse) {
+	if o.Obj == nil {
+		w.p.refuse(o.Name, "the dictionary names a declaration the checker recorded no object for")
+	}
+	w.Sync(pkgbits.SyncObject)
+	w.Reloc(pkgbits.SectionObj, w.p.objIdx(o.Obj))
+	w.Len(len(o.Targs))
+	for _, t := range o.Targs {
+		w.typeRef(w.p.resolve(t, w.dict))
+	}
+}
+
+// selectorRef writes a field or method name the dictionary holds.
+func (w *writer) selectorRef(sel Selector) {
+	w.Sync(pkgbits.SyncSelector)
+	w.pkg(sel.Pkg)
+	w.String(sel.Name)
+}
+
+// typeParamNames writes the name and the position of each type parameter.
+func (w *writer) typeParamNames(tparams []*types2.TypeParam) {
 	w.Sync(pkgbits.SyncTypeParamNames)
+	for _, tp := range tparams {
+		obj := tp.Obj()
+		w.pos(obj.Pos())
+		w.localIdent(obj)
+	}
 }
 
 func (w *writer) method(wext *writer, meth *types2.Func) {
 	sig := meth.Signature()
-	if sig.TypeParams().Len() != 0 || sig.RecvTypeParams().Len() != 0 {
-		w.p.refuse(objName(meth), genericReason)
+	if sig.TypeParams().Len() != 0 {
+		// The format writes such a method as a declaration of its own,
+		// whose dictionary holds the receiver's type parameters ahead of its
+		// own. Written here it would be a member of its receiver's element
+		// with no dictionary at all.
+		w.p.refuse(objName(meth), "the method is generic, and the format writes a generic method as a declaration of its own whose dictionary holds the receiver's type parameters ahead of the method's")
+	}
+	if sig.RecvTypeParams().Len() != 0 {
+		w.p.refuse(objName(meth), "the method belongs to a generic type, and its dictionary is the type's rather than its own")
 	}
 
 	w.Sync(pkgbits.SyncMethod)
 	w.pos(meth.Pos())
 	w.selector(meth)
-	w.typeParamNames()
+	w.typeParamNames(nil)
 	w.param(sig.Recv())
 	w.signature(sig)
 	w.pos(meth.Pos()) // the declaration's position, which the linker copies
@@ -747,6 +970,23 @@ func (w *writer) selector(obj types2.Object) {
 // in it and no reference to a body element. See README.md for what nanogo
 // leaves out of it and what each omission costs.
 func (w *writer) funcExt(fn *types2.Func, sig *types2.Signature, isMethod bool) {
+	// A declaration with type parameters carries its body, and it is the
+	// only shape in which one reaches a file. gc's reader records a
+	// definition for a declaration with type parameters before it reads the
+	// extension data, and the relocated form below asserts there is none, so
+	// writing that form for a generic declaration stops gc inside an
+	// assertion rather than at a diagnostic.
+	if w.dict != nil && w.dict.Generic() {
+		idx := w.p.declBodyIdx(fn)
+		w.Sync(pkgbits.SyncFuncExt)
+		w.pragmaFlag()
+		w.linkname()
+		w.Bool(false) // a reference to a body element, not relocated data
+		w.Reloc(pkgbits.SectionBody, idx)
+		w.Sync(pkgbits.SyncEOF)
+		return
+	}
+
 	w.Sync(pkgbits.SyncFuncExt)
 	w.pragmaFlag()
 	w.linkname()

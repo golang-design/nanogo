@@ -22,12 +22,13 @@ import (
 // built from syntax and carries no index at all, so every reference has to be
 // allocated in the package being written.
 //
-// The path a body takes to gc is the private root's list, which is the
-// inlining path of specs/015-export-data.md. gc reads a body from it only
-// when the declaration's extension data also says the declaration has an
-// inlinable body, and it reads it in order to inline the call. The generic
-// path, which is a reference in the extension data itself, stays refused: it
-// needs the object dictionary the writer does not fill.
+// A body takes one of two paths to gc. The inlining path is the private
+// root's list: gc reads a body from it when the declaration's extension data
+// also says the declaration has an inlinable body, and it reads it in order to
+// inline the call. The generic path is a reference in the extension data
+// itself, and gc reads it in order to stencil the declaration at the type
+// arguments an importer instantiated it with. A generic declaration has only
+// the second, so a body it cannot write is a declaration the writer refuses.
 
 // A Source is what a package's own source adds to what the checker recorded.
 //
@@ -122,6 +123,11 @@ func (pw *pkgWriter) posBaseIdx(file string) pkgbits.Index {
 // the reader rather than a refusal.
 type declRefs struct {
 	pw *pkgWriter
+
+	// dict is the dictionary of the declaration whose body is being
+	// encoded. It is nil for a body that belongs to no dictionary, and a
+	// slot the body names is then refused.
+	dict *Dict
 }
 
 func (d *declRefs) strIdx(s string) pkgbits.Index { return d.pw.StringIdx(s) }
@@ -151,17 +157,24 @@ func (d *declRefs) posBaseIdx(p Pos) pkgbits.Index {
 
 func (d *declRefs) bodyIdx(e *FuncLitExpr) pkgbits.Index { return d.pw.litBodyIdx(e) }
 
-// dictIdx refuses every slot.
+// dictIdx answers with the slot of the dictionary the declaration carries,
+// and refuses when it carries none.
 //
-// objDict writes four zeros for the runtime lists and no derived type, so the
-// dictionary a slot would be read out of is empty. Writing the slot anyway is
-// a type gc resolves to whatever the empty dictionary happens to give it,
-// which is a wrong answer and not a refusal. specs/015-export-data.md has
-// what filling the dictionary needs.
+// The slot is the builder's own ([Dict]): the body was built against the same
+// dictionary [pkgWriter.objDict] writes out, so the two are one allocation
+// and cannot disagree. Without a dictionary there is nothing to resolve the
+// slot against, and a slot written anyway is a type gc resolves to whatever
+// an empty dictionary gives it, which is a wrong answer and not a refusal.
 func (d *declRefs) dictIdx(what string, slot int) int {
-	d.pw.refuse(fmt.Sprintf("%s, slot %d", what, slot),
-		"the body names a slot of an object dictionary the writer does not fill")
-	panic("unreachable")
+	if d.dict == nil || !d.dict.Generic() {
+		d.pw.refuse(fmt.Sprintf("%s, slot %d", what, slot),
+			"the body names a slot of an object dictionary the declaration does not carry")
+	}
+	if slot < 0 {
+		d.pw.refuse(fmt.Sprintf("%s, slot %d", what, slot),
+			"the body names a dictionary slot that is not a slot")
+	}
+	return slot
 }
 
 var _ bodyRefs = (*declRefs)(nil)
@@ -186,10 +199,28 @@ func (pw *pkgWriter) litBodyIdx(e *FuncLitExpr) pkgbits.Index {
 //
 // check collects the reasons the body cannot be offered for inlining and is
 // nil on the write path, where the decision has already been made.
-func (pw *pkgWriter) writeBody(path, name string, b *Body, check *inlineCheck) pkgbits.Index {
+func (pw *pkgWriter) writeBody(refs *declRefs, path, name string, b *Body, check *inlineCheck) pkgbits.Index {
 	enc := pw.NewEncoder(pkgbits.SectionBody, pkgbits.SyncFuncBody)
-	pw.encodeBodyInto(enc, path, name, b, check)
+	pw.encodeBodyInto(refs, enc, path, name, b, check)
 	return enc.Idx
+}
+
+// declBodyIdx writes the body of a generic declaration and returns its index.
+//
+// This is the other of the two paths a body reaches an importer by. The
+// inlining path offers a body through the private root's list and gc reads it
+// to inline a call. This one is a reference in the declaration's own
+// extension data, and gc reads it to stencil the declaration at the type
+// arguments an importer instantiated it with. A generic declaration has only
+// this path, so a body it cannot write is a declaration the writer refuses
+// rather than a body it leaves out.
+func (pw *pkgWriter) declBodyIdx(fn *types2.Func) pkgbits.Index {
+	b := pw.bodies[fn]
+	if b == nil || b.Body == nil {
+		pw.refuse(objName(fn), "the declaration is generic and no body was built for it")
+	}
+	refs := &declRefs{pw: pw, dict: b.Body.Dict}
+	return pw.writeBody(refs, pw.curpkg.Path(), b.Name, b.Body, nil)
 }
 
 // encodeBodyInto fills one claimed element and then the elements of every
@@ -198,16 +229,19 @@ func (pw *pkgWriter) writeBody(path, name string, b *Body, check *inlineCheck) p
 // A literal's body is an element of its own, so a body is a tree of elements
 // and not one element. The walk is depth first in the order the literals were
 // named, which is the order gc's own writer produces.
-func (pw *pkgWriter) encodeBodyInto(enc *pkgbits.Encoder, path, name string, b *Body, check *inlineCheck) {
-	w := &bodyWriter{Encoder: enc, refs: pw.refs, path: path, name: name, check: check}
+func (pw *pkgWriter) encodeBodyInto(refs *declRefs, enc *pkgbits.Encoder, path, name string, b *Body, check *inlineCheck) {
+	w := &bodyWriter{Encoder: enc, refs: refs, path: path, name: name, check: check}
 	w.encodeBody(b)
 	enc.Flush()
 
+	// A literal's body is encoded with the resolver of the declaration that
+	// encloses it, because gc writes both into one dictionary and a literal
+	// names the enclosing declaration's slots.
 	for _, lit := range w.nested {
 		if lit.Decoded == nil {
 			w.refuse("a function literal in the body carries no body of its own")
 		}
-		pw.encodeBodyInto(pw.lits[lit], path, name+".func", lit.Decoded, check)
+		pw.encodeBodyInto(refs, pw.lits[lit], path, name+".func", lit.Decoded, check)
 	}
 }
 
@@ -220,7 +254,8 @@ func (pw *pkgWriter) writeBodies(path string, funcs []InlineFunc) []bodyEntry {
 	out := make([]bodyEntry, 0, len(funcs))
 	for i := range funcs {
 		fn := &funcs[i]
-		out = append(out, bodyEntry{path: path, name: fn.Name, idx: pw.writeBody(path, fn.Name, fn.Body, nil)})
+		refs := &declRefs{pw: pw}
+		out = append(out, bodyEntry{path: path, name: fn.Name, idx: pw.writeBody(refs, path, fn.Name, fn.Body, nil)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].idx < out[j].idx })
 	return out
@@ -249,11 +284,18 @@ func (pw *pkgWriter) writeBodies(path string, funcs []InlineFunc) []bodyEntry {
 // and a claimed index that holds nothing is exactly the declaration gc reads
 // as a different one. Here the holes are in the probe, which is thrown away.
 func writableBodies(pkg *types2.Package, fset *syntax.FileSet, file func(string) string, funcs []InlineFunc) []InlineFunc {
-	reached := surfaceObjects(pkg, fset, file)
+	reached := surfaceObjects(pkg, fset, file, funcs)
 	out := make([]InlineFunc, 0, len(funcs))
-	probe := newPkgWriter(pkg, nil, fset, file)
+	probe := newPkgWriter(pkg, nil, funcs, fset, file)
 	for i := range funcs {
 		fn := funcs[i]
+		// A generic declaration's body is not offered here. It reaches an
+		// importer through the declaration's own extension data, because gc
+		// stencils the declaration rather than inlining a call of it, and a
+		// declaration that carries no body cannot be written at all.
+		if isGenericDecl(fn.Obj) {
+			continue
+		}
 		if !reaches(reached, fn.Obj) {
 			continue
 		}
@@ -261,7 +303,7 @@ func writableBodies(pkg *types2.Package, fset *syntax.FileSet, file func(string)
 		if !writesInto(probe, pkg.Path(), &fn, check) {
 			// The probe now holds elements it claimed and did not fill, so
 			// it cannot answer for the next body. Start a fresh one.
-			probe = newPkgWriter(pkg, nil, fset, file)
+			probe = newPkgWriter(pkg, nil, funcs, fset, file)
 			continue
 		}
 		if check.reason != "" {
@@ -284,8 +326,8 @@ func writableBodies(pkg *types2.Package, fset *syntax.FileSet, file func(string)
 // [writableBodies] gives: the answer has to be known before the first
 // extension data is written, because that is where a declaration says whether
 // it has an inlinable body.
-func surfaceObjects(pkg *types2.Package, fset *syntax.FileSet, file func(string) string) map[types2.Object]bool {
-	pw := newPkgWriter(pkg, nil, fset, file)
+func surfaceObjects(pkg *types2.Package, fset *syntax.FileSet, file func(string) string, funcs []InlineFunc) map[types2.Object]bool {
+	pw := newPkgWriter(pkg, nil, funcs, fset, file)
 	ok := func() (ok bool) {
 		defer func() {
 			switch v := recover().(type) {
@@ -377,6 +419,13 @@ func writesInto(probe *pkgWriter, path string, fn *InlineFunc, check *inlineChec
 			panic(v)
 		}
 	}()
-	probe.writeBody(path, fn.Name, fn.Body, check)
+	probe.writeBody(&declRefs{pw: probe}, path, fn.Name, fn.Body, check)
 	return true
+}
+
+// isGenericDecl reports whether a declaration has type parameters of its own
+// or of its receiver.
+func isGenericDecl(fn *types2.Func) bool {
+	sig := fn.Signature()
+	return sig.TypeParams().Len() != 0 || sig.RecvTypeParams().Len() != 0
 }

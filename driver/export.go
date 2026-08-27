@@ -53,9 +53,11 @@ func exportBodies(cfg *Config, pkg *types2.Package, info *types2.Info, fset *syn
 			}
 			body, err := source.BuildBody(pkg.Path()+"."+name, obj.Signature(), fd.Body)
 			if err != nil {
-				// The builder refuses a generic declaration and a loop over
-				// a function by name. Both are declarations whose body no
-				// importer can be given yet, and neither stops the package.
+				// The builder refuses a method of a generic type, a type
+				// declared inside a generic declaration and a loop over a
+				// function, each by name. A generic declaration whose body
+				// is refused is refused by the writer too, because a
+				// generic declaration cannot reach a file without its body.
 				continue
 			}
 			bodies.Funcs = append(bodies.Funcs, export.InlineFunc{

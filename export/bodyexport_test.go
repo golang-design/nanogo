@@ -202,8 +202,8 @@ func Make(n int) func() int {
 // body a tree of elements rather than one element.
 func TestWriteEncodesAFunctionLiteralAsItsOwnElement(t *testing.T) {
 	pkg, _, funcs := buildSource(t, "xtest/r", litSource)
-	pw := newPkgWriter(pkg, nil, nil, nil)
-	pw.writeBody("xtest/r", funcs[0].Name, funcs[0].Body, nil)
+	pw := newPkgWriter(pkg, nil, nil, nil, nil)
+	pw.writeBody(&declRefs{pw: pw}, "xtest/r", funcs[0].Name, funcs[0].Body, nil)
 	if n := pw.NumElems(pkgbits.SectionBody); n != 2 {
 		t.Fatalf("the writer wrote %d body elements, want 2", n)
 	}
@@ -285,7 +285,7 @@ func Add(a, b int) int { return a + b }
 // filter: a body the writer cannot allocate an element for is refused rather
 // than written with an index nothing holds.
 func TestWriteRefusesAGenericBodyItWasHanded(t *testing.T) {
-	pw := newPkgWriter(types2.NewPackage("xtest/t", "p"), nil, nil, nil)
+	pw := newPkgWriter(types2.NewPackage("xtest/t", "p"), nil, nil, nil, nil)
 	body := &Body{
 		HasBlock: true,
 		Stmts: []Stmt{&ReturnStmt{
@@ -299,7 +299,7 @@ func TestWriteRefusesAGenericBodyItWasHanded(t *testing.T) {
 				err, _ = v.(error)
 			}
 		}()
-		pw.writeBody("xtest/t", "F", body, nil)
+		pw.writeBody(&declRefs{pw: pw}, "xtest/t", "F", body, nil)
 		return nil
 	}()
 	if err == nil {
