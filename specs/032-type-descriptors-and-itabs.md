@@ -21,20 +21,24 @@ text-assembly seam in [000](000-decisions.md) decision 3.
 
 ## What is built
 
-**Descriptors are named, encoded and referenced. An itab is named and encoded,
-and nothing builds a reference to one yet.**
+**Descriptors and itabs are named, encoded, referenced and written into the
+object. A program compiled by nanogo converts a value to an interface with
+methods, calls a method through it, and asserts a concrete type out of it.**
 
 | Part | Where | State |
 | --- | --- | --- |
 | The canonical name, both spellings | `ir/rtype.go` | built; the expected spellings were read out of a `gc` object with `go tool nm`, and the hash below re-checks the link string against a running `gc` binary |
 | The descriptor bytes | `rtype/` | built for the types below, including a defined type's `UncommonType` tail and a struct's field array, checked field by field against `reflect` |
 | The reference from generated code | `ir/lower.go` | built for `new`, `&T{...}`, a slice literal and `make([]T, n)`, and the pass runs in a real compile |
-| The interface value itself | `ssa/build.go` | built for a conversion to an **empty** interface, and for a conversion of an interface with methods to one |
-| The reference from an interface conversion | `ssa/build.go` | named, in `ssa.Func.Descriptors`. **`driver/compile.go` does not read that field yet**, so a conversion of a type the runtime does not already carry a descriptor for links against nothing |
+| The interface value itself | `ssa/build.go` | built for a conversion to an interface with or without methods, and for a conversion of an interface with methods to an empty one |
+| The reference from an interface conversion | `ssa/build.go` | built; the types are in `ssa.Func.Descriptors` and the pairs in `ssa.Func.Itabs`, and `driver/compile.go` reads both |
 | The descriptor as a data symbol in the object | `driver/compile.go` | built; a named `dupok` definition, and the data it points at is hashed |
 | A defined type's `Method` array | `rtype/uncommon.go` | built; `Mtyp` from `ir.Method.Sig`, `Ifn` and `Tfn` from the wrappers `ssagen` generates, `Xcount` from the exported prefix, checked entry by entry against the array `gc` wrote for the same type |
 | The itab name and bytes | `ir/rtype.go`, `rtype/itab.go` | built; the name is checked against the symbol `gc` wrote for the same pair, read out of a `gc` object with `go tool nm` |
-| The reference to an itab | `ssa/build.go` | **not built**; `concreteToInterface` still refuses a conversion to an interface with methods, so nothing names an itab and nothing writes one into an object |
+| The reference to an itab | `ssa/build.go`, `ir/lower.go` | built; `concreteToInterface` names the pair's itab as the type word, and a dynamic type test on a value that leads with an itab compares that word against the itab of the pair |
+| The itab as a data symbol in the object | `driver/compile.go` | built; a named `dupok` non-package definition, written in the same two passes as the descriptors so that a relocation against `type:` resolves to this object's own definition |
+| The call through an itab | `ssa/build.go` | built; `OpInterCall` loads the entry point from the itab at `Fun` plus the method's slot, which is the offset `rtype/itab.go` writes the array at |
+| The `*abi.TypeAssert` and `*abi.InterfaceSwitch` descriptors | nowhere | **not built**; they are what an assertion whose target is an interface and a type switch case that names one need, and they are the only interface construct left refused |
 
 The `gclocals·` and `go:string.` rows of the namespace table are produced
 elsewhere. `ssagen/stackmap.go` builds the stack maps, `ssa/decompose.go` names
@@ -58,6 +62,14 @@ and print what `gc` prints. `panic` of an interface with methods is the one
 that proves the guarded load: the descriptor comes out of the itab, and the
 value that used to reach the runtime made it die with "name offset out of
 range" instead of printing.
+
+So does the itab. A library nanogo compiles converts a concrete type to an
+interface with two methods and returns the interface value; `gc` compiles an
+importer that calls the second method through it and the program exits with
+what that method returned (`internal/e2e/import_test.go`). Nothing in the
+importer converts, so the itab in the link is nanogo's, the runtime registered
+it out of `runtime.itablinks`, and a slot written at the wrong offset reaches
+the other method.
 
 A refusal from `rtype` arrives after the function it came from has compiled,
 because lowering can name `main.point` without trouble and only the encoder
@@ -551,8 +563,12 @@ up with two itabs for one pair, interface comparison breaks and type switches
 become unreliable. That is why the naming rules below are not cosmetic.
 
 `ir.ItabSymbol` is the name, `rtype.Itab` is the bytes and
-`rtype.ItabReferenced` is the pair of descriptors the itab points at. Three
-decisions in the encoder are not obvious from the layout:
+`rtype.ItabReferenced` is the pair of descriptors the itab points at.
+`ssa.Func.Itabs` and `ir.Collected.Itabs` are the pairs a function named, and
+`driver/compile.go` unions them over the package: the two descriptors join the
+roots before the descriptor set is closed, because the method wrappers an
+itab's `Fun` entries name are decided by that closed set. Three decisions in the
+encoder are not obvious from the layout:
 
 - **`Fun` is in the interface's order, not the concrete type's.** The runtime
   reads a slot by the interface's index, so an itab built for `io.ReadWriter`
@@ -569,6 +585,13 @@ decisions in the encoder are not obvious from the layout:
   would resolve to zero and the call would jump to address zero. The weak form
   becomes available on the day an interface call names the interface and the
   method it selects.
+
+`Fun` carries `GoFunc` on each relocation, and `driver/compile.go` resolves it
+through `targetABI`. A method is a Go function and therefore `ABIInternal`, and
+its name does not say so: the method of a type the package declares is not in
+the generated set, because nothing generated it. A path around `targetABI`
+references the method under ABI0 and the link fails with "not defined for
+ABI0".
 
 The itab is a named `dupok` non-package definition, as the descriptor is, so
 `cmd/link` merges two copies by name. `gc` writes an itab into the hashed index
@@ -810,12 +833,12 @@ recorded because none of them is visible from `internal/abi`'s layout.
    walks a type's relocations and skips two after each `R_METHODOFF`, and it
    panics outright when the three are not consecutive.
 
-### A pointer to a declared type has no descriptor, and an importer needs one
+### A pointer to a declared type had no descriptor, and an importer needs one
 
-Found while the method array was being tested, and not caused by it. nanogo
-emits `type:<path>.<Type>` for every type a package declares and does not emit
-`type:*<path>.<Type>`. `gc` emits both, because `PtrToThis` names the second
-and because an importer that takes the address of such a value needs it. So
+Fixed. Found while the method array was being tested, and not caused by it.
+nanogo emitted `type:<path>.<Type>` for every type a package declares and never
+`type:*<path>.<Type>`. `gc` emits both, because `PtrToThis` names the second and
+because an importer that takes the address of such a value needs it. So
 
 ```go
 // lib, compiled by nanogo
@@ -833,9 +856,50 @@ fails at link time with
 
 which is `cmd/link` saying the symbol is defined nowhere. A type with a pointer
 receiver method reaches it every time, because such a type is only usable
-through `*T`. The fix is in `driver/types.go`'s closure walk, which decides the
-set a package emits: a declared type owes its pointer's descriptor as well.
-`rtype` writes that descriptor already, so nothing here is missing.
+through `*T`, and the failure that landed was the DWARF half of it:
+
+    sym 6: relocation target go:info.*nanogo.example/shape/lib.Counter not
+    defined
+
+The fix is in `driver/types.go`'s closure walk, which decides the set a package
+emits: a declared type is a root and so is the pointer to it. `rtype` wrote that
+descriptor already, so nothing was missing but the root.
+
+### The itab was wired, and three standing bugs came out with it
+
+`concreteToInterface` names the pair's itab, `driver/compile.go` writes it, and
+`ir/lower.go` compares against it. Three constructs the itab does not touch
+were unreachable until it landed and were wrong when they became reachable.
+Each is recorded where its own spec can find it, and each has a test that fails
+without the fix.
+
+- **A call through an interface was never built.** `OpInterCall` was in the
+  operation set, lowered by the arm64 rules and given a place by the ABI
+  assignment, and `ssa.Build` had no case for it: the call reached the closure
+  case, took the address of the selection and stopped at "field 0 of
+  main.coder". [021](021-ssa-construction.md) owns the shape; the offset is
+  this spec's, and it is `Fun` plus the method's slot.
+- **The data word of a zero-sized value.** A type declared only to carry methods
+  is a struct with no fields, and its data word still has to be a pointer the
+  collector scans. `gc` writes the address of `runtime.zerobase` without a call.
+  `rtsym` holds no row for that variable and [031](031-runtime-lowering.md)
+  makes `rtsym` the one place a runtime symbol is spelled, so the allocation is
+  made rather than its answer named: `runtime.newobject` of a zero-sized type is
+  `mallocgc(0)`, and that is the same word. A row for `runtime.zerobase` is what
+  would remove the call.
+- **An empty pointer map read as a missing one.** `ssa/rules/arm64.go` chose
+  between `memclrNoHeapPointers` and `memclrHasPointers` by "the map is empty
+  and the type is at least a word wide", and `ir.Layout` leaves `PtrBits` nil
+  for every pointer-free type whatever its size. The guess is not the safe half:
+  `memclrHasPointers` calls `bulkBarrierPreWrite`, which throws when the size is
+  not a multiple of the pointer size, so every clear of a pointer-free region of
+  twelve or twenty bytes was a fatal error at run time.
+
+Two more came out of Go's own corpus once the files that use interfaces
+compiled, and neither belongs to this spec. A method call evaluated its receiver
+after its arguments ([020](020-ir.md)), and a declaration with no initialiser
+emitted no statement, so a `var` in a loop body kept the previous iteration's
+value ([021](021-ssa-construction.md) writes the zero from `ir.ODeclare` now).
 
 ### Three claims the encoder disproved
 
