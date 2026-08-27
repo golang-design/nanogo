@@ -157,7 +157,7 @@ func TestChanDirectionsAreThreeNames(t *testing.T) {
 	}
 }
 
-// TestInterfaceMethodOrderIsGcsAndNotByteOrder is the case a byte-range
+// TestMethodOrderIsGcsAndNotByteOrder is the case a byte-range
 // exported test answers wrongly.
 //
 // gc puts every exported method ahead of every unexported one, then orders by
@@ -170,15 +170,15 @@ func TestChanDirectionsAreThreeNames(t *testing.T) {
 //	interface { Read() int; Ärger() int; example.com/outer.flush() int }
 //
 // read out of a gc-compiled object with go tool nm.
-func TestInterfaceMethodOrderIsGcsAndNotByteOrder(t *testing.T) {
+func TestMethodOrderIsGcsAndNotByteOrder(t *testing.T) {
 	sig := func() *Type { return layOut(t, &Type{Kind: FuncKind, Params: []*Type{}, Results: []*Type{}}) }
-	// The order Converter produces, which is by name alone.
+	// An unordered list, as a hand-built IR type may carry.
 	in := []Method{
 		{Name: "Ärger", Sig: sig()},
 		{Name: "flush", Pkg: "p", Sig: sig()},
 		{Name: "Read", Sig: sig()},
 	}
-	got := InterfaceMethodOrder(in)
+	got := MethodOrder(in)
 	want := []string{"Read", "Ärger", "flush"}
 	for i, w := range want {
 		if got[i].Name != w {

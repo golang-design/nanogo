@@ -124,17 +124,16 @@ func ifaceMethods(t *ir.Type, base int) ([]byte, []Reloc, []Symbol, error) {
 // imethods returns the methods an InterfaceType describes, in the order the
 // descriptor holds them.
 //
-// The order is ir.InterfaceMethodOrder's, which is gc's and not the order
-// Converter sorts a method set into. It is defined there rather than here
-// because a literal interface's spelling reads the same list in the same order:
-// the name says "interface { Vis() int; p.hid() }" and the Imethod array has to
-// hold the two the same way round, or reflect reports a method the name does
-// not spell.
+// The order is ir.MethodOrder's, which is gc's. It is defined there rather than
+// here because a literal interface's spelling reads the same list in the same
+// order: the name says "interface { Vis() int; p.hid() }" and the Imethod array
+// has to hold the two the same way round, or reflect reports a method the name
+// does not spell.
 func imethods(t *ir.Type) ([]ir.Method, error) {
 	if err := ifaceEmittable(t); err != nil {
 		return nil, err
 	}
-	return ir.InterfaceMethodOrder(t.Methods), nil
+	return ir.MethodOrder(t.Methods), nil
 }
 
 // ifaceEmittable reports the reason an interface's descriptor cannot be filled

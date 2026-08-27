@@ -1218,3 +1218,71 @@ func (T) ärger() {}
 		}
 	}
 }
+
+// TestConvertMethodSetIsInMethodOrder is the case byte order by name answers
+// wrongly.
+//
+// gc puts every exported method ahead of every unexported one and orders each
+// group by name (types.CompareSyms, and types.CalcMethods sorts a defined
+// type's method list with it). Ärger is exported, because the language's rule
+// is an upper-case letter and the letter need not be ASCII, and its first byte
+// is 0xC3, which is above every lower-case ASCII letter. Byte order by name
+// therefore puts it last and gc puts it second.
+//
+// The order is what a descriptor's Xcount counts. reflect reads the exported
+// method set as the first Xcount entries of the Method array, so a set whose
+// exported names are not all in front makes reflect report a method set the
+// type does not have.
+func TestConvertMethodSetIsInMethodOrder(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Wide int
+
+func (Wide) Read() int  { return 0 }
+func (Wide) Ärger() int { return 0 }
+func (Wide) flush() int { return 0 }
+`)
+	c := NewConverter()
+	out, err := c.Convert(pkg.Scope().Lookup("Wide").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Read", "Ärger", "flush"}
+	got := make([]string, 0, len(out.Methods))
+	for _, m := range out.Methods {
+		got = append(got, m.Name)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the method set is %v, want %v", got, want)
+	}
+}
+
+// TestConvertInterfaceMethodsAreInMethodOrder checks that a literal interface's
+// method list is ordered by the one rule as well.
+//
+// The Imethod array of the descriptor and the spelling of the same interface
+// are this list read twice, and ir.MethodOrder is what puts them in the order
+// gc writes both.
+func TestConvertInterfaceMethodsAreInMethodOrder(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Lit = interface {
+	Read() int
+	Ärger() int
+	flush() int
+}
+`)
+	c := NewConverter()
+	out, err := c.Convert(pkg.Scope().Lookup("Lit").Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Read", "Ärger", "flush"}
+	got := make([]string, 0, len(out.Methods))
+	for _, m := range out.Methods {
+		got = append(got, m.Name)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the method list is %v, want %v", got, want)
+	}
+}

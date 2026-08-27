@@ -369,7 +369,13 @@ type Type struct {
 	// same fields and gc names them apart.
 	NoAlg bool
 
-	// Methods is the method set of the *pointer* to this type, sorted by name.
+	// Methods is the method set of the *pointer* to this type, in MethodOrder.
+	//
+	// MethodOrder is gc's types.CompareSyms and not byte order by name: every
+	// exported method comes first. A descriptor's UncommonType carries the
+	// length of that exported prefix and reflect reads the method set out of
+	// it, so the order is part of what the field means rather than a detail of
+	// how it was built.
 	//
 	// The pointer's set, because it is the larger of the two: a method with a
 	// value receiver is in both sets and one with a pointer receiver is in

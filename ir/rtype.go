@@ -275,7 +275,7 @@ func pathBase(path string) string {
 // It is here, next to the naming, because the answer is part of a type's
 // identity in two places and the two must agree. An interface's spelling
 // qualifies an unexported method name with its package and leaves an exported
-// one bare, and InterfaceMethodOrder puts every exported method ahead of every
+// one bare, and MethodOrder puts every exported method ahead of every
 // unexported one. A rule that answered differently in one of them would give
 // one interface two link strings.
 func ExportedName(name string) bool {
@@ -289,37 +289,45 @@ func ExportedName(name string) bool {
 	return unicode.IsUpper(r)
 }
 
-// InterfaceMethodOrder returns ms in the order gc writes an interface's
-// methods, which is a copy and leaves ms alone.
+// MethodOrder returns ms in the order gc writes a method array, which is a
+// copy and leaves ms alone.
 //
 // The order is gc's types.CompareSyms: every exported name ahead of every
 // unexported one, then by name, then by the package path that qualifies an
-// unexported name. It is not the order Converter sorts a method set into,
-// which is by name alone.
+// unexported name. gc sorts both of its method arrays that way, types.CalcMethods
+// for a defined type and the interface completer for an interface, so one
+// function serves both here.
 //
-// The two agree for every ASCII identifier, because a capital letter sorts
-// below every lower-case one, and agreeing is not being the same rule. A name
-// beginning with a capital outside ASCII is exported and sorts above no
-// lower-case letter at all, so byte order would put Ärger after the unexported
-// names and gc puts it before them.
+// Byte order by name alone agrees with it for every ASCII identifier, because a
+// capital letter sorts below every lower-case one, and agreeing is not being the
+// same rule. A name beginning with a capital outside ASCII is exported and sorts
+// above no lower-case letter at all, so byte order would put Ärger after the
+// unexported names and gc puts it before them.
 //
-// One order, because the spelling of a literal interface and the Imethod array
-// of its descriptor are the same list read twice. Two orders would make the
-// name say one thing and the descriptor another.
-func InterfaceMethodOrder(ms []Method) []Method {
+// Three readers depend on this order and they have to agree. The spelling of a
+// literal interface and the Imethod array of its descriptor are the same list
+// read twice. An UncommonType's Xcount is the length of the exported prefix of
+// its Method array, which reflect finds by counting from the front, so an array
+// in any other order reports a method set nobody declared.
+func MethodOrder(ms []Method) []Method {
 	out := make([]Method, len(ms))
 	copy(out, ms)
-	sort.SliceStable(out, func(i, j int) bool {
-		ei, ej := ExportedName(out[i].Name), ExportedName(out[j].Name)
+	sortMethods(out)
+	return out
+}
+
+// sortMethods puts ms in MethodOrder's order, in place.
+func sortMethods(ms []Method) {
+	sort.SliceStable(ms, func(i, j int) bool {
+		ei, ej := ExportedName(ms[i].Name), ExportedName(ms[j].Name)
 		if ei != ej {
 			return ei
 		}
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
+		if ms[i].Name != ms[j].Name {
+			return ms[i].Name < ms[j].Name
 		}
-		return out[i].Pkg < out[j].Pkg
+		return ms[i].Pkg < ms[j].Pkg
 	})
-	return out
 }
 
 // fieldName returns the name a struct field's spelling carries, and the
@@ -456,7 +464,7 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 			return nil
 		}
 		b.WriteString("interface {")
-		for i, m := range InterfaceMethodOrder(t.Methods) {
+		for i, m := range MethodOrder(t.Methods) {
 			if i > 0 {
 				b.WriteString(";")
 			}

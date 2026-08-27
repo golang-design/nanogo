@@ -6,7 +6,6 @@ package ir
 
 import (
 	"fmt"
-	"sort"
 
 	"golang.design/x/nanogo/types2"
 )
@@ -417,7 +416,7 @@ func (c *Converter) methodSig(fn *types2.Func) (*Type, error) {
 	return c.convert(sig)
 }
 
-// interfaceMethods returns a literal interface's method set, sorted by name.
+// interfaceMethods returns a literal interface's method set, in MethodOrder.
 //
 // It exists because a literal interface is not a *types2.Named, so the Named
 // case above never runs for one and it reached the boundary with no methods at
@@ -447,20 +446,15 @@ func (c *Converter) interfaceMethods(t *types2.Interface) ([]Method, error) {
 		}
 		out = append(out, Method{Name: f.Name(), Pkg: path, Sig: sig})
 	}
-	// The same order the defined case sorts into, so that one interface
-	// written twice, once with a name and once as a literal, produces one
-	// list. specs/053-determinism.md needs an order; this is the one the rest
-	// of the boundary already uses.
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
-		}
-		return out[i].Pkg < out[j].Pkg
-	})
+	// MethodOrder, which is gc's, so that the Imethod array of this
+	// interface's descriptor and the spelling of the same interface hold the
+	// methods the same way round. Type.Methods states the order once and
+	// every reader of the field relies on it.
+	sortMethods(out)
 	return out, nil
 }
 
-// methodSet returns the method set of a pointer to t, sorted by name.
+// methodSet returns the method set of a pointer to t, in MethodOrder.
 //
 // The pointer's set is the larger of the two and Method.PtrOnly separates them,
 // which is what type.go's Methods field documents.
@@ -525,12 +519,11 @@ func (c *Converter) methodSet(t *types2.Named) ([]Method, error) {
 		}
 		out = append(out, Method{Name: name, Pkg: path, Sig: sig, PtrOnly: !inValue})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
-		}
-		return out[i].Pkg < out[j].Pkg
-	})
+	// MethodOrder and not byte order by name. A descriptor's UncommonType
+	// carries the count of the exported prefix of this array, so an array
+	// whose exported names are not all in front makes reflect report a method
+	// set the type does not have.
+	sortMethods(out)
 	return out, nil
 }
 
