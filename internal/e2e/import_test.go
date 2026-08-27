@@ -414,6 +414,17 @@ type linkShape struct {
 // write is invisible until the link.
 var linkingShapes = []linkShape{
 	{
+		// This one sat in refusedShapes until ssagen started generating the
+		// equality function a field-wise struct needs. Moving it here rather
+		// than deleting it is the point: refusing to describe the type and
+		// describing it with a nil Equal look the same to a compile test, and
+		// only a program that runs tells them apart. The runtime panics on a
+		// map whose key type has a nil Equal, so this uses the type as a key.
+		name: "a struct that compares field by field, as a map key",
+		lib:  "type Label struct{ Key, Value string }\n",
+		main: "\tm := map[lib.Label]int{{Key: \"a\", Value: \"b\"}: 42}\n\tos.Exit(m[lib.Label{Key: \"a\", Value: \"b\"}])\n",
+	},
+	{
 		name: "a constant and a function",
 		lib:  "const S = 21\n\nfunc Double(x int) int { return x * 2 }\n",
 		main: "\tos.Exit(lib.Double(lib.S))\n",
@@ -561,7 +572,6 @@ func shapeModule(s linkShape) map[string]string {
 var refusedShapes = []linkShape{
 	{name: "a named map", lib: "type M map[string]int\n", main: "M"},
 	{name: "a type with a method", lib: "type Code int\n\nfunc (c Code) V() int { return int(c) }\n", main: "Code"},
-	{name: "a struct that compares field by field", lib: "type Label struct{ Key, Value string }\n", main: "Label"},
 	{name: "a struct holding a map", lib: "type Table struct{ M map[string]int }\n", main: "Table"},
 }
 
