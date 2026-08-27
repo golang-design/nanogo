@@ -58,6 +58,9 @@ type symRefs struct {
 	// bodies numbers a function literal's body by the literal, because two
 	// literals are never the same body and nothing else names one.
 	bodies map[*FuncLitExpr]pkgbits.Index
+
+	// locals numbers each type declared inside a function by identity.
+	locals map[*types2.TypeName]int
 }
 
 func newSymRefs() *symRefs {
@@ -65,6 +68,7 @@ func newSymRefs() *symRefs {
 		tables: make(map[pkgbits.SectionKind]map[string]pkgbits.Index),
 		next:   make(map[pkgbits.SectionKind]pkgbits.Index),
 		bodies: make(map[*FuncLitExpr]pkgbits.Index),
+		locals: make(map[*types2.TypeName]int),
 	}
 }
 
@@ -95,7 +99,7 @@ func (s *symRefs) pkgIdx(pkg *types2.Package) pkgbits.Index {
 }
 
 func (s *symRefs) typIdx(t TypeUse) pkgbits.Index {
-	return s.intern(pkgbits.SectionType, typeKey(t.Type))
+	return s.intern(pkgbits.SectionType, s.typeKey(t.Type))
 }
 
 func (s *symRefs) objIdx(o ObjUse) pkgbits.Index {
@@ -107,7 +111,7 @@ func (s *symRefs) objIdx(o ObjUse) pkgbits.Index {
 	b.WriteString(o.Name)
 	for _, t := range o.Targs {
 		b.WriteString("|")
-		b.WriteString(typeKey(t.Type))
+		b.WriteString(s.typeKey(t.Type))
 	}
 	return s.intern(pkgbits.SectionObj, b.String())
 }
@@ -138,7 +142,7 @@ var _ bodyRefs = (*symRefs)(nil)
 //     any, so "any" and "interface{}" are one element (writer.go).
 //   - An alias declared inside a function is stripped to what it names,
 //     because two local aliases of one name would collide.
-func typeKey(t types2.Type) string {
+func (s *symRefs) typeKey(t types2.Type) string {
 	if t == nil {
 		return "<nil>"
 	}
@@ -153,7 +157,80 @@ func typeKey(t types2.Type) string {
 		types2.Unalias(t) == types2.Unalias(anyName.Type()) {
 		return "any"
 	}
-	return types2.TypeString(t, func(pkg *types2.Package) string { return pkg.Path() })
+	key := types2.TypeString(t, func(pkg *types2.Package) string { return pkg.Path() })
+	// A type declared inside a function has no qualified name: two of them
+	// print alike and gc gives each an element of its own, disambiguating
+	// the two by a number it derives from the declaring scope. Here they are
+	// told apart by identity, which is the same distinction made without
+	// reproducing gc's numbering.
+	for _, obj := range localTypeNames(t) {
+		n, ok := s.locals[obj]
+		if !ok {
+			n = len(s.locals)
+			s.locals[obj] = n
+		}
+		key += fmt.Sprintf("#%d", n)
+	}
+	return key
+}
+
+// localTypeNames returns the objects of the types declared inside a function
+// that a type reaches, in a deterministic order.
+func localTypeNames(t types2.Type) []*types2.TypeName {
+	var out []*types2.TypeName
+	seen := make(map[types2.Type]bool)
+	var walk func(types2.Type)
+	walk = func(t types2.Type) {
+		if t == nil || seen[t] {
+			return
+		}
+		seen[t] = true
+		switch t := t.(type) {
+		case *types2.Alias:
+			if isLocalTypeName(t.Obj()) {
+				out = append(out, t.Obj())
+			}
+			walk(t.Rhs())
+		case *types2.Named:
+			if isLocalTypeName(t.Obj()) {
+				out = append(out, t.Obj())
+				walk(t.Underlying())
+			}
+		case *types2.Pointer:
+			walk(t.Elem())
+		case *types2.Slice:
+			walk(t.Elem())
+		case *types2.Array:
+			walk(t.Elem())
+		case *types2.Chan:
+			walk(t.Elem())
+		case *types2.Map:
+			walk(t.Key())
+			walk(t.Elem())
+		case *types2.Tuple:
+			for i := range t.Len() {
+				walk(t.At(i).Type())
+			}
+		case *types2.Signature:
+			walk(t.Params())
+			walk(t.Results())
+		case *types2.Struct:
+			for i := range t.NumFields() {
+				walk(t.Field(i).Type())
+			}
+		case *types2.Interface:
+			for i := range t.NumMethods() {
+				walk(t.Method(i).Type())
+			}
+		}
+	}
+	walk(t)
+	return out
+}
+
+// isLocalTypeName reports whether a type was declared inside a function.
+func isLocalTypeName(obj *types2.TypeName) bool {
+	return obj.Pkg() != nil && obj.Parent() != obj.Pkg().Scope()
 }
 
 // normalizeFile puts the two sides' file names in one space.
@@ -210,10 +287,7 @@ func sourcePackages(t *testing.T, dir string, paths ...string) ([]sourcePackage,
 		t.Skipf("go list -deps -export: %v\n%s", err, stderr)
 	}
 
-	want := make(map[string]bool, len(paths))
-	for _, p := range paths {
-		want[p] = true
-	}
+	want := expandPatterns(t, dir, paths)
 	archives := make(map[string]string)
 	var list []sourcePackage
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -239,6 +313,25 @@ func sourcePackages(t *testing.T, dir string, paths ...string) ([]sourcePackage,
 	return list, archives
 }
 
+// expandPatterns resolves the patterns on a go list command line to the set of
+// import paths they name, so that "std" is every standard library package and
+// not a package of that name.
+func expandPatterns(t *testing.T, dir string, paths []string) map[string]bool {
+	t.Helper()
+	cmd := exec.Command(goTool(t), append([]string{"list", "-f", "{{.ImportPath}}"}, paths...)...)
+	cmd.Dir = dir
+	cmd.Env = env()
+	out, err := cmd.Output()
+	if err != nil {
+		t.Skipf("go list: %v", err)
+	}
+	want := make(map[string]bool)
+	for _, line := range strings.Fields(string(out)) {
+		want[line] = true
+	}
+	return want
+}
+
 // archiveImporter resolves an import to the package gc's archive holds.
 type archiveImporter struct {
 	reader   *Reader
@@ -254,6 +347,12 @@ func (i *archiveImporter) Import(path string) (*types2.Package, error) {
 		return types2.Unsafe, nil
 	}
 	file, ok := i.archives[path]
+	if !ok || file == "" {
+		// A standard library package that imports golang.org/x/... gets the
+		// copy under GOROOT/src/vendor, which the go command lists under
+		// its vendor path.
+		file, ok = i.archives["vendor/"+path]
+	}
 	if !ok || file == "" {
 		return nil, fmt.Errorf("no archive for %q", path)
 	}
