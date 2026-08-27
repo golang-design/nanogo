@@ -2659,9 +2659,8 @@ func TestBuildConvertsAConcreteValueToAnInterfaceWithMethods(t *testing.T) {
 //
 // The word is a pointer the collector scans, so a value with nothing to carry
 // still needs one, and the runtime's answer for a zero-byte allocation is the
-// address of runtime.zerobase. runtime.newobject of such a type reaches
-// mallocgc with size zero and returns exactly that word, which is the word
-// cmd/compile writes without the call.
+// address of runtime.zerobase. That address is a relocation, so the word is
+// written without a call. cmd/compile writes the same word the same way.
 //
 // It is the case a struct with no fields takes, which is what a type declared
 // only to carry methods is.
@@ -2674,23 +2673,29 @@ func TestBuildBoxesAZeroSizedValue(t *testing.T) {
 		t.Fatalf("no interface was made:\n%s", f)
 	}
 	data := mk.Args[1]
-	if data.Op != OpSelectN {
-		t.Fatalf("the data word is %v, want the result of an allocation", data.Op)
+	if data.Op != OpAddr {
+		t.Fatalf("the data word is %v, want the address of a symbol", data.Op)
 	}
-	call := data.Args[0]
-	o, _ := call.Aux.(*ir.Object)
-	if o == nil || o.Name != "runtime.newobject" {
-		t.Fatalf("the data word calls %v, want runtime.newobject", call.Aux)
+	o, _ := data.Aux.(*ir.Object)
+	if o == nil || o.Name != "runtime.zerobase" {
+		t.Fatalf("the data word names %v, want runtime.zerobase", data.Aux)
 	}
-	// The descriptor it is called with, which the object then owes.
-	arg := call.Args[0]
-	name, err := ir.TypeSymbol(tEmpty)
-	if err != nil {
-		t.Fatal(err)
+	if o.Class != ir.ClassGlobal {
+		t.Errorf("runtime.zerobase is %v, and a reference to it under any other class names a symbol nothing defines", o.Class)
 	}
-	if d, _ := arg.Aux.(*ir.Object); d == nil || d.Name != name {
-		t.Errorf("the allocation names %v, want %s", arg.Aux, name)
+	// No allocation is made for it. A call to runtime.newobject would be one
+	// mallocgc that returns the word the relocation already names.
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpStaticCall {
+				continue
+			}
+			if c, _ := v.Aux.(*ir.Object); c != nil && c.Name == "runtime.newobject" {
+				t.Fatalf("the data word still allocates:\n%s", f)
+			}
+		}
 	}
+	// The type word is the descriptor, which the object then owes.
 	if len(f.Descriptors) != 1 || f.Descriptors[0] != tEmpty {
 		t.Errorf("the function records %v as the descriptors it names, want just %v", f.Descriptors, tEmpty)
 	}

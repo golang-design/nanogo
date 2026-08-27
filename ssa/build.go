@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"golang.design/x/nanogo/ir"
+	"golang.design/x/nanogo/rtsym"
 	"golang.design/x/nanogo/rtype"
 	"golang.design/x/nanogo/syntax"
 )
@@ -1694,6 +1695,26 @@ var descriptorType = func() *ir.Type {
 	return t
 }()
 
+// zerobaseObj names runtime.zerobase, the address every value of a zero-sized
+// type carries.
+//
+// The name comes from rtsym rather than from this file, because
+// specs/031-runtime-lowering.md makes rtsym the one place a runtime symbol is
+// spelled and the table is checked against the runtime's own source. The type
+// is uintptr, which is what the runtime declares, and only its width matters
+// here: the value is never loaded, only its address is taken.
+var zerobaseObj = func() *ir.Object {
+	v := rtsym.LookupVar("runtime.zerobase")
+	if v == nil {
+		panic("ssa: rtsym does not name runtime.zerobase")
+	}
+	t := &ir.Type{Kind: ir.Uintptr, Size: ir.PtrSize, Align: ir.PtrSize, Name: "uintptr"}
+	if err := ir.Layout(t); err != nil {
+		panic("ssa: uintptr does not lay out: " + err.Error())
+	}
+	return &ir.Object{Name: v.Name, Type: t, Class: ir.ClassGlobal}
+}()
+
 // dataWord returns the second word of the interface value that holds x.
 //
 // It is cmd/compile's dataWord, minus the cases that only avoid an allocation.
@@ -1710,17 +1731,11 @@ func (b *builder) dataWord(n ir.Expr, x *Value, from *ir.Type) *Value {
 	switch {
 	case from.Size == 0:
 		// A value of a zero-sized type has no bits to carry, and the word is
-		// still a pointer the collector scans, so it has to be one.
-		// cmd/compile writes the address of runtime.zerobase, which is what
-		// runtime.mallocgc returns for a request of zero bytes. rtsym holds no
-		// entry for that variable and specs/031-runtime-lowering.md makes
-		// rtsym the one place a runtime symbol is spelled, so the allocation
-		// is made rather than its answer named: newobject of a zero-sized type
-		// is mallocgc(0), and mallocgc(0) is the address of runtime.zerobase.
-		// The word is the same one gc writes and the call is the optimisation
-		// gc makes here and this does not. ir.Lower reasons the same way about
-		// runtime.newarray(t, 0) for an empty slice literal.
-		return b.box(n, "runtime.newobject", b.typeWord(n, from))
+		// still a pointer the collector scans, so it has to be one. The
+		// address of runtime.zerobase is that pointer: runtime.mallocgc
+		// returns it for a request of zero bytes, so the answer is a
+		// relocation and not a call. cmd/compile writes the same word.
+		return b.globalAddr(zerobaseObj, n.Pos)
 
 	case directIface(from):
 		// One word, and that word is a pointer. The value is the data word.
