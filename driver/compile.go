@@ -156,9 +156,11 @@ func checkSupported(cfg *Config) error {
 //     so every assembly definition in an ordinary package is ABI0, and a Go
 //     call to it under specs/030-abi.md names an ABIInternal symbol that does
 //     not exist. gc closes the gap by generating a wrapper per bodyless
-//     declaration. nanogo has no wrapper generator, so the call would reach
-//     nothing and the linker would report it as a missing symbol, which is the
-//     wrong place to find out.
+//     declaration. addGenerated builds generated functions already, but not
+//     this one: an ABI0 wrapper is a text symbol whose own convention is ABI0,
+//     so its arguments arrive in the outgoing argument area, and ssa.AssignABI
+//     has one answer. Without it the call reaches nothing and the linker
+//     reports a missing symbol, which is the wrong place to find out.
 //  2. The header. -asmhdr asks for the constants and the struct offsets the
 //     assembly refers to by name, and nanogo writes none.
 func checkAssembly(cfg *Config) error {
@@ -692,7 +694,15 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 			return nil, nil, unsupportedFunc(cfg, fset, fn, p.name, err)
 		}
 	}
-	return r, needed, nil
+	// Two passes name descriptors and the package owes both sets. ir.Lower
+	// reports the ones its table names, and no row of that table reaches a
+	// conversion to an interface, so ssa.Build names a second set: the type
+	// word of every interface value it builds. Returning only the first leaves
+	// the reference without a definition, and the failure is the linker's
+	// rather than the compiler's: "relocation target type:main.myInt not
+	// defined". type:int and type:string hide it, because the runtime defines
+	// those already.
+	return r, append(needed, f.Descriptors...), nil
 }
 
 // unsupportedFunc is the refusal every pass of compileFunc reports.

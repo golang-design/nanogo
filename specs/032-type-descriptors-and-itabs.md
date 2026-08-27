@@ -133,8 +133,8 @@ Four things stop a descriptor, and each names itself in the refusal:
 
 | Stop | What is missing |
 | --- | --- |
-| a method | the two ABI wrappers `Ifn` and `Tfn` that `gc` generates beside every method |
-| a struct or an array whose parts do not compare as one region of memory | the generated equality function this spec owes |
+| a method | the `Method` array, whose `Ifn` and `Tfn` are `TextOff`s to code |
+| a struct or an array whose parts do not compare as one region of memory | the `Equal` closure, which points at code |
 | a map | a *descriptor* for the slot group, whose slots are a literal struct |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
@@ -142,15 +142,18 @@ Writing a tail that claims a type has no methods is the failure the first row
 exists to stop: `reflect` would report an empty method set, and an itab built
 against it would find no functions.
 
-**The first row lost half its reason.** It read "the method's signature, for
-the `Mtyp` offset, and the two ABI wrappers". `ir.Method.Sig` carries the
-signature now, so `Mtyp` is writable and only the wrappers are left. They are
-not a boundary gap and no field closes them: `Ifn` and `Tfn` are `TextOff`s to
-generated *code*, `Tfn` being the method itself for a value receiver and `Ifn`
-a wrapper taking a one-word receiver, and `rtype` returns data symbols. The
-refusal names the wrappers now, and names the signature only for a method built
-below the boundary that genuinely has none, because a message that states a gap
-that is already closed sends the next reader to the wrong file.
+**The first two rows are no longer about missing code.** They read "the two ABI
+wrappers `gc` generates" and "the generated equality function this spec owes",
+and both functions exist now: `ssagen` builds them and the driver compiles them
+into the object beside the package's own functions. See
+[The generated functions](#the-generated-functions) below. What is left in both
+rows is naming: `rtype` returns data symbols, and it has to spell the symbol
+each field points at before the field can be written.
+
+`ir.Method.Sig` carries the signature, so `Mtyp` is writable. The refusal names
+the wrappers, and names the signature only for a method built below the
+boundary that genuinely has none, because a message that states a gap that is
+already closed sends the next reader to the wrong file.
 
 A struct with an unexported field is **not** a stop, and it is worth saying
 because the shape looks like one. `gc` puts the declaring package's path in the
@@ -334,8 +337,9 @@ Four fields are worth calling out because each has a way of being subtly wrong:
   which is sha256 with the first byte inverted, and takes the first four bytes
   little-endian. Reproducing it is also a check on the link string: a hash that
   matches proves the two compilers spell the type the same way.
-- **`Equal`** is a generated function for a struct or an array whose parts do
-  **not** compare as one region of memory. Every other comparable type reaches
+- **`Equal`** is the generated function of
+  [The generated functions](#the-generated-functions) for a struct or an array
+  whose parts do **not** compare as one region of memory. Every other comparable type reaches
   a function the runtime already has, and a region of memory whose size is not
   one of the fixed widths reaches `runtime.memequal_varlen`, which takes the
   size out of the closure and needs no generated function either. The field
@@ -364,6 +368,95 @@ maps as well.
 `NameOff` and `TypeOff` are offsets relative to the module's data section, not
 pointers. The linker resolves them. A compiler that emits pointers where offsets
 belong produces a binary that fails at load.
+
+## The generated functions
+
+Three of a descriptor's fields point at code that no declaration defines. The
+code is generated, it is `ssagen`'s, and the driver compiles it through the
+same passes a declared function goes through: a generated function that took a
+shorter path would be a second code generator, and the first bug it hit would
+be one the pipeline already handles.
+
+| Field | Symbol | Shape |
+| --- | --- | --- |
+| `Method.Tfn`, `Method.Ifn` | `p.(*T).M` | `func (p *T) M(a ...) (r ...) { return T.M(*p, a...) }` |
+| `Type.Equal` | `type:.eq.<link string>` | `func(p, q *T) bool` |
+| `MapType.Hasher` | `type:.hash.<link string>` | `func(p *T, h uintptr) uintptr` |
+
+Each name is a function of the type alone, so two packages that need one
+produce one symbol and the linker keeps one copy. Each text symbol is
+duplicate-tolerant for the same reason. Each function carries `ir.Func.Wrapper`,
+so its `funcID` is `abi.FuncIDWrapper` and `runtime.gorecover` does not count
+its frame: a `recover` below a wrapper must recover, and a panic raised inside
+a generated comparison belongs to the map operation that reached it.
+
+### The method wrapper
+
+A method of `T` with a value receiver produces exactly one generated function,
+`(*T).M`, which loads the receiver through the pointer and calls the method.
+Four fields can name a function and each names either the method or that
+wrapper:
+
+| descriptor | receiver | `Tfn` | `Ifn` |
+| --- | --- | --- | --- |
+| `T` | value | `T.M` | `T.M` if `T` is one pointer word, else `(*T).M` |
+| `*T` | value | `(*T).M` | `(*T).M` |
+| `*T` | pointer | `(*T).M` | `(*T).M` |
+
+A pointer receiver method is already spelled `(*T).M` by the front end, so the
+bottom row needs nothing generated. `gc` emits an `OTAILCALL` and leaves no
+frame; nanogo has no tail call, so the frame exists and the `Wrapper` mark is
+what keeps `recover` working across it.
+
+`gc` emits a call to `runtime.panicwrap` for a nil receiver so that the message
+names the method. [031](031-runtime-lowering.md) is the only place a runtime
+symbol may be spelled and `panicwrap` is not in it, so the deref of a nil
+pointer faults into the ordinary nil-pointer panic instead. The behaviour is
+the same and the message is shorter.
+
+### The equality and hash functions
+
+They are one decision made twice. Two values that compare equal must hash alike
+or a map loses keys it holds, so the set of types that needs a generated
+equality function is the set that needs a generated hash function, and both are
+`rtype`'s `algSpecial`: a struct with padding, a struct with a blank field, or
+a struct or array with a part that is a string, a float or an interface.
+
+The equality function is a chain of comparisons with an early return, which is
+`gc`'s shape, and the short circuit is the point of it: a comparison that can
+panic, which an interface field can, must not run after a comparison that
+already answered false. A field is compared by its own kind and a nested struct
+or array is walked rather than compared whole, so padding and blank fields are
+skipped by construction rather than by arithmetic.
+
+The hash function is `runtime.typehash`'s own walk: one call per leaf, in field
+order, with the function chosen by the leaf's kind. Every leaf is one scalar,
+so its width is one the runtime declares and `memequal_varlen` never applies.
+
+`gc` collapses a run of adjacent memory-comparable fields into one `memequal`
+or `memhash` call above a cost threshold and walks field by field below it
+(`cmd/compile/internal/compare`, `EqStruct` and `Memrun`). nanogo always walks.
+That changes how many instructions the function takes and not what it answers.
+
+**What `rtype` has to do to use them.** Two hooks, and neither needs an IR
+field:
+
+1. `equalClosure` and `hashClosure`, for a type whose algorithm is
+   `algSpecial`, name a closure `type:.eqfunc.<link string>` or
+   `type:.hashfunc.<link string>` holding one word that relocates to
+   `type:.eq.<link string>` or `type:.hash.<link string>`. The runtime-owned
+   path stays as it is; `algClosure` refuses a name `rtsym` does not hold, and
+   a generated name is not one.
+2. `uncommonTail` writes the `Method` array rather than refusing it: `Mcount`,
+   `Xcount`, `Moff`, and one sixteen-byte entry per method holding `Name` as a
+   `NameOff`, `Mtyp` as a `TypeOff` to `ir.Method.Sig`, and `Ifn` and `Tfn` as
+   `R_METHODOFF` relocations against the names in the table above. `Referenced`
+   grows each method's `Sig`, so the closure the driver emits covers them.
+
+The driver decides the wrapper set from the closed descriptor list, which is
+where `gc` decides it too, and it will find the equality and hash functions the
+same way: a descriptor names the symbol and whoever writes the descriptor
+defines it.
 
 ## Itabs
 
