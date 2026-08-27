@@ -412,9 +412,23 @@ func (d *decomposer) ptrTo(elem *ir.Type) *ir.Type {
 // is a memory object, and this is what an assignment of one becomes.
 //
 // The conditions are strict on purpose. The load must be the store's only
-// reader, or the value is needed elsewhere and the load cannot go. The load
-// must read the memory the store writes, or something wrote in between and
-// moving the read past it would change what is copied.
+// reader, or the value is needed elsewhere and the load cannot go. And nothing
+// may have written between the two, or moving the read past it would change
+// what is copied.
+//
+// "Nothing wrote in between" is not the same question as "both name one memory
+// value", and reading it as that one left the copy of a wide element as a load
+// the machine has no rule for. A bounds check produces memory and writes
+// nothing: it panics or it does nothing, and it is on the chain so that the
+// check stays ordered against the loads and stores around it. ssa.Build puts
+// one between the value of an assignment and its store, because it evaluates
+// the value before it takes the destination's address, so
+//
+//	s[i] = e
+//
+// with an element too wide to split reaches this pass as Load, BoundsCheck,
+// Store, and the memory the store writes is the check's and not the load's.
+// memReaches walks the guards, which is what makes the pair a move again.
 func (d *decomposer) aggregateCopies() {
 	for _, b := range d.f.Blocks {
 		for _, v := range b.Values {
@@ -432,7 +446,7 @@ func (d *decomposer) aggregateCopies() {
 			if len(d.users[ld.ID]) != 1 || d.control[ld.ID] {
 				continue
 			}
-			if ld.Args[1] != v.Args[2] {
+			if !memReaches(v.Args[2], ld.Args[1]) {
 				continue
 			}
 			size := t.Size
@@ -443,6 +457,26 @@ func (d *decomposer) aggregateCopies() {
 			d.moves++
 		}
 	}
+}
+
+// memReaches reports whether the memory from is the memory want with nothing
+// but guards written since.
+//
+// The walk goes back from the store's memory and stops at the first value that
+// is not a guard, so a store, a move, a clear or a call between the two is the
+// answer no. OpBoundsCheck and OpSliceBoundsCheck are the whole of the set:
+// they are the only operations that produce memory and write none.
+func memReaches(from, want *Value) bool {
+	for m := from; m != nil; {
+		if m == want {
+			return true
+		}
+		if m.Op != OpBoundsCheck && m.Op != OpSliceBoundsCheck {
+			return false
+		}
+		m = m.Args[len(m.Args)-1]
+	}
+	return false
 }
 
 func (d *decomposer) dropLater(v *Value) {

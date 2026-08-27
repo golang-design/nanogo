@@ -1008,6 +1008,61 @@ func TestAggregateCopy(t *testing.T) {
 	}
 }
 
+// TestAggregateCopyAcrossABoundsCheck is the shape "s[i] = e" reaches this
+// pass as, where the element is too wide to split.
+//
+// ssa.Build evaluates the value of an assignment before it takes the
+// destination's address, so the bounds check of the index sits between the
+// load and the store, and the memory the store writes is the check's rather
+// than the load's. A bounds check panics or does nothing and writes nothing,
+// so the copy is still a copy. Reading the memory as a write leaves a load of
+// an aggregate, which no arm64 rule lowers, and the compiler dies in ssa.Lower
+// with no diagnostic a user could act on.
+func TestAggregateCopyAcrossABoundsCheck(t *testing.T) {
+	p := newDecFn()
+	src := p.arg(decPtr, "src")
+	dst := p.arg(decPtr, "dst")
+	val := p.v(ssa.OpLoad, decBig, src, p.mem)
+	chk := p.v(ssa.OpBoundsCheck, ssa.MemType, p.arg(decInt, "i"), p.arg(decInt, "n"), p.mem)
+	p.mem = chk
+	st := p.v(ssa.OpStore, ssa.MemType, dst, val, chk)
+	st.AuxInt = decBig.Size
+	p.mem = st
+	f := p.ret()
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if st.Op != ssa.OpMove || st.AuxInt != decBig.Size {
+		t.Fatalf("the copy became %s", st.LongString())
+	}
+	if st.Args[0] != dst || st.Args[1] != src || st.Args[2] != chk {
+		t.Errorf("the move is %s", st.LongString())
+	}
+	if len(ssa.CheckDecomposed(f)) != 0 {
+		t.Errorf("the load survived the move: %v", ssa.CheckDecomposed(f))
+	}
+}
+
+// TestAggregateCopyAcrossAWriteRefused keeps the load when something wrote
+// between the two, because the move would then copy what the write left.
+func TestAggregateCopyAcrossAWriteRefused(t *testing.T) {
+	p := newDecFn()
+	src := p.arg(decPtr, "src")
+	dst := p.arg(decPtr, "dst")
+	val := p.v(ssa.OpLoad, decBig, src, p.mem)
+	wrote := p.v(ssa.OpZero, ssa.MemType, src, p.mem)
+	wrote.AuxInt = decBig.Size
+	p.mem = wrote
+	st := p.v(ssa.OpStore, ssa.MemType, dst, val, wrote)
+	st.AuxInt = decBig.Size
+	p.mem = st
+	f := p.ret()
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if st.Op != ssa.OpStore {
+		t.Errorf("a copy over a write became a move: %s", st.LongString())
+	}
+}
+
 // TestAggregateCopyRefused keeps the load when it is read twice, because the
 // value is needed somewhere the move does not write.
 func TestAggregateCopyRefused(t *testing.T) {
