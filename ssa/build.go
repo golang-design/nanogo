@@ -1861,46 +1861,94 @@ func (b *builder) constant(n ir.Expr) *Value {
 		b.errorf(InvNone, "a constant with no type")
 		return b.zeroValue(b.intType)
 	}
+	// The value is read as a value wherever it carries one, and never from
+	// its printed form. ir.ConstValue is the interface that exists for it,
+	// and reading a constant through String instead is what this pass did
+	// until it was found to change programs.
+	//
+	// go/constant's String is a display form and not a value. It prints a
+	// float with %.6g, so 1.0/3.0 came back as 0.333333 and the largest
+	// float32 came back three ulps below itself. It quotes a string and
+	// truncates one longer than 72 runes with an ellipsis, so a long string
+	// constant came back as a quote, 71 of its characters and three dots.
+	// Both are a program the compiler accepted and then changed.
+	//
+	// The text is still read for a value that carries nothing else, which is
+	// what ir.Value alone promises. Nothing in the compiler produces one: the
+	// builder and the lowering pass both carry ir.Const.
+	num, _ := n.Val.(ir.ConstValue)
 	text := ""
-	if n.Val != nil {
+	if num == nil && n.Val != nil {
 		text = n.Val.String()
 	}
-	// ir.Value carries only its Go syntax, so a number is parsed back from
-	// the text. Reported as a finding: specs/022-optimization-passes.md cannot
-	// fold what it cannot read, and a parse of a printed form is not the
-	// interface a constant folder should be given.
 	var v *Value
 	switch {
 	case t.Kind == ir.Bool:
 		v = b.value(OpConstBool, t, n.Pos)
-		if text == "true" {
+		switch {
+		case num != nil:
+			if !num.IsZero() {
+				v.AuxInt = 1
+			}
+		case text == "true":
 			v.AuxInt = 1
-		} else if text != "false" {
+		case text != "false":
 			v.Aux = n.Val
 		}
+
 	case t.Kind.IsInteger():
 		v = b.value(OpConstInt, t, n.Pos)
-		if i, err := strconv.ParseInt(text, 0, 64); err == nil {
-			v.AuxInt = i
+		i, ok := int64(0), false
+		if num != nil {
+			if i, ok = num.Int64(); !ok {
+				var u uint64
+				if u, ok = num.Uint64(); ok {
+					i = int64(u)
+				}
+			}
+		} else if p, err := strconv.ParseInt(text, 0, 64); err == nil {
+			i, ok = p, true
 		} else if u, err := strconv.ParseUint(text, 0, 64); err == nil {
-			v.AuxInt = int64(u)
+			i, ok = int64(u), true
+		}
+		if ok {
+			v.AuxInt = i
 		} else {
 			v.Aux = n.Val
 		}
+
 	case t.Kind.IsFloat():
 		v = b.value(OpConstFloat, t, n.Pos)
-		if f, err := strconv.ParseFloat(text, 64); err == nil {
+		v.Aux = n.Val
+		if num != nil {
+			// An inexact value is still the nearest float64, which is the
+			// number the machine holds: 1.0/3.0 is exact in no binary float
+			// and is one number and not another. Zero and inexact is the one
+			// pair a number cannot produce, so it is what says the constant
+			// is not one and leaves the fallback standing.
+			if f, exact := num.Float64(); exact || f != 0 {
+				v.Aux = f
+			}
+		} else if f, err := strconv.ParseFloat(text, 64); err == nil {
 			v.Aux = f
-		} else {
-			v.Aux = n.Val
 		}
+
 	case t.Kind == ir.String:
 		v = b.value(OpConstString, t, n.Pos)
-		if s, err := strconv.Unquote(text); err == nil {
-			v.Aux = s
+		if n.Val == nil {
+			return v
+		}
+		v.Aux = n.Val
+		if num != nil {
+			if str, ok := num.StringVal(); ok {
+				v.Aux = str
+			}
+		} else if str, err := strconv.Unquote(text); err == nil {
+			v.Aux = str
 		} else {
 			v.Aux = text
 		}
+
 	default:
 		v = b.value(OpConstNil, t, n.Pos)
 	}

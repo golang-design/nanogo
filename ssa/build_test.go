@@ -8,6 +8,7 @@ import (
 	"fmt"
 	gobuild "go/build"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"go/ast"
+	"go/constant"
 	"go/parser"
 	"go/token"
 
@@ -2721,5 +2723,51 @@ func TestItabTypeOffsetMatchesTheRuntime(t *testing.T) {
 	}
 	if int64(want) != itabTypeOffset {
 		t.Errorf("ITab is %v, so Type is at %d, and itabTypeOffset is %d", fields, want, itabTypeOffset)
+	}
+}
+
+// TestBuildConstantIsAValueAndNotItsPrintedForm is the row that made this pass
+// change programs it compiled.
+//
+// go/constant's String is a display form. It prints a float with %.6g and it
+// quotes a string and truncates one longer than 72 runes with an ellipsis, so
+// a builder that parsed the text back put 0.333333 where the program wrote
+// 1.0/3.0 and put a quote and three dots into a long string constant. Neither
+// was reported by anything: both produce a program that links and runs.
+func TestBuildConstantIsAValueAndNotItsPrintedForm(t *testing.T) {
+	third := constant.BinaryOp(constant.MakeInt64(1), token.QUO, constant.MakeInt64(3))
+	long := strings.Repeat("0123456789", 10)
+	tF64 := mkType(&ir.Type{Kind: ir.Float64})
+
+	for _, tc := range []struct {
+		what string
+		t    *ir.Type
+		val  constant.Value
+		want any
+	}{
+		{"a float that no binary float holds exactly", tF64, third, 1.0 / 3.0},
+		{"the largest float64", tF64,
+			constant.MakeFloat64(math.MaxFloat64), math.MaxFloat64},
+		{"a string longer than the display form keeps", tString,
+			constant.MakeString(long), long},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			x := obj("x", tc.t, ir.ClassLocal)
+			fn := fun("f", []*ir.Object{x},
+				asn(local(x), &ir.Node{Op: ir.OConst, Type: tc.t, Val: ir.Const{Val: tc.val}}),
+				ret())
+			f := build(t, fn)
+			var got any
+			for _, b := range f.Blocks {
+				for _, v := range b.Values {
+					if v.Op == OpConstFloat || v.Op == OpConstString {
+						got = v.Aux
+					}
+				}
+			}
+			if got != tc.want {
+				t.Errorf("the constant reached SSA as %#v, want %#v", got, tc.want)
+			}
+		})
 	}
 }

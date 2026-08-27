@@ -433,3 +433,75 @@ func dataSymbols(t *testing.T, object string) map[string]string {
 	}
 	return out
 }
+
+// constantProgram is every constant whose value the compiler used to read out
+// of its printed form.
+//
+// go/constant's String is a display form: it prints a float with %.6g and it
+// quotes a string and truncates one longer than 72 runes with an ellipsis. A
+// builder that parsed the text back compiled a program holding 0.333333 where
+// the source wrote 1.0/3.0, and holding a quote and 71 characters where the
+// source wrote a hundred. Both link and run, which is why the assertion is the
+// bytes rather than the build.
+//
+// The output is compared against gc's, so the expectation is a fact about Go.
+const constantProgram = `package main
+
+import "fmt"
+
+const long = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+
+const (
+	two24   = 1.0 * (1 << 24)
+	two53   = 1.0 * (1 << 53)
+	two64   = 1.0 * (1 << 64)
+	two128  = two64 * two64
+	two256  = two128 * two128
+	two512  = two256 * two256
+	two1024 = two512 * two512
+
+	ulp32 = two128 / two24
+	max32 = two128 - ulp32
+	ulp64 = two1024 / two53
+	max64 = two1024 - ulp64
+)
+
+var gs = long
+var gf32 float32 = max32
+var gf64 float64 = max64
+
+func main() {
+	s := long
+	fmt.Println(len(s), s)
+	fmt.Println(len(gs), gs)
+	var a float64 = 1.0 / 3.0
+	var b float64 = 123456789.123456789
+	fmt.Println(a, b)
+	var c float32 = max32
+	var d float64 = max64
+	fmt.Println(c, d, gf32, gf64)
+	var e float32 = ulp32
+	var f float64 = ulp64
+	fmt.Println(e, f)
+}
+`
+
+// TestToolexecConstantsKeepTheirValue compares the constants nanogo compiled
+// against the ones gc compiled.
+func TestToolexecConstantsKeepTheirValue(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/consts\n\ngo 1.27\n",
+		"main.go": constantProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "consts", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "consts"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

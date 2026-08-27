@@ -345,8 +345,17 @@ type ConstValue interface {
 	// Uint64 returns the value as a uint64 and whether it fits exactly.
 	Uint64() (uint64, bool)
 
-	// Float64 returns the value as a float64 and whether it is exact.
+	// Float64 returns the value as a float64 and whether it is exact. A
+	// value that is not exact is still the nearest float64, which is what a
+	// consumer that has to put the constant in a register wants: 1.0/3.0 is
+	// exact in no binary float and is still one number and not another.
 	Float64() (float64, bool)
+
+	// StringVal returns the value as a string and whether it is one. It is
+	// here for the reason the three above are: go/constant's String quotes
+	// the value and truncates one longer than 72 runes, so a consumer that
+	// read a string constant through it would compile a different string.
+	StringVal() (string, bool)
 
 	// IsZero reports whether the value is the zero of its type. This is the
 	// question asked most often and the one most easily got wrong through a

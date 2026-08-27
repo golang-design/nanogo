@@ -170,11 +170,12 @@ type constFor struct {
 	ok   bool
 }
 
-func (c constFor) String() string           { return c.text }
-func (c constFor) Int64() (int64, bool)     { return c.i, c.ok }
-func (c constFor) Uint64() (uint64, bool)   { return uint64(c.i), c.ok && c.i >= 0 }
-func (c constFor) Float64() (float64, bool) { return float64(c.i), c.ok }
-func (c constFor) IsZero() bool             { return c.ok && c.i == 0 }
+func (c constFor) String() string            { return c.text }
+func (c constFor) Int64() (int64, bool)      { return c.i, c.ok }
+func (c constFor) Uint64() (uint64, bool)    { return uint64(c.i), c.ok && c.i >= 0 }
+func (c constFor) Float64() (float64, bool)  { return float64(c.i), c.ok }
+func (c constFor) StringVal() (string, bool) { return c.text, c.ok }
+func (c constFor) IsZero() bool              { return c.ok && c.i == 0 }
 
 // TestConstValueIsOptional pins the reason ConstValue is a second interface
 // rather than a wider Value: a consumer that only prints a constant must not

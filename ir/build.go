@@ -211,6 +211,19 @@ func (c Const) Float64() (float64, bool) {
 	return constant.Float64Val(v)
 }
 
+// StringVal returns the value as a string and whether it is one.
+//
+// A string constant is read here and never through String. go/constant's
+// String is a display form: it quotes the value and truncates one longer than
+// 72 runes with an ellipsis, so a consumer that read a string constant through
+// it would compile a program holding a different string.
+func (c Const) StringVal() (string, bool) {
+	if c.Val == nil || c.Val.Kind() != constant.String {
+		return "", false
+	}
+	return constant.StringVal(c.Val), true
+}
+
 // IsZero reports whether the value is the zero of its type.
 //
 // nil is the zero value of every type it can be written for, which is why the
