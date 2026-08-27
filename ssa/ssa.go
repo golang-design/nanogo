@@ -321,6 +321,20 @@ type Func struct {
 	// FuncInfo carries as a funcID (ir.Func.Wrapper).
 	Wrapper bool
 
+	// Descriptors lists the types whose type descriptors this function's code
+	// names, in first-use order.
+	//
+	// A reference is not a definition. The linker resolves type: symbols by
+	// name and defines none of them, so the package that names one owes the
+	// bytes unless the runtime already carries them. ir.LowerAndCollect
+	// reports the set the lowering table names and this is the set
+	// construction names, which is a different set: a conversion to an
+	// interface reaches specs/032's descriptor and no row of that table.
+	//
+	// First-use order and not a map, because the object's symbol table is
+	// written in the order symbols were added (specs/053-determinism.md).
+	Descriptors []*ir.Type
+
 	// ABI is where specs/030-abi.md puts this function's parameters and
 	// results. AssignABI fills it and it is nil until then.
 	//

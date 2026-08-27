@@ -2367,3 +2367,215 @@ func TestSameTypeAnswersFromTheLinkString(t *testing.T) {
 		t.Error("a nil type is reported as some type")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Concrete to interface
+
+// tEface is the empty interface, spelled the way ir.Converter spells it.
+var tEface = mkType(&ir.Type{Kind: ir.Interface, EmptyIface: true, Methods: []ir.Method{}})
+
+// convertToEface builds "var dst any = src" and returns the function.
+func convertToEface(from *ir.Type) *ir.Func {
+	src := obj("src", from, ir.ClassLocal)
+	dst := obj("dst", tEface, ir.ClassLocal)
+	return fun("convert", []*ir.Object{src, dst},
+		asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tEface}),
+	)
+}
+
+// findOp returns the first value with this operation, or nil.
+func findOp(f *Func, op Op) *Value {
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == op {
+				return v
+			}
+		}
+	}
+	return nil
+}
+
+// TestBuildConvertsAConcreteValueToAnEmptyInterface pins the two words of
+// specs/032's conversion: the type word is the concrete type's descriptor and
+// the data word follows cmd/compile's dataWord.
+func TestBuildConvertsAConcreteValueToAnEmptyInterface(t *testing.T) {
+	// A one-word struct holding a pointer. It is not pointer shaped and it is
+	// its own data word, which is the case types.IsDirectIface answers and a
+	// kind test does not.
+	tBox := mkType(&ir.Type{Kind: ir.Struct, Name: "box", Fields: []ir.Field{{Name: "p", Type: tIntPtr}}})
+	tUintptr := mkType(&ir.Type{Kind: ir.Uintptr, Name: "uintptr"})
+	tInt32 := mkType(&ir.Type{Kind: ir.Int32, Name: "int32"})
+	tInt16 := mkType(&ir.Type{Kind: ir.Int16, Name: "int16"})
+
+	for _, tt := range []struct {
+		name string
+		from *ir.Type
+		// box is the runtime symbol the data word calls, or "" when the value
+		// is its own data word.
+		box string
+		// bits reports that the value is reinterpreted before the call.
+		bits bool
+	}{
+		{"pointer", tIntPtr, "", false},
+		{"one-word struct holding a pointer", tBox, "", false},
+		{"int", tInt, "runtime.convT64", false},
+		{"uintptr", tUintptr, "runtime.convT64", false},
+		{"float64", tFloat, "runtime.convT64", true},
+		{"int32", tInt32, "runtime.convT32", false},
+		{"int16", tInt16, "runtime.convT16", false},
+		{"string", tString, "runtime.convTstring", false},
+		{"slice", tSlice, "runtime.convTslice", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := build(t, convertToEface(tt.from))
+
+			mk := findOp(f, OpIMake)
+			if mk == nil {
+				t.Fatalf("no interface was made:\n%s", f)
+			}
+			word := mk.Args[0]
+			if word.Op != OpAddr {
+				t.Fatalf("the type word is %v, want the address of a descriptor", word.Op)
+			}
+			name, err := ir.TypeSymbol(tt.from)
+			if err != nil {
+				t.Fatalf("TypeSymbol(%v): %v", tt.from, err)
+			}
+			if o, _ := word.Aux.(*ir.Object); o == nil || o.Name != name {
+				t.Errorf("the type word names %v, want %s", word.Aux, name)
+			}
+			if len(f.Descriptors) != 1 || f.Descriptors[0] != tt.from {
+				t.Errorf("the function records %v as the descriptors it names, want just %v", f.Descriptors, tt.from)
+			}
+
+			data := mk.Args[1]
+			if tt.box == "" {
+				if findOp(f, OpStaticCall) != nil {
+					t.Errorf("a value that is its own data word was boxed:\n%s", f)
+				}
+				if data.Type != tt.from {
+					t.Errorf("the data word has type %v, want the value itself, which is %v", data.Type, tt.from)
+				}
+				return
+			}
+			if data.Op != OpSelectN {
+				t.Fatalf("the data word is %v, want the result of a boxing call", data.Op)
+			}
+			call := data.Args[0]
+			o, _ := call.Aux.(*ir.Object)
+			if o == nil || o.Name != tt.box {
+				t.Errorf("the data word calls %v, want %s", call.Aux, tt.box)
+			}
+			arg := call.Args[0]
+			if tt.bits != (arg.Op == OpBitcast) {
+				t.Errorf("the boxed argument is %v, and a reinterpretation was %v", arg.Op, tt.bits)
+			}
+		})
+	}
+}
+
+// TestBuildRefusesADataWordItCannotBox names the two shapes construction has
+// no answer for, so that neither is compiled into a wrong one.
+func TestBuildRefusesADataWordItCannotBox(t *testing.T) {
+	tIface := mkType(&ir.Type{Kind: ir.Interface, Methods: []ir.Method{
+		{Name: "Code", Sig: mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}})},
+	}})
+
+	for _, tt := range []struct {
+		name string
+		from *ir.Type
+		to   *ir.Type
+		want string
+	}{
+		// One byte wide. cmd/compile indexes runtime.staticuint64s and this
+		// does not, so there is no helper left that takes it by value.
+		{"a one-byte type", tBool, tEface, "runtime.convT"},
+		// Two words. convT and convTnoptr take an address and construction has
+		// no frame slot to give them.
+		{"a two-word struct", tStruct, tEface, "runtime.convT"},
+		// The type word of an interface with methods is an itab.
+		{"an interface with methods", tInt, tIface, "itab"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			src := obj("src", tt.from, ir.ClassLocal)
+			dst := obj("dst", tt.to, ir.ClassLocal)
+			fn := fun("convert", []*ir.Object{src, dst},
+				asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tt.to}),
+			)
+			_, err := Build(fn)
+			if err == nil {
+				t.Fatal("the conversion built, so a data word nothing can fill reaches the runtime")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("the refusal is %q and does not name %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildNamesOneDescriptorPerType asserts two conversions of one type name
+// one symbol.
+//
+// The linker deduplicates descriptors by name, so two objects here are two
+// relocations against one symbol and not a bug. Naming it once is what keeps
+// the record on the function a set rather than a list with repeats, which is
+// what the caller emits from.
+func TestBuildNamesOneDescriptorPerType(t *testing.T) {
+	src := obj("src", tInt, ir.ClassLocal)
+	dst := obj("dst", tEface, ir.ClassLocal)
+	other := obj("other", tString, ir.ClassLocal)
+	fn := fun("convert", []*ir.Object{src, dst, other},
+		asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tEface}),
+		asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(other), Type: tEface}),
+		asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tEface}),
+	)
+	f := build(t, fn)
+
+	if len(f.Descriptors) != 2 || f.Descriptors[0] != tInt || f.Descriptors[1] != tString {
+		t.Fatalf("the function records %v, want int then string, each once", f.Descriptors)
+	}
+	var objs []*ir.Object
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpAddr {
+				continue
+			}
+			if o, ok := v.Aux.(*ir.Object); ok {
+				objs = append(objs, o)
+			}
+		}
+	}
+	if len(objs) != 3 {
+		t.Fatalf("%d descriptor addresses, want one per conversion", len(objs))
+	}
+	if objs[0] != objs[2] {
+		t.Error("two conversions of one type name two objects")
+	}
+}
+
+// TestDirectIfaceIsWidthAndPointerness pins the predicate the data word turns
+// on, which is not "pointer shaped".
+func TestDirectIfaceIsWidthAndPointerness(t *testing.T) {
+	tUintptr := mkType(&ir.Type{Kind: ir.Uintptr, Name: "uintptr"})
+	tBox := mkType(&ir.Type{Kind: ir.Struct, Name: "box", Fields: []ir.Field{{Name: "p", Type: tIntPtr}}})
+	tMap := mkType(&ir.Type{Kind: ir.Map, Key: tInt, Elem: tInt})
+
+	for _, tt := range []struct {
+		name string
+		typ  *ir.Type
+		want bool
+	}{
+		{"a pointer", tIntPtr, true},
+		{"a map", tMap, true},
+		{"a function", tFunc, true},
+		{"a one-field struct holding a pointer", tBox, true},
+		{"a uintptr, which is one word and holds no pointer", tUintptr, false},
+		{"an int", tInt, false},
+		{"a string", tString, false},
+		{"a one-byte type", tBool, false},
+	} {
+		if got := directIface(tt.typ); got != tt.want {
+			t.Errorf("directIface(%s) is %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}

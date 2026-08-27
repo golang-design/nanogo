@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"golang.design/x/nanogo/ir"
+	"golang.design/x/nanogo/rtype"
 	"golang.design/x/nanogo/syntax"
 )
 
@@ -50,6 +51,7 @@ func Build(fn *ir.Func) (*Func, error) {
 		labelDefined: make(map[string]bool),
 		ptrTypes:     make(map[*ir.Type]*ir.Type),
 		memVar:       &ir.Object{Name: "mem", Type: MemType, Class: ir.ClassLocal},
+		descs:        make(map[string]*ir.Object),
 		boolType:     &ir.Type{Kind: ir.Bool, Size: 1, Align: 1, Name: "bool"},
 		intType:      &ir.Type{Kind: ir.Int64, Size: 8, Align: 8, Name: "int"},
 	}
@@ -110,6 +112,13 @@ type builder struct {
 	ptrTypes map[*ir.Type]*ir.Type
 	boolType *ir.Type
 	intType  *ir.Type
+
+	// descs names each type descriptor once, so that two conversions of one
+	// type produce two relocations against one object. It is a lookup table
+	// and is never ranged over; Func.Descriptors carries the same set in
+	// first-use order for the caller that has to emit them
+	// (specs/053-determinism.md).
+	descs map[string]*ir.Object
 }
 
 // ctrlFrame is one enclosing loop or switch.
@@ -1434,11 +1443,177 @@ func (b *builder) convertInterface(n ir.Expr, x *Value, from, to *ir.Type) *Valu
 		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v", from, to))
 		return x
 	}
-	if from.Kind == ir.Interface && sameType(from, to) {
+	if from.Kind == ir.Interface {
+		if sameType(from, to) {
+			return x
+		}
+		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v", from, to))
 		return x
 	}
-	b.unsupported(n, fmt.Sprintf("a conversion from %v to %v", from, to))
-	return x
+	return b.concreteToInterface(n, x, from, to)
+}
+
+// concreteToInterface builds the interface value that holds x.
+//
+// The shape is cmd/compile's walkConvInterface: a type word and a data word,
+// joined into one value. The type word is the concrete type's descriptor for an
+// empty interface and the itab of the (interface, concrete type) pair for an
+// interface with methods. Only the first is built, because an itab is a symbol
+// this compiler has to define and specs/032 has no writer for one.
+func (b *builder) concreteToInterface(n ir.Expr, x *Value, from, to *ir.Type) *Value {
+	if !to.EmptyIface {
+		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v, which leads with the itab of that pair and specs/032 defines no itab", from, to))
+		return b.zeroValue(to)
+	}
+	word := b.typeWord(n, from)
+	data := b.dataWord(n, x, from)
+	if b.err != nil {
+		return b.zeroValue(to)
+	}
+	return b.value(OpIMake, to, n.Pos, word, data)
+}
+
+// typeWord returns the address of the type descriptor of t.
+//
+// The name comes from ir.TypeSymbol and is never built here. specs/032
+// requires one naming function used by everything, because the linker
+// deduplicates these symbols by name and two spellings of one type are two
+// descriptors for a type that must have one.
+//
+// The type is recorded on the function, because a reference is not a
+// definition: the descriptor of a type this package owns has to be written
+// into the object, and only the caller holds the set a package emits.
+func (b *builder) typeWord(n ir.Expr, t *ir.Type) *Value {
+	name, err := ir.TypeSymbol(t)
+	if err != nil {
+		b.unsupported(n, fmt.Sprintf("a conversion from %v to an interface, whose type word is its descriptor: %v", t, err))
+		return nil
+	}
+	o, ok := b.descs[name]
+	if !ok {
+		o = &ir.Object{Name: name, Type: descriptorType, Class: ir.ClassGlobal}
+		b.descs[name] = o
+		b.f.Descriptors = append(b.f.Descriptors, t)
+	}
+	v := b.value(OpAddr, b.ptrTo(descriptorType), n.Pos)
+	v.Aux = o
+	return v
+}
+
+// descriptorType is the type of a type descriptor, as construction sees it.
+//
+// The contents are rtype's business. What is needed here is a type of the right
+// size and alignment to take the address of, because below the IR a type is a
+// size, an alignment and a pointer map and nothing else. The size is
+// rtype.TypeSize rather than a number written again here.
+//
+// It carries no name on purpose. A name would make ir.TypeSymbol produce
+// type:runtime._type, which is a descriptor gc never emits and the linker would
+// never resolve.
+var descriptorType = func() *ir.Type {
+	t := &ir.Type{
+		Kind: ir.Array,
+		Elem: &ir.Type{Kind: ir.Uintptr, Size: ir.PtrSize, Align: ir.PtrSize, Name: "uintptr"},
+		Len:  rtype.TypeSize / ir.PtrSize,
+	}
+	if err := ir.Layout(t); err != nil {
+		panic("ssa: a type descriptor does not lay out: " + err.Error())
+	}
+	return t
+}()
+
+// dataWord returns the second word of the interface value that holds x.
+//
+// It is cmd/compile's dataWord, minus the cases that only avoid an allocation.
+// A pointer-shaped value is its own representation and goes in as it stands.
+// Everything else is boxed, which means a copy in the heap and the address of
+// the copy, and the runtime has one helper per shape it can box by value.
+//
+// The helpers that take an address are not reachable from here. runtime.convT
+// and runtime.convTnoptr copy from a pointer the caller supplies, so the value
+// needs a frame slot to be addressed through, and construction has already
+// decided which objects live in the frame by the time an expression is built.
+// A type they would be needed for is refused by name instead.
+func (b *builder) dataWord(n ir.Expr, x *Value, from *ir.Type) *Value {
+	switch {
+	case directIface(from):
+		// One word, and that word is a pointer. The value is the data word.
+		return x
+
+	case from.Kind == ir.String:
+		return b.box(n, "runtime.convTstring", x)
+
+	case from.Kind == ir.Slice:
+		// convTslice takes []byte and copies the header, so the element type
+		// does not reach it. cmd/compile passes any slice to it for the same
+		// reason.
+		return b.box(n, "runtime.convTslice", x)
+
+	case boxableWord(from) && from.Size == 8 && from.Align == 8:
+		return b.box(n, "runtime.convT64", b.rawBits(from, x, n.Pos))
+
+	case boxableWord(from) && from.Size == 4 && from.Align == 4:
+		return b.box(n, "runtime.convT32", b.rawBits(from, x, n.Pos))
+
+	case boxableWord(from) && from.Size == 2 && from.Align == 2:
+		return b.box(n, "runtime.convT16", x)
+	}
+	b.unsupported(n, fmt.Sprintf("a conversion from %v to an interface, whose data word needs runtime.convT with the address of a copy in the frame", from))
+	return nil
+}
+
+// box calls one of the runtime's boxing helpers and returns the pointer it
+// gives back.
+func (b *builder) box(n ir.Expr, sym string, arg *Value) *Value {
+	if arg == nil {
+		return nil
+	}
+	c := b.value(OpStaticCall, MemType, n.Pos, arg, b.memory())
+	c.Aux = RuntimeFunc(sym)
+	b.setMemory(c)
+	r := b.value(OpSelectN, b.ptrTo(nil), n.Pos, c)
+	r.AuxInt = 0
+	return r
+}
+
+// rawBits returns x as the integer the boxing helper takes.
+//
+// A floating-point value and an integer of the same width live in two register
+// files, and specs/030-abi.md places an argument by the type of the value. A
+// float passed to a helper that declares uint64 would be left in a
+// floating-point register and read out of an integer one, so the
+// reinterpretation is explicit.
+func (b *builder) rawBits(t *ir.Type, x *Value, pos syntax.Pos) *Value {
+	if !t.Kind.IsFloat() {
+		return x
+	}
+	k := ir.Uint64
+	if t.Size == 4 {
+		k = ir.Uint32
+	}
+	u := &ir.Type{Kind: k, Size: t.Size, Align: t.Align, Name: k.String()}
+	return b.value(OpBitcast, u, pos, x)
+}
+
+// directIface reports whether a value of t is its own data word.
+//
+// cmd/compile's types.IsDirectIface: one machine word wide, and that word
+// holds a pointer. It is not the same question as "pointer shaped". A uintptr
+// is one word and holds no pointer, so an interface holding one carries the
+// integer's address and not the integer, and a one-field struct holding a
+// pointer is not pointer shaped and is its own data word.
+func directIface(t *ir.Type) bool {
+	return t.Size == ir.PtrSize && t.PtrBytes() == ir.PtrSize
+}
+
+// boxableWord reports whether t is a single scalar the by-value helpers take.
+//
+// convT16, convT32 and convT64 take an unsigned integer of their own width, so
+// what reaches them has to be one machine value of exactly that width. A
+// struct or an array of the same width is not one: it is several values by the
+// time specs/025's decomposition has run, and the helper reads one.
+func boxableWord(t *ir.Type) bool {
+	return t.Kind.IsInteger() || t.Kind.IsFloat()
 }
 
 // sameType reports whether two IR types are one type.
