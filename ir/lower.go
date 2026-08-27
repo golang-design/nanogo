@@ -757,6 +757,9 @@ func (l *lowerer) stmt(s Stmt) {
 	case OSelect:
 		l.selectStmt(s)
 
+	case OTypeSwitch:
+		l.typeSwitchStmt(s)
+
 	case ORange:
 		// Init is not flushed here. It holds the range expression's
 		// temporaries, and rangeStmt puts them in the loop's own init list for
@@ -3424,29 +3427,44 @@ func (l *lowerer) printExpr(n Expr) Expr {
 // reason: specs/021's concreteToInterface refuses to build a value of a
 // non-empty interface type, because its type word is that same itab.
 
-// assertOperand evaluates the interface an assertion reads and returns a
-// factory for its two words.
+// ifaceRef reads the parts of one interface value the rows below examine.
 //
 // The value is addressed rather than copied. An interface is wider than a
 // register, so specs/021-ssa-construction.md's ssaAble puts every one of them
 // in the frame already, and one pointer temporary reads both words without a
 // sixteen-byte copy. The address is evaluated once, so an operand that is a
 // call is called once.
+type ifaceRef struct {
+	l   *lowerer
+	p   *Object // the address of the value, evaluated once
+	h   *Type   // the header the address is read through
+	t   *Type   // the interface type itself
+	pos syntax.Pos
+}
+
+// word returns one of the two words of the value.
+func (r *ifaceRef) word(i int) Expr {
+	return &Node{Op: OField, Pos: r.pos, Type: r.h.Fields[i].Type, X: ref(r.p, r.pos), Index: i}
+}
+
+// value returns the interface value itself, which is what a type switch
+// clause that names no single concrete type binds its variable to.
+func (r *ifaceRef) value() Expr {
+	return &Node{Op: ODeref, Pos: r.pos, Type: r.t,
+		X: &Node{Op: OConvert, Pos: r.pos, Type: r.l.ptrTo(r.t), X: ref(r.p, r.pos)}}
+}
+
+// ifaceOperand evaluates the interface a dynamic type test reads.
 //
 // The second result is the reason the row cannot be built, for a caller to
-// report.
-func (l *lowerer) assertOperand(x Expr, target *Type) (func(int) Expr, string) {
+// report. Both callers add their own reason for a target they cannot reach,
+// because the two reach different runtime symbols.
+func (l *lowerer) ifaceOperand(x Expr) (*ifaceRef, string) {
 	if x == nil || x.Type == nil {
 		return nil, "an operand with no type"
 	}
 	if x.Type.Kind != Interface {
 		return nil, "an operand of " + x.Type.Kind.String() + ", and only an interface holds a dynamic type"
-	}
-	if target == nil {
-		return nil, "an assertion with no target type"
-	}
-	if target.Kind == Interface {
-		return nil, "a target that is an interface, whose answer is the itab that pairs it with the dynamic type: cmd/compile calls runtime.typeAssert with an *abi.TypeAssert, and specs/032 writes neither that descriptor nor an itab"
 	}
 	if !x.Type.EmptyIface {
 		return nil, "an operand that is an interface with methods, which leads with an *itab and not a *_type, so the word to compare against is the itab of the pair: specs/032 writes no itab"
@@ -3457,9 +3475,18 @@ func (l *lowerer) assertOperand(x Expr, target *Type) (func(int) Expr, string) {
 	}
 	pos := x.Pos
 	p := l.spill(&Node{Op: OConvert, Pos: pos, Type: l.ptrTo(h), X: l.addrOf(x)})
-	return func(i int) Expr {
-		return &Node{Op: OField, Pos: pos, Type: h.Fields[i].Type, X: ref(p, pos), Index: i}
-	}, ""
+	return &ifaceRef{l: l, p: p, h: h, t: x.Type, pos: pos}, ""
+}
+
+// assertTarget reports why an assertion to t cannot be built, or "".
+func assertTarget(t *Type) string {
+	if t == nil {
+		return "an assertion with no target type"
+	}
+	if t.Kind == Interface {
+		return "a target that is an interface, whose answer is the itab that pairs it with the dynamic type: cmd/compile calls runtime.typeAssert with an *abi.TypeAssert, and specs/032 writes neither that descriptor nor an itab"
+	}
+	return ""
 }
 
 // ifaceValue reads a value of t out of the data word of an interface.
@@ -3469,17 +3496,41 @@ func (l *lowerer) assertOperand(x Expr, target *Type) (func(int) Expr, string) {
 // in, and the word is the address of that copy. types.IsDirectIface asks the
 // same question the same way, and it is not "pointer shaped": a uintptr is one
 // word and holds no pointer, so an interface carries the integer's address.
-func (l *lowerer) ifaceValue(data Expr, t *Type, pos syntax.Pos) Expr {
-	if directIface(t) {
-		return &Node{Op: OConvert, Pos: pos, Type: t, X: data}
+//
+// The second result is the reason the value cannot be spelled. A struct or an
+// array of one pointer is its own data word too, and OConvert does not
+// reinterpret a machine word as an aggregate: ssa.Build's convertOp bitcasts
+// between the kinds wordShaped names and nothing else. Writing the word into a
+// temporary through a pointer would spell it, and it would be a store, which
+// the comma-ok row cannot take: that row reads the data word in the arm the
+// test passed and a store hoisted out of the arm would put a word that is not
+// a pointer into a slot the collector scans.
+func (l *lowerer) ifaceValue(data Expr, t *Type, pos syntax.Pos) (Expr, string) {
+	if !directIface(t) {
+		return &Node{Op: ODeref, Pos: pos, Type: t,
+			X: &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(t), X: data}}, ""
 	}
-	return &Node{Op: ODeref, Pos: pos, Type: t,
-		X: &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(t), X: data}}
+	if !wordShaped(t) {
+		return nil, "a " + t.Kind.String() + " of one word holding a pointer, which is its own data word, and OConvert reinterprets a word as a pointer, a map, a channel or a func and not as a " + t.Kind.String()
+	}
+	return &Node{Op: OConvert, Pos: pos, Type: t, X: data}, ""
 }
 
 // directIface reports whether a value of t is its own data word.
 func directIface(t *Type) bool {
 	return t.Size == PtrSize && t.PtrBytes() == PtrSize
+}
+
+// wordShaped reports whether OConvert reinterprets a machine word as t.
+//
+// It is ssa.Build's isPointerShaped without uintptr, which is one word and
+// holds no pointer and so is never its own data word.
+func wordShaped(t *Type) bool {
+	switch t.Kind {
+	case Ptr, UnsafePtr, Map, Chan, FuncKind:
+		return true
+	}
+	return false
 }
 
 // typeAssert builds x.(T), the form that panics.
@@ -3500,34 +3551,43 @@ func (l *lowerer) typeAssert(n Expr) Expr {
 		return n
 	}
 	pos, target := n.Pos, n.Y.Type
-	word, why := l.assertOperand(n.X, target)
+	if why := assertTarget(target); why != "" {
+		l.refuse(n, why)
+		return n
+	}
+	x, why := l.ifaceOperand(n.X)
 	if why != "" {
 		l.refuse(n, why)
 		return n
 	}
-	// The descriptor of the target is asked for twice, because a node is a
-	// tree one pass rewrites in place and may not stand in two places. Both
-	// calls name one object and one symbol. The third is the static type of
-	// the operand, which is the "interface {} is" half of the message gc
-	// prints and it reads it the same way.
 	want, why := l.descriptor(target, pos)
-	again, _ := l.descriptor(target, pos)
-	src, srcWhy := l.descriptor(n.X.Type, pos)
-	if want == nil || src == nil {
-		if want == nil {
-			l.refuse(n, why)
-		} else {
-			l.refuse(n, srcWhy)
-		}
+	if want == nil {
+		l.refuse(n, why)
 		return n
 	}
+	// The static type of the operand, which is the "interface {} is" half of
+	// the message gc prints. It reads the same descriptor the same way.
+	src, why := l.descriptor(n.X.Type, pos)
+	if src == nil {
+		l.refuse(n, why)
+		return n
+	}
+	// The target's descriptor again, because a node is a tree a later pass
+	// rewrites in place and may not stand in two places. Both calls name one
+	// object and one symbol.
+	again, _ := l.descriptor(target, pos)
 	l.emit(&Node{
 		Op: OIf, Pos: pos, Type: voidType,
 		X: &Node{Op: OCompare, Op1: syntax.Neq, Pos: pos, Type: lowerBool,
-			X: word(ifaceTyp), Y: want},
-		Body: []Stmt{runtimeCall(pos, "runtime.panicdottypeE", word(ifaceTyp), again, src)},
+			X: x.word(ifaceTyp), Y: want},
+		Body: []Stmt{runtimeCall(pos, "runtime.panicdottypeE", x.word(ifaceTyp), again, src)},
 	})
-	return l.ifaceValue(word(ifaceData), target, pos)
+	out, why := l.ifaceValue(x.word(ifaceData), target, pos)
+	if out == nil {
+		l.refuse(n, why)
+		return n
+	}
+	return out
 }
 
 // typeAssert2 builds v, ok = x.(T).
@@ -3548,7 +3608,11 @@ func (l *lowerer) typeAssert2(s Stmt) {
 		return
 	}
 	target := n.Type.Fields[0].Type
-	word, why := l.assertOperand(l.expr(n.X), target)
+	why := assertTarget(target)
+	var x *ifaceRef
+	if why == "" {
+		x, why = l.ifaceOperand(l.expr(n.X))
+	}
 	if why != "" {
 		l.refuse(n, why)
 		l.emit(s)
@@ -3561,23 +3625,167 @@ func (l *lowerer) typeAssert2(s Stmt) {
 		return
 	}
 
+	got, why := l.ifaceValue(x.word(ifaceData), target, pos)
+	if got == nil {
+		l.refuse(n, why)
+		l.emit(s)
+		return
+	}
+
 	val := l.tempObj(target, pos)
 	if z := l.zeroOf(target, pos); z != nil {
 		l.emit(define(pos, ref(val, pos), z))
 	} else {
 		l.zero(val, pos)
 	}
-	got := l.tempObj(lowerBool, pos)
-	l.emit(define(pos, ref(got, pos), boolConst(pos, false)))
+	ok := l.tempObj(lowerBool, pos)
+	l.emit(define(pos, ref(ok, pos), boolConst(pos, false)))
 	l.emit(&Node{
 		Op: OIf, Pos: pos, Type: voidType,
 		X: &Node{Op: OCompare, Op1: syntax.Eql, Pos: pos, Type: lowerBool,
-			X: word(ifaceTyp), Y: want},
+			X: x.word(ifaceTyp), Y: want},
 		Body: []Stmt{
-			Assign(pos, ref(val, pos), l.ifaceValue(word(ifaceData), target, pos)),
-			Assign(pos, ref(got, pos), boolConst(pos, true)),
+			Assign(pos, ref(val, pos), got),
+			Assign(pos, ref(ok, pos), boolConst(pos, true)),
 		},
 	})
 	l.assignTo(s, 0, ref(val, pos))
-	l.assignTo(s, 1, ref(got, pos))
+	l.assignTo(s, 1, ref(ok, pos))
+}
+
+// typeSwitchStmt lowers a type switch into an ordinary switch on the first
+// word of the interface.
+//
+// # Why a switch and not a chain of ifs
+//
+// ir.OSwitch is not Go-specific, so ssa.Build already builds one: a tag, a
+// comparison per case expression, a clause with no expression as the default,
+// and a break that leaves. Every one of those is what a type switch needs, and
+// the only difference is what is compared. Building the chain here instead
+// would put a second copy of that construction in this file and would give
+// break nothing to bind to.
+//
+// # The clause variable
+//
+// The specification gives x := y.(type) a different type in each clause: the
+// clause's own type where the clause names exactly one, and the guard's type
+// otherwise, which covers the default clause, a clause listing several types
+// and case nil. ir.Build takes the object from the checker, so the object's
+// type is the answer and nothing here re-derives it: an interface type means
+// bind the value as it stands, and anything else means read the concrete value
+// out of the data word.
+//
+// The assignment goes at the front of the clause body, so it happens when the
+// clause is entered and not before.
+//
+// # Why the statements go in the switch's own Init
+//
+// A statement in front of the switch would take the label a labelled break
+// needs: ssa.Build reads the pending label at the first statement it sees, so
+// "L: switch v.(type)" with a temporary in front binds L to the temporary.
+// rangeStmt keeps its temporaries in the loop's Init for the same reason.
+func (l *lowerer) typeSwitchStmt(n *Node) {
+	pos := n.Pos
+	l.push()
+	for _, s := range n.Init {
+		l.stmt(s)
+	}
+	n.Init = nil
+	n.X = l.expr(n.X)
+
+	x, why := l.ifaceOperand(n.X)
+	if why != "" {
+		l.refuse(n, why)
+		pre := l.pop()
+		l.emit(pre...)
+		l.emit(n)
+		return
+	}
+	clauses := make([]Stmt, 0, len(n.Body))
+	ok := true
+	for _, c := range n.Body {
+		if c == nil || c.Op != OCase {
+			l.refuse(n, "a clause that is not a case node")
+			ok = false
+			continue
+		}
+		if !l.typeSwitchCase(n, c, x) {
+			ok = false
+		}
+		clauses = append(clauses, c)
+	}
+	pre := l.pop()
+	if !ok {
+		// A refused row leaves its node in place, so that construction reports
+		// it too rather than building a switch with a clause missing.
+		l.emit(pre...)
+		l.emit(n)
+		return
+	}
+	l.emit(&Node{Op: OSwitch, Pos: pos, Type: voidType, Init: pre, X: x.word(ifaceTyp), Body: clauses})
+}
+
+// typeSwitchCase lowers one clause of a type switch in place and reports
+// whether every part of it was lowered.
+//
+// A case expression becomes the descriptor of the type it names, and case nil
+// becomes the nil pointer, which is what an interface holding nothing leads
+// with. A clause with no case expression is the default and keeps none.
+func (l *lowerer) typeSwitchCase(n, c *Node, x *ifaceRef) bool {
+	pos := c.Pos
+	ok := true
+	var single *Type
+	for i, a := range c.Args {
+		if a == nil || a.Type == nil {
+			l.refuse(n, "a case with no type")
+			ok = false
+			continue
+		}
+		if a.Op == OConst {
+			// case nil. ir.Build gives it the guard's type and no value,
+			// because there is no type to name.
+			c.Args[i] = l.zeroOf(l.ptrTo(rtypeType), pos)
+			continue
+		}
+		if a.Type.Kind == Interface {
+			l.refuse(n, "a case that names an interface, whose answer is which itab implements it: cmd/compile calls runtime.interfaceSwitch with an *abi.InterfaceSwitch, and specs/032 writes neither that descriptor nor an itab")
+			ok = false
+			continue
+		}
+		desc, why := l.descriptor(a.Type, pos)
+		if desc == nil {
+			l.refuse(n, why)
+			ok = false
+			continue
+		}
+		c.Args[i] = desc
+		single = a.Type
+	}
+	if len(c.Args) != 1 {
+		single = nil
+	}
+
+	l.push()
+	if o := c.Obj; o != nil && o.Name != "_" && o.Type != nil {
+		switch {
+		case o.Type.Kind == Interface:
+			// The default clause, a clause listing several types, and case
+			// nil. The variable keeps the guard's type and its value.
+			l.emit(Assign(pos, ref(o, pos), x.value()))
+		case single != nil:
+			v, why := l.ifaceValue(x.word(ifaceData), o.Type, pos)
+			if v == nil {
+				l.refuse(n, why)
+				ok = false
+				break
+			}
+			l.emit(Assign(pos, ref(o, pos), v))
+		default:
+			l.refuse(n, "a clause whose variable is a "+o.Type.Kind.String()+" and whose case list is not one type")
+			ok = false
+		}
+	}
+	pre := l.pop()
+	c.Body = append(pre, l.stmts(c.Body)...)
+	return ok
 }

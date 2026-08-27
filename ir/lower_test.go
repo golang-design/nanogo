@@ -1756,6 +1756,11 @@ func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
 		{"a select with no clauses", `func f() { select {} }`, OSelect, "runtime.block"},
 		{"an assertion to an interface", `func f(v any) error { return v.(error) }`, OTypeAssert, "runtime.typeAssert"},
 		{"an assertion from an interface with methods", `func f(v interface{ M() int }) int { return v.(T).M() }`, OTypeAssert, "no itab"},
+		{"an assertion to a one-word struct", `
+type W struct{ P *int }
+
+func f(v any) W { return v.(W) }`, OTypeAssert, "its own data word"},
+		{"a type switch on an interface case", `func f(v any) int { switch v.(type) { case error: return 1 }; return 0 }`, OTypeSwitch, "runtime.interfaceSwitch"},
 		{"recover whose value is read", `func f() { useAny(recover()) }`, ORecover, "no row"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},
 		{"range over a function", `func f(it func(func(int) bool)) { for v := range it { use(v) } }`, ORange, "range over func"},
@@ -3197,4 +3202,143 @@ func TestLowerTypeAssertCommaOkBlank(t *testing.T) {
 	if lowerCalled(fn, "runtime.panicdottypeE") {
 		t.Errorf("the comma-ok form panics: %v", lowerCalls(fn))
 	}
+}
+
+// TestLowerTypeSwitch checks the shape a type switch becomes: an ordinary
+// switch on the first word of the interface.
+func TestLowerTypeSwitch(t *testing.T) {
+	fn := lowerOK(t, `func f(v any) int {
+	switch n := v.(type) {
+	case nil:
+		return 0
+	case int:
+		return n
+	case string, float64:
+		use(len(gs))
+		return 2
+	default:
+		return 3
+	}
+}`)
+	sw := lowerFirst(fn, OSwitch)
+	if sw == nil {
+		t.Fatalf("the type switch is not a switch:\n%s", buildDump(fn))
+	}
+	if len(sw.Body) != 4 {
+		t.Fatalf("the switch has %d clauses, want 4:\n%s", len(sw.Body), buildDump(fn))
+	}
+	// The tag is the first word of the interface, read through the pointer
+	// the operand was evaluated into.
+	if !ifaceWordRead(sw.X, ifaceTyp) {
+		t.Errorf("the tag is not the interface's first word: %v\n%s", sw.X, buildDump(fn))
+	}
+	// case nil compares against the nil pointer and names no descriptor.
+	if a := sw.Body[0].Args; len(a) != 1 || a[0].Op != OConst {
+		t.Errorf("case nil is %v\n%s", a, buildDump(fn))
+	}
+	// The default clause keeps no case expression, which is what makes it the
+	// default in ssa.Build.
+	if a := sw.Body[3].Args; len(a) != 0 {
+		t.Errorf("the default clause has %d case expressions\n%s", len(a), buildDump(fn))
+	}
+	for _, want := range []string{"type:int", "type:string", "type:float64"} {
+		if !lowerNames(fn, want) {
+			t.Errorf("the tree does not name %s: %v", want, lowerDescriptors(fn))
+		}
+	}
+	// A type switch is a comparison and never a call.
+	if c := lowerCalls(fn); len(c) != 0 {
+		t.Errorf("the type switch calls %v\n%s", c, buildDump(fn))
+	}
+}
+
+// TestLowerTypeSwitchBindsTheVariable checks the type each clause's variable
+// takes, which the specification makes the clause's own type where the clause
+// names exactly one and the guard's type everywhere else.
+func TestLowerTypeSwitchBindsTheVariable(t *testing.T) {
+	fn := lowerOK(t, `func f(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case string, float64:
+		useAny(n)
+		return 1
+	default:
+		useAny(n)
+		return 2
+	}
+}`)
+	sw := lowerFirst(fn, OSwitch)
+	if sw == nil {
+		t.Fatalf("the type switch is not a switch:\n%s", buildDump(fn))
+	}
+	want := []string{"int", "interface", "interface"}
+	for i, c := range sw.Body {
+		if len(c.Body) == 0 || c.Body[0].Op != OAssign {
+			t.Fatalf("clause %d does not open by binding the variable:\n%s", i, buildDump(fn))
+		}
+		got := c.Body[0].X
+		if got == nil || got.Type == nil || got.Type.String() != want[i] {
+			t.Errorf("clause %d binds a %v, want %s\n%s", i, got.Type, want[i], buildDump(fn))
+		}
+	}
+}
+
+// TestLowerTypeSwitchKeepsTheLabel asserts that nothing is emitted in front of
+// the switch, because ssa.Build gives a pending label to the first statement
+// it sees and a labelled break would then have no switch to leave.
+func TestLowerTypeSwitchKeepsTheLabel(t *testing.T) {
+	fn := lowerOK(t, `func f(v any) int {
+	n := 0
+L:
+	switch v.(type) {
+	case int:
+		n = 1
+		break L
+	}
+	return n
+}`)
+	lab := lowerFirst(fn, OLabel)
+	if lab == nil {
+		t.Fatalf("the label is gone:\n%s", buildDump(fn))
+	}
+	if len(lab.Body) != 1 || lab.Body[0].Op != OSwitch {
+		t.Errorf("the labelled statement is not the switch alone:\n%s", buildDump(fn))
+	}
+}
+
+// lowerFirst returns the first node with op in a lowered body.
+func lowerFirst(fn *Func, op Op) *Node {
+	var out *Node
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if out != nil {
+				return false
+			}
+			if n.Op == op {
+				out = n
+				return false
+			}
+			return true
+		})
+		if out != nil {
+			break
+		}
+	}
+	return out
+}
+
+// ifaceWordRead reports whether n reads word index of an interface value,
+// which is the shape every row of this group produces: the address of the
+// value in a temporary, read as a pointer to a struct of the two words.
+func ifaceWordRead(n *Node, index int) bool {
+	if n == nil || n.Op != OField || n.Index != index || n.X == nil {
+		return false
+	}
+	p := n.X
+	if p.Type == nil || p.Type.Kind != Ptr || p.Type.Elem == nil {
+		return false
+	}
+	h := p.Type.Elem
+	return h.Kind == Struct && h.Name == "eface" && len(h.Fields) == 2
 }
