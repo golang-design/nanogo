@@ -21,9 +21,11 @@ text-assembly seam in [000](000-decisions.md) decision 3.
 
 ## What is built
 
-**Descriptors and itabs are named, encoded, referenced and written into the
-object. A program compiled by nanogo converts a value to an interface with
-methods, calls a method through it, and asserts a concrete type out of it.**
+**Descriptors, itabs and the two runtime caches are named, encoded, referenced
+and written into the object. A program compiled by nanogo converts a value to
+an interface with methods, calls a method through it, asserts a concrete type
+or another interface out of it, and switches on its dynamic type over both
+kinds of case.**
 
 | Part | Where | State |
 | --- | --- | --- |
@@ -38,7 +40,10 @@ methods, calls a method through it, and asserts a concrete type out of it.**
 | The reference to an itab | `ssa/build.go`, `ir/lower.go` | built; `concreteToInterface` names the pair's itab as the type word, and a dynamic type test on a value that leads with an itab compares that word against the itab of the pair |
 | The itab as a data symbol in the object | `driver/compile.go` | built; a named `dupok` non-package definition, written in the same two passes as the descriptors so that a relocation against `type:` resolves to this object's own definition |
 | The call through an itab | `ssa/build.go` | built; `OpInterCall` loads the entry point from the itab at `Fun` plus the method's slot, which is the offset `rtype/itab.go` writes the array at |
-| The `*abi.TypeAssert` and `*abi.InterfaceSwitch` descriptors | nowhere | **not built**; they are what an assertion whose target is an interface and a type switch case that names one need, and they are the only interface construct left refused |
+| The two runtime caches, named | `ir/rtype.go` | built; `TypeAssertSymbol` and `InterfaceSwitchSymbol`, per function and per site, never canonical |
+| The `*abi.TypeAssert` and `*abi.InterfaceSwitch` bytes | `rtype/switch.go` | built; the offsets are checked against `internal/abi`'s own declarations and the sizes against the symbols `gc` wrote for the same shapes |
+| The reference from an assertion, a conversion and a type switch | `ir/lower.go` | built; the caches are in `ir.Collected.TypeAsserts` and `ir.Collected.InterfaceSwitches`, and `driver/compile.go` reads both |
+| The caches as data symbols in the object | `driver/compile.go` | built; a **package** definition in a writable section carrying its own Go type, which is the opposite of every other row and is why |
 
 The `gclocals·` and `go:string.` rows of the namespace table are produced
 elsewhere. `ssagen/stackmap.go` builds the stack maps, `ssa/decompose.go` names
@@ -602,6 +607,144 @@ package to name a nanogo package's type, which the hosted model of
 [000](000-decisions.md) decision 10 does not produce: the standard library
 imports nothing a user wrote.
 
+## The two runtime caches
+
+An assertion, a conversion and a type switch all ask one question the compiler
+cannot answer: which itab implements a given interface for a dynamic type that
+is not known until the value is. That is a search over a method set, so it is a
+call, and the runtime caches the answer inside a symbol the compiler wrote.
+
+```go
+type TypeAssert struct {
+    Cache   *TypeAssertCache
+    Inter   *InterfaceType
+    CanFail bool
+}
+
+type InterfaceSwitch struct {
+    Cache  *InterfaceSwitchCache
+    NCases int
+    Cases  [1]*InterfaceType   // variable sized, NCases entries
+}
+```
+
+`runtime.typeAssert(*abi.TypeAssert, *_type) *itab` answers the first.
+`runtime.interfaceSwitch(*abi.InterfaceSwitch, *_type) (int, *itab)` answers the
+second and returns the index of the first case the dynamic type implements.
+`ir.TypeAssert` and `ir.InterfaceSwitch` are what a lowered function reports,
+`ir/rtype.go` names the symbols and `rtype/switch.go` writes the bytes.
+
+### These are caches, and the section follows from that
+
+Everything else this spec writes is read-only, canonical and duplicate
+tolerant. A cache is none of those, and the reason is one sentence: **the
+runtime stores into it.** Both entry points build a table of the answers they
+computed and install it with a compare-and-swap on the symbol's first word.
+Four consequences follow and not one of them is a choice.
+
+- **`obj.SDATA`, not `obj.SRODATA`.** A read-only page faults on the store.
+- **Aligned to a pointer.** The install is an atomic compare-and-swap on the
+  first word, and an unaligned one does not execute on arm64.
+- **It carries the linker name of its own Go type,** through an `AuxGotype`
+  entry naming `type:internal/abi.TypeAssert` or
+  `type:internal/abi.InterfaceSwitch`. `cmd/link` builds the pointer map of the
+  data section out of each symbol's Go type, so without one the link stops:
+
+      runtime.gcdata: missing Go type information for global symbol
+      main.f..typeAssert.0: size 24
+
+  The descriptors are in `internal/abi`'s own object, which every program with
+  a runtime links, so the reference resolves without this package writing
+  bytes. The `InterfaceSwitch` type covers `Cache`, `NCases` and one case while
+  the symbol is one word longer per case after the first. That is deliberate
+  and it is `gc`'s reasoning too: only the first pointer has to be scanned,
+  because every later one is the address of a descriptor in static data that
+  the collector never traces.
+- **A package definition, added with `obj.AddDef`.** This is the opposite of a
+  descriptor and of an itab, and it follows from the same rule those two follow
+  from: `cmd/link` deduplicates by name in the non-package index space. These
+  must not be deduplicated. Two sites sharing one symbol would be two questions
+  writing one table.
+
+The `Cache` word starts at `runtime.emptyTypeAssertCache` or
+`runtime.emptyInterfaceSwitchCache`, never at nil: both entry points read
+`oldC.Mask` before they read anything else, so a nil there is a nil
+dereference. `rtsym` holds both names, and their types are read out of the
+composite literals the runtime declares them with.
+
+### The name is the site, not the type
+
+`ir.TypeAssertSymbol` and `ir.InterfaceSwitchSymbol` spell
+`<function>..typeAssert.<n>` and `<function>..interfaceSwitch.<n>`. `gc`
+numbers per package, which needs a package-wide counter; a lowering pass sees
+one function at a time, and a function symbol is already unique within a
+package, so the pair is unique without one.
+
+The canonical-name rule of the namespace table below does not apply here and
+must not. A canonical name is what lets the linker merge two copies, and
+merging is exactly what a cache must not do.
+
+### The order of the cases is the answer
+
+```mermaid
+flowchart TD
+    A["switch v.(type)"] --> B{"first word nil?"}
+    B -- yes --> N["case nil, or the default"]
+    B -- no --> G1["run 1: case J"]
+    G1 -- "interfaceSwitch says 0" --> C1["clause for J"]
+    G1 -- "no match" --> G2["run 2: case B"]
+    G2 -- "word == itab(B, guard)" --> C2["clause for B"]
+    G2 -- "no match" --> G3["run 3: case I"]
+    G3 -- "interfaceSwitch says 0" --> C3["clause for I"]
+    G3 -- "no match" --> D["the default clause"]
+```
+
+A dynamic type is at most one of a list of concrete cases, because two
+identical cases are a compile error, so a switch over concrete types alone is
+one switch on the first word and the order does not matter. An interface case
+breaks that. A `B` satisfies `J` and is also `case B`, and the specification
+runs the clause the source wrote first.
+
+So the tests choose a clause and the clauses are a switch on the choice.
+Consecutive cases of one kind are one test, and a test that matches nothing
+falls into the next through its own default clause, which is what keeps the
+runs in source order. The clauses stay in one `ir.OSwitch`, which is what keeps
+a `break` inside a clause bound to the switch it is written in; a chain of
+gotos would give it nothing to bind to.
+
+`gc` groups differently, every concrete case before every interface one, and it
+is correct there because `walkSwitchType` has already removed a case that a
+preceding one shadows. Nothing removes one here, so the order is kept instead.
+
+Three more rules fall out of the same picture.
+
+- **The nil test runs before any case test.** `runtime.interfaceSwitch` calls
+  `runtime.getitab`, which does not take a nil type. An interface holding
+  nothing also matches `case nil` and matches nothing else, so the test is the
+  answer and not only a guard. An assertion tests it too, and calls
+  `runtime.panicnildottype` rather than letting the lookup panic, because the
+  two messages differ and the specification asks for the first.
+- **The empty interface is neither run.** Every non-nil dynamic type is a value
+  of it, so `case any` matches with no test and every case written after it is
+  unreachable.
+- **The variable of a clause naming one interface binds the itab the call
+  returned.** Its type is that interface, so its first word is an itab built
+  for that interface. The word the operand carries was built for the guard's,
+  and an itab holds the concrete type's methods in the order its own interface
+  lists them, so passing the operand along unchanged calls through a slot that
+  holds another method. A clause listing several types keeps the guard's type
+  and its value, because that is the type the checker gave the variable.
+
+### `CanFail` is a byte and not a second entry point
+
+The comma-ok form asks the runtime to return a nil itab where it would
+otherwise panic. The flag is in the cache, so both forms are one call site. A
+conversion between two interfaces sets it as well, and `walkConvInterface` says
+why: the language guarantees the conversion succeeds, but the guarantee is
+about the static types, and a source holding nothing has no dynamic type to
+search for. The result is then the zero of the destination, which is what a nil
+interface converts to.
+
 ## The symbol namespace
 
 | Prefix | Contents | Linker behaviour |
@@ -715,6 +858,18 @@ Every bullet but the last is built, and the second is built by half.
   `internal/e2e/iface_test.go` runs the three shapes: an assertion that
   succeeds, one that fails and is recovered, and a type switch that picks each
   arm, `case nil` and `default` included.
+- The runtime caches: nanogo compiles a library that asserts and switches, `gc`
+  compiles the importer, and the search therefore runs through symbols nanogo
+  defined. `internal/e2e/typeassert_test.go` reads the `Cache` word of one
+  symbol of each kind by linkname, before and after, and fails when it did not
+  move. That test is the only one that can say anything about the section and
+  the Go type: the runtime installs a table about one time in a thousand, so a
+  single assertion proves the call works and proves nothing about the symbol.
+  Between passes it collects and allocates, so a table the collector could not
+  see would already be handed out by the time the next pass reads it. The same
+  program pins the ordering rule twice over, an interface case before a
+  concrete case the same type satisfies and the reverse, and checks that two
+  interface runs separated by a concrete case are two symbols of one case each.
 - `GCData` against `PtrBits` for every type in a corpus, and against the
   collector's own view under `GODEBUG=gccheckmark=1`. The first half is built
   and the mask is asserted to be exactly what `PtrBits` says, so that a second
@@ -726,6 +881,31 @@ Every bullet but the last is built, and the second is built by half.
   be compared.
 
 ## What was wrong
+
+### The clause variable of a single interface case was already wrong
+
+The refusal on an interface case hid a second bug in the same file.
+`typeSwitchCase` bound a clause variable whose type is an interface to the
+guard's value unchanged, and its comment names the three clauses that reach
+it: the default, a clause listing several types, and `case nil`. For all three
+the variable's type **is** the guard's, so the value is right. A clause naming
+exactly one interface has the case's type instead, and that branch caught it
+too.
+
+Nothing reported it, because such a clause was refused before it got there.
+Lifting the refusal without moving the binding would have put an itab built for
+the guard into a slot typed as the case's interface, and a method call through
+it would have jumped to whatever the guard's itab holds at that slot. That is a
+silent wrong answer of exactly the kind `convertInterface`'s own comment
+describes for a conversion, in a row that looked finished.
+
+The rule is one sentence and it is worth stating once for both:
+**an itab holds the concrete type's methods in the order its own interface
+lists them, so an itab is never carried between two interfaces.** The value a
+clause naming one interface binds is built from the itab
+`runtime.interfaceSwitch` returned for that case, and for the empty interface
+from the dynamic type's descriptor.
+
 
 ### The seam between lowering and the object file
 
