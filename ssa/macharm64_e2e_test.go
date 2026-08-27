@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -333,5 +334,71 @@ func TestARM64ScratchBoundRunsOnHardware(t *testing.T) {
 		if !strings.Contains(string(dump), want) {
 			t.Errorf("the disassembly of main writes nothing to %s; the call passes four arguments in the frame", want)
 		}
+	}
+}
+
+// indexProgram asks for the instructions that read three registers, which is
+// what sets the number of scratch registers the target reserves.
+//
+// fill stores through an index the compiler does not know, so the store is
+// MOVDstoreidx8 and it reads a base, an index and the value. `a[2] = 7`
+// reaches the same instruction with all three operands rematerialised, and it
+// is internal/audit's array-local probe. rem is a remainder, which lowers to
+// MSUB and reads three registers as well.
+//
+// The exit status is the assertion. A wrong answer divides by zero and the
+// runtime kills the process.
+const indexProgram = `package main
+
+//go:noinline
+func fill(n int) int {
+	var a [4]int
+	a[2] = 7
+	a[n] = a[2] * 3
+	s := 0
+	for i := 0; i < 4; i++ {
+		s = s*10 + a[i]
+	}
+	return s
+}
+
+//go:noinline
+func rem(a, b int) int { return a % b }
+
+func main() {
+	d := fill(0) - 21070 + rem(17, 5) - 2
+	if d != 0 {
+		d = d / (d - d)
+	}
+}
+`
+
+// TestARM64ThreeRegisterOperandsRunOnHardware compiles and runs the
+// instructions that read three registers.
+//
+// The target reserves three integer scratch registers because of them. The
+// disassembly names both instructions, because an exit status alone would not
+// tell this apart from a lowering that used a different form and read two.
+func TestARM64ThreeRegisterOperandsRunOnHardware(t *testing.T) {
+	goCmd, prog := buildWithNanogo(t, "index", indexProgram)
+
+	dump, err := exec.Command(goCmd, "tool", "objdump", "-s", "main.(fill|rem)", prog).Output()
+	if err != nil {
+		t.Fatalf("go tool objdump: %v", err)
+	}
+	text := string(dump)
+	if !strings.Contains(text, "MSUB") {
+		t.Errorf("the disassembly holds no MSUB, and a remainder is what lowers to one:\n%s", text)
+	}
+	// The scaled register-offset store, naming the three registers it reads.
+	// The exit status alone would not tell this apart from a lowering that
+	// used a different form and read two.
+	store := regexp.MustCompile(`MOVD (R\d+), \((R\d+)\)\((R\d+)<<3\)`)
+	m := store.FindStringSubmatch(text)
+	if m == nil {
+		t.Fatalf("the disassembly of fill holds no scaled register-offset store:\n%s", text)
+	}
+	if m[1] == m[2] || m[1] == m[3] || m[2] == m[3] {
+		t.Errorf("%q reads fewer than three distinct registers", m[0])
 	}
 }

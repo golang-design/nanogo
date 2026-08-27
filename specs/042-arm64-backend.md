@@ -45,11 +45,12 @@ From [030](030-abi.md), with the allocation view:
 | Registers | Allocatable | Note |
 | --- | --- | --- |
 | R0 – R15 | yes | also the integer argument and result registers |
-| R19 – R25 | yes | scratch, no ABI meaning |
+| R19 – R24 | yes | scratch, no ABI meaning |
 | F0 – F15 | yes | also the floating-point argument and result registers |
 | F16 – F29 | yes | scratch, no ABI meaning |
-| F30, F31 | **no** | held back for materialisation, as R16 and R17 are |
-| R16, R17 | **no** | linker trampolines |
+| F30, F31 | **no** | held back for materialisation, as R16, R17 and R25 are |
+| R16, R17 | **no** | linker trampolines, and two of the three integer materialisation registers |
+| R25 | **no** | the third integer materialisation register |
 | R18 | **no** | reserved by Darwin |
 | R26 | **no** | closure context at a call |
 | R27 | **no** | assembler scratch for expanded instructions |
@@ -65,11 +66,21 @@ against zero, and materialising zero all use it, and the rules should.
 The floating-point registers belong to group 6. Rule groups 1 to 5 need none of
 them.
 
-F30 and F31 are held back for the same reason R16 and R17 are, and it is not
-the linker's: [026](026-register-allocation.md) reserves a pair per class for
-materialisation, so that a spilled value can always be read back without
-spilling something else first. The pair is taken from the top of the file
-because [030](030-abi.md) gives no role to any register above F15.
+F30 and F31 are held back for the same reason R16, R17 and R25 are, and it is
+not the linker's: [026](026-register-allocation.md) reserves per class as many
+registers as the widest instruction reads operands, so that a spilled value can
+always be read back without spilling something else first. The floating-point
+pair is taken from the top of the file because [030](030-abi.md) gives no role
+to any register above F15.
+
+The integer file needs three and the floating-point file needs two, and the
+difference is what the widest instruction of each file reads. `MOVDstoreidx8`
+reads a base, an index and the value to store, and `MADD` and `MSUB` read
+three. The indexed floating-point stores read three registers as well, and two
+of them are the address, which is an integer, so no operation reads three
+registers of the floating-point file. `TestArm64ScratchCoversTheOperationTable`
+walks the operation table and computes both numbers, so an operation added with
+a wider operand list fails a test rather than a program.
 
 A note on how the reserved set is checked, because the obvious property is the
 wrong one. The test asserts that **no allocatable register encodes as 18**, not

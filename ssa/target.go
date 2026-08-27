@@ -485,11 +485,33 @@ func NewArm64Target() *Target {
 		t.Allocatable[ClassFloat] = t.Allocatable[ClassFloat].Add(Arm64Reg(r))
 	}
 
-	// R16 and R17 are the linker's trampoline scratch, so they are not
-	// allocatable and the allocator loses nothing by taking them. A trampoline
-	// is inserted at a branch, and a scratch register here is live only inside
-	// one straight-line materialisation sequence, which contains no branch.
-	t.Scratch[ClassInt] = []Reg{Arm64Reg(arm64.RegTrampLo), Arm64Reg(arm64.RegTrampHi)}
+	// Three integer registers, because the widest arm64 instruction reads
+	// three: MOVDstoreidx8 reads a base, an index and the value to store, and
+	// MADD and MSUB read three. A value in a slot is read into one of these at
+	// each use and a rematerialised value is recomputed into one, so a program
+	// whose three operands are all in slots needs three at once. arm64 is
+	// three-address, so a spilled result adds nothing to that.
+	// TestArm64ScratchCoversTheOperationTable holds the count against the
+	// operation table.
+	//
+	// The first two are free. R16 and R17 are the linker's trampoline scratch,
+	// so they were never allocatable, and a trampoline is inserted at a branch
+	// while a scratch register here is live only inside one straight-line
+	// materialisation sequence, which contains no branch.
+	//
+	// The third is not free. R25 comes out of the allocatable set and the
+	// integer file drops from 23 registers to 22. It is the top of the range
+	// specs/030-abi.md gives no role to, so the cost falls on general values
+	// and on no argument, result or runtime register.
+	//
+	// Two floating-point registers, because no arm64 operation in
+	// ssa/macharm64.go reads three of them. The indexed float stores read
+	// three registers and two of them are the address, which is an integer.
+	// F30 and F31 are taken from the top of the file because specs/030-abi.md
+	// gives no role to any register above F15.
+	t.Scratch[ClassInt] = []Reg{
+		Arm64Reg(arm64.RegTrampLo), Arm64Reg(arm64.RegTrampHi), Arm64Reg(arm64.RegScratchThird),
+	}
 	t.Scratch[ClassFloat] = []Reg{Arm64Reg(arm64.RegFScratchLo), Arm64Reg(arm64.RegFScratchHi)}
 
 	// specs/030-abi.md: R0 to R15 carry integer arguments and results, F0 to

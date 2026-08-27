@@ -115,12 +115,27 @@ still holds one, so the precondition is checked and not assumed.
 ### Reserved registers, the control value, and a missing move
 
 **A spilled value needs a register to be reloaded into**, and it cannot be one
-the allocator handed out. The target reserves **two** scratch registers per
-class, because one instruction can read two spilled operands. On `arm64` the
-integer pair is free: R16 and R17 were never allocatable, because
-[030](030-abi.md) reserves them for linker trampolines. The floating-point pair
-is not free. There is no reserved float register, so the target takes F30 and
-F31 from the top of the file and the allocator loses two.
+the allocator handed out. The target reserves, per class, **as many scratch
+registers as the widest instruction of that class reads operands**, plus one on
+a two-address machine for a spilled result. On `arm64` that is three integer
+registers and two floating-point ones.
+
+The count is a property of the machine and nothing else, which it is only
+because two kinds of value draw no scratch register at all. A phi has one
+operand per predecessor and is not an instruction: it becomes a move on each
+edge and the code generator emits nothing for it. A call has one operand per
+argument and a return one per result, and [030](030-abi.md) places every one of
+them: an operand in a register is named by the convention, and an operand in
+the argument area is written there by a store of its own. Drawing a scratch
+register for either would make the demand grow with the program, and then no
+fixed reservation could serve it.
+
+R16 and R17 are free. They were never allocatable, because [030](030-abi.md)
+reserves them for linker trampolines. R25 is not free: the third integer
+register comes out of the allocatable set, which drops from 23 registers to 22.
+The floating-point pair is not free either. There is no reserved float
+register, so the target takes F30 and F31 from the top of the file and the
+allocator loses two.
 
 **A block's control value is a use.** A pass that leaves it out of the use set
 collapses a branch condition's live range to nothing and lets two live
@@ -140,8 +155,9 @@ are pre-coloured:
 
 - On `arm64`, integer arguments and results are in R0–R15 and floating-point in
   F0–F15. R28 holds the current goroutine, R26 the closure context, R27 and R16
-  and R17 are scratch used by the assembler and linker, R18 is reserved by the
-  operating system on Darwin and must never be touched.
+  and R17 are scratch used by the assembler and linker, R25 is the allocator's
+  third materialisation register, R18 is reserved by the operating system on
+  Darwin and must never be touched.
 - Every register is clobbered at a call, as above.
 
 The reserved set is not advice. R18 on Darwin is used by the platform, and a
@@ -223,10 +239,23 @@ drops a rematerialised value, and a frame address is rematerialisable. It was
 found when the stack map pass needed a safepoint set and the allocator's result
 carried none.
 
-**The spec said one scratch register per class. Two are needed.** One
-instruction can read two operands that are both in slots, so one scratch
-register lets the second reload destroy the first. It was found by an
-instruction with two spilled operands.
+**The spec said one scratch register per class. The number is the widest
+instruction's operand count, which is three on `arm64`.** One instruction can
+read two operands that are both in slots, so one scratch register lets the
+second reload destroy the first. It was found by an instruction with two
+spilled operands, and then again by `var a [4]int; a[2] = 7`, whose indexed
+store reads three.
+
+**Raising the number was the wrong fix twice before it was the right one.** The
+demand was computed over every operand of every value, and a phi and a call
+have as many operands as the program wrote arms and arguments. A merge of three
+arms and a call of twenty integers each asked for more than the machine
+reserves, and reserving one more would have moved the refusal to four arms and
+twenty-one arguments. Both were fixed by saying that no register is read for
+those operands, which is what the code generator already did. Only then does a
+fixed count bound anything, and
+`TestArm64ScratchCoversTheOperationTable` holds it against the operation
+table.
 
 **The spec's list of what constitutes a use left out a block's control
 value.** Two live branch conditions were then given one register.

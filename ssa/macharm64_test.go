@@ -617,3 +617,112 @@ func TestARM64FloatMemOpSelection(t *testing.T) {
 		t.Error("ARM64StoreOp accepted a width with no instruction")
 	}
 }
+
+// arm64OperandClasses returns how many register operands of an operation are
+// read out of the integer file and how many out of the floating-point file.
+//
+// The operation table records how many operands an instruction has, not which
+// file each one comes from, so the encoder family supplies the missing half.
+// A family this switch does not name counts its operands against both files,
+// so adding one fails TestArm64ScratchCoversTheOperationTable until it is
+// classified here rather than passing on an assumption.
+//
+// A variadic operation is a call or a return. specs/030-abi.md places every
+// one of their operands and ssa/regalloc.go reads none of them out of a
+// scratch register, so they have no count.
+func arm64OperandClasses(o arm64Op) (ints, floats int, ok bool) {
+	n := int(o.info.argLen)
+	if n < 0 {
+		return 0, 0, false
+	}
+	if o.info.takesMem {
+		n--
+	}
+	if n <= 0 {
+		return 0, 0, true
+	}
+	switch o.enc {
+	case encFArith, encFUnary, encFCmp, encFCmpZero, encFConst, encFCvt:
+		return 0, n, true
+	case encFMove:
+		// A move between the two files. The operand is in whichever file the
+		// result is not, so it counts against both.
+		return n, n, true
+	case encMem, encMemIdx:
+		// The base and the index are addresses and are always integers. A
+		// store also reads the value it transfers, in the file the memory
+		// operation names.
+		if o.info.makesMem && o.mem.IsFloat() {
+			return n - 1, 1, true
+		}
+		return n, 0, true
+	case encNone, encArith, encArith3, encArithImm, encLogicalImm, encShiftImm,
+		encAddShift, encUnary, encExt, encMovConst, encCmp, encCmpImm,
+		encLogicalCmpImm, encAddr, encFrame, encGetClosure, encCondSet,
+		encBranchCond, encCompareBranch, encCall, encCallInd, encRet:
+		return n, 0, true
+	}
+	return n, n, true
+}
+
+// TestArm64ScratchCoversTheOperationTable is the assertion behind the scratch
+// count in ssa/target.go.
+//
+// A value in a slot is read into a scratch register at each use and a
+// rematerialised value is recomputed into one, so an instruction whose
+// operands are all in slots needs one scratch register per operand at once.
+// The count the target reserves is therefore the widest instruction the back
+// end can emit, per register file, and this walks the table and computes it.
+//
+// Adding an operation that reads more registers than the target reserves is
+// the change this catches. Without it the failure arrives as a ScratchError on
+// whichever program first reaches the new operation, which is how the indexed
+// stores and MADD were found.
+//
+// The reservation is also asserted to be no larger than the bound. Every
+// register held back for materialisation is a register no value can live in,
+// and R25 is already one the allocator lost.
+func TestArm64ScratchCoversTheOperationTable(t *testing.T) {
+	tg := NewArm64Target()
+	var need [NumRegClass]int
+	widest := [NumRegClass]string{}
+	for i := range arm64Ops {
+		o := arm64Ops[i]
+		if o.info.name == "" {
+			continue
+		}
+		ints, floats, ok := arm64OperandClasses(o)
+		if !ok {
+			if !o.info.call && Op(i)+OpARM64ADD != OpARM64RET {
+				t.Errorf("%s has a variable operand list and is neither a call nor a return, "+
+					"so specs/030-abi.md does not place its operands", o.info.name)
+			}
+			continue
+		}
+		for c, n := range [NumRegClass]int{ClassInt: ints, ClassFloat: floats} {
+			if n > need[c] {
+				need[c] = n
+				widest[c] = o.info.name
+			}
+		}
+	}
+	for c := RegClass(0); c < NumRegClass; c++ {
+		have := len(tg.Scratch[c])
+		if have < need[c] {
+			t.Errorf("%v: %s reads %d registers and the target reserves %d scratch registers; "+
+				"an instruction with that many operands in slots cannot be read",
+				c, widest[c], need[c], have)
+		}
+		if have > need[c] {
+			t.Errorf("%v: the target reserves %d scratch registers and the widest operation, %s, "+
+				"reads %d; a register held back for materialisation is one no value can live in",
+				c, have, widest[c], need[c])
+		}
+	}
+	// The numbers, so that a change to either side reads as a change and not
+	// as an inequality that still holds.
+	if need[ClassInt] != 3 || need[ClassFloat] != 2 {
+		t.Errorf("the widest operation reads %d integer and %d floating-point registers, "+
+			"and ssa/target.go says three and two", need[ClassInt], need[ClassFloat])
+	}
+}

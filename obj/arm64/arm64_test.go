@@ -13,12 +13,17 @@ import (
 // rather than derived from the package, so that the test fails if the table
 // changes and nobody changed the spec.
 //
-// F30 and F31 are the floating-point materialisation pair, which is what R16
-// and R17 are for the integer file. specs/042 gives every other
-// floating-point register to the allocator: F0 to F15 carry arguments and
-// results, and an argument register is a register like any other between
-// calls.
-var notAllocatable = []Reg{R16, R17, R18, R26, R27, R28, R29, R30, RSP, ZR, F30, F31}
+// R16, R17 and R25 are the integer materialisation registers. The first two
+// are the linker's trampoline pair and were never allocatable. R25 is, and it
+// is here because an arm64 instruction can read three registers, so a
+// materialisation of three operands needs three registers to read into.
+//
+// F30 and F31 are the floating-point materialisation pair. There are two and
+// not three because no arm64 operation reads three floating-point registers.
+// specs/042 gives every other floating-point register to the allocator: F0 to
+// F15 carry arguments and results, and an argument register is a register like
+// any other between calls.
+var notAllocatable = []Reg{R16, R17, R18, R25, R26, R27, R28, R29, R30, RSP, ZR, F30, F31}
 
 func TestNotAllocatable(t *testing.T) {
 	for _, r := range notAllocatable {
@@ -74,9 +79,10 @@ func TestAllocatableRegsIsSortedAndStable(t *testing.T) {
 			t.Fatalf("AllocatableRegs differs between calls at %d", i)
 		}
 	}
-	// specs/042: R0 to R15 and R19 to R25.
+	// specs/042: R0 to R15 and R19 to R24. R25 is the third materialisation
+	// register and left the allocatable set with it.
 	want := []Reg{R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15,
-		R19, R20, R21, R22, R23, R24, R25}
+		R19, R20, R21, R22, R23, R24}
 	if len(got) != len(want) {
 		t.Fatalf("AllocatableRegs returned %d registers, want %d", len(got), len(want))
 	}
@@ -126,6 +132,7 @@ func TestAbiRoles(t *testing.T) {
 		{RegLink, R30, "link register"},
 		{RegTrampLo, R16, "linker trampoline"},
 		{RegTrampHi, R17, "linker trampoline"},
+		{RegScratchThird, R25, "the third materialisation register"},
 		{RegPlatform, R18, "reserved by darwin"},
 		{RegAsmScratch, R27, "assembler scratch"},
 	}

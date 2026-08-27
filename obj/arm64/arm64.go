@@ -155,6 +155,26 @@ const (
 	RegPlatform   = R18
 	RegAsmScratch = R27
 
+	// RegScratchThird is the third integer register the allocator holds back
+	// for materialisation. R16 and R17 are the first two and cost nothing,
+	// because the linker reserves them already. This one is not free: it comes
+	// out of the allocatable set.
+	//
+	// A third is needed because an instruction can read three registers.
+	// MOVDstoreidx8 reads a base, an index and the value to store, and MADD
+	// and MSUB read three, so a program whose three operands are all in slots
+	// or all rematerialised needs three registers to read them into at once.
+	// `var a [4]int; a[2] = 7` is such a program.
+	//
+	// R25 is the register to lose. It is the top of the range
+	// specs/030-abi.md gives no role to, so taking it costs one general
+	// register and touches no argument, no result, and no runtime register.
+	// R27 is not available for this: the assembler and the linker write it
+	// when they expand an instruction or insert a trampoline, and a value read
+	// into it before an instruction that the linker then expands would be
+	// destroyed between the read and the use.
+	RegScratchThird = R25
+
 	// The floating-point pair the allocator holds back for materialisation,
 	// which is what R16 and R17 are for the integer file. F30 and F31 are
 	// taken because specs/030-abi.md gives no role to any register above F15,
@@ -178,9 +198,9 @@ var regNames = [numReg]string{
 }
 
 // allocatable is indexed by Reg. The false entries are specs/042's table: the
-// two linker trampoline scratch registers, darwin's reserved register, the
-// closure, goroutine, frame pointer and link registers, the assembler's
-// scratch, and the two spellings of register 31.
+// two linker trampoline scratch registers, the third materialisation register,
+// darwin's reserved register, the closure, goroutine, frame pointer and link
+// registers, the assembler's scratch, and the two spellings of register 31.
 //
 // Every floating-point register carries a value except F30 and F31, which are
 // the materialisation pair. specs/042 marks F0 to F15 as the argument and
@@ -189,7 +209,7 @@ var regNames = [numReg]string{
 var allocatable = [numReg]bool{
 	R0: true, R1: true, R2: true, R3: true, R4: true, R5: true, R6: true, R7: true,
 	R8: true, R9: true, R10: true, R11: true, R12: true, R13: true, R14: true, R15: true,
-	R19: true, R20: true, R21: true, R22: true, R23: true, R24: true, R25: true,
+	R19: true, R20: true, R21: true, R22: true, R23: true, R24: true,
 	F0: true, F1: true, F2: true, F3: true, F4: true, F5: true, F6: true, F7: true,
 	F8: true, F9: true, F10: true, F11: true, F12: true, F13: true, F14: true, F15: true,
 	F16: true, F17: true, F18: true, F19: true, F20: true, F21: true, F22: true, F23: true,
