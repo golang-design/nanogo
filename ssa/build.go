@@ -1655,6 +1655,20 @@ var descriptorType = func() *ir.Type {
 // A type they would be needed for is refused by name instead.
 func (b *builder) dataWord(n ir.Expr, x *Value, from *ir.Type) *Value {
 	switch {
+	case from.Size == 0:
+		// A value of a zero-sized type has no bits to carry, and the word is
+		// still a pointer the collector scans, so it has to be one.
+		// cmd/compile writes the address of runtime.zerobase, which is what
+		// runtime.mallocgc returns for a request of zero bytes. rtsym holds no
+		// entry for that variable and specs/031-runtime-lowering.md makes
+		// rtsym the one place a runtime symbol is spelled, so the allocation
+		// is made rather than its answer named: newobject of a zero-sized type
+		// is mallocgc(0), and mallocgc(0) is the address of runtime.zerobase.
+		// The word is the same one gc writes and the call is the optimisation
+		// gc makes here and this does not. ir.Lower reasons the same way about
+		// runtime.newarray(t, 0) for an empty slice literal.
+		return b.box(n, "runtime.newobject", b.typeWord(n, from))
+
 	case directIface(from):
 		// One word, and that word is a pointer. The value is the data word.
 		return x

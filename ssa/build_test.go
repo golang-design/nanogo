@@ -2613,6 +2613,47 @@ func TestBuildConvertsAConcreteValueToAnInterfaceWithMethods(t *testing.T) {
 	}
 }
 
+// TestBuildBoxesAZeroSizedValue is the data word of a type with no bits.
+//
+// The word is a pointer the collector scans, so a value with nothing to carry
+// still needs one, and the runtime's answer for a zero-byte allocation is the
+// address of runtime.zerobase. runtime.newobject of such a type reaches
+// mallocgc with size zero and returns exactly that word, which is the word
+// cmd/compile writes without the call.
+//
+// It is the case a struct with no fields takes, which is what a type declared
+// only to carry methods is.
+func TestBuildBoxesAZeroSizedValue(t *testing.T) {
+	tEmpty := mkType(&ir.Type{Kind: ir.Struct, Name: "main.seven", PkgPath: "main", Fields: []ir.Field{}})
+	f := build(t, convertToEface(tEmpty))
+
+	mk := findOp(f, OpIMake)
+	if mk == nil {
+		t.Fatalf("no interface was made:\n%s", f)
+	}
+	data := mk.Args[1]
+	if data.Op != OpSelectN {
+		t.Fatalf("the data word is %v, want the result of an allocation", data.Op)
+	}
+	call := data.Args[0]
+	o, _ := call.Aux.(*ir.Object)
+	if o == nil || o.Name != "runtime.newobject" {
+		t.Fatalf("the data word calls %v, want runtime.newobject", call.Aux)
+	}
+	// The descriptor it is called with, which the object then owes.
+	arg := call.Args[0]
+	name, err := ir.TypeSymbol(tEmpty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := arg.Aux.(*ir.Object); d == nil || d.Name != name {
+		t.Errorf("the allocation names %v, want %s", arg.Aux, name)
+	}
+	if len(f.Descriptors) != 1 || f.Descriptors[0] != tEmpty {
+		t.Errorf("the function records %v as the descriptors it names, want just %v", f.Descriptors, tEmpty)
+	}
+}
+
 // TestBuildRefusesADataWordItCannotBox names the two shapes construction has
 // no answer for, so that neither is compiled into a wrong one.
 func TestBuildRefusesADataWordItCannotBox(t *testing.T) {
