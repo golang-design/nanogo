@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.design/x/nanogo/rtsym"
 	"golang.design/x/nanogo/syntax"
 )
 
@@ -1746,7 +1747,6 @@ func TestLowerRefusals(t *testing.T) {
 type G[X any] struct{ V X }
 
 func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
-		{"range over a string", `func f(s string) { for i := range s { use(i) } }`, ORange, "UTF-8"},
 		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
 		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
 		{"defer of a builtin", `func f(c chan int) { defer close(c) }`, ODefer, "holds a close and not a call"},
@@ -3657,4 +3657,142 @@ func TestLowerConversionLeavesTheRestAlone(t *testing.T) {
 			t.Errorf("%s calls %v:\n%s", body, got, buildDump(fn))
 		}
 	}
+}
+
+// TestLowerRangeOverAString is specs/020-ir.md's row: an index over bytes and
+// a loop over runes.
+//
+// It is not a case of the counted loop, and the assertion says why: there is
+// no post list. How far to advance is what the body computed, so the advance
+// is in the body and the loop carries a condition and nothing else.
+func TestLowerRangeOverAString(t *testing.T) {
+	fn := lowerOK(t, `func f(s string) { for i, r := range s { use(i); use(int(r)) } }`)
+	loop := lowerFindFor(fn)
+	if loop == nil {
+		t.Fatalf("the row produced no loop:\n%s", buildDump(fn))
+	}
+	if len(loop.Post) != 0 {
+		t.Errorf("the loop has a post list of %d statements:\n%s", len(loop.Post), buildDump(fn))
+	}
+	if loop.X == nil || loop.X.Op != OCompare || loop.X.Op1 != syntax.Lss {
+		t.Errorf("the condition is not an index below the length:\n%s", buildDump(fn))
+	}
+	if !lowerCalled(fn, "runtime.decoderune") {
+		t.Errorf("the row does not call runtime.decoderune:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerRangeOverAStringDecodesOnlyOutsideASCII checks that the call is in
+// the arm the fast path does not take.
+//
+// runtime.decoderune's own comment says it "assumes that caller has checked
+// that the to be decoded rune is a non-ASCII rune", so a call on every byte is
+// both slower and outside the contract.
+func TestLowerRangeOverAStringDecodesOnlyOutsideASCII(t *testing.T) {
+	fn := lowerOK(t, `func f(s string) { for _, r := range s { use(int(r)) } }`)
+	var guard *Node
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if guard != nil {
+				return false
+			}
+			if n.Op != OIf || n.X == nil || n.X.Op != OCompare || n.X.Op1 != syntax.Leq {
+				return true
+			}
+			for _, e := range n.Else {
+				if e.Op == OAssign && e.Y != nil && e.Y.Op == OCall &&
+					e.Y.X != nil && e.Y.X.Obj != nil && e.Y.X.Obj.Name == "runtime.decoderune" {
+					guard = n
+				}
+			}
+			return guard == nil
+		})
+	}
+	if guard == nil {
+		t.Fatalf("the decode is not in the else of a test against the ASCII bound:\n%s", buildDump(fn))
+	}
+	// The bound is utf8.RuneSelf-1, and the operand is the byte widened to a
+	// rune. A sign extension would make every leading byte of a multi-byte
+	// sequence compare below it, so the widening is checked here and the
+	// bytes are checked end to end in internal/e2e.
+	c, ok := guard.X.Y.Val.(ConstValue)
+	if !ok {
+		t.Fatalf("the bound is not a constant:\n%s", buildDump(fn))
+	}
+	if v, exact := c.Int64(); !exact || v != 127 {
+		t.Errorf("the bound is %d, want 127", v)
+	}
+	if guard.X.X == nil || guard.X.X.Type == nil || guard.X.X.Type.Kind != Int32 {
+		t.Errorf("the tested value is %v, want a rune:\n%s", guard.X.X.Type, buildDump(fn))
+	}
+}
+
+// TestLowerDecodeRuneResultIsTheRuntimesOwn checks the tuple the call is built
+// with against the signature rtsym holds.
+//
+// runtime.decoderune returns a rune and a uint, and the second is not an int.
+// A tuple that said int64 would read eight bytes of a register the callee
+// wrote four of, so the index after the rune would carry whatever was above
+// it. cmd/compile/internal/walk's range.go converts for the same reason.
+func TestLowerDecodeRuneResultIsTheRuntimesOwn(t *testing.T) {
+	sym := rtsym.Lookup("runtime.decoderune")
+	if sym == nil {
+		t.Fatal("rtsym does not hold runtime.decoderune")
+	}
+	if want := "func(string, uint) (rune, uint)"; sym.Sig != want {
+		t.Fatalf("the signature is %q, want %q", sym.Sig, want)
+	}
+	if n := len(decodeRuneResult.Fields); n != 2 {
+		t.Fatalf("the result has %d components, want 2", n)
+	}
+	if k := decodeRuneResult.Fields[0].Type.Kind; k != Int32 {
+		t.Errorf("the rune is %v, want int32", k)
+	}
+	if k := decodeRuneResult.Fields[1].Type.Kind; k != Uint64 {
+		t.Errorf("the index is %v, want uint64", k)
+	}
+	fn := lowerOK(t, `func f(s string) { for range s { none() } }`)
+	call := findCall(fn, "runtime.decoderune")
+	if call == nil {
+		t.Fatalf("no call:\n%s", buildDump(fn))
+	}
+	if len(call.Args) != 2 {
+		t.Fatalf("the call takes %d arguments, want 2:\n%s", len(call.Args), buildDump(fn))
+	}
+	if call.Args[1].Type == nil || call.Args[1].Type.Kind != Uint64 {
+		t.Errorf("the index crosses as %v, want an unsigned word:\n%s",
+			call.Args[1].Type, buildDump(fn))
+	}
+}
+
+// TestLowerRangeOverAStringWithNoVariables checks that the decode still runs.
+//
+// "for range s" iterates once per rune, so a loop that advanced by one byte
+// because nothing read the rune would run once per byte instead.
+func TestLowerRangeOverAStringWithNoVariables(t *testing.T) {
+	fn := lowerOK(t, `func f(s string) { for range s { none() } }`)
+	if !lowerCalled(fn, "runtime.decoderune") {
+		t.Errorf("a range with no variables skipped the decode:\n%s", buildDump(fn))
+	}
+}
+
+// lowerFindFor returns the first loop in a lowered body.
+func lowerFindFor(fn *Func) *Node {
+	var out *Node
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if out != nil {
+				return false
+			}
+			if n.Op == OFor {
+				out = n
+				return false
+			}
+			return true
+		})
+		if out != nil {
+			break
+		}
+	}
+	return out
 }

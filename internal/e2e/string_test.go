@@ -583,3 +583,85 @@ func TestToolexecConvertsBetweenStringsAndSlices(t *testing.T) {
 		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
 	}
 }
+
+// stringRangeProgram is specs/020-ir.md's range row, run as a program.
+//
+// The assertion a unit test cannot make is the byte the loop widens. A byte of
+// 0x80 is 128 and not -128, and a sign extension would put every leading byte
+// of a multi-byte sequence below the ASCII bound, so every string outside
+// ASCII would be read one byte at a time as U+FFFD. Every probe and every unit
+// case over ASCII passes with that mistake in place, so the strings here carry
+// a two-byte, a three-byte and a four-byte rune, and the index and the rune
+// are both printed for every iteration.
+//
+// The invalid encodings are the other half. A lone continuation byte and a
+// 0xff are each U+FFFD and advance one byte, which is runtime.decoderune's
+// answer and not this compiler's, so the comparison against gc is what checks
+// that the call was built the way the runtime reads it.
+const stringRangeProgram = `package main
+
+import "fmt"
+
+//go:noinline
+func id(s string) string { return s }
+
+// The loop bodies here call nothing. A call inside the body puts the byte
+// index live across it, and the phi that joins the two arms of the decode then
+// needs a copy from one stack slot to another, which ssagen.Emit has no case
+// for. That is a gap of its own, shared with test/divmod.go and
+// test/stackobj2.go in Go's corpus, and this program is about the row.
+func main() {
+	for _, s := range []string{
+		"",
+		"abcdefg",
+		"a\u00e9\u6f22\U0001f642z",
+		"h\u00e9llo",
+		"\x80\xff\xfe",
+		"a\x80b\xffc",
+		"\u00ff\u07ff\u0800\uffff",
+	} {
+		var idx [64]int
+		var runes [64]int
+		var keys [64]int
+		n := 0
+		for i, r := range id(s) {
+			idx[n] = i
+			runes[n] = int(r)
+			n = n + 1
+		}
+		k := 0
+		for i := range id(s) {
+			keys[k] = i
+			k = k + 1
+		}
+		c := 0
+		for range id(s) {
+			c = c + 1
+		}
+		fmt.Println("bytes", len(s), "runes", n, k, c)
+		for j := 0; j < n; j++ {
+			fmt.Println(j, idx[j], runes[j], keys[j])
+		}
+	}
+}
+`
+
+// TestToolexecRangesOverAString compares the index and the rune of every
+// iteration against gc's.
+func TestToolexecRangesOverAString(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/strrange\n\ngo 1.27\n",
+		"main.go": stringRangeProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "strrange", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "strrange"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

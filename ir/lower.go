@@ -231,6 +231,7 @@ var (
 	lowerByte      = mustLayoutNamed(Uint8, "byte")
 	lowerUintptr   = mustLayoutNamed(Uintptr, "uintptr")
 	lowerInt64     = mustLayoutNamed(Int64, "int64")
+	lowerInt32     = mustLayoutNamed(Int32, "int32")
 	lowerUint16    = mustLayoutNamed(Uint16, "uint16")
 	lowerUint64    = mustLayoutNamed(Uint64, "uint64")
 	lowerUnsafePtr = mustLayoutNamed(UnsafePtr, "unsafe.Pointer")
@@ -2552,7 +2553,11 @@ func (l *lowerer) rangeStmt(n *Node) {
 		bound = ref(l.spill(x), n.Pos)
 
 	case x.Type.Kind == String:
-		bail("a range over a string needs the UTF-8 decode of specs/020's row")
+		// The rune loop has no post list, because how far to advance is what
+		// the body computed, so it is built whole rather than through the
+		// index loop below. The statements the operand needed are on the sink
+		// and rangeString takes them.
+		l.rangeString(n, x)
 		return
 	case x.Type.Kind == Map:
 		// The map loop has no index and no bound, so it is built whole rather
@@ -2697,6 +2702,161 @@ func (l *lowerer) rangeChan(n *Node, x Expr) {
 	// nothing else, which is what makes the receive the only exit.
 	l.emit(&Node{Op: OFor, Pos: pos, Type: voidType, Init: init, Body: body})
 }
+
+// rangeString builds a range over a string.
+//
+// specs/020-ir.md's row. The loop is over runes and the index is over bytes,
+// which is what makes it not a case of the counted loop above: the advance
+// depends on the width of the rune just read, so it belongs in the body and
+// the loop has no post list at all.
+//
+// The shape is cmd/compile/internal/walk's, from range.go:
+//
+//	ha := s
+//	for hv1 := 0; hv1 < len(ha); {
+//		hv1t := hv1
+//		hv2 := rune(ha[hv1])
+//		if hv2 <= 127 {
+//			hv1 = hv1 + 1
+//		} else {
+//			hv2, hv1 = decoderune(ha, hv1)
+//		}
+//		v1, v2 = hv1t, hv2
+//		body
+//	}
+//
+// The ASCII path is inlined and runtime.decoderune is called only for a byte
+// that starts a multi-byte sequence, which is the shape gc produces and the
+// reason the symbol's own comment says it "assumes that caller has checked
+// that the to be decoded rune is a non-ASCII rune".
+//
+// Two things about that call are not free choices.
+//
+// The byte is widened to a rune by zero extension. A byte of 0x80 is 128 and
+// not -128, and a sign extension would make every leading byte of a multi-byte
+// sequence compare below 127 and take the ASCII path, so every string outside
+// ASCII would be read one byte at a time as U+FFFD. The IR's byte is unsigned,
+// so the conversion this pass builds is the zero extension already; the
+// failure is what the e2e program with a two-byte and a four-byte rune in it
+// exists to catch, because a test over ASCII cannot.
+//
+// And decoderune takes and returns a uint, not an int. The index is converted
+// on the way in and back on the way out. range.go says the same where it
+// builds the call: "decoderune expects a uint, but hv1 is an int. This is safe
+// because hv1 is always >= 0." A call built for an int result reads eight
+// bytes of a register the callee wrote four of, so the rune would carry
+// whatever was above it.
+//
+// The decode runs whether or not the clause asked for anything. "for range s"
+// iterates once per rune, so a loop that advanced by one byte would run too
+// many times.
+func (l *lowerer) rangeString(n *Node, x Expr) {
+	pos := n.Pos
+	// The string is evaluated once, which is what the specification requires
+	// of every range expression, and its length with it: an assignment in the
+	// body cannot change what is iterated.
+	s := l.spill(x)
+	bound := l.spill(l.headerField(ref(s, pos), hdrLen, lowerInt))
+	// The operand's temporaries go in the loop's own init list and not in
+	// front of the loop, for the reason rangeStmt gives: a statement between a
+	// label and the loop takes the name the loop needs.
+	idx := l.tempObj(lowerInt, pos)
+	init := append(l.pop(), define(pos, ref(idx, pos), intConst(pos, lowerInt, 0)))
+
+	l.push()
+	// The index of the rune about to be read, captured before the advance,
+	// which is what the key variable is given.
+	var start *Object
+	if len(n.Args) > 0 && n.Args[0] != nil {
+		start = l.tempObj(lowerInt, pos)
+		l.emit(define(pos, ref(start, pos), ref(idx, pos)))
+	}
+
+	r := l.tempObj(lowerInt32, pos)
+	l.emit(define(pos, ref(r, pos), &Node{
+		Op: OConvert, Pos: pos, Type: lowerInt32,
+		X: &Node{Op: OIndex, Pos: pos, Type: lowerByte,
+			X: ref(s, pos), Y: ref(idx, pos)},
+	}))
+
+	// The ASCII arm: one byte, one rune, and no call.
+	ascii := []Stmt{Assign(pos, ref(idx, pos), &Node{
+		Op: OBinary, Op1: syntax.Add, Pos: pos, Type: lowerInt,
+		X: ref(idx, pos), Y: intConst(pos, lowerInt, 1),
+	})}
+
+	// The decode arm. The two results are a rune and the index after it, and
+	// the second is a uint, so it lands in a temporary of its own and the
+	// index is written from it.
+	next := l.tempObj(lowerUint64, pos)
+	l.push()
+	l.emit(&Node{
+		Op: OAssign, Pos: pos, Type: voidType,
+		Args: []Expr{ref(r, pos), ref(next, pos)},
+		Y: &Node{
+			Op: OCall, Pos: pos, Type: decodeRuneResult,
+			X: &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.decoderune")},
+			Args: []Expr{
+				ref(s, pos),
+				&Node{Op: OConvert, Pos: pos, Type: lowerUint64, X: ref(idx, pos)},
+			},
+		},
+	})
+	l.emit(Assign(pos, ref(idx, pos),
+		&Node{Op: OConvert, Pos: pos, Type: lowerInt, X: ref(next, pos)}))
+	decode := l.pop()
+
+	l.emit(&Node{
+		Op: OIf, Pos: pos, Type: voidType,
+		X: &Node{Op: OCompare, Op1: syntax.Leq, Pos: pos, Type: lowerBool,
+			X: ref(r, pos), Y: intConst(pos, lowerInt32, runeSelf-1)},
+		Body: ascii,
+		Else: decode,
+	})
+
+	// The destinations are written before the body, so that the per-iteration
+	// declaration ir.Build put at the head of the body copies a value that is
+	// already there.
+	if start != nil {
+		l.store(pos, 0, n.Args[0], ref(start, pos))
+	}
+	if len(n.Args) > 1 && n.Args[1] != nil {
+		l.store(pos, 0, n.Args[1], ref(r, pos))
+	}
+	for _, st := range n.Body {
+		l.stmt(st)
+	}
+	body := l.pop()
+
+	// No post list. The advance is in the body, because how far to advance is
+	// what the body's first half computed.
+	l.emit(&Node{
+		Op: OFor, Pos: pos, Type: voidType, Init: init,
+		X: &Node{Op: OCompare, Op1: syntax.Lss, Pos: pos, Type: lowerBool,
+			X: ref(idx, pos), Y: ref(bound, pos)},
+		Body: body,
+	})
+}
+
+// runeSelf is the first code point that needs more than one byte, which is
+// unicode/utf8.RuneSelf. A byte below it is a rune of its own.
+const runeSelf = 0x80
+
+// decodeRuneResult is what runtime.decoderune returns: the rune, and the index
+// of the byte after it.
+//
+// The second is a uint and not an int, which is the runtime's own spelling and
+// the reason the row converts on both sides.
+var decodeRuneResult = func() *Type {
+	t := &Type{Kind: Tuple, Fields: []Field{
+		{Name: "r0", Type: lowerInt32},
+		{Name: "r1", Type: lowerUint64},
+	}}
+	if err := Layout(t); err != nil {
+		panic("ir: the result of runtime.decoderune does not lay out: " + err.Error())
+	}
+	return t
+}()
 
 // select.
 //

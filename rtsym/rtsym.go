@@ -166,6 +166,13 @@ var syms = []Sym{
 	{Name: "runtime.stringtoslicerune", Sig: "func(*[tmpStringBufSize]rune, string) []rune", Group: GroupString},
 	{Name: "runtime.slicerunetostring", Sig: "func(*tmpBuf, []rune) string", Group: GroupString},
 	{Name: "runtime.intstring", Sig: "func(*[4]byte, int64) string", Group: GroupString},
+	// decoderune takes and returns a uint and not an int, and the range row
+	// converts on both sides because of it. cmd/compile/internal/walk's
+	// range.go says the same thing where it builds the call: "decoderune
+	// expects a uint, but hv1 is an int. This is safe because hv1 is always
+	// >= 0." A call built for an int result reads eight bytes of a register
+	// the callee wrote four of.
+	{Name: "runtime.decoderune", Sig: "func(string, uint) (rune, uint)", Group: GroupString},
 
 	// Memory.
 	{Name: "runtime.memmove", Sig: "func(unsafe.Pointer, unsafe.Pointer, uintptr)", Group: GroupMemory},

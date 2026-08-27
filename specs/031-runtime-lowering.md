@@ -33,8 +33,9 @@ runtime's source, so a field inserted ahead of `enabled`, or padding that stops
 the four-byte load from being valid, is a build failure.
 
 **The 120 symbols and the contract below are not the same set, in either
-direction.** The sections below still name one call `rtsym` does not hold:
-`decoderune`. `rtsym` holds calls those sections do not enumerate at all: the
+direction.** Every call the sections below name is in the table now:
+`decoderune` was the last one missing and the `range` row over a string is its
+caller. `rtsym` holds calls those sections do not enumerate at all: the
 whole `print*` family, `deferproc` and `deferreturn`, and `newproc` and
 `morestack_noctxt`, which [033](033-closures-defer-panic.md) and
 [035](035-goroutines-and-stack-growth.md) own. The table is what the compiler
@@ -62,6 +63,7 @@ other row of the tables further down names a call nothing produces yet:
 | `makeslice` | `make([]T, n)` and `make([]T, n, m)` | IR lowering |
 | `growslice` | `append` past the capacity | IR lowering |
 | `stringtoslicebyte`, `stringtoslicerune`, `slicebytetostring`, `slicerunetostring`, `intstring` | a conversion between a string and a slice, and `string(r)` | IR lowering |
+| `decoderune` | the multi-byte arm of a `range` over a string | IR lowering |
 | `gopanic` | `panic` whose operand is already an interface value | IR lowering |
 | `gorecover` | `recover()` whose value nobody reads | IR lowering |
 | `closechan` | `close` | IR lowering |
@@ -363,6 +365,24 @@ parameters are the data pointer and the length, so the caller reads the header
 and passes two words; the other four take a header or a number. A call built
 with the header instead would put a slice's three words where the runtime
 reads two parameters.
+
+**`decoderune` takes and returns a `uint`.**
+
+```go
+func decoderune(s string, k uint) (r rune, pos uint)  // runtime/utf8.go
+```
+
+The index of a `range` over a string is an `int`, so the row converts on the
+way in and back on the way out. `cmd/compile/internal/walk`'s `range.go` says
+the same where it builds the call: *"decoderune expects a uint, but hv1 is an
+int. This is safe because hv1 is always >= 0."* A call built for an `int`
+result reads eight bytes of a register the callee wrote four of, so the rune
+would carry whatever was above it.
+
+The symbol is called only for a byte that starts a multi-byte sequence. Its own
+comment requires it: *"decoderune assumes that caller has checked that the to
+be decoded rune is a non-ASCII rune."* The ASCII path is one byte, one rune and
+no call.
 
 ### Memory
 
