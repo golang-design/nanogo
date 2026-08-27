@@ -5,6 +5,7 @@
 package link
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,14 +16,7 @@ import (
 )
 
 // loadProgram reads every archive the program links and builds the global
-// symbol table.
-//
-// The order is cmd/link's: the main package, then the packages each object
-// records in its Autolib list, in the order the lists give them. It is a
-// breadth-first walk and it decides which of two content-identical symbols
-// keeps its name, because the first definition of a content hash is the
-// one the whole program then refers to. A different order links the same
-// program under different names.
+// symbol table, in the order the linker uses.
 func loadProgram(t *testing.T, b *build) *Loader {
 	t.Helper()
 	archive := map[string]string{}
@@ -30,34 +24,15 @@ func loadProgram(t *testing.T, b *build) *Loader {
 		archive[pf[0]] = pf[1]
 	}
 	l := NewLoader()
-	queue := []string{b.pkg}
-	seen := map[string]bool{b.pkg: true}
-	for len(queue) > 0 {
-		pkg := queue[0]
-		queue = queue[1:]
+	err := l.LoadProgram(b.pkg, func(pkg string) ([]byte, string, error) {
 		file, ok := archive[pkg]
 		if !ok {
-			t.Fatalf("the import configuration does not name %s", pkg)
+			return nil, "", fmt.Errorf("the import configuration does not name it")
 		}
 		data, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatalf("reading the archive of %s: %v", pkg, err)
-		}
-		objs, err := ReadFile(data, file, pkg)
-		if err != nil {
-			t.Fatalf("%s: %v", pkg, err)
-		}
-		for _, o := range objs {
-			l.AddObject(o)
-			for _, im := range o.Imports {
-				if !seen[im.Path] {
-					seen[im.Path] = true
-					queue = append(queue, im.Path)
-				}
-			}
-		}
-	}
-	if err := l.Load(); err != nil {
+		return data, file, err
+	})
+	if err != nil {
 		t.Fatalf("building the symbol table: %v", err)
 	}
 	if d := l.Duplicates(); len(d) > 0 {

@@ -558,3 +558,45 @@ func (l *Loader) Undefined() []string {
 func (l *Loader) UsedInIface(g Global) bool {
 	return g > 0 && int(g) < len(l.usedInIface) && l.usedInIface[g]
 }
+
+// An ArchiveOpener returns the bytes of the archive or object that holds a
+// package, and the name to use for it in a diagnostic. It is what an
+// import configuration is read through.
+type ArchiveOpener func(pkg string) (data []byte, name string, err error)
+
+// LoadProgram reads the main package and everything it needs, and builds
+// the symbol table.
+//
+// The order is cmd/link's: the main package, then the packages each object
+// records in its Autolib list, in the order the lists give them, breadth
+// first. The order is not a detail. A content-addressable symbol merges by
+// hash, and the first definition of a hash is the one the whole program
+// then refers to, so a different order links the same program with
+// different names for the symbols that merged. specs/045-linker.md states
+// the fact and the comparison with cmd/link -dumpdep is what found it.
+func (l *Loader) LoadProgram(main string, open ArchiveOpener) error {
+	queue := []string{main}
+	seen := map[string]bool{main: true}
+	for len(queue) > 0 {
+		pkg := queue[0]
+		queue = queue[1:]
+		data, name, err := open(pkg)
+		if err != nil {
+			return fmt.Errorf("link: %s: %w", pkg, err)
+		}
+		objs, err := ReadFile(data, name, pkg)
+		if err != nil {
+			return err
+		}
+		for _, o := range objs {
+			l.AddObject(o)
+			for _, im := range o.Imports {
+				if !seen[im.Path] {
+					seen[im.Path] = true
+					queue = append(queue, im.Path)
+				}
+			}
+		}
+	}
+	return l.Load()
+}

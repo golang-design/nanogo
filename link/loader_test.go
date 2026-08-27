@@ -6,6 +6,7 @@ package link
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -328,3 +329,90 @@ func TestBuiltinName(t *testing.T) {
 		t.Error("a symbol that is not predeclared has an index")
 	}
 }
+
+// TestLoadProgramFollowsTheAutolibOrder checks the order the loader walks
+// packages in.
+//
+// The order decides which of two content-identical symbols keeps its name,
+// so it is part of the linker and not of whoever calls it. Here two
+// packages define one string, and the one the main package imports first
+// is the one whose name survives.
+func TestLoadProgramFollowsTheAutolibOrder(t *testing.T) {
+	shared := func(pkg, name string) *obj.Package {
+		p := obj.NewPackage(pkg)
+		p.AddHashedDef(&obj.Symbol{Name: name, Type: obj.SRODATA, Size: 2, Align: 1, Data: []byte("hi")})
+		return p
+	}
+	build := func(first, second string) map[string][]byte {
+		main := obj.NewPackage("example.com/main")
+		main.Main = true
+		main.AddImport(first, [8]byte{})
+		main.AddImport(second, [8]byte{})
+		main.AddDef(&obj.Symbol{Name: "main.main", ABI: obj.ABIInternal, Type: obj.STEXT, Size: 4, Align: 4, Data: []byte{0, 0, 0, 0}})
+		files := map[string][]byte{}
+		for pkg, p := range map[string]*obj.Package{
+			"example.com/main": main,
+			"example.com/a":    shared("example.com/a", "go:string.fromA"),
+			"example.com/b":    shared("example.com/b", "go:string.fromB"),
+		} {
+			var buf bytes.Buffer
+			if err := p.WriteObject(&buf, testHeader); err != nil {
+				t.Fatal(err)
+			}
+			files[pkg] = buf.Bytes()
+		}
+		return files
+	}
+	for _, c := range []struct {
+		first, second, want string
+	}{
+		{"example.com/a", "example.com/b", "go:string.fromA"},
+		{"example.com/b", "example.com/a", "go:string.fromB"},
+	} {
+		t.Run(c.first+" first", func(t *testing.T) {
+			files := build(c.first, c.second)
+			l := NewLoader()
+			opened := []string{}
+			err := l.LoadProgram("example.com/main", func(pkg string) ([]byte, string, error) {
+				opened = append(opened, pkg)
+				b, ok := files[pkg]
+				if !ok {
+					return nil, "", errNoSuchPackage
+				}
+				return b, pkg + ".o", nil
+			})
+			if err != nil {
+				t.Fatalf("loading: %v", err)
+			}
+			want := []string{"example.com/main", c.first, c.second}
+			if strings.Join(opened, " ") != strings.Join(want, " ") {
+				t.Errorf("the loader read %v, want %v", opened, want)
+			}
+			g := l.Resolve(l.objs[1].obj, obj.SymRef{PkgIdx: obj.PkgIdxHashed})
+			if got := l.Name(g); got != c.want {
+				t.Errorf("the merged symbol is named %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	t.Run("a package the opener cannot find", func(t *testing.T) {
+		l := NewLoader()
+		err := l.LoadProgram("example.com/missing", func(string) ([]byte, string, error) {
+			return nil, "", errNoSuchPackage
+		})
+		if err == nil || !strings.Contains(err.Error(), "example.com/missing") {
+			t.Errorf("loading a program whose main package is missing gave %v", err)
+		}
+	})
+	t.Run("an archive that is not an object", func(t *testing.T) {
+		l := NewLoader()
+		err := l.LoadProgram("example.com/main", func(string) ([]byte, string, error) {
+			return []byte("not an object"), "main.o", nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "not a Go object file") {
+			t.Errorf("loading a program whose main package is not an object gave %v", err)
+		}
+	})
+}
+
+var errNoSuchPackage = errors.New("no such package")
