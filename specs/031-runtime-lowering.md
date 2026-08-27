@@ -90,36 +90,38 @@ construction, which is where every `panic` in ordinary Go stops today.
 
 The gap is not in this pass. It is in which rows of
 [020](020-ir.md)'s table are built, and its **State** column is the answer per
-row. What is left without a caller is `append`, and every row holding a map: no
-`m[k]` reaches this far, so no row of the map table has a caller. The block on
-the map rows is the descriptor and not the calls. `rtsym` holds every map
-symbol and this compiler can already name a map type; what it cannot describe
-is the slot group the descriptor's tail points at, whose own fields are literal
-structs ([032](032-type-descriptors-and-itabs.md)).
+row. What is left without a caller is `append`.
 
-`selectnbsend` and `selectnbrecv` have no caller either, and they never need
+**The map group has callers now.** The block on it was the descriptor and never
+the calls: `rtsym` held every map symbol and this compiler could already name a
+map type, and what it could not describe was the slot group the descriptor's
+tail points at, whose own fields are literal structs. A literal struct is
+spelled now ([032](032-type-descriptors-and-itabs.md)), so the group has a
+descriptor and every row of the map table below is built.
+
+`selectnbsend` and `selectnbrecv` have no caller, and they never need
 one. `gc` reaches them through an optimisation of a select with one
 communication clause and a default; `selectgo` is correct for that shape too,
 and building the general form first is the rule this deck applies to the
 type-specialised map variants as well.
 
-**Every group of the table now has members, and two of them have no caller.**
+**Every group of the table now has members, and one of them has no caller.**
 The **map** and **write barrier** groups were declared and empty, which is a
 table claiming the compiler can call a family and naming none of it. The map
-group holds the seven entry points below and the write barrier group holds the
-eight `gcWriteBarrier` entry points, the four copies that carry a barrier of
-their own, and `runtime.writeBarrier` from the variable table
+group holds the seven entry points below and every one of them is called now.
+The write barrier group holds the eight `gcWriteBarrier` entry points, the four
+copies that carry a barrier of their own, and `runtime.writeBarrier` from the
+variable table, and none of them has a caller
 ([034](034-write-barriers.md) is still the spec with no code). A test asserts
 that no group is empty, so the next group added cannot be a name with nothing
 behind it.
 
 The allocation group has callers, because
 [032](032-type-descriptors-and-itabs.md) produces the `*_type` each of them
-takes. `makechan`, `makechan64`, `makemap`, `makemap64` and `makemap_small` are
-in the table and have none. They are blocked on the descriptor rather than on
-the symbol: a map descriptor's tail names the runtime's own group type and a
-channel descriptor carries a direction that [020](020-ir.md)'s type boundary
-does not keep.
+takes, and that now includes `makechan` and `makemap`. The three left without
+one are not blocked on anything: `makechan64` and `makemap64` are unreachable
+where `int` is 64 bits, and `makemap_small` is a size optimisation whose caller
+already names the descriptor it saves.
 
 **The equality algorithms are not called by generated code.** A type
 descriptor's `Equal` field points at a one-word closure, and the closure points
@@ -190,6 +192,41 @@ buffer's size, which is exactly the silent drift the table exists to catch.
 The specialised variants are an optimisation and are skipped until the general
 ones work. Skipping them is a performance decision; using the wrong one is
 corruption.
+
+**Nothing in the map group reads the `maps.Map`, and `len` is the exception
+that proves why.** Every symbol above answers for a nil map on its own:
+`mapaccess1` and `mapaccess2` return the zero value, `mapassign` panics,
+`mapdelete` and `mapclear` do nothing, and `mapIterStart` starts an iteration
+that is already finished. A nil check emitted by the compiler would be a second
+answer to a question the runtime has already answered.
+
+`len(m)` has no symbol at all. `gc` reads the first word of the `maps.Map`
+inline (`cmd/compile/internal/ssagen.referenceTypeBuiltin`) and
+`internal/runtime/maps` writes *"Must be first (known by the compiler, for
+len() builtin)"* above the field, so the layout is documented as the compiler's
+to read. This compiler reads it, behind the nil check `gc` also emits, because
+`len` of a nil map is zero and a nil map has no `maps.Map` to read. An earlier
+draft of [020](020-ir.md) said `rtsym` holds no symbol for it, as though one
+were missing. None is.
+
+**The element never crosses a map call and the key always does.**
+`mapaccess1`, `mapaccess2` and `mapassign` each return a *pointer* into the
+table and the value is read or written through it, which is what lets one
+symbol serve every element type. The key crosses as the address of a frame slot
+of the compiler's own, for the reason a channel's element does: the runtime
+reads it through the pointer and, for an insert, copies it into the table, so
+the program's own variable stays out of the frame.
+
+That pointer is an interior pointer to a heap object and the collector handles
+one: it finds the object from the span, so the group stays alive while the
+pointer does. `gc` holds the same pointer for the same reason.
+
+**A map index is a different call in a destination position.** `m[k]` is
+`mapaccess1` where it is read and `mapassign` where it is written, and lowering
+a destination as a value produces a program that links, runs and drops every
+write: `mapaccess1` hands back a pointer to the runtime's zero value for a key
+that is not there and the store goes into it. `ir/lower.go` puts every
+destination it writes through one router for that reason.
 
 **The iteration row is `mapIterStart` and `mapIterNext`, and an earlier draft
 of this spec named `mapiterinit` and `mapiternext`.** Following the earlier
@@ -511,8 +548,11 @@ expand it to. Both are emitted today.
 
 They are two cases. `makechan` and `makechan64` were in `rtsym` with no caller
 and no `makemap` symbol was in `rtsym` at all, which is what the empty **map**
-group meant. All five are in the table now and none has a caller. The blocker
-is the same for both and it is the descriptor, not the symbol.
+group meant. All five are in the table now. `makechan` and `makemap` have
+callers; the two 64-bit forms are unreachable on this target, because
+[030](030-abi.md) makes `int` 64 bits and `gc` reaches them only where `int` is
+narrower than the operand's own type, and `makemap_small` is a size
+optimisation that would still need the descriptor its caller already names.
 
 ### The map rows named symbols that would corrupt memory
 
