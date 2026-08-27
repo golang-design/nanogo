@@ -93,6 +93,47 @@ func TestTextLayoutAgreesWithTheLinker(t *testing.T) {
 	}
 }
 
+// TestTypeSectionSizeAgreesWithTheLinker is specs/045-linker.md's oracle
+// for address assignment, over the one data section a linker at this
+// stage can lay out completely.
+//
+// Every symbol in the type descriptor section comes out of an object, so
+// the section is closed and its size is a number the two linkers must
+// agree on. The other data sections are not closed: they hold pclntab,
+// moduledata, the garbage collection data for globals and the typelink
+// and itablink tables, none of which is built, and cmd/link breaks a tie
+// between two symbols of one size by its own symbol numbering, which
+// counts symbols those stages create. specs/045-linker.md records the
+// boundary.
+func TestTypeSectionSizeAgreesWithTheLinker(t *testing.T) {
+	target := TargetFor(runtime.GOOS, runtime.GOARCH)
+	if target == nil || runtime.GOOS != "darwin" {
+		t.Skipf("the section names this reads are Mach-O's, and this is %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	for _, b := range []*build{&hostBuild, &reflectBuild} {
+		t.Run(b.pkg, func(t *testing.T) {
+			b := b.get(t)
+			want := machoSections(t, linkExe(t, b))
+
+			l := loadProgram(t, b)
+			l.InitTasks()
+			r := l.Deadcode(runtime.GOOS, runtime.GOARCH)
+			a := l.Layout(r, target)
+
+			size, ok := want["__go_type"]
+			if !ok {
+				t.Fatal("the executable has no __go_type section")
+			}
+			t.Logf("%d type descriptors and itabs, 0x%x bytes against the linker's 0x%x",
+				len(a.GoType.Syms), a.GoType.Length, size)
+			if a.GoType.Length != size {
+				t.Errorf("the type descriptor section is 0x%x bytes for cmd/link and 0x%x for nanogo",
+					size, a.GoType.Length)
+			}
+		})
+	}
+}
+
 // TestRuntimePackagesMatchTheToolchain compares the pinned list of
 // packages the runtime depends on with the installed toolchain's.
 //

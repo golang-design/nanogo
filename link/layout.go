@@ -143,6 +143,10 @@ type Layout struct {
 	TextStart, TextEnd uint64
 	TextLength         uint64
 
+	// GoType is the section that holds the type descriptors and the
+	// itabs. It is the one data section this stage lays out.
+	GoType *Section
+
 	addr []uint64
 	kind []Kind
 	libs []*library
@@ -185,6 +189,12 @@ func (l *Loader) Layout(r *Reachability, t *Target) *Layout {
 	}
 	a.buildLibraries()
 	a.assignText(r)
+	for g := Global(1); g < Global(l.NSym()); g++ {
+		if s := l.Def(g); s != nil && r.Reachable(g) && !s.Type.IsText() {
+			a.kind[g] = a.group(g, s)
+		}
+	}
+	a.assignTypes(r)
 	return a
 }
 
@@ -367,4 +377,176 @@ func rnd(v uint64, align int64) uint64 {
 	}
 	m := uint64(align)
 	return (v + m - 1) &^ (m - 1)
+}
+
+// A Section is one output section: the symbols in it, in order, and the
+// space they take.
+type Section struct {
+	Name   string
+	Align  int64
+	Length uint64
+	Syms   []Global
+}
+
+// The names the linker groups read-only symbols by. A symbol whose name
+// carries one of these prefixes is laid out with its group and not with
+// the read-only data it was compiled as, so that the runtime can find
+// every member of the group in one address range.
+const (
+	prefixGoString = "go:string."
+	prefixGCBits   = "runtime.gcbits."
+	prefixType     = "type:"
+	prefixGCMask   = "type:.gcmask."
+	suffixFuncDesc = "·f"
+)
+
+// group is the kind the output lays a symbol out as.
+//
+// The object records read-only data for five different things, and the
+// linker separates them by name: the string constants, the garbage
+// collection bit masks, the function descriptors, the type descriptors
+// and the itabs. cmd/link's symtab does this before dodata, and dodata
+// then walks the kinds in order, so the name is what decides which
+// section a symbol lands in.
+func (a *Layout) group(g Global, s *Sym) Kind {
+	k := ObjKind(s.Type)
+	if k == KNOPTRBSS && hasPrefix(s.Name, prefixGCMask) {
+		return KGCMASK
+	}
+	if k != KRODATA {
+		return k
+	}
+	switch {
+	case hasPrefix(s.Name, prefixGoString):
+		return KGOSTRING
+	case hasPrefix(s.Name, prefixGCBits):
+		return KGCBITS
+	case hasSuffix(s.Name, suffixFuncDesc):
+		return KGOFUNC
+	case hasPrefix(s.Name, prefixType), s.Itab():
+		return KTYPE
+	}
+	return k
+}
+
+func hasSuffix(s, p string) bool { return len(s) >= len(p) && s[len(s)-len(p):] == p }
+
+// dataAlign is the alignment a data symbol is laid out at.
+//
+// An object that asked for one gets it, subject to the target's minimum.
+// One that asked for none is aligned by its size, up to the target's
+// maximum, which is cmd/link's symalign: a symbol large enough for the
+// maximum gets the maximum, and a smaller one gets the largest power of
+// two that is not larger than it.
+func (a *Layout) dataAlign(g Global) int64 {
+	t := a.target
+	if align := int64(a.symAlign(g)); align >= t.Minalign {
+		return align
+	} else if align != 0 {
+		return t.Minalign
+	}
+	align := t.Maxalign
+	size := int64(a.symSize(g))
+	for align > size && align > t.Minalign {
+		align >>= 1
+	}
+	return align
+}
+
+// assignTypes lays out the section that holds the type descriptors and
+// the itabs.
+//
+// It is the one data section a linker that has not built pclntab,
+// moduledata or the garbage collection data can lay out completely,
+// because every symbol in it comes out of an object. The three symbols
+// the linker adds to it are runtime.types, runtime.etypes and the type:*
+// carrier, and all three have size zero and an alignment the section
+// already has, so none of them moves a byte. specs/045-linker.md records
+// which sections are not in this position and why.
+//
+// The section starts one pointer in, so that no type reference has offset
+// zero, and the section's own start is rounded to the largest alignment
+// any of its symbols asked for, so its length does not depend on what the
+// segment holds in front of it.
+func (a *Layout) assignTypes(r *Reachability) {
+	var syms []Global
+	for g := Global(1); g < Global(len(a.kind)); g++ {
+		if a.kind[g] == KTYPE && r.Reachable(g) {
+			syms = append(syms, g)
+		}
+	}
+	a.sortTypes(syms)
+
+	sect := &Section{Name: ".go.type", Syms: syms, Align: a.target.Minalign}
+	for _, g := range syms {
+		if al := a.dataAlign(g); al > sect.Align {
+			sect.Align = al
+		}
+	}
+	// The start of the section is a multiple of its alignment, so the
+	// offsets below are the addresses modulo that multiple.
+	size := a.target.PtrSize
+	for _, g := range syms {
+		size = rndInt(size, a.dataAlign(g))
+		a.addr[g] = uint64(size)
+		size += int64(a.symSize(g))
+	}
+	sect.Length = uint64(size)
+	a.GoType = sect
+}
+
+// sortTypes puts the type descriptors in the order the linker writes
+// them.
+//
+// The descriptors a typelink names come first and in order of the string
+// the type calls itself, which is what lets the reflect package rely on
+// one descriptor per type string. The rest of the descriptors follow by
+// size, and the itabs come last, so that moduledata can name the three
+// ranges by their bounds alone.
+func (a *Layout) sortTypes(syms []Global) {
+	l := a.l
+	type key struct {
+		itab     bool
+		typelink bool
+		str      string
+		size     uint32
+	}
+	keys := make(map[Global]key, len(syms))
+	for _, g := range syms {
+		st, s := l.def(g)
+		k := key{itab: s.Itab(), size: s.Size}
+		if !k.itab {
+			k.typelink = s.Typelink()
+			if k.typelink {
+				k.str = l.typeStr(st, s, int(a.target.PtrSize))
+			}
+		}
+		keys[g] = k
+	}
+	sort.SliceStable(syms, func(i, j int) bool {
+		ki, kj := keys[syms[i]], keys[syms[j]]
+		if ki.itab != kj.itab {
+			return kj.itab
+		}
+		if !ki.itab {
+			if ki.typelink != kj.typelink {
+				return ki.typelink
+			}
+			if ki.typelink {
+				return ki.str < kj.str
+			}
+		}
+		if ki.size != kj.size {
+			return ki.size < kj.size
+		}
+		return syms[i] < syms[j]
+	})
+}
+
+// rndInt rounds a size up to a multiple of align.
+func rndInt(v, align int64) int64 {
+	if align <= 1 {
+		return v
+	}
+	return (v + align - 1) &^ (align - 1)
 }

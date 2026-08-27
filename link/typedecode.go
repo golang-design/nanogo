@@ -197,3 +197,24 @@ func (l *Loader) itabType(st *objState, s *Sym, ptrSize int) Global {
 	}
 	return 0
 }
+
+// tflagOff is where a descriptor holds its flag byte, and tflagExtraStar
+// says the string the descriptor names has a star in front of it that the
+// type's name does not. internal/abi owns both.
+func tflagOff(ptrSize int) int { return 2*ptrSize + 4 }
+
+const tflagExtraStar = 1 << 1
+
+// typeStr decodes the string a type descriptor names itself by.
+//
+// It is the key the linker sorts the type descriptors of the typelink
+// table by, so that reflect can rely on one descriptor per type string.
+// The extra star an indirect type carries is removed, which is what makes
+// the sort agree with the name the runtime prints.
+func (l *Loader) typeStr(st *objState, s *Sym, ptrSize int) string {
+	str := l.typeName(st, s, 4*ptrSize+8)
+	if off := tflagOff(ptrSize); off < len(s.Data) && s.Data[off]&tflagExtraStar != 0 && str != "" {
+		return str[1:]
+	}
+	return str
+}

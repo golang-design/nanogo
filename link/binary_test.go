@@ -11,6 +11,7 @@
 package link
 
 import (
+	"debug/macho"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -140,4 +141,31 @@ func parseNMLine(line string) (addr uint64, code byte, name string, ok bool) {
 		return 0, 0, "", false
 	}
 	return addr, rest[0], rest[2:], true
+}
+
+// machoSections returns the size of every section of a Mach-O
+// executable, by the name the linker gave it.
+//
+// The names are Mach-O's, which are the linker's own with the dots
+// replaced and cut to sixteen characters, so .go.type is __go_type. A
+// name that two segments both use is recorded under the segment and the
+// section both.
+func machoSections(t *testing.T, exe string) map[string]uint64 {
+	t.Helper()
+	f, err := macho.Open(exe)
+	if err != nil {
+		t.Fatalf("reading the executable: %v", err)
+	}
+	defer f.Close()
+	out := map[string]uint64{}
+	for _, s := range f.Sections {
+		out[s.Seg+","+s.Name] = s.Size
+		if _, seen := out[s.Name]; !seen {
+			out[s.Name] = s.Size
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("the executable has no section")
+	}
+	return out
 }
