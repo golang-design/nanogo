@@ -116,6 +116,28 @@ const (
 	OUnsafeString     // unsafe.String(X, Y)
 	OUnsafeStringData // unsafe.StringData(X)
 
+	// ODeclare is "var x T" with no initialiser: X is the variable it
+	// declares.
+	//
+	// It is a statement and not the absence of one, because a declaration
+	// happens where it is written. The specification makes each execution of a
+	// declaration a fresh variable, so a var in a loop body is zero on every
+	// iteration, and a frame zeroed once at the entry gives it the previous
+	// iteration's value instead. It was the absence of one until a program
+	// measured it.
+	//
+	// It is not Go-specific. Construction writes the zero, because the choice
+	// between a zero value and a clear through memory is the choice between a
+	// variable that lives in a value and one that lives in the frame, and
+	// specs/021-ssa-construction.md is where that is decided. Lowering may
+	// still rewrite X: a captured variable lives in a heap cell, and the cell
+	// is allocated where the declaration stands and comes back zeroed, so the
+	// declaration then writes nothing.
+	//
+	// A declaration with an initialiser is an OAssign with defineOp, which
+	// writes the value and needs no zero.
+	ODeclare
+
 	opCount
 )
 
@@ -178,6 +200,7 @@ var opNames = [...]string{
 	OUnsafeSliceData:  "unsafe.SliceData",
 	OUnsafeString:     "unsafe.String",
 	OUnsafeStringData: "unsafe.StringData",
+	ODeclare:          "declare",
 }
 
 func (o Op) String() string {

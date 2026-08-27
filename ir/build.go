@@ -1593,9 +1593,14 @@ func (b *builder) selectStmt(s *syntax.SelectStmt) {
 //
 // A constant and a type declare nothing at run time: a constant use is already
 // folded by the checker, and a type is not a value. A variable with no
-// initialiser emits no statement either, because a frame is zeroed
-// (specs/030-abi.md); what it does need is an entry in the function's locals,
-// which the object creation does.
+// initialiser becomes an ODeclare, which is where its zero is written.
+//
+// The frame is zeroed at the entry too (specs/030-abi.md), and the two answer
+// different questions. The entry zero is what keeps a frame slot from holding
+// whatever the last call left there before any declaration has run. This zero
+// is the language's: the specification makes each execution of a declaration a
+// fresh variable, so "var n int" in a loop body is zero on every iteration and
+// not the value the previous one left.
 func (b *builder) localDecl(d syntax.Decl) {
 	vd, ok := d.(*syntax.VarDecl)
 	if !ok {
@@ -1603,9 +1608,17 @@ func (b *builder) localDecl(d syntax.Decl) {
 	}
 	if vd.Values == nil {
 		for _, name := range vd.NameList {
-			if o := b.info.Defs[name]; o != nil {
-				b.obj(o)
+			o := b.info.Defs[name]
+			if o == nil {
+				continue
 			}
+			obj := b.obj(o)
+			if obj.Name == "_" {
+				// The blank identifier names no storage.
+				continue
+			}
+			b.emit(&Node{Op: ODeclare, Pos: name.Pos(), Type: voidType,
+				X: &Node{Op: OLocal, Pos: name.Pos(), Type: obj.Type, Obj: obj}})
 		}
 		return
 	}

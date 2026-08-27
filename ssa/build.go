@@ -255,18 +255,16 @@ func (b *builder) entry() {
 		}
 	}
 
-	// Go zeroes a result and a local before the body runs. A value-resident
-	// one gets the zero constant; a frame-resident one gets a Zero through
-	// memory, which is what puts the initialisation in the memory order.
+	// Go zeroes a result and a local before the body runs.
+	//
+	// This is the clear the collector needs: a frame slot holds whatever the
+	// last call left in it, and a stack map describes the slot from the entry
+	// onwards whether or not the declaration that names it has run. It is not
+	// the clear the language needs. A declaration inside a loop is a fresh
+	// variable on every iteration and this runs once, which is what ir.ODeclare
+	// and declareStmt write.
 	for _, o := range append(append([]*ir.Object{}, b.fn.Results...), b.fn.Locals...) {
-		if b.frame[o] {
-			m := b.memory()
-			z := e.NewValue(o.Pos, OpZero, MemType, b.localAddr(o, o.Pos), m)
-			z.AuxInt = o.Type.Size
-			b.setMemory(z)
-			continue
-		}
-		b.write(o, e, b.zeroValue(o.Type))
+		b.zeroLocal(o, o.Pos)
 	}
 }
 
@@ -620,9 +618,64 @@ func (b *builder) stmt(n ir.Stmt) {
 	case ir.OAssign:
 		b.stmts(n.Init)
 		b.assignStmt(n)
+	case ir.ODeclare:
+		b.stmts(n.Init)
+		b.declareStmt(n)
 	default:
 		b.unsupported(n, "statement")
 	}
+}
+
+// declareStmt writes the zero value of a variable declared with no
+// initialiser.
+//
+// The zero is written where the declaration stands and not only at the entry.
+// The two answer different questions. The entry clear keeps a frame slot from
+// holding whatever the last call left in it before any declaration has run,
+// which is what the collector needs. This one is the language's: each
+// execution of a declaration is a fresh variable, so "var n int" in a loop
+// body is zero on every iteration rather than holding what the previous one
+// left. gc writes the same zero from ir.ODCL.
+//
+// A declaration whose variable ir.Lower moved into a heap cell writes nothing.
+// The cell is allocated where the declaration stands, through
+// runtime.newobject, and what that returns is already zero.
+func (b *builder) declareStmt(n ir.Expr) {
+	x := n.X
+	if x == nil || x.Type == nil {
+		b.errorf(InvNone, "a declaration of nothing")
+		return
+	}
+	if x.Op != ir.OLocal {
+		return
+	}
+	if x.Obj == nil {
+		b.errorf(InvNone, "a declaration of a local with no object")
+		return
+	}
+	b.zeroLocal(x.Obj, n.Pos)
+}
+
+// zeroLocal writes the zero value of an object into wherever it lives.
+//
+// A frame-resident object is cleared through memory, so that the clear takes
+// its place in the memory order. One that lives in a value is written with the
+// zero constant, which is what keeps it out of the frame: clearing it through
+// its address would make it address-taken, and
+// specs/021-ssa-construction.md then gives it a slot.
+func (b *builder) zeroLocal(o *ir.Object, pos syntax.Pos) {
+	if o.Type == nil || o.Type.Size == 0 {
+		// Nothing to write, and a clear of no bytes is work for no reason.
+		return
+	}
+	if !b.frame[o] {
+		b.write(o, b.cur, b.zeroValue(o.Type))
+		return
+	}
+	m := b.memory()
+	z := b.value(OpZero, MemType, pos, b.localAddr(o, pos), m)
+	z.AuxInt = o.Type.Size
+	b.setMemory(z)
 }
 
 // forParts returns the four parts of a for statement.

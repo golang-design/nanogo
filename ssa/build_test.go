@@ -2490,6 +2490,48 @@ func TestBuildConvertsAConcreteValueToAnEmptyInterface(t *testing.T) {
 	}
 }
 
+// TestBuildZeroesADeclarationWhereItStands is the language rule the entry
+// clear does not satisfy.
+//
+// Each execution of a declaration is a fresh variable, so "var n int" in a loop
+// body is zero on every iteration. The entry clear runs once, so a declaration
+// that reaches this point without a zero of its own reads what the previous
+// iteration left.
+//
+// Two shapes, because the storage decides the form: a variable that lives in a
+// value takes the zero constant and a frame-resident one is cleared through
+// memory. Clearing the first through its address would make it address-taken
+// and put it in the frame.
+func TestBuildZeroesADeclarationWhereItStands(t *testing.T) {
+	// A value-resident local: an int nothing takes the address of.
+	n := obj("n", tInt, ir.ClassLocal)
+	dst := obj("dst", tInt, ir.ClassLocal)
+	f := build(t, fun("decl", []*ir.Object{n, dst},
+		&ir.Node{Op: ir.ODeclare, Type: tVoid, X: local(n)},
+		asn(local(dst), local(n)),
+	))
+	// One zero constant per declaration plus the one the entry writes.
+	if got := countOp(f, OpConstInt); got < 2 {
+		t.Errorf("%d zero constants, want the entry's and the declaration's:\n%s", got, f)
+	}
+	if countOp(f, OpZero) != 0 {
+		t.Errorf("an int was cleared through memory, so it is in the frame:\n%s", f)
+	}
+
+	// A frame-resident local: a struct wider than a value.
+	st := obj("s", tStruct, ir.ClassLocal)
+	out := obj("out", tStruct, ir.ClassLocal)
+	f = build(t, fun("declStruct", []*ir.Object{st, out},
+		&ir.Node{Op: ir.ODeclare, Type: tVoid, X: local(st)},
+		asn(local(out), local(st)),
+	))
+	// Two frame slots are cleared at the entry and the declaration clears one
+	// of them again.
+	if got := countOp(f, OpZero); got != 3 {
+		t.Errorf("%d clears, want two at the entry and one at the declaration:\n%s", got, f)
+	}
+}
+
 // TestBuildCallsThroughAnItab pins the shape of a call to a method of an
 // interface.
 //

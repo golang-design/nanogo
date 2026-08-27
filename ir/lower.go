@@ -860,6 +860,12 @@ func (l *lowerer) stmt(s Stmt) {
 		l.flush(s)
 		l.emit(runtimeCall(s.Pos, "runtime.gorecover"))
 
+	case ODeclare:
+		// Nothing to lower. X is a local, or the dereference of a heap cell
+		// that moveCapturedToHeap put the variable in, and construction is
+		// where the zero is written.
+		l.emit(s)
+
 	case OSelect:
 		l.selectStmt(s)
 

@@ -2420,10 +2420,15 @@ func f() int {
 	if strings.Contains(names, "k") {
 		t.Errorf("a constant took a frame slot: %q", names)
 	}
-	// A variable with no initialiser emits no statement: a frame is zeroed.
-	if got := len(fn.Body); got != 3 {
-		t.Errorf("%d statements, want the two initialisations and the return:\n%s",
+	// A variable with no initialiser declares where it stands, which is where
+	// its zero is written: the specification makes each execution of a
+	// declaration a fresh variable.
+	if got := len(fn.Body); got != 5 {
+		t.Errorf("%d statements, want the two declarations, the two initialisations and the return:\n%s",
 			got, buildDump(fn))
+	}
+	if got := len(buildFind(fn, ODeclare)); got != 2 {
+		t.Errorf("%d declarations, want one for x and one for w:\n%s", got, buildDump(fn))
 	}
 }
 
