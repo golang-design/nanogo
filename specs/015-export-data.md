@@ -30,7 +30,8 @@ Both directions, for everything but a generic declaration.
 | The declaration writer | `export/writer.go` | built; refuses a generic declaration by name |
 | The `__.PKGDEF` archive member | `driver/archive.go` | built; nanogo writes both members `gc` writes |
 | `-importcfg` parsing | `driver/importcfg.go` | built; all four directives, in separate tables, and an unknown directive is an error |
-| Function bodies | nowhere | **not read and not written**; see below |
+| Function bodies, the container half | `export/body.go` | specified below and being built; a body element decodes to a tree and re-encodes to the same bytes |
+| Function bodies, the type checker half | nowhere | **not written from source and not resolved to objects**; see below |
 
 `driver/importer.go` turns an import path into a file through `-importcfg` and
 hands it to the reader, so a package that imports compiles.
@@ -144,6 +145,131 @@ four directives, keeps them in separate tables as specified, and rejects an
 unknown directive. It sits in `driver` and not in an export package, because
 the driver is what reads the command line and the parser was built with
 [050](050-driver.md)'s flag handling.
+
+### What a body is, in the format's terms
+
+A body is one element of `SectionBody`. It is not a syntax tree and it is not
+a type-checked tree. It is `gc`'s **encoding of the checked syntax tree**,
+written by `noder/writer.go` from `syntax` nodes plus the `types2.Info` the
+checker filled, and read by `noder/reader.go` into `gc`'s own IR. Both halves
+name the same 15 statement codes and 24 expression codes, so the codes are the
+part of the format a second implementation has to agree on.
+
+The grammar, in the notation of `noder/doc.go`:
+
+    Body        = RefTable
+                  { AddLocal }      // one per receiver, parameter and result
+                  Bool              // whether the declaration has a block
+                  [ Stmts Pos ]     // the block, then its closing brace
+                  .
+
+    AddLocal    = Bool              // whether the local's type is derived
+                  [ Uint64 ]        // if derived, its runtime type index
+                  .
+
+    Stmts       = { Stmt } stmtEnd .
+    Stmt        = CodeStmt StmtSpec .
+
+    Expr        = CodeExpr ExprSpec .
+
+**The number of `AddLocal` entries is not in the element.** It is the arity of
+the signature, which is the receiver plus the parameters plus the results. So
+a body element cannot be decoded on its own. It is decoded through whatever
+names it, and the two things that name one are the next section.
+
+Every reference out of a body is an index into a section the declaration side
+already writes, which is what makes a body cheap:
+
+| In a body | Refers to | Section |
+| --- | --- | --- |
+| a use of a package-scope declaration | an object | `SectionObj` |
+| a use of a type | a type, or a dictionary slot when the type is derived | `SectionType` |
+| a field or method name | a package and a string | `SectionPkg`, `SectionString` |
+| a nested function literal | another body | `SectionBody` |
+| a position | a position base | `SectionPosBase` |
+
+A local variable is the exception. It is not an object anywhere in the file:
+`addLocal` gives it an index in declaration order and `useLocal` refers to it
+by that index. So a body carries its own local numbering and nothing outside
+the body can name a local.
+
+### The two ways a body is reached, and only one unblocks G1
+
+`gc` writes two body references, in two places, for two different reasons. A
+reader that implements one of them has half the feature.
+
+| Path | Written by | Shape | For |
+| --- | --- | --- | --- |
+| the private root's list | `linker.go`'s `exportBody` | `Len(n)`, then per entry `String` path, `String` name, `Reloc(SectionBody)` | inlining across packages ([024](024-inlining-and-devirtualization.md)) |
+| the function's extension data | `writer.go`'s `funcExt` | `Bool(false)`, then `Reloc(SectionBody)` | instantiating a generic ([013](013-generics.md)) |
+
+The first path carries a body only when the function is inlinable, and the
+entry names the function by its linker symbol, such as `(*Buffer).Read`. The
+second path is the one a generic takes, and it is not an option the writer
+chooses: `linker.go` writes the relocated extension data only for an object
+that has a definition in `gc`'s IR, and a generic never does, so the stub
+extension data is copied through verbatim. That is the sentence the writer's
+refusal states from the other side.
+
+The measurement says the same. In the archives the pinned toolchain writes,
+`slices` holds 85 body elements and its private root lists 2 of them. The
+other 83 are generic bodies, reached through `funcExt` alone.
+
+### What the reader decodes into, and why it is not a syntax tree
+
+The reader decodes a body into a tree this package owns
+(`export/body.go`), whose nodes are the format's own statement and
+expression codes. It is not `syntax` and it is not `ir`. Three reasons, in
+order of weight.
+
+1. **The encoding is not a syntax tree and cannot be turned back into one.**
+   A constant expression is written folded, so `1 << 3` reaches the file as
+   the value 8. An implicit conversion the source never spelled is written as
+   `exprConvert` with the implicit flag set. `exprReshape` and
+   `exprRuntimeBuiltin` have no source spelling at all. A reader that produced
+   `syntax` would be inventing text for nodes that never had any.
+2. **`types2.Info` cannot be filled from outside the checker.**
+   `types2.TypeAndValue` carries an unexported `mode`, so no package but
+   `types2` can build one. A reader that produced a syntax tree would have no
+   way to hand the type information along with it.
+3. **`ir.Build` takes a package and not a function.** Its signature is
+   `Build(pkg, files, info)`, and one decoded body is neither. Producing `ir`
+   from this package would put a second IR builder beside the one
+   [020](020-ir.md) owns.
+
+So the tree is the format, named. Its consumer is
+[013](013-generics.md)'s stenciler, which substitutes the type arguments
+through it and lowers the result. What the stenciler needs from the tree is
+what the format already carries, because it is what `gc`'s own stenciler reads
+out of the same bytes.
+
+### The round trip that proves the decoding
+
+A decoder for an undocumented format is only as good as its oracle, and a
+fixture is not one. The oracle here is `gc`'s own bodies:
+
+$$
+\forall b \in \text{SectionBody} : \quad
+\texttt{encode}(\texttt{decode}(b)) = b
+$$
+
+Every body element of every standard library archive is decoded into the tree
+and encoded back, and the resulting bitstream is compared byte for byte with
+the one `gc` wrote. Two things must be held fixed for the comparison to mean
+what it says, and both are properties of the container rather than of the
+body:
+
+- The element's reference table is seeded from the source element's. The
+  encoder builds its table in first-use order, so a table built afresh can
+  hold the same entries at different indices, and the data stream carries
+  table indices.
+- The string section is seeded from the source's, in order. `Encoder.String`
+  interns, so a string written afresh gets an index of the encoder's own
+  choosing.
+
+A field the decoder reads with the wrong width, or skips, or re-encodes in the
+wrong order, moves every byte after it. So the comparison is exact and it
+fails loudly.
 
 ### What neither half carries
 
