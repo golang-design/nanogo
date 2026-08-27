@@ -26,9 +26,9 @@
 //	A .. B  the kind-specific header: a slice's element, an array's element,
 //	        slice type and length, a struct's package path and field slice
 //	B .. C  internal/abi.UncommonType, for a type that has a name or a method
-//	C .. D  the variable-length data the header points at, which today is a
-//	        struct's field array
-//	D .. E  the method array
+//	C .. D  the variable-length data the header points at, which is a struct's
+//	        field array or an interface's method array
+//	D .. E  the method array of the UncommonType
 //
 // The order is not free. The UncommonType has to start pointer-aligned, and its
 // Moff is measured from B rather than from the descriptor, so a header that
@@ -37,21 +37,15 @@
 //
 // # What is emitted and what is refused
 //
-// A defined type is emitted. Its method set crosses the type boundary
-// (ir.Type.Methods), so the UncommonType can carry the package path that
-// reflect.Type.PkgPath reads and a method count that was established rather
-// than assumed. A struct is emitted, with the field array that carries each
-// name, tag, embedded bit, type and offset. A channel, a function and an
-// interface with methods are emitted, because the direction, the signature and
-// the method list all cross the boundary now.
+// A defined type is emitted, with the UncommonType that carries the package
+// path reflect.Type.PkgPath reads and the Method array reflect.Type.Method
+// indexes. A struct is emitted, with the field array that carries each name,
+// tag, embedded bit, type and offset. A channel, a function and an interface
+// with methods are emitted, because the direction, the signature and the method
+// list all cross the boundary now.
 //
-// Three things are refused, and each names what is missing:
+// Two things are refused, and each names what is missing:
 //
-//   - A type that has a method. The entry needs Ifn and Tfn, the two ABI
-//     wrappers, which gc generates in the declaring package as code and nanogo
-//     does not generate at all. Mtyp is writable: ir.Method.Sig carries the
-//     method's type with the receiver removed. This is the same gap that stops
-//     itabs, whose Fun array holds the same wrappers.
 //   - A struct whose fields do not compare as one region of memory. Its Equal
 //     needs a generated function, which specs/032 has no writer for, and a nil
 //     Equal on a comparable type makes the runtime panic when a value of it is
@@ -106,6 +100,18 @@ type Reloc struct {
 	Type   obj.RelocType
 	Add    int64
 	Target string
+
+	// GoFunc says the target is a Go function rather than data.
+	//
+	// An ABI is half of a symbol's identity and cmd/link resolves a by-name
+	// reference by name and ABI together, so a reference under the wrong one
+	// names a symbol nothing defines. Almost everything a descriptor points at
+	// is data, which is ABI0, and a caller cannot tell the rest apart by the
+	// name: a Method's Mtyp and its Tfn are both four-byte offsets written
+	// with the same relocation, and one is a type descriptor and the other is
+	// the compiled method. So the encoder says which, because the encoder is
+	// what chose the target.
+	GoFunc bool
 }
 
 // GCDataOffset is the offset of internal/abi.Type's GCData field within a
@@ -201,10 +207,14 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 	// Moff is measured from B, so a header that grew after the UncommonType
 	// was written would move the methods without moving the offset that finds
 	// them.
+	un, err := hasUncommon(t)
+	if err != nil {
+		return nil, err
+	}
 	a := TypeSize
 	b := a + kindTailSize(t)
 	c := b
-	if hasUncommon(t) {
+	if un {
 		c = b + uncommonSize
 	}
 	body, bodyRelocs, bodySyms, err := kindData(t, c)
@@ -220,9 +230,26 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 	if len(tail) != b-a {
 		return nil, fmt.Errorf("rtype: %s has a %d byte header and kindTailSize says %d", t, len(tail), b-a)
 	}
-	data := make([]byte, d)
+	// D..E, the method array. Its fields are four bytes each and the linker
+	// resolves each one in place, so a misaligned array would have the runtime
+	// read two halves of two offsets.
+	methods, methodRelocs, methodSyms, err := uncommonMethods(t, d)
+	if err != nil {
+		return nil, err
+	}
+	if len(methods) > 0 {
+		if !un {
+			return nil, fmt.Errorf("rtype: %s has %d method(s) and no UncommonType to hold them", t, len(methods)/methodSize)
+		}
+		if d%4 != 0 {
+			return nil, fmt.Errorf("rtype: the method array of %s starts at %d, which is not four-byte aligned", t, d)
+		}
+	}
+	e := d + len(methods)
+	data := make([]byte, e)
 	copy(data[a:], tail)
 	copy(data[c:], body)
+	copy(data[d:], methods)
 
 	h, err := Hash(t)
 	if err != nil {
@@ -257,17 +284,22 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 	out = append(out, tailSyms...)
 	out = append(out, bodySyms...)
 
-	if hasUncommon(t) {
-		un, unRelocs, unSyms, err := uncommonTail(t, d-c)
+	if un {
+		head, headRelocs, headSyms, err := uncommonTail(t, d-c)
 		if err != nil {
 			return nil, err
 		}
-		copy(data[b:], un)
-		for _, r := range unRelocs {
+		copy(data[b:], head)
+		for _, r := range headRelocs {
 			r.Off += int32(b)
 			relocs = append(relocs, r)
 		}
-		out = append(out, unSyms...)
+		out = append(out, headSyms...)
+		// The method array's relocations are already at their offsets in the
+		// descriptor, because the array is placed at D and not inside the
+		// header.
+		relocs = append(relocs, methodRelocs...)
+		out = append(out, methodSyms...)
 	}
 
 	// The pointer bitmask, from ir.Type.PtrBits and not recomputed.
@@ -333,6 +365,29 @@ func Referenced(t *ir.Type) ([]*ir.Type, error) {
 	if t == nil {
 		return nil, fmt.Errorf("rtype: the references of a nil type")
 	}
+	// The method array first, because a Method's Mtyp is a TypeOff to the
+	// descriptor of the method's type with the receiver removed. gc writes the
+	// same descriptors from the same list, in dextratype.
+	ms, err := methodSet(t)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*ir.Type, 0, len(ms))
+	for _, m := range ms {
+		if m.Sig != nil {
+			out = append(out, m.Sig)
+		}
+	}
+	more, err := referencedByKind(t)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, more...), nil
+}
+
+// referencedByKind returns the descriptors the kind-specific sections of t's
+// descriptor point at.
+func referencedByKind(t *ir.Type) ([]*ir.Type, error) {
 	switch t.Kind {
 	case ir.Ptr, ir.Slice, ir.Chan:
 		return []*ir.Type{t.Elem}, nil
@@ -445,8 +500,10 @@ func emittable(t *ir.Type) error {
 	if err != nil {
 		return err
 	}
-	if len(ms) > 0 {
-		return methodRefusal(t, ms)
+	for _, m := range ms {
+		if err := methodEmittable(t, m); err != nil {
+			return err
+		}
 	}
 	switch t.Kind {
 	case ir.Chan:
@@ -607,7 +664,11 @@ func tflag(t *ir.Type) (uint8, error) {
 	// reads sixteen bytes past the end of the symbol; clear with a tail,
 	// reflect reports no package path for a type that has one. hasUncommon is
 	// what Descriptor places the section by, so it is what sets the bit.
-	if hasUncommon(t) {
+	un, err := hasUncommon(t)
+	if err != nil {
+		return 0, err
+	}
+	if un {
 		f |= tflagUncommon
 	}
 	name, err := ir.TypeNameString(t)
@@ -626,13 +687,24 @@ func tflag(t *ir.Type) (uint8, error) {
 	if alg(t) == algMem {
 		f |= tflagRegularMemory
 	}
-	// A cached computation, not a decision: the runtime stores a value of this
-	// type directly in an interface's data word exactly when the value is one
-	// pointer-sized word that is entirely pointer.
-	if t.Size == ir.PtrSize && t.PtrBytes() == ir.PtrSize {
+	// A cached computation, not a decision.
+	if directIface(t) {
 		f |= tflagDirectIface
 	}
 	return f, nil
+}
+
+// directIface reports whether the runtime stores a value of t in an interface's
+// data word itself rather than through a pointer to a copy.
+//
+// It is so exactly when the value is one pointer-sized word that is entirely
+// pointer. Two readers need the same answer: TFlagDirectIface, which is where
+// the runtime reads it, and a Method's Ifn, which names the function that takes
+// the word the itab call passes. Two answers would name a function expecting a
+// receiver of the other shape, and nothing between here and the call would
+// notice.
+func directIface(t *ir.Type) bool {
+	return t.Size == ir.PtrSize && t.PtrBytes() == ir.PtrSize
 }
 
 // kindTailSize is the size of the kind-specific header that follows

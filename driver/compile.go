@@ -715,7 +715,7 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, generated m
 			ref, ok := defs[r.Target]
 			if !ok {
 				if ref, ok = refs[r.Target]; !ok {
-					ref = out.AddNonPkgRef(&obj.Symbol{Name: r.Target, ABI: targetABI(r.Target, generated)})
+					ref = out.AddNonPkgRef(&obj.Symbol{Name: r.Target, ABI: targetABI(r, generated)})
 					// go tool nm and go tool objdump print a name only for a
 					// symbol the RefName block covers.
 					out.AddRefName(ref, r.Target)
@@ -749,7 +749,16 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, generated m
 //
 //	type:.eqfunc.main.key: relocation target type:.eq.main.key not defined
 //	for ABI0 (but is defined for ABIInternal)
-func targetABI(name string, generated map[string]bool) uint16 {
+func targetABI(r rtype.Reloc, generated map[string]bool) uint16 {
+	name := r.Target
+	if r.GoFunc {
+		// A Method's Ifn or Tfn. It names a function the front end compiled or
+		// a wrapper ssagen generated, and either way it is a Go function and
+		// therefore ABIInternal. The name does not say so: the method of a
+		// type this package declares is not in the generated set, because
+		// nothing generated it.
+		return obj.ABIInternal
+	}
 	if generated[name] {
 		// A function this object generated. It is a Go function and it is
 		// compiled the way every Go function is, so it is ABIInternal. The

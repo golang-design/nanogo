@@ -27,15 +27,6 @@ func TestExportedTypeRefusalNamesWhatIsMissing(t *testing.T) {
 		want []string
 	}{
 		{
-			// A type with a method needs an UncommonType whose entries carry
-			// the method's signature and the two ABI wrappers. Neither is
-			// built, and an entry left out would make reflect report an empty
-			// method set for a type that has one.
-			name: "a type with a method",
-			src:  "package lib\n\ntype Code int\n\nfunc (c Code) String() string { return \"\" }\n",
-			want: []string{"Code", "type:lib.Code", "String", "ABI wrappers"},
-		},
-		{
 			// The closure and not only the root. cmd/link's defgotype walks
 			// from a struct descriptor into the type of every field, so a
 			// field whose own descriptor cannot be written stops the package
@@ -66,14 +57,16 @@ func TestExportedTypeRefusalNamesWhatIsMissing(t *testing.T) {
 	}
 }
 
-// TestExportedTypeIsDescribedForAnInterface is the row that left the table
+// TestExportedTypeIsDescribedForAnInterface holds the rows that left the table
 // above.
 //
 // A descriptor for an interface with methods needs an Imethod per method, each
 // an offset to the descriptor of the method's signature. That signature is a
 // function literal, and it had no canonical name until ir/rtype.go spelled one,
-// so the whole package was refused. Both spellings are there now, so the
-// package compiles and the importer's link resolves.
+// so the whole package was refused. A defined type with a method sat there too,
+// because its Method array names two ABI wrappers that nothing generated. All
+// three spellings are there now, so the package compiles and the importer's
+// link resolves.
 func TestExportedTypeIsDescribedForAnInterface(t *testing.T) {
 	arm64Only(t)
 	needGoCommand(t)
@@ -88,6 +81,17 @@ func TestExportedTypeIsDescribedForAnInterface(t *testing.T) {
 		},
 		{"an embedded interface", "package lib\n\ntype R interface{ Read([]byte) (int, error) }\n\ntype RC interface {\n\tR\n\tClose() error\n}\n"},
 		{"a literal interface in a struct field", "package lib\n\ntype Holder struct{ V interface{ Len() int } }\n"},
+		{
+			// A type with a method. Its UncommonType's Method array names the
+			// method's signature and the two ABI wrappers, and it was refused
+			// for as long as ssagen generated no wrapper.
+			"a defined type with a value receiver method",
+			"package lib\n\ntype Code int\n\nfunc (c Code) String() string { return \"\" }\n",
+		},
+		{
+			"a defined type with a pointer receiver method",
+			"package lib\n\ntype Buf []byte\n\nfunc (b *Buf) Reset() { *b = (*b)[:0] }\n",
+		},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			if _, err := compileSource(t, tc.src, func(c *Config) { c.Package = "lib" }); err != nil {

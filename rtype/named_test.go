@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"golang.design/x/nanogo/ir"
+	"golang.design/x/nanogo/obj"
 	"golang.design/x/nanogo/rtype"
 	"golang.design/x/nanogo/syntax"
 	"golang.design/x/nanogo/types2"
@@ -144,6 +145,42 @@ type Reader interface {
 	flush() error
 }
 
+// Counter is a defined type with a method set that covers every row of the
+// Method array at once.
+//
+// Value is exported with a value receiver, so T's descriptor names the method
+// for Tfn and the generated wrapper for Ifn, because an int is not one pointer
+// word. Ärger is exported and its first letter is not ASCII, which is the case
+// that decides where the exported prefix ends: byte order by name would sort it
+// after hidden, and Xcount counts the prefix, so reflect would report one
+// exported method where there are two. Add has a pointer receiver, so it is in
+// *Counter's set and not in Counter's. hidden is unexported, so it is in the
+// array and not in the exported prefix.
+type Counter int
+
+func (c Counter) Value() int  { return int(c) }
+func (c Counter) Ärger() int  { return int(c) + 1 }
+func (c *Counter) Add(n int)  { *c += Counter(n) }
+func (c Counter) hidden() int { return int(c) + 2 }
+
+// CounterPtr puts *Counter in the corpus. A pointer carries no name of its own
+// and carries the whole of the pointee's method set, so it is the descriptor
+// that has an UncommonType because of its methods rather than because of a
+// name, and the one whose Tfn and Ifn both name the pointer method.
+type CounterPtr = *Counter
+
+// Handle is one pointer word, so a value of it is its own interface word.
+// TFlagDirectIface is set, and Ifn therefore names the method itself rather
+// than a wrapper that dereferences a pointer.
+type Handle struct{ p *int }
+
+func (h Handle) Get() int {
+	if h.p == nil {
+		return 0
+	}
+	return *h.p
+}
+
 var namedCorpus = []struct {
 	src string
 	rt  reflect.Type
@@ -163,6 +200,9 @@ var namedCorpus = []struct {
 	{"Variadic", reflect.TypeOf(Variadic(nil))},
 	{"NamedEmpty", reflect.TypeOf((*NamedEmpty)(nil)).Elem()},
 	{"Unicode", reflect.TypeOf(Unicode{})},
+	{"Counter", reflect.TypeOf(Counter(0))},
+	{"CounterPtr", reflect.TypeOf((*Counter)(nil))},
+	{"Handle", reflect.TypeOf(Handle{})},
 }
 
 // namedRefusals are the rows that must be refused, with the words the refusal
@@ -246,11 +286,23 @@ type Reader interface {
 	flush() error
 }
 
-// Counter is not in the corpus. It is the type whose descriptor must be
-// refused, because a method needs two things this compiler does not have.
 type Counter int
 
-func (Counter) String() string { return "" }
+func (c Counter) Value() int  { return int(c) }
+func (c Counter) Ärger() int  { return int(c) + 1 }
+func (c *Counter) Add(n int)  { *c += Counter(n) }
+func (c Counter) hidden() int { return int(c) + 2 }
+
+type CounterPtr = *Counter
+
+type Handle struct{ p *int }
+
+func (h Handle) Get() int {
+	if h.p == nil {
+		return 0
+	}
+	return *h.p
+}
 `
 
 // namedPkgPath is the import path gc compiled this test package under.
@@ -335,13 +387,16 @@ func TestNamedDescriptorAgainstReflect(t *testing.T) {
 	}
 }
 
-// TestUncommonTypeCarriesThePackagePath checks the section that a defined type
-// exists for.
+// TestUncommonTypeAgainstReflect checks the section a defined type exists for
+// against the one gc wrote for the same type.
 //
-// reflect.Type.PkgPath reads the UncommonType, so a descriptor without one
-// reports an empty path for a type that has one, and a TFlagUncommon set with
-// no section makes the runtime read past the end of the symbol.
-func TestUncommonTypeCarriesThePackagePath(t *testing.T) {
+// gc's own descriptor is the oracle rather than reflect's accessors, because
+// reflect reports the exported method set and Mcount counts the whole of it.
+// The three numbers are what every reader of the section navigates by:
+// reflect.Type.PkgPath reads PkgPath, reflect.Type.NumMethod on a type that is
+// not an interface returns Xcount, and Moff is the distance to the array both
+// of them index.
+func TestUncommonTypeAgainstReflect(t *testing.T) {
 	types, _ := namedTypes(t)
 	for i, c := range namedCorpus {
 		t.Run(c.src, func(t *testing.T) {
@@ -350,63 +405,216 @@ func TestUncommonTypeCarriesThePackagePath(t *testing.T) {
 				t.Fatalf("descriptor: %v", err)
 			}
 			d := syms[0]
+			want := gcUncommon(c.rt)
+			if want == nil {
+				t.Fatal("gc wrote no UncommonType for a type in the named corpus")
+			}
 			// B is where the UncommonType starts: the end of
 			// internal/abi.Type plus the kind-specific header.
-			b := rtype.TypeSize
-			switch c.rt.Kind() {
-			case reflect.Struct:
-				b += 32
-			case reflect.Slice:
-				b += 8
-			case reflect.Array:
-				b += 24
-			case reflect.Chan:
-				b += 16
-			case reflect.Func:
-				b += 8
-			case reflect.Interface:
-				b += 32
+			b := uncommonOffsetOf(c.rt)
+			if got := d.Data[20] & 1; got == 0 {
+				t.Error("TFlagUncommon is clear and gc set it")
 			}
-			// An interface declares no method on itself. Its methods are the
-			// InterfaceType header's Imethods, a different section with a
-			// different encoding, so its UncommonType holds none of them.
-			// reflect.Type.NumMethod reads the Imethods for an interface and
-			// the UncommonType for everything else, which is why the two are
-			// not one expression.
-			wantM := c.rt.NumMethod()
-			if c.rt.Kind() == reflect.Interface {
-				wantM = 0
+			if got := binary.LittleEndian.Uint16(d.Data[b+4:]); got != want.Mcount {
+				t.Errorf("Mcount %d, want %d", got, want.Mcount)
 			}
-			if got := binary.LittleEndian.Uint16(d.Data[b+4:]); got != uint16(wantM) {
-				t.Errorf("Mcount %d, want %d", got, wantM)
+			if got := binary.LittleEndian.Uint16(d.Data[b+6:]); got != want.Xcount {
+				t.Errorf("Xcount %d, want %d", got, want.Xcount)
 			}
-			if got := binary.LittleEndian.Uint16(d.Data[b+6:]); got != 0 {
-				t.Errorf("Xcount %d, want 0", got)
-			}
-			// Moff is measured from the UncommonType and not from the
-			// descriptor, and it skips the variable-length data, so it is the
-			// distance from B to the end.
-			if got := binary.LittleEndian.Uint32(d.Data[b+8:]); int(got) != len(d.Data)-b {
-				t.Errorf("Moff %d, want %d", got, len(d.Data)-b)
+			if got := binary.LittleEndian.Uint32(d.Data[b+8:]); got != want.Moff {
+				t.Errorf("Moff %d, want %d", got, want.Moff)
 			}
 
 			r, ok := reloc(d, int32(b))
-			if !ok {
-				t.Fatal("no package path reference")
+			if ok != (want.PkgPath != 0) {
+				t.Fatalf("package path present %v, want %v", ok, want.PkgPath != 0)
 			}
-			want := "type:.importpath." + namedPkgPath() + "."
-			if r.Target != want {
-				t.Errorf("package path is %s, want %s", r.Target, want)
+			if !ok {
+				return
+			}
+			path := namedPkgPath()
+			sym := "type:.importpath." + path + "."
+			if r.Target != sym {
+				t.Errorf("package path is %s, want %s", r.Target, sym)
 			}
 			if r.Size != 4 {
 				t.Errorf("package path is %d bytes, want a four-byte NameOff", r.Size)
 			}
-			sym, ok := find(syms, want)
+			def, ok := find(syms, sym)
 			if !ok {
-				t.Fatalf("%s is not defined", want)
+				t.Fatalf("%s is not defined", sym)
 			}
-			if got := decodeName(t, sym.Data); got != c.rt.PkgPath() {
-				t.Errorf("package path is %q, want %q", got, c.rt.PkgPath())
+			if got := decodeName(t, def.Data); got != path {
+				t.Errorf("package path is %q, want %q", got, path)
+			}
+		})
+	}
+}
+
+// TestMethodArrayAgainstReflect checks the Method array against gc's own.
+//
+// The array is what reflect.Type.Method reads and what the linker walks to
+// decide which methods a reachable type keeps, so three things have to hold at
+// once: the entries are in gc's order, each names the method's name, its type
+// with the receiver removed, and the two functions an ordinary call and an itab
+// call reach, and the three code and type offsets of one entry are consecutive
+// R_METHODOFF relocations. cmd/link's deadcode pass panics with "expect three
+// consecutive R_METHODOFF relocs" if anything separates them.
+func TestMethodArrayAgainstReflect(t *testing.T) {
+	types, _ := namedTypes(t)
+	for i, c := range namedCorpus {
+		want := gcMethods(c.rt)
+		if len(want) == 0 {
+			continue
+		}
+		t.Run(c.src, func(t *testing.T) {
+			syms, err := rtype.Descriptor(types[i])
+			if err != nil {
+				t.Fatalf("descriptor: %v", err)
+			}
+			d := syms[0]
+			b := uncommonOffsetOf(c.rt)
+			base := b + int(binary.LittleEndian.Uint32(d.Data[b+8:]))
+			if got := len(d.Data); got != base+len(want)*16 {
+				t.Fatalf("the descriptor is %d bytes and the array ends at %d", got, base+len(want)*16)
+			}
+			// The names, in order. gc's Name is an offset this process cannot
+			// resolve, so the names come from the source: the exported ones in
+			// order are what reflect reports, and the unexported ones are the
+			// ones the declaration holds.
+			names := methodNamesOf(t, c.rt)
+			for j := range want {
+				off := int32(base + j*16)
+				r, ok := reloc(d, off)
+				if !ok {
+					t.Fatalf("method %d has no name reference", j)
+				}
+				if r.Type != obj.R_ADDROFF || r.Size != 4 {
+					t.Errorf("method %d's name is a %v of %d bytes, want a four-byte R_ADDROFF", j, r.Type, r.Size)
+				}
+				def, ok := find(syms, r.Target)
+				if !ok {
+					t.Fatalf("method %d's name symbol %s is not defined", j, r.Target)
+				}
+				if got := decodeName(t, def.Data); got != names[j] {
+					t.Errorf("method %d is named %q, want %q", j, got, names[j])
+				}
+				// The three offsets into text and type data, consecutive and
+				// in the order Mtyp, Ifn, Tfn.
+				for k, field := range []string{"Mtyp", "Ifn", "Tfn"} {
+					r, ok := reloc(d, off+4+int32(4*k))
+					if !ok {
+						t.Fatalf("method %d has no %s reference", j, field)
+					}
+					if r.Type != obj.R_METHODOFF || r.Size != 4 {
+						t.Errorf("method %d's %s is a %v of %d bytes, want a four-byte R_METHODOFF", j, field, r.Type, r.Size)
+					}
+				}
+			}
+		})
+	}
+}
+
+// methodNamesOf returns the names of rt's methods in the order gc's array holds
+// them: every exported name first, then the unexported ones.
+//
+// reflect reports only the exported ones, so the unexported names come from the
+// declarations in this file. Counter is the only type in the corpus that has
+// one.
+func methodNamesOf(t *testing.T, rt reflect.Type) []string {
+	t.Helper()
+	out := make([]string, 0, rt.NumMethod())
+	for i := 0; i < rt.NumMethod(); i++ {
+		out = append(out, rt.Method(i).Name)
+	}
+	base := rt
+	if base.Kind() == reflect.Pointer {
+		base = base.Elem()
+	}
+	if base == reflect.TypeOf(Counter(0)) {
+		out = append(out, "hidden")
+	}
+	if got := len(out); got != len(gcMethods(rt)) {
+		t.Fatalf("%v has %d methods in the descriptor and this test names %d", rt, len(gcMethods(rt)), got)
+	}
+	return out
+}
+
+// TestMethodArrayNamesTheFunctions checks that each entry names the method the
+// front end compiled or the wrapper ssagen generates, and never anything else.
+//
+// The table is the one rtype/uncommon.go draws. Getting Ifn wrong is silent:
+// both spellings exist, both are called with one word, and the word means a
+// value in one and a pointer in the other.
+func TestMethodArrayNamesTheFunctions(t *testing.T) {
+	types, _ := namedTypes(t)
+	byName := map[string]*ir.Type{}
+	for i, c := range namedCorpus {
+		byName[c.src] = types[i]
+	}
+	pkg := namedPkgPath()
+	for _, tc := range []struct {
+		src      string
+		entries  []string
+		tfn, ifn []string
+	}{
+		{
+			// Counter is an int, so a value of it is not its own interface
+			// word and Ifn is the wrapper on the pointer.
+			src:     "Counter",
+			entries: []string{"Value", "Ärger", "hidden"},
+			tfn:     []string{pkg + ".Counter.Value", pkg + ".Counter.Ärger", pkg + ".Counter.hidden"},
+			ifn:     []string{pkg + ".(*Counter).Value", pkg + ".(*Counter).Ärger", pkg + ".(*Counter).hidden"},
+		},
+		{
+			// The pointer's set is the larger one and both fields name the
+			// pointer method throughout.
+			src:     "CounterPtr",
+			entries: []string{"Add", "Value", "Ärger", "hidden"},
+			tfn:     []string{pkg + ".(*Counter).Add", pkg + ".(*Counter).Value", pkg + ".(*Counter).Ärger", pkg + ".(*Counter).hidden"},
+			ifn:     []string{pkg + ".(*Counter).Add", pkg + ".(*Counter).Value", pkg + ".(*Counter).Ärger", pkg + ".(*Counter).hidden"},
+		},
+		{
+			// Handle is one pointer word, so the itab passes the value itself
+			// and Ifn is the method rather than a wrapper.
+			src:     "Handle",
+			entries: []string{"Get"},
+			tfn:     []string{pkg + ".Handle.Get"},
+			ifn:     []string{pkg + ".Handle.Get"},
+		},
+	} {
+		t.Run(tc.src, func(t *testing.T) {
+			syms, err := rtype.Descriptor(byName[tc.src])
+			if err != nil {
+				t.Fatalf("descriptor: %v", err)
+			}
+			d := syms[0]
+			b := uncommonOffsetOf(reflect.TypeOf(Counter(0)))
+			if tc.src == "CounterPtr" {
+				b = rtype.TypeSize + 8
+			}
+			if tc.src == "Handle" {
+				b = rtype.TypeSize + 32
+			}
+			base := b + int(binary.LittleEndian.Uint32(d.Data[b+8:]))
+			if got := binary.LittleEndian.Uint16(d.Data[b+4:]); int(got) != len(tc.entries) {
+				t.Fatalf("Mcount %d, want %d", got, len(tc.entries))
+			}
+			for j := range tc.entries {
+				off := int32(base + j*16)
+				name, _ := reloc(d, off)
+				def, _ := find(syms, name.Target)
+				if got := decodeName(t, def.Data); got != tc.entries[j] {
+					t.Errorf("method %d is %q, want %q", j, got, tc.entries[j])
+				}
+				ifn, _ := reloc(d, off+8)
+				if ifn.Target != tc.ifn[j] {
+					t.Errorf("%s's Ifn is %s, want %s", tc.entries[j], ifn.Target, tc.ifn[j])
+				}
+				tfn, _ := reloc(d, off+12)
+				if tfn.Target != tc.tfn[j] {
+					t.Errorf("%s's Tfn is %s, want %s", tc.entries[j], tfn.Target, tc.tfn[j])
+				}
 			}
 		})
 	}
@@ -523,42 +731,63 @@ func TestStructPkgPathIsTheUnexportedFieldsPackage(t *testing.T) {
 	}
 }
 
-// TestDescriptorRefusesAMethod checks that a type with a method is refused by
-// name rather than described with an empty method set.
+// TestDescriptorDescribesAMethodSet checks that a method set reaches the
+// descriptor rather than stopping it.
 //
-// The refusal names the two ABI wrappers and no longer names the signature.
-// ir.Method.Sig carries the method's type now, so a refusal that still said
-// the signature was absent would send the next reader to a file with nothing
-// left to fix in it.
-func TestDescriptorRefusesAMethod(t *testing.T) {
+// It was refused for as long as the two ABI wrappers did not exist. Both halves
+// are here now: ssagen generates the wrapper and ir.MethodSymbol spells it, so
+// the row names a function the same object defines.
+func TestDescriptorDescribesAMethodSet(t *testing.T) {
 	_, pkg := namedTypes(t)
 	c := ir.NewConverter()
 	counter, err := c.Convert(pkg.Scope().Lookup("Counter").Type())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counter.Methods[0].Sig == nil {
-		t.Fatal("Counter.String carries no signature, so this test cannot tell the two gaps apart")
+	if _, err := rtype.Descriptor(counter); err != nil {
+		t.Fatalf("Counter: %v", err)
 	}
-	_, err = rtype.Descriptor(counter)
-	if err == nil {
-		t.Fatal("a type with a method was described")
-	}
-	for _, want := range []string{"String", "ABI wrappers", "Ifn", "Tfn"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal is %q, want it to name %q", err, want)
-		}
-	}
-	if strings.Contains(err.Error(), "signature") {
-		t.Errorf("the refusal is %q and still claims the signature is missing", err)
-	}
-	// The pointer's set is the larger one, so a pointer to it is refused too.
 	ptr := &ir.Type{Kind: ir.Ptr, Elem: counter}
 	if err := ir.Layout(ptr); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rtype.Descriptor(ptr); err == nil {
-		t.Error("a pointer to a type with a method was described")
+	if _, err := rtype.Descriptor(ptr); err != nil {
+		t.Fatalf("*Counter: %v", err)
+	}
+	// A descriptor is not a leaf. Every Mtyp is an offset to the descriptor of
+	// the method's signature, so whoever writes this one owes those as well.
+	// The pointer's set is the larger one, so it is the one that owes them all.
+	refs, err := rtype.Referenced(ptr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range counter.Methods {
+		found := false
+		for _, r := range refs {
+			if r == m.Sig {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the signature of %s is not in *Counter's referenced set", m.Name)
+		}
+	}
+	// Counter's own descriptor has no row for a pointer receiver method, so it
+	// owes no descriptor for one either.
+	refs, err = rtype.Referenced(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range counter.Methods {
+		found := false
+		for _, r := range refs {
+			if r == m.Sig {
+				found = true
+			}
+		}
+		if found == m.PtrOnly {
+			t.Errorf("the signature of %s is in Counter's referenced set: %v, want %v", m.Name, found, !m.PtrOnly)
+		}
 	}
 }
 

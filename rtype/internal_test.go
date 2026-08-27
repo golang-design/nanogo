@@ -222,12 +222,12 @@ func TestEmittableRefusalsSurviveWithoutTheName(t *testing.T) {
 			"method set of p.T is not in the IR type",
 		},
 		{
-			"a defined type that has a method",
+			"a method with no signature",
 			&ir.Type{
 				Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int",
 				Methods: []ir.Method{{Name: "String"}},
 			},
-			"the first is String",
+			"the method String of p.T has no signature",
 		},
 	} {
 		err := emittable(tc.typ)
@@ -392,10 +392,9 @@ func TestStructPkgPathRefusesWhatItCannotAttribute(t *testing.T) {
 // TestUncommonPkgPathOfAComposite covers gc's rule for a type with no name.
 //
 // gc takes the package from the element's symbol for a pointer, a slice, an
-// array and a channel. It is unreachable through Descriptor while a type with
-// a method is refused, because a composite with no name has no UncommonType
-// unless it has methods, and it can only have methods through a defined
-// element. It is the answer for the day methods are written.
+// array and a channel. A composite with no name has no UncommonType unless it
+// has methods, and it can only have methods through a defined element, so a
+// pointer to a defined type is the row that reaches this through Descriptor.
 func TestUncommonPkgPathOfAComposite(t *testing.T) {
 	elem := &ir.Type{Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int"}
 	for _, tc := range []struct {
@@ -418,22 +417,26 @@ func TestUncommonPkgPathOfAComposite(t *testing.T) {
 	}
 }
 
-// TestMethodRefusalQualifiesAnUnexportedName checks that the refusal names one
-// method the way the language names it.
+// TestMethodRefusalQualifiesAnUnexportedName checks that the one refusal a
+// method row still has names the method the way the language names it.
 //
 // Two packages may declare an unexported method of the same name and they are
-// different methods, so the refusal has to say which.
+// different methods, so the refusal has to say which package. The row is
+// refused because rtype/name.go writes no package-path offset, which is the
+// only thing that would tell the two apart in the descriptor.
 func TestMethodRefusalQualifiesAnUnexportedName(t *testing.T) {
 	typ := &ir.Type{Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int"}
-	err := methodRefusal(typ, []ir.Method{{Name: "hidden", Pkg: "p"}, {Name: "Visible"}})
+	sig := &ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}}
+	err := methodEmittable(typ, ir.Method{Name: "hidden", Pkg: "other", Sig: sig})
 	if err == nil {
 		t.Fatal("no refusal")
 	}
-	if !strings.Contains(err.Error(), "p.hidden") {
-		t.Errorf("the refusal is %q, want it to qualify the unexported name", err)
+	if !strings.Contains(err.Error(), "hidden") || !strings.Contains(err.Error(), "other") {
+		t.Errorf("the refusal is %q, want it to name the method and the package that declares it", err)
 	}
-	if !strings.Contains(err.Error(), "2 method") {
-		t.Errorf("the refusal is %q, want it to count the methods", err)
+	// A method of the type's own package needs no offset and is written.
+	if err := methodEmittable(typ, ir.Method{Name: "hidden", Pkg: "p", Sig: sig}); err != nil {
+		t.Errorf("a method of the type's own package was refused: %v", err)
 	}
 }
 

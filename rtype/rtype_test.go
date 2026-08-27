@@ -423,6 +423,18 @@ func TestStrIsAnOffset(t *testing.T) {
 // written out here rather than taken from the encoder, so that a section the
 // encoder places wrongly is a failure rather than two agreeing computations.
 func descriptorSize(rt reflect.Type) int {
+	b := uncommonOffsetOf(rt)
+	if u := gcUncommon(rt); u != nil {
+		// B plus Moff is where the method array starts, because Moff is
+		// measured from the UncommonType and skips the variable-length data.
+		return b + int(u.Moff) + int(u.Mcount)*abiMethodSize
+	}
+	return b + kindDataSize(rt)
+}
+
+// uncommonOffsetOf is B: the end of internal/abi.Type plus the kind-specific
+// header, which is where an UncommonType starts.
+func uncommonOffsetOf(rt reflect.Type) int {
 	n := rtype.TypeSize
 	switch rt.Kind() {
 	case reflect.Pointer, reflect.Slice:
@@ -432,18 +444,67 @@ func descriptorSize(rt reflect.Type) int {
 	case reflect.Chan:
 		n += 16
 	case reflect.Func:
-		n += 8 + 8*(rt.NumIn()+rt.NumOut())
-	case reflect.Interface:
-		n += 32 + 8*rt.NumMethod()
-	case reflect.Struct:
-		n += 32 + 24*rt.NumField()
-	}
-	// gc gives an UncommonType to every type that has a name, predeclared
-	// types included, so that reflect can report a package path.
-	if rt.Name() != "" {
-		n += 16
+		n += 8
+	case reflect.Interface, reflect.Struct:
+		n += 32
 	}
 	return n
+}
+
+// kindDataSize is the variable-length section a kind-specific header points at,
+// which sits between the UncommonType and the method array.
+func kindDataSize(rt reflect.Type) int {
+	switch rt.Kind() {
+	case reflect.Func:
+		return 8 * (rt.NumIn() + rt.NumOut())
+	case reflect.Interface:
+		return 8 * rt.NumMethod()
+	case reflect.Struct:
+		return 24 * rt.NumField()
+	}
+	return 0
+}
+
+// abiUncommon mirrors internal/abi.UncommonType, and abiMethod mirrors one
+// entry of the array it points at.
+//
+// Mirrored here for the reason abiType is: this file runs in the target's own
+// binary, so a mirror laid out by the compiler that built the test is the
+// layout the runtime reads.
+type abiUncommon struct {
+	PkgPath int32
+	Mcount  uint16
+	Xcount  uint16
+	Moff    uint32
+	_       uint32
+}
+
+type abiMethod struct{ Name, Mtyp, Ifn, Tfn int32 }
+
+const abiMethodSize = 16
+
+// gcUncommon returns the UncommonType gc wrote for rt, or nil when gc wrote
+// none.
+//
+// TFlagUncommon is what says whether there is one. Reading the section without
+// asking is reading sixteen bytes past the end of the symbol, which is the
+// failure the flag exists to prevent.
+func gcUncommon(rt reflect.Type) *abiUncommon {
+	d := abiOf(rt)
+	if d.TFlag&1 == 0 {
+		return nil
+	}
+	return (*abiUncommon)(unsafe.Add(unsafe.Pointer(d), uncommonOffsetOf(rt)))
+}
+
+// gcMethods returns the Method array gc wrote for rt.
+func gcMethods(rt reflect.Type) []abiMethod {
+	u := gcUncommon(rt)
+	if u == nil || u.Mcount == 0 {
+		return nil
+	}
+	base := unsafe.Add(unsafe.Pointer(abiOf(rt)), uncommonOffsetOf(rt)+int(u.Moff))
+	return unsafe.Slice((*abiMethod)(base), int(u.Mcount))
 }
 
 func TestTailsAreReferences(t *testing.T) {

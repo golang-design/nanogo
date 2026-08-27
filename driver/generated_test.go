@@ -66,10 +66,11 @@ func TestAddGeneratedCompilesTheMethodWrapper(t *testing.T) {
 	if !generated["main.(*counter).get"] {
 		t.Errorf("the wrapper is not in the generated set, which is %v", generated)
 	}
-	if got := targetABI("main.(*counter).get", generated); got != obj.ABIInternal {
+	ref := rtype.Reloc{Target: "main.(*counter).get"}
+	if got := targetABI(ref, generated); got != obj.ABIInternal {
 		t.Errorf("a descriptor references the wrapper under ABI %d, want ABIInternal", got)
 	}
-	if got := targetABI("main.(*counter).get", nil); got != obj.ABI0 {
+	if got := targetABI(ref, nil); got != obj.ABI0 {
 		t.Errorf("a name that is not a generated function is ABI %d, want ABI0", got)
 	}
 	sym := findDef(out, "main.(*counter).get")

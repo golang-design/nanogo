@@ -17,6 +17,7 @@ import (
 
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
+	"golang.design/x/nanogo/rtype"
 	"golang.design/x/nanogo/syntax"
 	"golang.design/x/nanogo/types2"
 )
@@ -425,23 +426,30 @@ func TestAddDescriptorsRefusesATypeWithNoMethodSet(t *testing.T) {
 // not its name.
 //
 // cmd/link resolves a by-name reference by name and ABI together, so a data
-// symbol referenced under ABIInternal names a symbol nothing defines. Every
-// symbol a descriptor points at is data except the equality routine.
+// symbol referenced under ABIInternal names a symbol nothing defines. Most of
+// what a descriptor points at is data.
 func TestTargetABIFollowsTheSymbol(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		want uint16
+		name   string
+		goFunc bool
+		want   uint16
 	}{
-		{"runtime.gcbits.0100000000000000", obj.ABI0},
-		{"type:.namedata.int-", obj.ABI0},
-		{"type:int", obj.ABI0},
-		{"runtime.memequal64", obj.ABIInternal},
+		{name: "runtime.gcbits.0100000000000000", want: obj.ABI0},
+		{name: "type:.namedata.int-", want: obj.ABI0},
+		{name: "type:int", want: obj.ABI0},
+		{name: "runtime.memequal64", want: obj.ABIInternal},
 		// A symbol that exists only in assembly is ABI0, for the reason
 		// ssagen's morestackCallee records.
-		{"runtime.morestack_noctxt", obj.ABI0},
+		{name: "runtime.morestack_noctxt", want: obj.ABI0},
+		// A Method's Ifn or Tfn. The name says nothing: a method of a type
+		// this package declares is compiled by the front end and is in no
+		// generated set, so the encoder is what says it is a function.
+		{name: "p.T.String", goFunc: true, want: obj.ABIInternal},
+		{name: "p.(*T).String", goFunc: true, want: obj.ABIInternal},
 	} {
-		if got := targetABI(tt.name, nil); got != tt.want {
-			t.Errorf("targetABI(%q) = %d, want %d", tt.name, got, tt.want)
+		r := rtype.Reloc{Target: tt.name, GoFunc: tt.goFunc}
+		if got := targetABI(r, nil); got != tt.want {
+			t.Errorf("targetABI(%q, GoFunc=%v) = %d, want %d", tt.name, tt.goFunc, got, tt.want)
 		}
 	}
 }
