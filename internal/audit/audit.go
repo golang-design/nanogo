@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -136,7 +137,61 @@ type Result struct {
 // Same reports whether two results are the same observation. A build that
 // failed is never the same as one that succeeded, whatever the exit codes say.
 func (r Result) Same(o Result) bool {
-	return r.Built == o.Built && r.Exit == o.Exit && r.Out == o.Out
+	return r.Built == o.Built && r.Exit == o.Exit && sameOutput(r.Out, o.Out)
+}
+
+// sameOutput compares two program outputs.
+//
+// Byte equality is the rule, and a Go traceback is the one exception. A
+// traceback prints two things that describe the compiler rather than the
+// program: the offset of the program counter inside its frame, and the
+// arguments of a frame the compiler inlined. Two compilers that agree
+// perfectly about what a program does still disagree about both.
+//
+//	nanogo   main.boom(0x0)
+//	                 /tmp/probe/main.go:4 +0x38
+//	gc       main.boom(...)
+//	                 /tmp/probe/main.go:4 +0x2c
+//
+// Demanding byte equality there makes "agrees with gc" a property only gc can
+// have, for every program that panics without recovering. That is not a strict
+// test, it is a broken one: it reports a difference in code generation as a
+// difference in behaviour, which is the distinction this whole corpus exists to
+// draw.
+//
+// What is normalised is exactly those two things and nothing else. The panic
+// message, the goroutine header, the frame order, every function name, and
+// every file and line still have to match byte for byte, and so does all
+// output that is not a traceback. A wrong panic value, a missing frame, a
+// frame in the wrong order and a wrong line number all still fail.
+func sameOutput(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return normalizeTraceback(a) == normalizeTraceback(b)
+}
+
+// pcOffset matches the program counter offset a traceback prints after a
+// position, which is where in the frame execution had reached.
+var pcOffset = regexp.MustCompile(`( \+0x[0-9a-f]+)$`)
+
+// frameArgs matches the argument list of a traceback's frame line. gc prints
+// "(...)" for a frame it inlined, because the arguments are not recoverable,
+// and the real values otherwise.
+var frameArgs = regexp.MustCompile(`^([\w./\-*()\[\]]+)\(.*\)$`)
+
+func normalizeTraceback(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "\t") {
+			lines[i] = pcOffset.ReplaceAllString(line, "")
+			continue
+		}
+		if m := frameArgs.FindStringSubmatch(line); m != nil {
+			lines[i] = m[1] + "(~)"
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // A Verdict is what happened to one probe.

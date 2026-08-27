@@ -273,3 +273,71 @@ func TestDetailIsOneLine(t *testing.T) {
 		t.Errorf("a wrong verdict does not show which side failed to build: %q", wrong.Detail())
 	}
 }
+
+// TestSameOutputNormalisesOnlyTheCompilersOwnDetail pins both halves of the
+// traceback rule: what it forgives, and what it must still catch.
+//
+// The forgiving half exists because a traceback prints the program counter's
+// offset inside its frame and the arguments of a frame the compiler inlined,
+// and two compilers that agree about behaviour disagree about both. The strict
+// half is the point of the corpus: everything else in a traceback describes
+// what the program did, and a difference there is a real difference.
+func TestSameOutputNormalisesOnlyTheCompilersOwnDetail(t *testing.T) {
+	const gc = "panic: boom\n\ngoroutine 1 [running]:\nmain.boom(...)\n\t/tmp/p/main.go:4 +0x2c\nmain.main()\n\t/tmp/p/main.go:9 +0x1c\n"
+	for _, tt := range []struct {
+		name string
+		out  string
+		same bool
+		why  string
+	}{
+		{
+			name: "a different program counter offset",
+			out:  "panic: boom\n\ngoroutine 1 [running]:\nmain.boom(...)\n\t/tmp/p/main.go:4 +0x38\nmain.main()\n\t/tmp/p/main.go:9 +0x40\n",
+			same: true,
+			why:  "the offset inside a frame is code generation and not behaviour",
+		},
+		{
+			name: "an inlined frame against a real argument list",
+			out:  "panic: boom\n\ngoroutine 1 [running]:\nmain.boom(0x0)\n\t/tmp/p/main.go:4 +0x38\nmain.main()\n\t/tmp/p/main.go:9 +0x1c\n",
+			same: true,
+			why:  "gc prints (...) for a frame it inlined, because the arguments are gone",
+		},
+		{
+			name: "a different panic value",
+			out:  "panic: bang\n\ngoroutine 1 [running]:\nmain.boom(...)\n\t/tmp/p/main.go:4 +0x2c\nmain.main()\n\t/tmp/p/main.go:9 +0x1c\n",
+			why:  "the panic value is the program's behaviour",
+		},
+		{
+			name: "a different line number",
+			out:  "panic: boom\n\ngoroutine 1 [running]:\nmain.boom(...)\n\t/tmp/p/main.go:5 +0x2c\nmain.main()\n\t/tmp/p/main.go:9 +0x1c\n",
+			why:  "a wrong line is a wrong answer about where the program was",
+		},
+		{
+			name: "a missing frame",
+			out:  "panic: boom\n\ngoroutine 1 [running]:\nmain.main()\n\t/tmp/p/main.go:9 +0x1c\n",
+			why:  "a frame that is not there is a different call stack",
+		},
+		{
+			name: "the frames in the other order",
+			out:  "panic: boom\n\ngoroutine 1 [running]:\nmain.main()\n\t/tmp/p/main.go:9 +0x1c\nmain.boom(...)\n\t/tmp/p/main.go:4 +0x2c\n",
+			why:  "frame order is the call stack",
+		},
+		{
+			name: "a different function name",
+			out:  "panic: boom\n\ngoroutine 1 [running]:\nmain.bang(...)\n\t/tmp/p/main.go:4 +0x2c\nmain.main()\n\t/tmp/p/main.go:9 +0x1c\n",
+			why:  "a different function is a different stack",
+		},
+		{
+			name: "ordinary output that is not a traceback",
+			out:  "seven\n",
+			why:  "output that is not a traceback is compared byte for byte",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sameOutput(gc, tt.out)
+			if got != tt.same {
+				t.Errorf("sameOutput = %v, want %v: %s", got, tt.same, tt.why)
+			}
+		})
+	}
+}
