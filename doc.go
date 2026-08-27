@@ -37,11 +37,11 @@
 // their arguments, print and println, a closure with or without captures, and
 // a declared function used as a value all compile.
 //
-// A method value, defer of a method of an interface,
-// append, a conversion to an interface, a type assertion, a type switch,
-// every map and channel operation, range over a string, floating point,
-// generics, and a package with a go:embed directive in it are refused, each
-// with a message that names the function, the position and the construct.
+// A method value, defer of a method of an interface, append, a type
+// assertion, a type switch, range over a string, a conversion between string
+// and []byte, generics, a package with assembly in it, and a package with a
+// go:embed directive in it are refused, each with a message that names the
+// function, the position and the construct.
 //
 // No program the probe corpus reaches behaves differently from the one gc
 // builds. That is a measurement over 95 programs compiled twice and run

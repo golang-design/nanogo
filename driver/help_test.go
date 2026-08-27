@@ -25,17 +25,15 @@ import (
 // internal/audit/testdata/probes shows the behaviour it describes.
 func TestHelpStatesTheLimits(t *testing.T) {
 	for _, want := range []string{
-		"arm64",             // the one architecture
-		"darwin/arm64",      // the target the tests run on
-		"allowlist",         // how a package is selected
-		"gc",                // what happens to everything else
-		"export data",       // the archive carries it, so it can be imported
-		"assembly",          // the ABI wrapper that is not generated
-		"a type assertion",  // probes/type-assert
-		"append",            // probes/append-int
-		"map operation",     // probes/map-make-assign
-		"channel operation", // probes/chan-buffered
-		"A method value",    // probes/defer-method-value
+		"arm64",            // the one architecture
+		"darwin/arm64",     // the target the tests run on
+		"allowlist",        // how a package is selected
+		"gc",               // what happens to everything else
+		"export data",      // the archive carries it, so it can be imported
+		"assembly",         // the ABI wrapper that is not generated
+		"a type assertion", // probes/type-assert
+		"append",           // probes/append-int
+		"A method value",   // probes/defer-method-value
 		"generic function",
 		`imports "C"`,
 		"-race",

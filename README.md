@@ -197,12 +197,7 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
   ```
 - `recover`, when its result is read.
 - `append`.
-- Every map operation and every channel operation, including a package-level
-  variable whose type is a channel.
 - `range` over a string, and a conversion between `string` and `[]byte`.
-- A local array. The refusal is the register allocator's, not the array's:
-  an indexed store wants three integer scratch registers and the target
-  reserves two.
 - `make` of a slice whose element type has methods, or is an interface.
   `make([]byte, n)` and `make([]T, n)` for a method-free struct `T` compile;
   `make([]C, n)` where `C` has one method is refused, because the descriptor

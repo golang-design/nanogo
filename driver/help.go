@@ -159,14 +159,7 @@ What nanogo refuses, by name, with the reason:
 
 	append.
 
-	Every map operation and every channel operation, including a
-	package-level variable whose type is a channel.
-
 	range over a string, and a conversion between string and []byte.
-
-	A local array. The refusal is the register allocator's, not the
-	array's: an indexed store wants three integer scratch registers and
-	the target reserves two (specs/026-register-allocation.md).
 
 	make of a slice whose element type has methods, or is an interface.
 	make([]byte, n) and make([]T, n) for a method-free struct T compile;
