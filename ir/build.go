@@ -265,6 +265,10 @@ func Build(pkg *types2.Package, files []*syntax.File, info *types2.Info) (*Packa
 		objs:  make(map[types2.Object]*Object),
 		owner: make(map[*Object]*Func),
 		ptrs:  make(map[types2.Type]*Type),
+
+		closgen:   make(map[*Func]int),
+		isLiteral: make(map[*Func]bool),
+
 		out: &Package{
 			Path: pkg.Path(),
 			Name: pkg.Name(),
@@ -310,9 +314,17 @@ type builder struct {
 
 	any types2.Type
 
-	ntmp  int
-	nfunc int
-	errs  []error
+	ntmp int
+
+	// closgen counts the function literals declared directly inside each
+	// function, and isLiteral records which functions are literals themselves.
+	// Both are keyed by the enclosing function, nil for one declared at
+	// package scope, and both are lookup tables that are never ranged over
+	// (specs/053-determinism.md). literalNames says what they are for.
+	closgen   map[*Func]int
+	isLiteral map[*Func]bool
+
+	errs []error
 }
 
 func (b *builder) errorf(format string, args ...any) {
@@ -1131,19 +1143,49 @@ func (b *builder) wrapCallStmt(pos syntax.Pos, call Expr) Expr {
 	return &Node{Op: OCall, Pos: pos, Type: voidType, X: node}
 }
 
-// newLiteral returns an empty func() literal of the function being built.
-func (b *builder) newLiteral(pos syntax.Pos) *Func {
-	outerName, outerSym := "func", b.out.Path+".func"
+// literalNames returns the name and the linker symbol of the next function
+// literal declared inside the function being built, and records it as a
+// literal.
+//
+// It is gc's closureName. Three parts of it are read by programs rather than
+// by people, so none of them is a matter of taste.
+//
+// The counter is per enclosing function and it starts at one. A traceback and
+// runtime.CallersFrames report these names, and a program that asks which
+// frame it panicked in spells the name it expects: "main.main.func1" is the
+// first literal of main whatever else the package declares. A counter shared
+// by the package numbers the same literal differently as soon as another
+// function grows one.
+//
+// The "func" part is left out when the enclosing function is itself a literal,
+// so a literal inside main's first is "main.main.func1.1" and not
+// "main.main.func1.func1".
+//
+// A literal at package scope keeps the package's own counter, which is what
+// the nil key holds.
+func (b *builder) literalNames() (name, sym string) {
+	gen := b.closgen[b.fn] + 1
+	b.closgen[b.fn] = gen
+	outerName, outerSym, prefix := "func", b.out.Path+".func", "func"
 	if b.fn != nil {
 		outerName, outerSym = b.fn.Name, b.fn.Sym
+		if b.isLiteral[b.fn] {
+			prefix = ""
+		}
 	}
+	return fmt.Sprintf("%s.%s%d", outerName, prefix, gen), fmt.Sprintf("%s.%s%d", outerSym, prefix, gen)
+}
+
+// newLiteral returns an empty func() literal of the function being built.
+func (b *builder) newLiteral(pos syntax.Pos) *Func {
+	name, sym := b.literalNames()
 	fn := &Func{
-		Name: fmt.Sprintf("%s.func%d", outerName, b.nfunc),
-		Sym:  fmt.Sprintf("%s.func%d", outerSym, b.nfunc),
+		Name: name,
+		Sym:  sym,
 		Type: funcType,
 		Pos:  pos,
 	}
-	b.nfunc++
+	b.isLiteral[fn] = true
 	return fn
 }
 
@@ -2301,17 +2343,14 @@ func (b *builder) elem(e syntax.Expr, want types2.Type) Expr {
 // is what a closure holds.
 func (b *builder) closure(x *syntax.FuncLit) Expr {
 	sig, _ := unalias(b.typeOf(x)).(*types2.Signature)
-	outerName, outerSym := "func", b.out.Path+".func"
-	if b.fn != nil {
-		outerName, outerSym = b.fn.Name, b.fn.Sym
-	}
+	name, sym := b.literalNames()
 	fn := &Func{
-		Name: fmt.Sprintf("%s.func%d", outerName, b.nfunc),
-		Sym:  fmt.Sprintf("%s.func%d", outerSym, b.nfunc),
+		Name: name,
+		Sym:  sym,
 		Type: b.nodeType(x),
 		Pos:  x.Pos(),
 	}
-	b.nfunc++
+	b.isLiteral[fn] = true
 
 	saveFn, saveSig, saveSinks, saveFree := b.fn, b.sig, b.sinks, b.free
 	b.fn, b.sig, b.sinks, b.free = fn, sig, nil, nil

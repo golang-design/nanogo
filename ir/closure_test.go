@@ -88,7 +88,7 @@ func TestLowerCaptureReadsTheContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	lit := buildFuncOf(t, out, "f.func0")
+	lit := buildFuncOf(t, out, "f.func1")
 	if len(lit.Captures) != 1 {
 		t.Fatalf("the literal captures %d objects, want one", len(lit.Captures))
 	}
@@ -164,7 +164,7 @@ func TestLowerNestedCapture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	mid := buildFuncOf(t, out, "f.func0")
+	mid := buildFuncOf(t, out, "f.func1")
 	if len(mid.Captures) != 1 {
 		t.Fatalf("the outer literal captures %d objects, want one", len(mid.Captures))
 	}

@@ -512,6 +512,44 @@ func buildFuncOf(t *testing.T, p *Package, name string) *Func {
 	return nil
 }
 
+// TestBuildNamesFunctionLiteralsTheWayGcDoes pins the symbol of a function
+// literal.
+//
+// The name is read by programs and not only by people. A traceback and
+// runtime.CallersFrames report it, and a program that asks which frame it
+// panicked in spells the name it expects, so a spelling of nanogo's own makes
+// such a program disagree with the same program compiled by gc and nothing at
+// build time says so. test/devirtualization_nil_panics.go of Go's own corpus
+// is one.
+//
+// Three parts, each checked here: the counter starts at one, it is per
+// enclosing function rather than per package, and the "func" part is left out
+// when the enclosing function is itself a literal.
+func TestBuildNamesFunctionLiteralsTheWayGcDoes(t *testing.T) {
+	p := buildSource(t, "func outer() {\n\tsink(func() { sink(func() {}) })\n\tsink(func() {})\n}\n\n"+
+		"func second() {\n\tsink(func() {})\n}\n")
+
+	for _, want := range []struct{ name, sym string }{
+		{"outer.func1", "p.outer.func1"},
+		{"outer.func1.1", "p.outer.func1.1"},
+		{"outer.func2", "p.outer.func2"},
+		{"second.func1", "p.second.func1"},
+	} {
+		fn := buildFuncOf(t, p, want.name)
+		if fn.Sym != want.sym {
+			t.Errorf("%s has the symbol %s, want %s", want.name, fn.Sym, want.sym)
+		}
+	}
+	for _, fn := range p.Funcs {
+		if strings.Contains(fn.Name, ".func0") {
+			t.Errorf("%s is numbered from zero and gc numbers from one", fn.Name)
+		}
+		if strings.Contains(fn.Name, ".func1.func") {
+			t.Errorf("%s spells a literal inside a literal with the func part, and gc leaves it out", fn.Name)
+		}
+	}
+}
+
 // TestBuildEvaluatesAMethodReceiverBeforeTheArguments is the order the
 // specification gives an expression: left to right.
 //
@@ -968,7 +1006,7 @@ func TestBuildLoweringTable(t *testing.T) {
 			body: `func f() { defer func() { _ = recover() }() }`,
 			op:   OClosure,
 			check: func(t *testing.T, p *Package, fn *Func, n *Node) {
-				lit := buildFuncOf(t, p, fn.Name+".func0")
+				lit := buildFuncOf(t, p, fn.Name+".func1")
 				if len(buildFind(lit, ORecover)) != 1 {
 					t.Errorf("no recover in the deferred literal:\n%s", buildDump(lit))
 				}
@@ -2622,7 +2660,7 @@ func f(x int, g func(int)) {
 	if d.X.X.Op != OClosure {
 		t.Fatalf("the deferred call is not wrapped: %s", buildStr(d.X.X))
 	}
-	inner := buildFuncOf(t, p, "f.func0")
+	inner := buildFuncOf(t, p, "f.func1")
 	if len(inner.Body) != 1 || inner.Body[0].X == nil ||
 		inner.Body[0].X.Op != OGlobal || inner.Body[0].X.Obj.Name != "p.sink" {
 		t.Errorf("the wrapped callee is not p.sink:\n%s", buildDump(inner))

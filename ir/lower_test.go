@@ -1641,7 +1641,7 @@ func TestLowerDeferSnapshotsAGlobalCallee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	w := buildFuncOf(t, out, "f.func0")
+	w := buildFuncOf(t, out, "f.func1")
 	for _, o := range w.Captures {
 		if o.Class == ClassGlobal {
 			t.Errorf("the wrapper captures the global %s, so the call would read it when it runs", o.Name)
