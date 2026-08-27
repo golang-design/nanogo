@@ -417,6 +417,40 @@ func TestLowerDeadValues(t *testing.T) {
 	}
 }
 
+// TestLowerKeepsCallResults asserts that a result nobody reads is kept.
+//
+// An OpSelectN names one ABI location of a call, the way an OpArg names one of
+// the function's own, and specs/030-abi.md assigns the results of a call by
+// counting them. Dropping the one with no user leaves the call with a result
+// that has no name and ssagen stops with "result 0 of the call is never
+// named". "_, b := f()" is the source that produces it.
+func TestLowerKeepsCallResults(t *testing.T) {
+	p := lowNew()
+	call := p.b.NewValue(0, OpStaticCall, MemType, p.mem)
+	call.Aux = RuntimeFunc("runtime.gorecover")
+	unread := p.b.NewValue(0, OpSelectN, lowI64, call)
+	read := p.b.NewValue(0, OpSelectN, lowI64, call)
+	read.AuxInt = 1
+	p.mem = call
+	f := p.ret(read)
+
+	rules := lowRules(map[Op]ValueRule{
+		OpMakeResult: retRule,
+		OpStaticCall: func(v *Value, e *Edit) bool {
+			e.Set(v, OpARM64CALLstatic, v.Args...)
+			return true
+		},
+	})
+	Lower(f, rules)
+
+	if unread.dead {
+		t.Error("the result with no user was removed, and it names an ABI location")
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Errorf("the function did not verify: %v\n%s", vs, f)
+	}
+}
+
 // TestLowerBases asserts the two base pointers are made once and dominate
 // every use.
 func TestLowerBases(t *testing.T) {

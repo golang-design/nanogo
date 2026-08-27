@@ -471,6 +471,15 @@ func (l *lowerer) removable(v *Value) bool {
 		// An argument names an ABI location whether or not the body reads it,
 		// and the two base pointers are read by the frame layout.
 		return false
+	case OpSelectN:
+		// A result of a call names an ABI location for the same reason an
+		// argument does. specs/030-abi.md assigns the results of a call by
+		// position, and ssagen reads the assignment off the OpSelectN values
+		// the call has: one per result. Dropping the one nobody reads leaves
+		// the call with a result that has no name, and ssagen stops with
+		// "result 0 of the call is never named". That is what "_, b := f()"
+		// produced, and it has nothing to do with the shape f() came from.
+		return false
 	}
 	return l.rs.Essential == nil || !l.rs.Essential(v.Op)
 }
