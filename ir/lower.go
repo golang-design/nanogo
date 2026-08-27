@@ -1532,7 +1532,21 @@ func (l *lowerer) newExpr(n Expr) Expr {
 	if out == nil {
 		return n
 	}
-	return out
+	if n.X == nil {
+		return out
+	}
+	// new(expr), which Go 1.26 accepts beside new(T). The allocation is the
+	// same and the value the expression produced is stored through the pointer
+	// before it is handed back, because runtime.newobject returns zeroed
+	// memory and the program asked for the value.
+	p := l.spill(out)
+	l.emit(&Node{
+		Op:  OAssign,
+		Pos: n.Pos,
+		X:   &Node{Op: ODeref, Pos: n.Pos, Type: n.Type.Elem, X: ref(p, n.Pos)},
+		Y:   l.expr(n.X),
+	})
+	return ref(p, n.Pos)
 }
 
 // elem returns the element of an array temporary at a constant index.

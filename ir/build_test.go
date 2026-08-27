@@ -2868,3 +2868,46 @@ func buildAssertNoRef(t *testing.T, n *Node, o *Object, what string) {
 		return true
 	})
 }
+
+// TestBuildNewOfAnExpressionKeepsItsOperand pins the difference Go 1.26 added.
+//
+// new(T) allocates a zero value and new(expr) allocates and stores the value
+// the expression produced. The builder read the result type and emitted ONew
+// from that alone, which turned the second into the first: a pointer to a zero
+// where the program asked for a pointer to 123. Nothing said so, because both
+// forms produce a pointer of the right type and the corpus is what caught it,
+// in Go's own test/newexpr.go.
+func TestBuildNewOfAnExpressionKeepsItsOperand(t *testing.T) {
+	for _, tc := range []struct {
+		what string
+		body string
+		want bool
+	}{
+		{"new of a type", `func f() *int { return new(int) }`, false},
+		{"new of an untyped constant", `func f() *int { return new(123) }`, true},
+		{"new of a variable", `func f(x int) *int { return new(x) }`, true},
+		{"new of an expression", `func f(x int) *int { return new(x + 1) }`, true},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			p := buildSource(t, tc.body)
+			fn := buildFuncOf(t, p, "f")
+			var found, carries bool
+			for _, st := range fn.Body {
+				Walk(st, func(n *Node) bool {
+					if n.Op == ONew {
+						found = true
+						carries = n.X != nil
+					}
+					return true
+				})
+			}
+			if !found {
+				t.Fatalf("no new node was built:\n%s", buildDump(fn))
+			}
+			if carries != tc.want {
+				t.Errorf("the new node carries an operand=%v, want %v:\n%s",
+					carries, tc.want, buildDump(fn))
+			}
+		})
+	}
+}

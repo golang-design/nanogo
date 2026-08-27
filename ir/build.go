@@ -2464,7 +2464,21 @@ func (b *builder) builtin(x *syntax.CallExpr, fun syntax.Expr) Expr {
 		return &Node{Op: OCap, Pos: pos, Type: t, X: arg(0)}
 	case "new":
 		// The type of the node is the result type, which is the pointer.
-		return &Node{Op: ONew, Pos: pos, Type: t}
+		//
+		// Go 1.26 accepts new(expr) as well as new(T), and the two are not the
+		// same node. new(T) allocates a zero value, and new(expr) allocates
+		// and stores the value the expression produced. Dropping the operand
+		// would compile the second into the first, which is a pointer to a
+		// zero where the program asked for a pointer to 123.
+		n := &Node{Op: ONew, Pos: pos, Type: t}
+		if len(x.ArgList) == 1 && !b.info.Types[x.ArgList[0]].IsType() {
+			var elem types2.Type
+			if p, ok := coreType(b.typeOf(x)).(*types2.Pointer); ok {
+				elem = p.Elem()
+			}
+			n.X = b.assignConv(b.operand(x.ArgList[0]), b.typeOf(x.ArgList[0]), elem)
+		}
+		return n
 	case "make":
 		n := &Node{Op: OMake, Pos: pos, Type: t}
 		for i := 1; i < len(x.ArgList); i++ {
