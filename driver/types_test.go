@@ -40,9 +40,15 @@ func TestExportedTypeRefusalNamesWhatIsMissing(t *testing.T) {
 			// from a struct descriptor into the type of every field, so a
 			// field whose own descriptor cannot be written stops the package
 			// even though the struct's could be.
-			name: "a struct holding a map",
-			src:  "package lib\n\ntype Table struct{ M map[string]int }\n",
-			want: []string{"Table", "type:lib.Table", "group type"},
+			//
+			// The field was a map until the slot group gained a spelling.
+			// It is an array of two hundred pointers now: past
+			// internal/abi.MaxPtrmaskBytes gc stops writing a bitmask and
+			// emits a symbol the runtime fills in on demand, which needs the
+			// runtime's cooperation and a BSS symbol.
+			name: "a struct holding a long pointer array",
+			src:  "package lib\n\ntype Table struct{ M [200]*int }\n",
+			want: []string{"Table", "type:lib.Table", "on-demand mask"},
 		},
 	}
 	for _, tt := range tests {

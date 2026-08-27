@@ -47,30 +47,33 @@ import (
 // # What cannot be named, and why it is refused rather than guessed
 //
 // An ir.Type carries what type.go's two rules let it carry, and a spelling
-// needs more. One kind of Go type is distinguishable to the language and not
-// spellable from an ir.Type: a literal struct. gc spells an embedded field that
+// needs more. A channel's direction and a function's signature were both on
+// this list. Both are in type.go now, so chan T and chan<- T are two ir.Types
+// and two spellings, and so are func(int) and func(string). What is refused for
+// each is the zero value of the field it reads: a channel whose ChanDir is
+// InvalidDir, and a function whose Params or Results is nil, are types built
+// below the type boundary and never converted.
+//
+// A literal struct was on this list and is not any more, and the reason it came
+// off is the whole of why the list is short. gc spells an embedded field that
 // was renamed through a type alias as "struct{ Int = int }", and ir.Converter
-// unaliases, so the alias is gone before the name is asked for. A struct's
-// field tags were on this list too and are not any more, because type.go
-// carries them along with each field's package and whether it is embedded.
+// unaliases, so the alias itself is gone before the name is asked for. But gc
+// does not read the alias either: types.fldconv writes the field's own name
+// unless it is the name of the embedded type, and both of those are in the IR
+// type. The alias is what makes the two differ, and the difference is what is
+// spelled. type.go carries the field's tag, its package and whether it is
+// embedded, so nothing else in a literal struct's spelling is missing.
 //
-// A channel's direction and a function's signature were both on this list. Both
-// are in type.go now, so chan T and chan<- T are two ir.Types and two
-// spellings, and so are func(int) and func(string). What is refused for each is
-// the zero value of the field it reads: a channel whose ChanDir is InvalidDir,
-// and a function whose Params or Results is nil, are types built below the type
-// boundary and never converted.
-//
-// For each of those, a name computed from the ir.Type would be the same name
-// for two different types. That is the deduplication failure specs/032 names,
-// and it is silent: the linker merges the two and the program reads one type's
-// descriptor for the other's values. So they are refused, and the refusal names
-// the field the IR does not carry. A defined type is exempt from all of them,
-// because its name is its identity: type S func(int) is named main.S and no
-// signature is needed to say so.
+// For each of the two that are left, a name computed from the ir.Type would be
+// the same name for two different types. That is the deduplication failure
+// specs/032 names, and it is silent: the linker merges the two and the program
+// reads one type's descriptor for the other's values. So they are refused, and
+// the refusal names the field the IR does not carry. A defined type is exempt
+// from both, because its name is its identity: type S func(int) is named main.S
+// and no signature is needed to say so.
 //
 // A generic instantiation is the exception to that exemption, and it is the
-// fourth refusal. Its name is not its identity: Converter's name drops the type
+// third refusal. Its name is not its identity: Converter's name drops the type
 // arguments, so atomic.Pointer[int] and atomic.Pointer[string] both come out as
 // sync/atomic.Pointer. specs/032 records it as the case that neither the naming
 // function nor the encoder refused, which was true only because every defined
@@ -121,6 +124,22 @@ func TypeSymbol(t *Type) (string, error) {
 // would leave a declared comparable type with a nil Equal, and the runtime
 // panics on a map whose key is that type.
 const noAlgPrefix = "noalg."
+
+// NoAlgType reports whether t was synthesised with no algorithms, so that it
+// has neither an equality function nor a hash.
+//
+// It is gc's types.TypeHasNoAlg, and gc gives the mark the highest priority of
+// any algorithm: ANOALG implies ANOEQ, so a type the compiler synthesised is
+// not comparable at all and its descriptor's Equal is nil. The map slot group
+// is the type this exists for. A group holding a string would otherwise be
+// given the generated field-wise comparison, and gc emits none, so the two
+// compilers would disagree about a symbol the linker merges.
+//
+// It is exported because the naming and the encoding are in two packages and
+// the mark decides both: the symbol takes a "noalg." prefix here and the Equal
+// field is nil in rtype. One predicate, because a type that is synthesised to
+// one and declared to the other gets a descriptor under the wrong symbol.
+func NoAlgType(t *Type) bool { return noAlg(t, 0) }
 
 // noAlg reports whether t or a part of it was synthesised with no algorithms.
 //
@@ -303,6 +322,77 @@ func InterfaceMethodOrder(ms []Method) []Method {
 	return out
 }
 
+// fieldName returns the name a struct field's spelling carries, and the
+// separator between that name and the field's type.
+//
+// It is gc's types.fldconv with verb 'L', which is the verb a struct field
+// takes, and the two spellings differ here more than anywhere else.
+//
+//   - A name the language does not export is qualified by the package that
+//     declared it in the link string and left bare in the name string. Two
+//     packages may declare a field of one name and they are different fields,
+//     so the qualifier is part of the type. A field the compiler synthesised
+//     carries no package at all, which is what the map slot group's key and
+//     elem fields are, and then there is nothing to qualify with.
+//   - An embedded field is written as its type alone, and gc writes the field's
+//     own name in front of it with " = " when the two differ. That happens when
+//     the field was embedded through a type alias: type Int = int embedded is
+//     "struct { Int = int }", which is a different type from "struct { int }"
+//     and from "struct { Int int }". The name string drops an embedded name
+//     whatever it is, which is why one name symbol serves every alias of one
+//     type.
+//
+// An empty name means the field is spelled by its type alone.
+func fieldName(f Field, link bool) (name, sep string) {
+	if f.Embedded {
+		if !link || embeddedNamesItsType(f) {
+			return "", ""
+		}
+		return qualifiedFieldName(f, link), " = "
+	}
+	return qualifiedFieldName(f, link), " "
+}
+
+// qualifiedFieldName returns a field's name with the qualifier the link string
+// puts in front of an unexported one.
+func qualifiedFieldName(f Field, link bool) string {
+	if link && f.Pkg != "" && !ExportedName(f.Name) {
+		return f.Pkg + "." + f.Name
+	}
+	return f.Name
+}
+
+// embeddedNamesItsType reports whether an embedded field's name is the name the
+// language would have given it, so that gc leaves the name out.
+//
+// The name the language gives is the embedded type's own, without its package
+// and without a pointer: struct{ *T } declares a field named T. So a field
+// whose name is anything else was embedded through an alias, and the two are
+// different types.
+//
+// The second half is gc's, and it is not the first half written twice. A field
+// declared in one package and a type declared in another have different
+// packages and the same name, and embedding an exported type across a package
+// boundary is the ordinary case: struct{ io.Reader } declares a field named
+// Reader. An unexported name cannot cross that boundary, so for one the
+// packages must agree.
+func embeddedNamesItsType(f Field) bool {
+	t := f.Type
+	if t != nil && t.Kind == Ptr {
+		// gc asserts that an embedded pointer type has no name of its own, so
+		// the name to compare against is the element's.
+		t = t.Elem
+	}
+	if t == nil || t.Name == "" {
+		return false
+	}
+	base := t.Name[strings.LastIndex(t.Name, ".")+1:]
+	if f.Name != base {
+		return false
+	}
+	return f.Pkg == t.PkgPath || ExportedName(base)
+}
+
 // typeName writes one spelling of t into b. link selects the link string.
 func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 	if t == nil {
@@ -416,11 +506,38 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 			return typeName(b, m.Elem, link, depth+1)
 		}
 		// A defined struct was answered above. What is left is a literal
-		// struct type, whose spelling holds the type of every field. gc
-		// spells an embedded field renamed through a type alias as
-		// "struct{ Int = int }", and Converter unaliases, so the fact that
-		// tells the two apart is gone before the name is asked for.
-		return fmt.Errorf("ir: a literal struct's spelling distinguishes an embedded field renamed through an alias, which is not in the IR type")
+		// struct type, whose spelling holds the name, the type and the tag of
+		// every field. The separators are gc's types.tconv2: a semicolon
+		// between two fields, a space in front of each, and a space before the
+		// closing brace when there is at least one field, so an empty struct
+		// is "struct {}" and a one-field struct is "struct { A int }".
+		if len(t.Fields) == 0 {
+			b.WriteString("struct {}")
+			return nil
+		}
+		b.WriteString("struct {")
+		for i, f := range t.Fields {
+			if i > 0 {
+				b.WriteString(";")
+			}
+			b.WriteString(" ")
+			name, sep := fieldName(f, link)
+			if name != "" {
+				b.WriteString(name)
+				b.WriteString(sep)
+			}
+			if err := typeName(b, f.Type, link, depth+1); err != nil {
+				return err
+			}
+			if f.Tag != "" {
+				// Two struct types that differ only in a tag are different
+				// types, and gc quotes the tag the way Go source does.
+				b.WriteString(" ")
+				b.WriteString(strconv.Quote(f.Tag))
+			}
+		}
+		b.WriteString(" }")
+		return nil
 
 	case Chan:
 		switch t.ChanDir {

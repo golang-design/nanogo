@@ -90,26 +90,42 @@ that package's to emit, and this package only needs to name it. So the
 lowering pass refuses a row when the type cannot be *named*, and `rtype`
 refuses separately when the contents cannot be *filled in*.
 
-The name is a function of the `ir.Type`, and **one** Go distinction does not
-survive [020](020-ir.md)'s type boundary. `ir/rtype.go` refuses it by name:
+The name is a function of the `ir.Type`, and **no** Go distinction is left that
+does not survive [020](020-ir.md)'s type boundary. The table is empty.
 
-| Distinction | Two types that would share one name |
-| --- | --- |
-| an embedded field renamed through a type alias | `struct{ int }` and `struct{ Int = int }` |
+Four rows left it. A channel's direction, a function's signature and a literal
+interface's method list are all in `ir.Type` now, so each has a spelling, and
+what each refuses is the zero value of the field it reads: a channel whose
+`ChanDir` is `InvalidDir`, a function whose `Params` or `Results` is nil, an
+interface with no method list. Those are types built below the type boundary and
+never converted, and a zero read as a fact is what [020](020-ir.md)'s second
+rule forbids.
 
-Three rows left this table. A channel's direction, a function's signature and a
-literal interface's method list are all in `ir.Type` now, so each has a
-spelling, and what each refuses is the zero value of the field it reads: a
-channel whose `ChanDir` is `InvalidDir`, a function whose `Params` or `Results`
-is nil, an interface with no method list. Those are types built below the type
-boundary and never converted, and a zero read as a fact is what
-[020](020-ir.md)'s second rule forbids.
+The fourth row was a **literal struct**, and it was in the table for a reason
+that turned out not to be true. `gc` spells an embedded field renamed through a
+type alias as `struct{ Int = int }`, and `ir.Converter` unaliases, so the alias
+is gone before the name is asked for. But `gc` does not read the alias either.
+`types.fldconv` writes the field's own name in front of its type, with `" = "`
+between them, and leaves the name out when it is the name the language would
+have given the field, which is the embedded type's own name without its package
+and without a pointer. Both of those are in the `ir.Type`: `ir.Field` carries
+`Name`, `Pkg`, `Tag` and `Embedded`, and the embedded type carries `Name` and
+`PkgPath`. So `struct{ Int }` is spelled `struct { Int = int }` and
+`struct{ int }` is spelled `struct { p.int = int }`, and the two differ exactly
+where the language says they are different types.
 
-The row that is left is not a boundary gap in the same sense: `ir.Field` carries
-`Tag`, `Embedded` and `Pkg`, and what `Converter` loses is the alias itself,
-because it unaliases before the name is asked for. A **defined** type is exempt,
-because its name is its identity: `type S func(int)` is `type:p.S` and no
-signature is needed to say so.
+The two spellings differ here more than anywhere else, and both halves are
+`gc`'s:
+
+| | link string | name string |
+| --- | --- | --- |
+| an unexported field name | qualified by the declaring package | bare |
+| an embedded field's name | written when it is not the type's name | never written |
+| a field tag | `strconv.Quote`d after the type | the same |
+| a field the compiler synthesised | no package to qualify with | bare |
+
+A **defined** type is exempt from every row, because its name is its identity:
+`type S func(int)` is `type:p.S` and no signature is needed to say so.
 
 One case is refused by neither and is wrong: a **generic instantiation**.
 `ir/convert.go` names `atomic.Pointer[os.dirInfo]` as `sync/atomic.Pointer`,
@@ -135,7 +151,7 @@ Four things stop a descriptor, and each names itself in the refusal:
 | --- | --- |
 | a method | the `Method` array, whose `Ifn` and `Tfn` are `TextOff`s to code |
 | a struct or an array whose parts do not compare as one region of memory | the `Equal` closure, which points at code |
-| a map | a *descriptor* for the slot group, whose slots are a literal struct |
+| a map whose key needs a generated hash | the `Hasher` closure, which the runtime calls on every operation and which may not be nil |
 | a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
 Writing a tail that claims a type has no methods is the failure the first row
@@ -881,23 +897,37 @@ prefix is not decoration: without it the group's descriptor would merge with the
 descriptor of a struct a program declared with the same two fields, and that
 struct would be left with a nil `Equal`.
 
-**What is left is one spelling below the group.** The group's slots are a
-literal struct, which is the row still in the naming table above, so
-`mapEmittable` asks the group for its descriptor and reports the group's own
-reason. The map moves when the literal struct is spelled and needs nothing else.
+**The one spelling below the group is written.** The group's slots are a
+literal struct, and a literal struct is spelled now, so `mapEmittable` asks the
+group for its descriptor and gets one. `mapEmittable` still asks the group
+rather than restating the reason, because a shallower check is a second opinion
+that can disagree with the writer.
+
+**A synthesised type has no equality function at all, and that is the mark and
+not the kind.** `gc`'s `ANOALG` has the highest priority of any algorithm and
+implies `ANOEQ`, so a type carrying the `NoAlg` mark is not comparable and its
+`Equal` is nil. The slot group of `map[string]int` holds a string, so without
+the rule `rtype` would ask for the generated field-wise comparison of a type
+`gc` generates none for, and the two compilers would disagree about a symbol the
+linker merges. `ir.NoAlgType` is the one predicate, exported because the mark
+decides the symbol's prefix in `ir` and the `Equal` field in `rtype`.
 
 ### The naming function was the last block, and it is not one now
 
-Three of the four spellings this spec asked for are written, and each was
-checked against `gc` rather than against reasoning. The oracle is the running
-binary: `rtype`'s corpus hashes the link string with `gc`'s own algorithm and
-compares the result with the hash `gc` put in the descriptor `reflect` is
-reading in the same process, so a spelling that differs from `gc`'s by one
-character fails as a hash mismatch. Every channel, signature, literal interface
-and slot group added here is a corpus row.
+All four spellings this spec asked for are written, and each was checked against
+`gc` rather than against reasoning. The oracle is the running binary: `rtype`'s
+corpus hashes the link string with `gc`'s own algorithm and compares the result
+with the hash `gc` put in the descriptor `reflect` is reading in the same
+process, so a spelling that differs from `gc`'s by one character fails as a hash
+mismatch. Every channel, signature, literal interface and slot group added here
+is a corpus row.
 
-The fourth spelling, a literal struct, is the whole of what is left. It is the
-one row of the naming table and it is the one thing a map is waiting on.
+The literal struct is checked from the other end, because a literal struct has
+no hash in a running program to compare against: twenty spellings were read out
+of a `gc`-compiled object with `go tool nm` and are rows of `ir/rtype_test.go`'s
+name corpus. The rows that matter are the ones no reasoning would have produced:
+`struct{ byte }` is `struct { p.byte = uint8 }`, `struct{ error }` is
+`struct { p.error = error }`, and `struct{ _ int }` is `struct { p._ int }`.
 
 **Two refusals moved out of the tables and became linked programs.** An
 interface with methods is compiled, linked and run against a gc-compiled

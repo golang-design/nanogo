@@ -107,6 +107,15 @@ func alg(t *ir.Type) algKind {
 	if t == nil {
 		return algNone
 	}
+	if ir.NoAlgType(t) {
+		// A type the compiler synthesised, or one holding a part of one. gc
+		// gives the mark the highest priority of any algorithm and ANOALG
+		// implies ANOEQ, so the descriptor's Equal is nil and nothing compares
+		// a value of this type. The map slot group is what this is for: a
+		// group holding a string would otherwise be given the generated
+		// field-wise comparison, and gc generates none.
+		return algNone
+	}
 	switch t.Kind {
 	case ir.Float32:
 		return algFloat32

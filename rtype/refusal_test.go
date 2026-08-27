@@ -61,16 +61,6 @@ func TestDescriptorRefusals(t *testing.T) {
 			"method set of bytes.Buffer is not in the IR type",
 		},
 		{
-			// A literal struct's spelling holds each unexported field's
-			// package and distinguishes an embedded field renamed through an
-			// alias, and ir.Converter unaliases before it names.
-			"a literal struct",
-			func(t *testing.T) *ir.Type {
-				return lay(t, &ir.Type{Kind: ir.Struct, Fields: []ir.Field{{Name: "A", Type: intType(t)}}})
-			},
-			"embedded field renamed through an alias",
-		},
-		{
 			"a channel",
 			func(t *testing.T) *ir.Type {
 				return lay(t, &ir.Type{Kind: ir.Chan, Elem: intType(t)})
@@ -83,15 +73,17 @@ func TestDescriptorRefusals(t *testing.T) {
 			"signature",
 		},
 		{
-			// The header's bytes are all computable and the slot group is
-			// named as gc names it. What has no descriptor is the group, whose
-			// slots are a literal struct, so a map is refused with the group's
-			// own reason.
-			"a map",
+			// A map whose key has no hash function. The header's bytes are all
+			// computable and the group is described now, so what is left is
+			// the one field that cannot be nil: the runtime calls the Hasher
+			// on every operation.
+			"a map with an unhashable key",
 			func(t *testing.T) *ir.Type {
-				return lay(t, &ir.Type{Kind: ir.Map, Key: intType(t), Elem: intType(t)})
+				return lay(t, &ir.Type{Kind: ir.Map,
+					Key:  lay(t, &ir.Type{Kind: ir.Slice, Elem: intType(t)}),
+					Elem: intType(t)})
 			},
-			"group type",
+			"hash function",
 		},
 		{
 			"an interface with methods",

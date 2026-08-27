@@ -98,6 +98,37 @@ var nameCorpus = []struct {
 		"interface { Close() error; Read([]uint8) (int, error) }",
 		"interface { Close() error; Read([]uint8) (int, error) }"},
 	{"map[string]func(T)", "map[string]func(p.T)", "map[string]func(p.T)"},
+	// A literal struct. The spelling holds the name, the type and the tag of
+	// every field, and the two spellings differ here more than anywhere else:
+	// the link string qualifies an unexported field name by the package that
+	// declared it and the name string leaves it bare.
+	{"struct{}", "struct {}", "struct {}"},
+	{"struct{ A int }", "struct { A int }", "struct { A int }"},
+	{"struct{ A int; B string }", "struct { A int; B string }", "struct { A int; B string }"},
+	{"struct{ a int }", "struct { p.a int }", "struct { a int }"},
+	{"struct{ a int; B string }", "struct { p.a int; B string }", "struct { a int; B string }"},
+	// A blank field is not exported either, so it is qualified with the rest.
+	{"struct{ _ int }", "struct { p._ int }", "struct { _ int }"},
+	{"struct{ A int; _ [4]byte }", "struct { A int; p._ [4]uint8 }", "struct { A int; _ [4]uint8 }"},
+	{"struct{ P unsafe.Pointer }", "struct { P unsafe.Pointer }", "struct { P unsafe.Pointer }"},
+	{"struct{ A struct{ B int } }", "struct { A struct { B int } }", "struct { A struct { B int } }"},
+	{"struct{ A []struct{ B int } }", "struct { A []struct { B int } }", "struct { A []struct { B int } }"},
+	{"map[struct{ A int }]int", "map[struct { A int }]int", "map[struct { A int }]int"},
+	// A tag is part of the type, and gc quotes it the way Go source does.
+	{"struct{ A int `json:\"a\"` }", "struct { A int \"json:\\\"a\\\"\" }", "struct { A int \"json:\\\"a\\\"\" }"},
+	{"struct{ a int `json:\"a,omitempty\"`; B string `xml:\"b\"` }", "struct { p.a int \"json:\\\"a,omitempty\\\"\"; B string \"xml:\\\"b\\\"\" }", "struct { a int \"json:\\\"a,omitempty\\\"\"; B string \"xml:\\\"b\\\"\" }"},
+	// An embedded field is spelled by its type alone, and the name string
+	// drops the name whatever it is.
+	{"struct{ T }", "struct { p.T }", "struct { p.T }"},
+	{"struct{ *T }", "struct { *p.T }", "struct { *p.T }"},
+	{"struct{ u }", "struct { p.u }", "struct { p.u }"},
+	// Embedded through an alias. The field's name is not the embedded type's
+	// name, and gc writes the difference: struct{ Int } with type Int = int is
+	// a different type from struct{ int } and from struct{ Int int }.
+	{"struct{ Int }", "struct { Int = int }", "struct { int }"},
+	{"struct{ int }", "struct { p.int = int }", "struct { int }"},
+	{"struct{ error }", "struct { p.error = error }", "struct { error }"},
+	{"struct{ byte }", "struct { p.byte = uint8 }", "struct { uint8 }"},
 }
 
 // TestChanDirectionsAreThreeNames is the naming half of rtype's
@@ -253,11 +284,23 @@ func TestMapGroupIsSpelledFromTheMap(t *testing.T) {
 		}
 	}
 
-	// A struct carrying the mark on nothing is still refused, so the spelling
-	// is the group's and not every struct's.
-	plain := layOut(t, &Type{Kind: Struct, Fields: []Field{{Name: "A", Type: num}}})
-	if _, err := TypeLinkString(plain); err == nil {
-		t.Error("a literal struct was named")
+	// A struct of the same two fields and no MapGroup is spelled as the
+	// literal struct it is, so the group's name is the group's and not every
+	// struct's. The two must differ, or the linker would merge the group of
+	// one map with a struct a program declared.
+	plain := layOut(t, &Type{Kind: Struct, Fields: []Field{
+		{Name: "ctrl", Type: mustLayoutNamed(Uint64, "uint64")},
+		{Name: "slots", Type: group.Fields[1].Type},
+	}})
+	plainLink, err := TypeLinkString(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plainLink == link {
+		t.Errorf("the group and a struct of its fields are both %q", link)
+	}
+	if plainLink != "struct { ctrl uint64; slots [8]struct { key *string; elem int } }" {
+		t.Errorf("the struct of the group's fields is %q", plainLink)
 	}
 	// A group whose MapGroup is not a map is refused rather than spelled from
 	// whatever the field holds.
@@ -273,7 +316,7 @@ func TestMapGroupIsSpelledFromTheMap(t *testing.T) {
 func nameCorpusTypes(t *testing.T) []*Type {
 	t.Helper()
 	var b strings.Builder
-	b.WriteString("package p\n\nimport \"unsafe\"\n\nvar _ unsafe.Pointer\n\ntype T struct{ A int }\n")
+	b.WriteString("package p\n\nimport \"unsafe\"\n\nvar _ unsafe.Pointer\n\ntype T struct{ A int }\n\ntype Int = int\n\ntype u int\n")
 	for i, c := range nameCorpus {
 		fmt.Fprintf(&b, "var v%d %s\n", i, c.src)
 	}
@@ -404,7 +447,13 @@ func TestTypeNameRefusals(t *testing.T) {
 			&Type{Kind: Interface, Methods: []Method{{Name: "f", Sig: &Type{Kind: FuncKind, Params: []*Type{}, Results: []*Type{}}}}},
 			"the package that declares it is not in the IR type",
 		},
-		{"a literal struct", &Type{Kind: Struct, Fields: []Field{{Name: "A", Type: mustLayoutNamed(Int64, "int")}}}, "embedded field renamed through an alias"},
+		// A literal struct is spelled now, so what is refused is a field whose
+		// own type has no spelling. The reason is the field's, not the
+		// struct's, which is what makes a count by cause say which field
+		// boundary is missing.
+		{"a struct holding a channel", &Type{Kind: Struct, Fields: []Field{
+			{Name: "c", Type: &Type{Kind: Chan, Elem: mustLayoutNamed(Int64, "int")}},
+		}}, "direction"},
 		{"a slice of channels", &Type{Kind: Slice, Elem: &Type{Kind: Chan, Elem: mustLayoutNamed(Int64, "int")}}, "direction"},
 		{"an untyped constant", mustLayoutNamed(Int64, "untyped int"), "no canonical name"},
 		{"a void", &Type{Kind: Void}, "no canonical name"},

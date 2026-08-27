@@ -355,18 +355,22 @@ func TestIsExportedNameIsTheLanguagesRule(t *testing.T) {
 	}
 }
 
-// TestStructPkgPathRefusesWhatItCannotAttribute covers the two shapes that
-// cannot come from the checker.
+// TestStructPkgPathRefusesWhatItCannotAttribute covers the shape that cannot
+// come from the checker.
 //
-// ir.Converter sets Field.Pkg on every unexported field, and the language puts
-// the fields of one struct literal in one file, so both of these mean the IR
-// was built by hand and wrongly. A descriptor written from one would send
-// reflect to the wrong package for a field name, or to none at all.
+// The language puts the fields of one struct literal in one file, so a struct
+// whose unexported fields come from two packages means the IR was built by hand
+// and wrongly. A descriptor written from one would send reflect to the wrong
+// package for half the field names.
 func TestStructPkgPathRefusesWhatItCannotAttribute(t *testing.T) {
 	i64 := &ir.Type{Kind: ir.Int64, Name: "int64", Basic: "int64"}
+	// An unexported field with no package is a field no Go source declared,
+	// which is what a map slot group's are. gc gives those a nil package and
+	// writes no path, and ir.TypeLinkString leaves them unqualified, so the
+	// descriptor and the spelling agree.
 	noPkg := structOf(t, ir.Field{Name: "hidden", Type: i64})
-	if _, err := structPkgPath(noPkg); err == nil {
-		t.Error("an unexported field with no package was attributed")
+	if got, err := structPkgPath(noPkg); err != nil || got != "" {
+		t.Errorf("a synthesised field gave %q (%v), want no path", got, err)
 	}
 	two := structOf(t,
 		ir.Field{Name: "a", Type: i64, Pkg: "p"},
@@ -707,6 +711,9 @@ type bigKey struct {
 	B string
 }
 
+// bigKeyPkgPath is the import path gc compiled this test package under.
+func bigKeyPkgPath() string { return reflect.TypeOf(bigKey{}).PkgPath() }
+
 // mapCorpus is one map type written twice: as the IR sees it, and as the
 // compiler that built this test laid it out.
 var mapCorpus = []struct {
@@ -754,11 +761,21 @@ func tArray16(t *testing.T) *ir.Type {
 	return lay2(t, &ir.Type{Kind: ir.Array, Len: 16, Elem: lay2(t, &ir.Type{Kind: ir.Uint8, Name: "uint8", Basic: "uint8"})})
 }
 
+// tBigKey is the defined type the oracle was compiled under, named.
+//
+// The name is not decoration. A slot group's spelling holds the map's key, gc
+// spells a defined key by its name, and a literal struct of the same two fields
+// is a different spelling and therefore a different hash. Before the literal
+// struct had a spelling at all, this row was skipped for want of one and the
+// name was not needed.
 func tBigKey(t *testing.T) *ir.Type {
-	return lay2(t, &ir.Type{Kind: ir.Struct, Fields: []ir.Field{
-		{Name: "A", Type: tBigArray40(t)},
-		{Name: "B", Type: tString(t)},
-	}})
+	return lay2(t, &ir.Type{Kind: ir.Struct,
+		Name:    bigKeyPkgPath() + ".bigKey",
+		PkgPath: bigKeyPkgPath(),
+		Fields: []ir.Field{
+			{Name: "A", Type: tBigArray40(t)},
+			{Name: "B", Type: tString(t)},
+		}})
 }
 
 func tBigArray40(t *testing.T) *ir.Type {
@@ -1000,42 +1017,49 @@ func TestMapGroupIsNamedAsGcNamesIt(t *testing.T) {
 	}
 }
 
-// TestMapIsRefusedOnTheGroupsFields records where the last map refusal lives.
+// TestMapGroupIsDescribed is what the last map refusal turned into.
 //
-// Everything this package computes for a map agrees with gc, and the group is
-// named as gc names it. What is left is one spelling below the group: its slots
-// are a literal struct, and a literal struct's spelling distinguishes an
-// embedded field renamed through an alias, which ir.Converter unaliases away.
-// The refusal names the group type, so the reason a map is refused is the
-// group's and not restated in the map's own words.
-func TestMapIsRefusedOnTheGroupsFields(t *testing.T) {
+// The group's slots are a literal struct, and a literal struct had no spelling
+// until ir/rtype.go grew one. That was the only thing between a map type and a
+// descriptor: everything the header holds was already computed and the group
+// was already named as gc names it. So this asserts the whole chain rather than
+// the one link, because the chain is what a map's descriptor needs.
+func TestMapGroupIsDescribed(t *testing.T) {
 	m := mapOf(t, tString(t), tInt(t))
 	p, err := mapPlanOf(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The map, its key, its element and the group are all nameable, so the
-	// gap is one level further down.
-	for _, ty := range []*ir.Type{m, m.Key, m.Elem, p.group} {
+	// The map, its key, its element and the group, and now the group's own
+	// fields: the array of slots and the slot.
+	slots := p.group.Fields[1].Type
+	for _, ty := range []*ir.Type{m, m.Key, m.Elem, p.group, slots, slots.Elem} {
 		if _, err := ir.TypeSymbol(ty); err != nil {
 			t.Errorf("%s has no name: %v", ty, err)
 		}
-	}
-	if _, err := Descriptor(p.group); err == nil {
-		t.Fatal("the group type is describable; lift the refusal below")
-	}
-	err = mapEmittable(m)
-	if err == nil {
-		t.Fatal("a map was emittable")
-	}
-	for _, want := range []string{
-		"group type",
-		"type:noalg.map.group[string]int",
-		"embedded field renamed through an alias",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal is %q, want it to name %q", err, want)
+		if _, err := Descriptor(ty); err != nil {
+			t.Errorf("%s has no descriptor: %v", ty, err)
 		}
+	}
+	if err := mapEmittable(m); err != nil {
+		t.Fatalf("a map is not emittable: %v", err)
+	}
+	// The two spellings gc gives the slot, which is the pair the refusal used
+	// to stand in for. The field names are the compiler's and belong to no
+	// package, so neither spelling qualifies them.
+	link, err := ir.TypeLinkString(slots.Elem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "struct { key string; elem int }"; link != want {
+		t.Errorf("the slot's link string is %q, want %q", link, want)
+	}
+	sym, err := ir.TypeSymbol(slots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "type:noalg.[8]struct { key string; elem int }"; sym != want {
+		t.Errorf("the slot array's symbol is %q, want %q", sym, want)
 	}
 }
 

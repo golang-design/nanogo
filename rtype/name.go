@@ -167,14 +167,20 @@ func fieldName(f ir.Field) Symbol {
 // when every field is exported. reflect needs it to reach a field name from
 // outside the package that declared the field; a struct with no unexported
 // field has no such name to reach.
+//
+// An unexported field with no package is a field no Go source declared, which
+// is what the map slot group's ctrl, slots, key and elem fields are.
+// ir.Converter sets the path for every unexported field it converts, so the
+// empty one can only come from below the type boundary, and gc gives exactly
+// those fields a nil package and writes a nil PkgPath for them. The spelling
+// says the same thing from the other side: ir.TypeLinkString leaves such a
+// field unqualified, and a descriptor that named a package the spelling did
+// not would be two answers to one question.
 func structPkgPath(t *ir.Type) (string, error) {
 	path := ""
 	for _, f := range t.Fields {
-		if isExportedName(f.Name) || f.Name == "_" {
+		if isExportedName(f.Name) || f.Name == "_" || f.Pkg == "" {
 			continue
-		}
-		if f.Pkg == "" {
-			return "", fmt.Errorf("rtype: %s has the unexported field %s and the IR type does not say which package declared it", t, f.Name)
 		}
 		if path == "" {
 			path = f.Pkg

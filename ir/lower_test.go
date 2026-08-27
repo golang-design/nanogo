@@ -1742,7 +1742,13 @@ func TestLowerRefusals(t *testing.T) {
 		// which field is holding the row back rather than only that a name was
 		// wanted.
 		{"make of a map", `func f() map[int]int { return make(map[int]int) }`, OMake, "descriptor"},
-		{"new of a literal struct", `func f() *struct{ A int } { return new(struct{ A int }) }`, ONew, "embedded field renamed through an alias"},
+		// A literal struct is spelled now, so the type an allocation still
+		// refuses is the generic instantiation: Converter's name drops the type
+		// arguments, so G[int] and G[string] would be one descriptor.
+		{"new of a generic instantiation", `
+type G[X any] struct{ V X }
+
+func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
 		{"len of a map", `func f(m map[int]int) int { return len(m) }`, OLen, "the length of map"},
 		// mapIterStart and not mapiterinit. runtime.mapiterinit still exists,
 		// as a //go:linkname shim taking a different struct layout, so a row
