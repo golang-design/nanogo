@@ -157,7 +157,33 @@ import (
 	"runtime"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
+
+// tinyBlock is the runtime's maxTinySize.
+const tinyBlock = 16
+
+// payload is the object the collector has to decide about, and it is bigger
+// than a tiny block on purpose.
+//
+// The tiny allocator serves an allocation that is smaller than tinyBlock and
+// holds no pointer, and it packs several of them into one block. A finaliser
+// set on such an allocation belongs to the block and not to the allocation:
+// runtime/mfinal.go accepts a finaliser on a pointer that is not the start of
+// the block for exactly this case. The finaliser then runs only once every
+// allocation in the block is unreachable, and which allocations share the
+// block is decided by everything else the program has allocated. new(int) is
+// such an allocation, and with it the two cases that assert the object is
+// freed reported no finaliser at all on some hosts.
+//
+// A block of its own makes the object's liveness the object's own, which is
+// what the stack map decides and what this test measures.
+type payload [4]int
+
+// A compile-time check that the object keeps a block to itself. The constant
+// is negative and the program does not build if payload ever fits in a tiny
+// block again.
+var _ [unsafe.Sizeof(payload{}) - tinyBlock]struct{}
 
 var finalized int32
 var duringGC int32
@@ -165,10 +191,10 @@ var seen int
 
 //go:noinline
 func mk() *int {
-	p := new(int)
-	*p = 0x5eed
-	runtime.SetFinalizer(p, func(*int) { atomic.AddInt32(&finalized, 1) })
-	return p
+	p := new(payload)
+	p[0] = 0x5eed
+	runtime.SetFinalizer(p, func(*payload) { atomic.AddInt32(&finalized, 1) })
+	return &p[0]
 }
 
 //go:noinline
@@ -311,14 +337,27 @@ func TestStackMapKeepsALiveSlotAndFreesADeadOne(t *testing.T) {
 			}
 			addFull(t, r, p)
 			caller := compileCaller(t, goCmd, c.f.Sym, tt.caller)
-			out, err := runLinkedEnv(t, goCmd, tc, cfg, p, caller, env)
-			if err != nil {
-				t.Fatalf("the program failed: %v\n%s", err, out)
+			bin := linkProgram(t, goCmd, tc, cfg, p, caller)
+			// One P and then several, from one link.
+			//
+			// A retention of an object this test says is dead can be invisible
+			// at one number of Ps and plain at another, and the host's core
+			// count picks the number when nothing else does. Both values are
+			// asked for so that the result does not depend on the machine CI
+			// runs on. What keeps the object's own liveness out of the answer
+			// is the size of payload and not this loop.
+			for _, procs := range []string{"1", "4"} {
+				runEnv := append(append([]string{}, env...), "GOMAXPROCS="+procs)
+				out, err := runProgram(bin, runEnv)
+				if err != nil {
+					t.Fatalf("at GOMAXPROCS=%s the program failed: %v\n%s", procs, err, out)
+				}
+				if !strings.Contains(out, tt.want) {
+					t.Fatalf("at GOMAXPROCS=%s the program printed %q, want %q in it",
+						procs, strings.TrimSpace(out), tt.want)
+				}
+				t.Logf("GOMAXPROCS=%s: %s", procs, strings.TrimSpace(out))
 			}
-			if !strings.Contains(out, tt.want) {
-				t.Fatalf("the program printed %q, want %q in it", strings.TrimSpace(out), tt.want)
-			}
-			t.Logf("%s", strings.TrimSpace(out))
 		})
 	}
 }
@@ -412,9 +451,12 @@ func compileCaller(t *testing.T, goCmd, sym, body string) string {
 	return out
 }
 
-// runLinkedEnv links a nanogo object with a gc caller and runs the program
-// with the given environment added.
-func runLinkedEnv(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj.Package, caller string, env []string) (string, error) {
+// linkProgram links a nanogo object with a gc caller and returns the binary.
+//
+// It is separate from running so that one program can be run more than once,
+// which is how a test asks the same binary the same question under a different
+// environment without paying for a second link.
+func linkProgram(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj.Package, caller string) string {
 	t.Helper()
 	objPath := writeObject(t, p, tc)
 	dir := t.TempDir()
@@ -426,8 +468,20 @@ func runLinkedEnv(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *
 	if b, err := exec.Command(goCmd, "tool", "link", "-importcfg", cfg, "-o", out, archive).CombinedOutput(); err != nil {
 		t.Fatalf("the linker rejected the object: %v\n%s", err, b)
 	}
-	cmd := exec.Command(out)
+	return out
+}
+
+// runProgram runs a linked program with the given environment added.
+func runProgram(bin string, env []string) (string, error) {
+	cmd := exec.Command(bin)
 	cmd.Env = append(os.Environ(), env...)
 	b, err := cmd.CombinedOutput()
 	return string(b), err
+}
+
+// runLinkedEnv links a nanogo object with a gc caller and runs the program
+// with the given environment added.
+func runLinkedEnv(t *testing.T, goCmd string, tc *obj.Toolchain, cfg string, p *obj.Package, caller string, env []string) (string, error) {
+	t.Helper()
+	return runProgram(linkProgram(t, goCmd, tc, cfg, p, caller), env)
 }
