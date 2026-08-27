@@ -740,8 +740,8 @@ func lowerCollect(t *testing.T, body string) (*Func, []*Type, error) {
 		t.Fatalf("Build: %v", err)
 	}
 	fn := buildFuncOf(t, out, "f")
-	types, lerr := LowerAndCollect(fn)
-	return fn, types, lerr
+	c, lerr := LowerAndCollect(fn)
+	return fn, c.Types, lerr
 }
 
 // TestLowerRangeRows is specs/020's range rows: an index loop with the bound
@@ -1754,7 +1754,6 @@ func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
 		{"defer of recover", `func f() { defer recover() }`, ODefer, "holds a recover and not a call"},
 		{"a select with no clauses", `func f() { select {} }`, OSelect, "runtime.block"},
 		{"an assertion to an interface", `func f(v any) error { return v.(error) }`, OTypeAssert, "runtime.typeAssert"},
-		{"an assertion from an interface with methods", `func f(v interface{ M() int }) int { return v.(T).M() }`, OTypeAssert, "no itab"},
 		{"an assertion to a one-word struct", `
 type W struct{ P *int }
 
@@ -2868,10 +2867,11 @@ func TestLowerDeferNamesTheDescriptorItAllocates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	types, err := LowerAndCollect(buildFuncOf(t, out, "f"))
+	c, err := LowerAndCollect(buildFuncOf(t, out, "f"))
 	if err != nil {
 		t.Fatalf("Lower: %v", err)
 	}
+	types := c.Types
 	found := false
 	for _, ty := range types {
 		if ty.Kind == Uintptr {
@@ -3163,6 +3163,113 @@ func TestLowerTypeAssert(t *testing.T) {
 	c := findCall(fn, "runtime.panicdottypeE")
 	if c == nil || len(c.Args) != 3 {
 		t.Fatalf("panicdottypeE takes %v\n%s", c, buildDump(fn))
+	}
+}
+
+// lowerItabs returns the itab symbols a lowered body names.
+func lowerItabs(fn *Func) []string {
+	var out []string
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OGlobal && n.Obj != nil && strings.HasPrefix(n.Obj.Name, ItabSymbolPrefix) {
+				out = append(out, n.Obj.Name)
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// TestLowerTypeAssertFromAnInterfaceWithMethods is the row specs/032's itab
+// encoder lifted.
+//
+// The operand leads with an *itab and not with a *_type, so the word the test
+// compares against is the itab of the (target, operand) pair and not the
+// target's descriptor. The failing arm changes with it: panicdottypeI takes
+// the itab the value carried and reads the concrete type out of it, where
+// panicdottypeE takes a *_type. Handing the itab to panicdottypeE is a name
+// read at an offset into another structure.
+func TestLowerTypeAssertFromAnInterfaceWithMethods(t *testing.T) {
+	fn := lowerOK(t, `func f(v interface{ M() int }) int { return v.(T).M() }`)
+
+	want := "go:itab.p.T,interface { M() int }"
+	if got := lowerItabs(fn); len(got) != 1 || got[0] != want {
+		t.Errorf("the tree names %v as its itabs, want just %s:\n%s", got, want, buildDump(fn))
+	}
+	if lowerNames(fn, "type:p.T") == false {
+		t.Errorf("the tree does not name the target's descriptor, which the panic prints: %v", lowerDescriptors(fn))
+	}
+	if !lowerCalled(fn, "runtime.panicdottypeI") {
+		t.Errorf("the failing arm calls %v, want panicdottypeI for a value that carries an itab:\n%s",
+			lowerCalls(fn), buildDump(fn))
+	}
+	if lowerCalled(fn, "runtime.panicdottypeE") {
+		t.Errorf("the failing arm hands an itab to panicdottypeE, which reads it as a *_type:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerTypeAssertCollectsTheItab is the other half: the pair reaches the
+// object writer.
+//
+// cmd/link defines no go:itab. symbol, so a comparison against one that nobody
+// reported is a relocation with nothing to resolve against, and the failure is
+// the linker's rather than the compiler's.
+func TestLowerTypeAssertCollectsTheItab(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, lowerPrelude+"\n"+
+		`func f(v interface{ M() int }) int { return v.(T).M() }`)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	c, err := LowerAndCollect(buildFuncOf(t, out, "f"))
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	if len(c.Itabs) != 1 {
+		t.Fatalf("the pass collected %d itabs, want the one pair", len(c.Itabs))
+	}
+	name, err := ItabSymbol(c.Itabs[0].Type, c.Itabs[0].Iface)
+	if err != nil {
+		t.Fatalf("ItabSymbol: %v", err)
+	}
+	if want := "go:itab.p.T,interface { M() int }"; name != want {
+		t.Errorf("the pass collected %s, want %s", name, want)
+	}
+}
+
+// TestLowerTypeSwitchOnAnInterfaceWithMethods is the same lift for the switch.
+//
+// Every concrete case compares against the itab of its own pair with the
+// guard's interface, and case nil against the nil word, because an interface
+// holding nothing has a nil first word whichever layout it has.
+func TestLowerTypeSwitchOnAnInterfaceWithMethods(t *testing.T) {
+	fn := lowerOK(t, `type W int
+
+func (w W) M() int { return int(w) }
+
+func f(v interface{ M() int }) int {
+	switch v.(type) {
+	case nil:
+		return 1
+	case T:
+		return 2
+	case W:
+		return 3
+	}
+	return 0
+}`)
+	got := lowerItabs(fn)
+	want := []string{"go:itab.p.T,interface { M() int }", "go:itab.p.W,interface { M() int }"}
+	if len(got) != len(want) {
+		t.Fatalf("the tree names %v as its itabs, want %v:\n%s", got, want, buildDump(fn))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("case %d compares against %s, want %s", i, got[i], want[i])
+		}
+	}
+	if lowerNames(fn, "type:p.T") || lowerNames(fn, "type:p.W") {
+		t.Errorf("a case compares against a descriptor, and the guard leads with an itab: %v", lowerDescriptors(fn))
 	}
 }
 

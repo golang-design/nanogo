@@ -93,27 +93,43 @@ func Lower(fn *Func) error {
 	return err
 }
 
-// LowerAndCollect is Lower, and it also returns the types whose descriptors
-// the lowered tree names.
+// Collected is the set of data symbols a lowered function names and does not
+// define.
 //
-// Every allocation the pass introduces passes a *_type to the runtime, and
-// specs/032-type-descriptors-and-itabs.md makes the set of descriptors a
-// package must emit exactly the set its code names. Nothing between this pass
-// and the object writer carries a list of data symbols, so the list is
-// returned rather than stored: a caller that gains a writer for them unions
-// the per-function lists and emits each one once.
+// One value rather than two lists side by side, because the two are one
+// answer: everything here is a symbol the object writer owes because the
+// lowered body refers to it, and a caller that took one and not the other
+// would leave a relocation with nothing to resolve against.
+type Collected struct {
+	// Types are the types whose descriptors the lowered tree names. Every
+	// allocation the pass introduces passes a *_type to the runtime.
+	Types []*Type
+
+	// Itabs are the (concrete type, interface) pairs whose itabs it names. A
+	// dynamic type test on a value that leads with an *itab compares that word
+	// against the itab of the pair.
+	Itabs []Itab
+}
+
+// LowerAndCollect is Lower, and it also returns what the lowered tree names.
+//
+// specs/032-type-descriptors-and-itabs.md makes the set a package must emit
+// exactly the set its code names. Nothing between this pass and the object
+// writer carries a list of data symbols, so the set is returned rather than
+// stored: a caller unions the per-function answers and emits each symbol once.
 //
 // The order is the order the names were first met, not a map's, which
 // specs/053-determinism.md requires of anything that reaches output.
-func LowerAndCollect(fn *Func) ([]*Type, error) {
+func LowerAndCollect(fn *Func) (Collected, error) {
 	if fn == nil {
-		return nil, fmt.Errorf("ir: Lower needs a function")
+		return Collected{}, fmt.Errorf("ir: Lower needs a function")
 	}
 	l := &lowerer{
 		fn:    fn,
 		ptrs:  make(map[*Type]*Type),
 		hdrs:  make(map[*Type]*Type),
 		descs: make(map[string]*Object),
+		itabs: make(map[string]*Object),
 	}
 	l.openCaptures()
 	fn.Body = l.stmts(fn.Body)
@@ -121,7 +137,7 @@ func LowerAndCollect(fn *Func) ([]*Type, error) {
 		l.deferExit()
 	}
 	if len(l.errs) > 0 {
-		return l.needed, l.errs[0]
+		return l.collected(), l.errs[0]
 	}
 	// The invariant this pass exists to satisfy, asserted rather than assumed.
 	// specs/020-ir.md names HasGoSpecific as the check and records that nothing
@@ -130,10 +146,15 @@ func LowerAndCollect(fn *Func) ([]*Type, error) {
 	// code generator.
 	for _, s := range fn.Body {
 		if op, ok := HasGoSpecific(s); ok {
-			return l.needed, &LowerError{Func: fn.Name, Op: op, What: "survived a lowering that reported no refusal"}
+			return l.collected(), &LowerError{Func: fn.Name, Op: op, What: "survived a lowering that reported no refusal"}
 		}
 	}
-	return l.needed, nil
+	return l.collected(), nil
+}
+
+// collected is what the pass named, in the order the names were first met.
+func (l *lowerer) collected() Collected {
+	return Collected{Types: l.needed, Itabs: l.needItabs}
 }
 
 // lowerer holds the state of one function's lowering.
@@ -162,6 +183,13 @@ type lowerer struct {
 	// caller emitting the descriptors reads.
 	descs  map[string]*Object
 	needed []*Type
+
+	// itabs and needItabs are the same pair of records for the itab symbols
+	// this function names. They are separate from the two above because an
+	// itab is not a descriptor: it is named per (concrete type, interface)
+	// pair and rtype writes it from a different encoder.
+	itabs     map[string]*Object
+	needItabs []Itab
 
 	// capIndex names the field of the closure object each of this function's
 	// own captures is read from, and cells names the heap cell of each
@@ -294,12 +322,21 @@ func (l *lowerer) header(t *Type) *Type {
 		}}
 	case Interface:
 		// An interface is a header too: a word that names the dynamic type
-		// and a word that holds the value. The first word is typed as a
-		// descriptor pointer because that is what an empty interface leads
-		// with, and the assertion rows refuse an interface with methods,
-		// whose first word is an *itab, before they read the field.
-		h = &Type{Kind: Struct, Name: "eface", Fields: []Field{
-			{Name: "typ", Type: l.ptrTo(rtypeType)},
+		// and a word that holds the value. Which structure the first word
+		// points at is the difference between the two interface layouts, so
+		// it is the difference between the two headers: an empty interface
+		// leads with a *_type and one with methods leads with an *itab, and
+		// the runtime reads different fields out of each. A single header
+		// would make a comparison between that word and an itab's address
+		// well typed in the IR and wrong in the machine.
+		//
+		// gc names the two shapes eface and iface, and so do these.
+		word, name := l.ptrTo(rtypeType), "eface"
+		if !t.EmptyIface {
+			word, name = l.ptrTo(itabType), "iface"
+		}
+		h = &Type{Kind: Struct, Name: name, Fields: []Field{
+			{Name: "typ", Type: word},
 			{Name: "data", Type: lowerUnsafePtr},
 		}}
 	default:
@@ -584,6 +621,33 @@ func (l *lowerer) descriptor(t *Type, pos syntax.Pos) (Expr, string) {
 	return &Node{
 		Op: OAddr, Pos: pos, Type: l.ptrTo(rtypeType),
 		X: &Node{Op: OGlobal, Pos: pos, Type: rtypeType, Obj: o},
+	}, ""
+}
+
+// itab returns the address of the itab that pairs the concrete type t with the
+// interface iface.
+//
+// The name comes from ItabSymbol and is never built here, for the reason
+// descriptor gives: the linker deduplicates an itab by name, and two spellings
+// of one pair are two itabs. The runtime compares two interface values by
+// comparing their first words, so a second itab for a pair makes every such
+// comparison false and every dynamic type test on the pair miss.
+//
+// The second result is the reason there is no name, for a caller to report.
+func (l *lowerer) itab(t, iface *Type, pos syntax.Pos) (Expr, string) {
+	name, err := ItabSymbol(t, iface)
+	if err != nil {
+		return nil, err.Error()
+	}
+	o, ok := l.itabs[name]
+	if !ok {
+		o = &Object{Name: name, Type: itabType, Class: ClassGlobal}
+		l.itabs[name] = o
+		l.needItabs = append(l.needItabs, Itab{Type: t, Iface: iface})
+	}
+	return &Node{
+		Op: OAddr, Pos: pos, Type: l.ptrTo(itabType),
+		X: &Node{Op: OGlobal, Pos: pos, Type: itabType, Obj: o},
 	}, ""
 }
 
@@ -3940,15 +4004,20 @@ func (l *lowerer) printExpr(n Expr) Expr {
 // cached. cmd/compile's dottype1 reaches it for an interface target and for
 // nothing else, and a concrete target is CMP against a symbol there too.
 //
+// # Which word is compared
+//
+// The first word of an empty interface is the dynamic type's descriptor, and
+// the first word of an interface with methods is the itab of the pair that
+// interface makes with the dynamic type. So the constant a concrete target is
+// compared against is the target's descriptor in the first case and the itab
+// of (target, source) in the second. The two are different symbols and the
+// comparison is the same one instruction.
+//
 // # What is refused, and what would lift it
 //
-// A target that is an interface needs runtime.typeAssert, the *abi.TypeAssert
-// descriptor that call reads, and a writer for the itab it returns. A source
-// that is an interface with methods leads with an *itab rather than a *_type,
-// so the word to compare against is the itab of the (target, source) pair,
-// which is the same missing writer. Neither is reachable today for a second
-// reason: specs/021's concreteToInterface refuses to build a value of a
-// non-empty interface type, because its type word is that same itab.
+// A target that is an interface needs runtime.typeAssert and the
+// *abi.TypeAssert descriptor that call reads, which rtype does not write.
+// specs/032 owns the gap.
 
 // ifaceRef reads the parts of one interface value the rows below examine.
 //
@@ -3970,6 +4039,47 @@ func (r *ifaceRef) word(i int) Expr {
 	return &Node{Op: OField, Pos: r.pos, Type: r.h.Fields[i].Type, X: ref(r.p, r.pos), Index: i}
 }
 
+// want returns the constant the first word equals exactly when the value's
+// dynamic type is t.
+//
+// It is the descriptor of t when the operand is an empty interface and the
+// itab of the pair when the operand is an interface with methods, because that
+// is what the two layouts put in the first word. Both are link-time constants
+// and the test is one pointer comparison either way.
+//
+// t implements the operand's interface whenever a concrete target is legal:
+// the type checker rejects an assertion to a type that does not, so the itab
+// asked for here always exists.
+//
+// The second result is the reason the constant cannot be named.
+func (r *ifaceRef) want(t *Type, pos syntax.Pos) (Expr, string) {
+	if r.t.EmptyIface {
+		return r.l.descriptor(t, pos)
+	}
+	return r.l.itab(t, r.t, pos)
+}
+
+// panicSym is the runtime symbol that reports a failed assertion on this
+// operand.
+//
+// The choice follows what the value's first word holds and is never a
+// convenience: panicdottypeI takes the itab the value carried and reads the
+// concrete type out of it, and panicdottypeE takes the *_type itself. The
+// wrong one reads an *InterfaceType where a *Type belongs and prints a name
+// from an offset into another structure.
+func (r *ifaceRef) panicSym() string {
+	if r.t.EmptyIface {
+		return "runtime.panicdottypeE"
+	}
+	return "runtime.panicdottypeI"
+}
+
+// nilWord is the first word of an operand holding nothing, which is what
+// case nil in a type switch compares against.
+func (r *ifaceRef) nilWord(pos syntax.Pos) Expr {
+	return r.l.zeroOf(r.h.Fields[ifaceTyp].Type, pos)
+}
+
 // value returns the interface value itself, which is what a type switch
 // clause that names no single concrete type binds its variable to.
 func (r *ifaceRef) value() Expr {
@@ -3989,9 +4099,6 @@ func (l *lowerer) ifaceOperand(x Expr) (*ifaceRef, string) {
 	if x.Type.Kind != Interface {
 		return nil, "an operand of " + x.Type.Kind.String() + ", and only an interface holds a dynamic type"
 	}
-	if !x.Type.EmptyIface {
-		return nil, "an operand that is an interface with methods, which leads with an *itab and not a *_type, so the word to compare against is the itab of the pair: specs/032 writes no itab"
-	}
 	h := l.header(x.Type)
 	if h == nil {
 		return nil, "an interface with no header layout"
@@ -4007,7 +4114,7 @@ func assertTarget(t *Type) string {
 		return "an assertion with no target type"
 	}
 	if t.Kind == Interface {
-		return "a target that is an interface, whose answer is the itab that pairs it with the dynamic type: cmd/compile calls runtime.typeAssert with an *abi.TypeAssert, and specs/032 writes neither that descriptor nor an itab"
+		return "a target that is an interface, whose answer is the itab that pairs it with the dynamic type and is not known until the value is: cmd/compile calls runtime.typeAssert with an *abi.TypeAssert, and specs/032 writes no such descriptor"
 	}
 	return ""
 }
@@ -4083,7 +4190,7 @@ func (l *lowerer) typeAssert(n Expr) Expr {
 		l.refuse(n, why)
 		return n
 	}
-	want, why := l.descriptor(target, pos)
+	want, why := x.want(target, pos)
 	if want == nil {
 		l.refuse(n, why)
 		return n
@@ -4095,15 +4202,22 @@ func (l *lowerer) typeAssert(n Expr) Expr {
 		l.refuse(n, why)
 		return n
 	}
-	// The target's descriptor again, because a node is a tree a later pass
-	// rewrites in place and may not stand in two places. Both calls name one
-	// object and one symbol.
-	again, _ := l.descriptor(target, pos)
+	// The target's descriptor, which the panic prints as the "not int" half.
+	// It is the descriptor and not the word compared above, because the two
+	// differ for an operand with methods and the runtime reads a *_type here.
+	// A second call rather than a reused node, because a node is a tree a
+	// later pass rewrites in place and may not stand in two places. Both calls
+	// name one object and one symbol.
+	again, why := l.descriptor(target, pos)
+	if again == nil {
+		l.refuse(n, why)
+		return n
+	}
 	l.emit(&Node{
 		Op: OIf, Pos: pos, Type: voidType,
 		X: &Node{Op: OCompare, Op1: syntax.Neq, Pos: pos, Type: lowerBool,
 			X: x.word(ifaceTyp), Y: want},
-		Body: []Stmt{runtimeCall(pos, "runtime.panicdottypeE", x.word(ifaceTyp), again, src)},
+		Body: []Stmt{runtimeCall(pos, x.panicSym(), x.word(ifaceTyp), again, src)},
 	})
 	out, why := l.ifaceValue(x.word(ifaceData), target, pos)
 	if out == nil {
@@ -4141,7 +4255,7 @@ func (l *lowerer) typeAssert2(s Stmt) {
 		l.emit(s)
 		return
 	}
-	want, why := l.descriptor(target, pos)
+	want, why := x.want(target, pos)
 	if want == nil {
 		l.refuse(n, why)
 		l.emit(s)
@@ -4266,22 +4380,23 @@ func (l *lowerer) typeSwitchCase(n, c *Node, x *ifaceRef) bool {
 		}
 		if a.Op == OConst {
 			// case nil. ir.Build gives it the guard's type and no value,
-			// because there is no type to name.
-			c.Args[i] = l.zeroOf(l.ptrTo(rtypeType), pos)
+			// because there is no type to name. An interface holding nothing
+			// has a nil first word whichever of the two layouts it has.
+			c.Args[i] = x.nilWord(pos)
 			continue
 		}
 		if a.Type.Kind == Interface {
-			l.refuse(n, "a case that names an interface, whose answer is which itab implements it: cmd/compile calls runtime.interfaceSwitch with an *abi.InterfaceSwitch, and specs/032 writes neither that descriptor nor an itab")
+			l.refuse(n, "a case that names an interface, whose answer is which itab implements it: cmd/compile calls runtime.interfaceSwitch with an *abi.InterfaceSwitch, and specs/032 writes no such descriptor")
 			ok = false
 			continue
 		}
-		desc, why := l.descriptor(a.Type, pos)
-		if desc == nil {
+		word, why := x.want(a.Type, pos)
+		if word == nil {
 			l.refuse(n, why)
 			ok = false
 			continue
 		}
-		c.Args[i] = desc
+		c.Args[i] = word
 		single = a.Type
 	}
 	if len(c.Args) != 1 {

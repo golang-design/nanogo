@@ -878,16 +878,21 @@ func targetABI(r rtype.Reloc, generated map[string]bool) uint16 {
 // same list, and a refusal has to say which of the two spec decks owns the gap.
 func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package, fset *syntax.FileSet) (*ssagen.Result, []*ir.Type, []ir.Itab, error) {
 	var (
-		f      *ssa.Func
-		a      *ssa.Alloc
-		r      *ssagen.Result
-		needed []*ir.Type
+		f       *ssa.Func
+		a       *ssa.Alloc
+		r       *ssagen.Result
+		needed  []*ir.Type
+		lowered []ir.Itab
 	)
 	passes := []struct {
 		name string
 		run  func() error
 	}{
-		{"ir.Lower", func() (err error) { needed, err = ir.LowerAndCollect(fn); return err }},
+		{"ir.Lower", func() error {
+			c, err := ir.LowerAndCollect(fn)
+			needed, lowered = c.Types, c.Itabs
+			return err
+		}},
 		{"ssa.Build", func() (err error) { f, err = ssa.Build(fn); return err }},
 		{"decomposition", func() error { ssa.Decompose(f); return nil }},
 		{"the ABI assignment", func() error { return ssa.AssignABI(f, target) }},
@@ -925,11 +930,14 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 	// defined". type:int and type:string hide it, because the runtime defines
 	// those already.
 	//
-	// The itabs are a third set and only ssa.Build names them. An itab is not
-	// a descriptor: it is named per (concrete type, interface) pair, cmd/link
-	// collects it into runtime.itablinks by name, and rtype writes it from a
-	// different encoder.
-	return r, append(needed, f.Descriptors...), f.Itabs, nil
+	// The itabs are a third set and both passes name them, for the same two
+	// reasons the descriptors have two sets: ir.Lower compares the first word
+	// of a value that leads with an *itab against the itab of the pair, and
+	// ssa.Build builds that word when a value goes into an interface. An itab
+	// is not a descriptor: it is named per (concrete type, interface) pair,
+	// cmd/link collects it into runtime.itablinks by name, and rtype writes it
+	// from a different encoder.
+	return r, append(needed, f.Descriptors...), append(lowered, f.Itabs...), nil
 }
 
 // unsupportedFunc is the refusal every pass of compileFunc reports.
