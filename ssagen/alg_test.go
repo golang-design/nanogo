@@ -156,3 +156,92 @@ func TestGeneratedEqualIsOneSymbolPerType(t *testing.T) {
 		t.Error("the function has no instructions")
 	}
 }
+
+// TestGeneratedHashAgreesWithEquality checks the one invariant a map depends
+// on: two values that compare equal hash alike.
+//
+// A map that broke it would lose keys it holds, and it would lose them only
+// for the values whose bytes differ, which is the failure that does not show
+// up in a small test. The cases are exactly the ones where == and the bytes
+// disagree: a string with its own data pointer, a negative zero, a blank
+// field, and the padding between two fields.
+func TestGeneratedHashAgreesWithEquality(t *testing.T) {
+	hostRunsNanogoOutput(t)
+	goCmd := goTool(t)
+	tc := hostToolchain(t)
+	cfg := linkConfig(t)
+
+	tests := []struct {
+		name string
+		decl string
+		x, y string
+	}{
+		{"padding", "struct {\n\ta int32\n\tb int64\n}", "pair{a: 1, b: 2}", "pair{a: 1, b: 2}"},
+		{"blank field", "struct {\n\ta int32\n\t_ int32\n\tb int32\n}", "pair{a: 1, b: 2}", "pair{a: 1, b: 2}"},
+		{"string contents", "struct {\n\ts string\n\tn int\n}",
+			"pair{s: string([]byte{104, 105}), n: 4}", `pair{s: "hi", n: 4}`},
+		{"negative zero", "struct {\n\tf float64\n\tn int32\n}", "pair{f: 0.0, n: 1}", "pair{f: negZero, n: 1}"},
+		{"nested", "struct {\n\tin inner\n\tn int32\n}", "pair{in: inner{a: 1, b: 2}, n: 3}", "pair{in: inner{a: 1, b: 2}, n: 3}"},
+		{"array of strings", "[2]string", `pair{"a", "b"}`, `pair{"a", string([]byte{98})}`},
+	}
+	for _, tc2 := range tests {
+		t.Run(tc2.name, func(t *testing.T) {
+			src := "package main\n\ntype inner struct {\n\ta int32\n\tb int64\n}\n\ntype pair " + tc2.decl + "\n"
+			c := check(t, src)
+			fn, err := HashFunc(c.namedType(t, "pair"))
+			if err != nil {
+				t.Fatalf("HashFunc: %v", err)
+			}
+			fn.Sym = "main.hash"
+			p := newMainPackage()
+			addFull(t, emitFunc(t, c.build(t, fn), p), p)
+
+			defs := src[len("package main\n\n"):] +
+				"\nvar zero float64\nvar negZero = zero * -1\n" +
+				"\nfunc b2i(b bool) int {\n\tif b {\n\t\treturn 1\n\t}\n\treturn 0\n}\n" +
+				"\nvar x = " + tc2.x + "\nvar y = " + tc2.y + "\n"
+			// The seed is the same for both, so a difference is the value and
+			// not the seed. The second digit is gc's answer to ==, so the
+			// program states the invariant rather than a number.
+			caller := exitWrapper(t, goCmd, "main.hash",
+				"b2i(hash(&x, 0) == hash(&y, 0))*10+b2i(x == y)",
+				defs, "func hash(p *pair, h uintptr) uintptr")
+			got := strings.TrimSpace(runLinked(t, goCmd, tc, cfg, p, caller))
+			if got != "11" {
+				t.Fatalf("the program printed %q, want \"11\": the two digits are whether the hashes agree and whether the values are equal", got)
+			}
+			t.Logf("two equal values hash alike through the generated function")
+		})
+	}
+}
+
+// TestGeneratedHashIsSeeded checks that the seed reaches the answer.
+//
+// A generated function that dropped h would return the same value for every
+// map, which makes a map that holds these keys degrade to a list.
+func TestGeneratedHashIsSeeded(t *testing.T) {
+	hostRunsNanogoOutput(t)
+	goCmd := goTool(t)
+	tc := hostToolchain(t)
+	cfg := linkConfig(t)
+
+	src := "package main\n\ntype pair struct {\n\ta int32\n\tb int64\n}\n"
+	c := check(t, src)
+	fn, err := HashFunc(c.namedType(t, "pair"))
+	if err != nil {
+		t.Fatalf("HashFunc: %v", err)
+	}
+	fn.Sym = "main.hash"
+	p := newMainPackage()
+	addFull(t, emitFunc(t, c.build(t, fn), p), p)
+
+	defs := src[len("package main\n\n"):] +
+		"\nfunc b2i(b bool) int {\n\tif b {\n\t\treturn 1\n\t}\n\treturn 0\n}\n" +
+		"\nvar x = pair{a: 1, b: 2}\n"
+	caller := exitWrapper(t, goCmd, "main.hash", "b2i(hash(&x, 1) != hash(&x, 2))",
+		defs, "func hash(p *pair, h uintptr) uintptr")
+	got := strings.TrimSpace(runLinked(t, goCmd, tc, cfg, p, caller))
+	if got != "1" {
+		t.Fatalf("the program printed %q, want \"1\": two seeds gave one hash, so the seed is dropped", got)
+	}
+}

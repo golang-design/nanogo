@@ -9,6 +9,7 @@ import (
 	"go/constant"
 
 	"golang.design/x/nanogo/ir"
+	"golang.design/x/nanogo/rtsym"
 	"golang.design/x/nanogo/syntax"
 )
 
@@ -257,3 +258,195 @@ func mustLayout(t *ir.Type) func() *ir.Type {
 	}
 	return func() *ir.Type { return t }
 }
+
+// The generated hash function.
+//
+// A map descriptor's Hasher holds a func value the runtime calls to hash a
+// key. The set of types that need a generated one is the set that needs a
+// generated equality function, and that is not a coincidence: two values that
+// compare equal have to hash alike or a map loses keys it holds, so gc derives
+// both from one algorithm and rtype reproduces that.
+//
+// # The shape, which is the runtime's own walk
+//
+//	func(p *T, h uintptr) uintptr {
+//	    h = memhash32(&p.f0, h)
+//	    h = strhash(&p.f1, h)
+//	    ...
+//	    return h
+//	}
+//
+// One call per leaf, in field order, with the function chosen by the leaf's
+// kind. That is what runtime.typehash does for a type it has no Hasher for
+// (runtime/alg.go): it recurses through a struct's fields and an array's
+// elements and hashes each leaf by its kind, skipping blank fields and never
+// reading padding.
+//
+// gc collapses a run of adjacent memory-comparable fields into one memhash
+// over the run, which this does not, for the reason the equality generator
+// gives. The two shapes hash to different values and neither is more correct:
+// a map uses one hasher for its key type and never mixes two.
+
+// HashFunc returns the generated hash function of t.
+func HashFunc(t *ir.Type) (*ir.Func, error) {
+	sym, err := HashSymbol(t)
+	if err != nil {
+		return nil, err
+	}
+	ptr, err := pointerTo(t)
+	if err != nil {
+		return nil, fmt.Errorf("ssagen: %s: %w", sym, err)
+	}
+	p := &ir.Object{Name: ".p", Type: ptr, Class: ir.ClassParam, Pos: wrapperPos}
+	h := &ir.Object{Name: ".h", Type: uintptrType(), Class: ir.ClassParam, Pos: wrapperPos}
+	fn := &ir.Func{
+		Name:    sym,
+		Sym:     sym,
+		Pos:     wrapperPos,
+		Params:  []*ir.Object{p, h},
+		Results: []*ir.Object{{Name: ".r", Type: uintptrType(), Class: ir.ClassResult, Pos: wrapperPos}},
+		Wrapper: true,
+	}
+	body, err := appendHash(nil, h, deref(p, t), t)
+	if err != nil {
+		return nil, fmt.Errorf("ssagen: %s: %w", sym, err)
+	}
+	fn.Body = append(body, &ir.Node{
+		Op: ir.OReturn, Pos: wrapperPos, Type: voidType(),
+		Args: []ir.Expr{{Op: ir.OLocal, Pos: wrapperPos, Type: uintptrType(), Obj: h}},
+	})
+	return fn, nil
+}
+
+// appendHash appends the statements that fold x into h.
+func appendHash(out []ir.Stmt, h *ir.Object, x ir.Expr, t *ir.Type) ([]ir.Stmt, error) {
+	switch t.Kind {
+	case ir.Struct, ir.Tuple:
+		for i, f := range t.Fields {
+			if f.Name == "_" {
+				continue
+			}
+			var err error
+			if out, err = appendHash(out, h, field(x, i, f.Type), f.Type); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	case ir.Array:
+		if t.Len > maxUnrolledElements {
+			return nil, fmt.Errorf("an array of %d elements needs a hashing loop, which is not built", t.Len)
+		}
+		for i := int64(0); i < t.Len; i++ {
+			var err error
+			if out, err = appendHash(out, h, index(x, i, t.Elem), t.Elem); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	}
+	name, err := leafHashFunc(t)
+	if err != nil {
+		return nil, err
+	}
+	// h = name(&x, h)
+	ptr, err := pointerTo(t)
+	if err != nil {
+		return nil, err
+	}
+	call := &ir.Node{
+		Op: ir.OCall, Pos: wrapperPos, Type: uintptrType(),
+		X: &ir.Node{Op: ir.OGlobal, Pos: wrapperPos, Type: hashSigType(), Obj: runtimeFunc(name)},
+		Args: []ir.Expr{
+			{Op: ir.OAddr, Pos: wrapperPos, Type: ptr, X: x},
+			{Op: ir.OLocal, Pos: wrapperPos, Type: uintptrType(), Obj: h},
+		},
+	}
+	return append(out, &ir.Node{
+		Op: ir.OAssign, Pos: wrapperPos, Type: voidType(),
+		X: &ir.Node{Op: ir.OLocal, Pos: wrapperPos, Type: uintptrType(), Obj: h},
+		Y: call,
+	}), nil
+}
+
+// leafHashFunc names the runtime function that hashes one value of a kind that
+// is not walked further.
+//
+// The choice is the same one rtype's algFuncs makes for a type that has a
+// runtime function of its own, and the memory widths are the same table.
+// A leaf reached from a walk is one scalar, so its size is always one of the
+// widths the runtime declares and memhash_varlen never applies.
+func leafHashFunc(t *ir.Type) (string, error) {
+	switch t.Kind {
+	case ir.Float32:
+		return "runtime.f32hash", nil
+	case ir.Float64:
+		return "runtime.f64hash", nil
+	case ir.Complex64:
+		return "runtime.c64hash", nil
+	case ir.Complex128:
+		return "runtime.c128hash", nil
+	case ir.String:
+		return "runtime.strhash", nil
+	case ir.Interface:
+		// Which layout the first word has decides which function reads it.
+		// Calling the other one reads a descriptor at the wrong offset.
+		if t.EmptyIface {
+			return "runtime.nilinterhash", nil
+		}
+		return "runtime.interhash", nil
+	case ir.Slice, ir.Map, ir.FuncKind:
+		return "", fmt.Errorf("%s cannot be a map key", t)
+	}
+	switch t.Size {
+	case 0:
+		return "runtime.memhash0", nil
+	case 1:
+		return "runtime.memhash8", nil
+	case 2:
+		return "runtime.memhash16", nil
+	case 4:
+		return "runtime.memhash32", nil
+	case 8:
+		return "runtime.memhash64", nil
+	case 16:
+		return "runtime.memhash128", nil
+	}
+	return "", fmt.Errorf("%s is %d bytes and the runtime has no hash of that width", t, t.Size)
+}
+
+// runtimeFunc returns the object that names a runtime function.
+//
+// The name is checked against rtsym, which specs/031-runtime-lowering.md makes
+// the only place a runtime symbol may be spelled. A name that is not there
+// would link against nothing and the call would jump wherever the linker left
+// that address, so it is a build failure here rather than a run-time one.
+func runtimeFunc(name string) *ir.Object {
+	if rtsym.Lookup(name) == nil {
+		panic("ssagen: " + name + " is not in rtsym")
+	}
+	return &ir.Object{Name: name, Type: hashSigType(), Class: ir.ClassFunc, Pos: wrapperPos}
+}
+
+// hashSigType is the type of every hash function the runtime declares:
+// func(unsafe.Pointer, uintptr) uintptr.
+//
+// Below the IR a function value is one pointer-sized word whatever it is a
+// function of, so the fields here are read only by a descriptor writer. They
+// are filled in anyway, because a signature that claimed func() would be a
+// FuncType descriptor that describes the wrong function.
+var hashSigType = func() func() *ir.Type {
+	t := &ir.Type{
+		Kind:    ir.FuncKind,
+		Params:  []*ir.Type{unsafePtrType(), uintptrType()},
+		Results: []*ir.Type{uintptrType()},
+	}
+	if err := ir.Layout(t); err != nil {
+		panic("ssagen: the hash signature does not lay out: " + err.Error())
+	}
+	return func() *ir.Type { return t }
+}()
+
+var (
+	uintptrType   = mustLayout(&ir.Type{Kind: ir.Uintptr, Name: "uintptr", Basic: "uintptr"})
+	unsafePtrType = mustLayout(&ir.Type{Kind: ir.UnsafePtr, Name: "unsafe.Pointer", PkgPath: "unsafe"})
+)
