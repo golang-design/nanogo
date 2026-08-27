@@ -1817,6 +1817,9 @@ func (l *lowerer) convertExpr(n Expr) Expr {
 	}
 	from, pos := x.Type, n.Pos
 	switch {
+	case from.Kind == Interface && to.Kind == Interface && !to.EmptyIface && !sameIface(from, to):
+		return l.ifaceToIface(n, from, to, pos)
+
 	case from.Kind == String && to.Kind == Slice:
 		switch elemKind(to) {
 		case Uint8:
@@ -1851,6 +1854,70 @@ func (l *lowerer) convertExpr(n Expr) Expr {
 		return l.stringCall(n, to, "runtime.intstring", v)
 	}
 	return n
+}
+
+// sameIface reports whether two interface types are the same type.
+//
+// Identity of link strings is identity of types, which is what
+// ir.TypeLinkString states and what ssa.Build's convertInterface asks the same
+// question with. Two interfaces that are not identical carry itabs built for
+// different method lists even when the method sets happen to agree, and an
+// itab passed along unchanged calls through a slot that holds another method.
+//
+// A type whose link string cannot be spelled is not the same type as anything,
+// so the conversion is built rather than skipped, and the row that builds it
+// reports the reason.
+func sameIface(a, b *Type) bool {
+	if a == b {
+		return true
+	}
+	as, err := TypeLinkString(a)
+	if err != nil {
+		return false
+	}
+	bs, err := TypeLinkString(b)
+	if err != nil {
+		return false
+	}
+	return as == bs
+}
+
+// ifaceToIface converts between two interfaces that are not the same type,
+// where the destination has methods.
+//
+// The destination's first word is an itab built for the destination, and the
+// source carries either a *_type or an itab built for the source. Neither is
+// the word the destination needs, so the answer is the same search
+// runtime.typeAssert makes for an assertion, and cmd/compile's
+// walkConvInterface says so plainly: it builds "res, _ = c.(To)" and hands it a
+// descriptor with CanFail set.
+//
+// CanFail is set even though the language guarantees the conversion succeeds.
+// The guarantee is about the static types, and a source holding nothing has no
+// dynamic type to search for. The result is then the zero of the destination,
+// which is what a nil interface converts to.
+func (l *lowerer) ifaceToIface(n Expr, from, to *Type, pos syntax.Pos) Expr {
+	x, why := l.ifaceOperand(n.X)
+	if why != "" {
+		l.refuse(n, why)
+		return n
+	}
+	val := l.tempObj(to, pos)
+	if z := l.zeroOf(to, pos); z != nil {
+		l.emit(define(pos, ref(val, pos), z))
+	} else {
+		l.zero(val, pos)
+	}
+	// The second destination of the comma-ok row. Nothing reads it: the
+	// conversion has no failing arm to report, and the value the row writes
+	// when the search finds nothing is the zero the destination already holds.
+	ok := l.tempObj(lowerBool, pos)
+	l.emit(define(pos, ref(ok, pos), boolConst(pos, false)))
+	if why := l.assertToIface2(x, to, val, ok, pos); why != "" {
+		l.refuse(n, why)
+		return n
+	}
+	return ref(val, pos)
 }
 
 // stringCall builds one of the string conversion calls.

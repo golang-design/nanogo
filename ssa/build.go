@@ -1511,7 +1511,12 @@ func (b *builder) convertInterface(n ir.Expr, x *Value, from, to *ir.Type) *Valu
 		case to.EmptyIface:
 			return b.ifaceToEmpty(n, x, to)
 		}
-		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v, which cmd/compile gives to runtime.typeAssert because the destination's itab is not the source's", from, to))
+		// ir.Lower rewrites this pair into the comma-ok assertion
+		// walkConvInterface builds for it, so a tree that reaches here was
+		// not lowered. It is reported rather than built a second time: two
+		// answers to one question are two places a cache can be named, and
+		// only the lowering pass reports the caches it named.
+		b.unsupported(n, fmt.Sprintf("a conversion from %v to %v, which ir.Lower rewrites into an assertion because the destination's itab is not the source's", from, to))
 		return b.zeroValue(to)
 	}
 	return b.concreteToInterface(n, x, from, to)

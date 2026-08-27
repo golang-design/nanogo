@@ -4068,3 +4068,86 @@ func TestLowerAssertCachesAreOnePerSite(t *testing.T) {
 		t.Errorf("both assertions read %s", c.TypeAsserts[0].Sym)
 	}
 }
+
+// TestLowerInterfaceToInterface is specs/032's conversion between two
+// interfaces that are not the same type.
+//
+// The destination's first word is an itab built for the destination, and the
+// source carries a *_type or an itab built for the source. Neither is the word
+// the destination needs, so the row is the same search an assertion makes.
+// cmd/compile's walkConvInterface builds "res, _ = c.(To)" here and hands it a
+// cache with CanFail set, and CanFail is what makes a source holding nothing
+// convert to the zero rather than panic.
+func TestLowerInterfaceToInterface(t *testing.T) {
+	fn, c := lowerAll(t, `
+type R interface {
+	M() int
+	N() int
+}
+
+func f(r R) interface{ M() int } { return r }`)
+	if !lowerCalled(fn, "runtime.typeAssert") {
+		t.Fatalf("the conversion calls %v, want runtime.typeAssert:\n%s", lowerCalls(fn), buildDump(fn))
+	}
+	for _, p := range lowerCalls(fn) {
+		if strings.HasPrefix(p, "runtime.panic") {
+			t.Errorf("the conversion panics through %s, and the language admits every one of them", p)
+		}
+	}
+	if len(c.TypeAsserts) != 1 || !c.TypeAsserts[0].CanFail {
+		t.Fatalf("the pass collected %v, want one cache that may fail", c.TypeAsserts)
+	}
+	if got := c.TypeAsserts[0].Iface; got == nil || got.Kind != Interface || got.EmptyIface {
+		t.Errorf("the cache targets %v, want the destination interface", got)
+	}
+}
+
+// TestSameIfaceIsTheLinkString is the test that decides whether a conversion
+// between two interfaces has anything to do.
+//
+// Identity of link strings is identity of types. A value already carrying the
+// destination's itab needs no search, and a call for it would be a lookup
+// whose answer is the word the value already holds. Two interfaces that are
+// not identical need the search even when their method sets agree, because an
+// itab holds the concrete type's methods in the order the interface lists
+// them: a defined interface and its own unnamed underlying type are two types,
+// and cmd/compile's walkConvInterface reaches its I2I path for both.
+func TestSameIfaceIsTheLinkString(t *testing.T) {
+	one := func(name string) *Type {
+		sig := &Type{Kind: FuncKind, Results: []*Type{{Kind: Int64, Name: "int", Size: 8, Align: 8}}}
+		if err := Layout(sig); err != nil {
+			t.Fatal(err)
+		}
+		ty := &Type{Kind: Interface, Name: name, Methods: []Method{{Name: "M", Sig: sig}}}
+		if name != "" {
+			ty.PkgPath = "p"
+		}
+		if err := Layout(ty); err != nil {
+			t.Fatal(err)
+		}
+		return ty
+	}
+	named, again, unnamed := one("p.R"), one("p.R"), one("")
+	if !sameIface(named, named) {
+		t.Error("a type is not the same as itself")
+	}
+	if !sameIface(named, again) {
+		t.Error("two spellings of p.R are two types, so a conversion between them would search for an itab it already holds")
+	}
+	if sameIface(named, unnamed) {
+		t.Error("p.R and its unnamed underlying type are one type, and their itabs are built for two different interfaces")
+	}
+}
+
+// TestLowerInterfaceToTheEmptyInterfaceIsALoad keeps the row that was already
+// built.
+//
+// The empty interface leads with a *_type, which is the second word of the
+// itab the source carries, so the answer is a guarded load and construction
+// builds it. A cache here would be a call for a field.
+func TestLowerInterfaceToTheEmptyInterfaceIsALoad(t *testing.T) {
+	_, c := lowerAll(t, `func f(r interface{ M() int }) any { return r }`)
+	if len(c.TypeAsserts) != 0 {
+		t.Errorf("the pass collected %v, and every type is a value of the empty interface", c.TypeAsserts)
+	}
+}
