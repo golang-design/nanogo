@@ -360,9 +360,11 @@ func TestIndexSpaces(t *testing.T) {
 	d0 := p.AddNonPkgDef(&Symbol{Name: "d"})
 	d1 := p.AddNonPkgDef(&Symbol{Name: "e"})
 	// References continue the definition numbering, they do not restart it.
+	// A reference holds its position and gets its index when the object is
+	// written, so it is read through resolve.
 	r0 := p.AddNonPkgRef(&Symbol{Name: "f"})
-	if d0 != (SymRef{PkgIdxNone, 0}) || d1 != (SymRef{PkgIdxNone, 1}) || r0 != (SymRef{PkgIdxNone, 2}) {
-		t.Errorf("non-package indices = %v %v %v", d0, d1, r0)
+	if d0 != (SymRef{PkgIdxNone, 0}) || d1 != (SymRef{PkgIdxNone, 1}) || p.resolve(r0) != (SymRef{PkgIdxNone, 2}) {
+		t.Errorf("non-package indices = %v %v %v", d0, d1, p.resolve(r0))
 	}
 	if got, want := p.PkgIndex("runtime"), uint32(1); got != want {
 		t.Errorf("first referenced package index = %d, want %d", got, want)
@@ -375,6 +377,34 @@ func TestIndexSpaces(t *testing.T) {
 	}
 	if (SymRef{}).IsZero() != true || (SymRef{PkgIdxSelf, 0}).IsZero() {
 		t.Error("SymRef.IsZero is wrong")
+	}
+}
+
+// TestNonPkgDefAfterRefKeepsTheReference is the rule that a definition added
+// after a reference does not move the reference.
+//
+// The NonPkgRefs array continues the NonPkgDefs array, so a reference numbered
+// when it was added takes the index of a definition added later. The linker
+// then reads the definition where the reference should be, and a relocation
+// that named an undefined symbol resolves to a symbol this object defines.
+// That is how one dupok definition and one by-name reference to the same
+// symbol end up as two symbols in the linked binary.
+func TestNonPkgDefAfterRefKeepsTheReference(t *testing.T) {
+	p := NewPackage("p")
+	ref := p.AddNonPkgRef(&Symbol{Name: "runtime.newobject"})
+	def := p.AddNonPkgDef(&Symbol{Name: "type:*int32", Type: SRODATA, Size: 1, Align: 1, Flag: SymFlagDupok, Data: []byte{0}})
+	if got, want := p.resolve(def), (SymRef{PkgIdxNone, 0}); got != want {
+		t.Errorf("the definition is %v, want %v", got, want)
+	}
+	if got, want := p.resolve(ref), (SymRef{PkgIdxNone, 1}); got != want {
+		t.Errorf("the reference is %v, want %v; a definition added after it took its index", got, want)
+	}
+	// The name the linker resolves the reference by is the referenced one.
+	if got, err := p.nonPkgName(p.resolve(ref).SymIdx); err != nil || got != "runtime.newobject" {
+		t.Errorf("the reference names %q (%v), want %q", got, err, "runtime.newobject")
+	}
+	if got, err := p.nonPkgName(p.resolve(def).SymIdx); err != nil || got != "type:*int32" {
+		t.Errorf("the definition names %q (%v), want %q", got, err, "type:*int32")
 	}
 }
 

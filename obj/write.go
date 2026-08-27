@@ -164,12 +164,35 @@ func (p *Package) AddNonPkgDef(s *Symbol) SymRef {
 
 // AddNonPkgRef adds a reference to a symbol that belongs to no package.
 //
-// The index space of NonPkgRefs continues that of NonPkgDefs, so every
-// reference added before the last definition would take a wrong index.
-// Add all definitions first.
+// The index space of NonPkgRefs continues that of NonPkgDefs, so the index a
+// reference ends up with depends on how many definitions the object holds when
+// it is written, not on how many it held when the reference was added. The
+// reference this returns therefore carries [pkgIdxPendingRef] and is given its
+// final index by [Package.resolve] at write time. A caller may add definitions
+// and references in any order.
 func (p *Package) AddNonPkgRef(s *Symbol) SymRef {
 	p.nonPkgRefs = append(p.nonPkgRefs, s)
-	return SymRef{PkgIdxNone, uint32(len(p.nonPkgDefs) + len(p.nonPkgRefs) - 1)}
+	return SymRef{pkgIdxPendingRef, uint32(len(p.nonPkgRefs) - 1)}
+}
+
+// pkgIdxPendingRef marks a reference whose symbol index is not yet final.
+//
+// It exists in memory only. Every path that reads or writes a SymRef sends it
+// through [Package.resolve] first, so no pending reference reaches the object.
+// The value is above PkgIdxNone, which is the largest index the format uses,
+// so it cannot collide with a real package index.
+const pkgIdxPendingRef = 1 << 31
+
+// resolve gives a pending non-package reference its final index.
+//
+// The NonPkgRefs array continues the NonPkgDefs array, so the index of a
+// reference is the number of definitions plus its own position. Every other
+// reference passes through unchanged.
+func (p *Package) resolve(r SymRef) SymRef {
+	if r.PkgIdx != pkgIdxPendingRef {
+		return r
+	}
+	return SymRef{PkgIdxNone, uint32(len(p.nonPkgDefs)) + r.SymIdx}
 }
 
 // PkgRef returns a reference to symbol symIdx of the named package. The
@@ -262,6 +285,7 @@ func (p *Package) lists() [][]*Symbol {
 // definition and returns nil rather than a symbol of no content.
 func (p *Package) Def(r SymRef) *Symbol {
 	var list []*Symbol
+	r = p.resolve(r)
 	switch r.PkgIdx {
 	case PkgIdxSelf:
 		list = p.defs
@@ -350,7 +374,7 @@ func (p *Package) Bytes() ([]byte, error) {
 
 	offsets[BlkRefFlags] = w.off()
 	for _, rf := range p.refFlags {
-		w.symRef(rf.Sym)
+		w.symRef(p.resolve(rf.Sym))
 		w.uint8(rf.Flag)
 		w.uint8(rf.Flag2)
 	}
@@ -419,7 +443,7 @@ func (p *Package) Bytes() ([]byte, error) {
 				w.uint8(r.Size)
 				w.uint16(uint16(r.Type))
 				w.uint64(uint64(r.Add))
-				w.symRef(r.Sym)
+				w.symRef(p.resolve(r.Sym))
 			}
 		}
 	}
@@ -429,7 +453,7 @@ func (p *Package) Bytes() ([]byte, error) {
 		for _, s := range list {
 			for _, a := range s.Aux {
 				w.uint8(uint8(a.Type))
-				w.symRef(a.Sym)
+				w.symRef(p.resolve(a.Sym))
 			}
 		}
 	}
@@ -443,7 +467,7 @@ func (p *Package) Bytes() ([]byte, error) {
 
 	offsets[BlkRefName] = w.off()
 	for _, rn := range p.refNames {
-		w.symRef(rn.Sym)
+		w.symRef(p.resolve(rn.Sym))
 		t.ref(w, rn.Name)
 	}
 
@@ -629,6 +653,7 @@ func (p *Package) checkRef(r SymRef) error {
 	if r.IsZero() {
 		return nil // the nil symbol, which marker relocations use
 	}
+	r = p.resolve(r)
 	var n int
 	switch r.PkgIdx {
 	case PkgIdxInvalid:
@@ -783,6 +808,7 @@ func (p *Package) contentHash(i uint32) ([16]byte, error) {
 
 // hashTarget writes the globally stable identity of one relocation target.
 func (p *Package) hashTarget(h io.Writer, rs, self SymRef) error {
+	rs = p.resolve(rs)
 	switch {
 	case rs.IsZero():
 		io.WriteString(h, "nil symbol") // a marker relocation, with no target
