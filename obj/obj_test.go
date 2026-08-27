@@ -437,6 +437,9 @@ func TestCheckRejects(t *testing.T) {
 			p.AddDef(&Symbol{Name: "s", Type: SDATA, Size: 4, Data: []byte{0, 0, 0, 0},
 				Relocs: []Reloc{{Off: 2, Size: 4, Type: R_ADDR}}})
 		}, "outside the symbol"},
+		{"duplicate-tolerant package definition", func(p *Package) {
+			p.AddDef(&Symbol{Name: "type:*int32", Type: SRODATA, Size: 1, Align: 1, Flag: SymFlagDupok, Data: []byte{0}})
+		}, "non-package index space"},
 		{"short hashed symbol too long", func(p *Package) {
 			p.AddHashed64Def(&Symbol{Name: "s", Type: SRODATA, Size: 9, Align: 1, Data: make([]byte, 9)})
 		}, "at most 8"},

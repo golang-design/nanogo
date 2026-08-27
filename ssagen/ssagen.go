@@ -249,6 +249,14 @@ func (r *Result) Add(p *obj.Package) (obj.SymRef, error) {
 		entries = append(entries, obj.Aux{Type: obj.AuxPcdata, Sym: p.AddHashedDef(s)})
 	}
 	r.Text.Aux = entries
+	if r.Text.Flag&obj.SymFlagDupok != 0 {
+		// A duplicate-tolerant definition is a non-package definition, which
+		// is gc's rule in obj.isNonPkgSym. cmd/link deduplicates by name in
+		// that index space only: loader.addSym takes a package definition as
+		// unique by construction, so two objects that both generate one
+		// method wrapper would put two of it in the binary.
+		return p.AddNonPkgDef(r.Text), nil
+	}
 	return p.AddDef(r.Text), nil
 }
 

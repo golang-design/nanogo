@@ -85,6 +85,12 @@ func TestAddGeneratedCompilesTheMethodWrapper(t *testing.T) {
 	if sym.Flag&obj.SymFlagDupok == 0 {
 		t.Error("the wrapper is not duplicate-tolerant, so two packages that name it are two definitions of one symbol")
 	}
+	// And a duplicate-tolerant symbol belongs to no package. cmd/link
+	// deduplicates by name in that index space only, so a wrapper written as a
+	// package definition would survive beside the copy another object wrote.
+	if findNonPkgDef(out, "main.(*counter).get") == nil {
+		t.Error("the wrapper is a package definition, and cmd/link deduplicates a dupok symbol by name in the non-package index space only")
+	}
 	if len(sym.Data) == 0 {
 		t.Error("the wrapper has no instructions")
 	}
@@ -135,9 +141,28 @@ func TestGeneratedFuncsReportsARefusalByName(t *testing.T) {
 //
 // The object holds its definitions in an index space rather than by name, so
 // the walk is over the indices and stops at the first one nothing defines.
+// Both spaces that hold a named definition are walked: a duplicate-tolerant
+// symbol belongs to no package, so a generated function is not where a
+// declared one is.
 func findDef(p *obj.Package, name string) *obj.Symbol {
+	for _, space := range []uint32{obj.PkgIdxSelf, obj.PkgIdxNone} {
+		for i := uint32(0); ; i++ {
+			s := p.Def(obj.SymRef{PkgIdx: space, SymIdx: i})
+			if s == nil {
+				break
+			}
+			if s.Name == name {
+				return s
+			}
+		}
+	}
+	return nil
+}
+
+// findNonPkgDef returns a non-package definition of the object by name.
+func findNonPkgDef(p *obj.Package, name string) *obj.Symbol {
 	for i := uint32(0); ; i++ {
-		s := p.Def(obj.SymRef{PkgIdx: obj.PkgIdxSelf, SymIdx: i})
+		s := p.Def(obj.SymRef{PkgIdx: obj.PkgIdxNone, SymIdx: i})
 		if s == nil {
 			return nil
 		}
@@ -150,15 +175,18 @@ func findDef(p *obj.Package, name string) *obj.Symbol {
 // defNames lists the named definitions of the object, for a failure message.
 func defNames(p *obj.Package) []string {
 	var out []string
-	for i := uint32(0); ; i++ {
-		s := p.Def(obj.SymRef{PkgIdx: obj.PkgIdxSelf, SymIdx: i})
-		if s == nil {
-			return out
-		}
-		if s.Name != "" {
-			out = append(out, s.Name)
+	for _, space := range []uint32{obj.PkgIdxSelf, obj.PkgIdxNone} {
+		for i := uint32(0); ; i++ {
+			s := p.Def(obj.SymRef{PkgIdx: space, SymIdx: i})
+			if s == nil {
+				break
+			}
+			if s.Name != "" {
+				out = append(out, s.Name)
+			}
 		}
 	}
+	return out
 }
 
 // TestAlgFuncsReadsTheDescriptorsAnswer checks that the equality and hash

@@ -588,6 +588,20 @@ func (p *Package) check() error {
 			}
 		}
 	}
+	// A duplicate-tolerant definition belongs to no package.
+	//
+	// cmd/link deduplicates by name in the non-package index space only.
+	// loader.addSym takes a package definition as unique by construction: it
+	// overwrites the name table entry and adds the symbol to the binary
+	// beside the copy that was already there. Both copies are then reachable,
+	// one by name and one by index, and a runtime that compares two of them by
+	// address sees two. gc writes the rule from the other side, in
+	// obj.isNonPkgSym, where a dupok symbol is a non-package symbol.
+	for _, s := range p.defs {
+		if s.Flag&SymFlagDupok != 0 {
+			return fmt.Errorf("obj: %s: a duplicate-tolerant symbol is a package definition, and cmd/link deduplicates by name in the non-package index space only; add it with AddNonPkgDef", s.Name)
+		}
+	}
 	for _, s := range p.hashed64Defs {
 		if err := checkSym(s); err != nil {
 			return err
