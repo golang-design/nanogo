@@ -30,6 +30,10 @@ type pkgReader struct {
 	// that a caller can report the elements it read and not only the
 	// declarations it read them for.
 	nested int
+
+	// posBases caches the file name of each SectionPosBase element a body
+	// resolved. See [pkgReader.posBaseFile].
+	posBases map[pkgbits.Index]string
 }
 
 // ReadPackage decodes one package from an already opened container.
@@ -59,6 +63,8 @@ func readPackage(ctxt *types2.Context, imports map[string]*types2.Package, input
 
 		pkgs: make([]*types2.Package, input.NumElems(pkgbits.SectionPkg)),
 		typs: make([]types2.Type, input.NumElems(pkgbits.SectionType)),
+
+		posBases: make(map[pkgbits.Index]string),
 	}
 
 	r := pr.newReader(pkgbits.SectionMeta, pkgbits.PublicRootIdx, pkgbits.SyncPublic)

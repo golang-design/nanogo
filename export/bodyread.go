@@ -151,9 +151,27 @@ func (r *bodyReader) pos() Pos {
 		return p
 	}
 	p.Base = r.reloc(pkgbits.SectionPosBase)
+	p.File = r.p.posBaseFile(p.Base)
 	p.Line = r.Uint()
 	p.Col = r.Uint()
 	return p
+}
+
+// posBaseFile returns the file name one SectionPosBase element holds.
+//
+// It is the only field of the element a body needs. The rest of the element
+// says whether the base is a file or a line directive, and where the
+// directive stands, which places the file's own coordinates and not the
+// body's.
+func (pr *pkgReader) posBaseFile(idx pkgbits.Index) string {
+	if name, ok := pr.posBases[idx]; ok {
+		return name
+	}
+	r := pr.tempReader(pkgbits.SectionPosBase, idx, pkgbits.SyncPosBase)
+	name := r.String()
+	pr.retireReader(r)
+	pr.posBases[idx] = name
+	return name
 }
 
 // @@@ References

@@ -63,12 +63,18 @@ type Local struct {
 // A Pos is a source position, as the format carries it.
 //
 // nanogo has no coordinate space for a file of another package
-// (specs/010-scanner-and-positions.md), so the base is kept as the index of
-// the SectionPosBase element and is not resolved. Known is false for the
-// absent position, which is what nanogo's own writer writes.
+// (specs/010-scanner-and-positions.md), so a position read from an archive is
+// not turned into a [syntax.Pos]. Known is false for the absent position.
+//
+// The base is named twice, and the two names have different owners. Base is
+// the SectionPosBase element of the archive the position was read from, and
+// is meaningless in a position built from syntax. File is the file name that
+// element holds, and is the only name a position built from syntax has: a
+// writer allocates the element from it.
 type Pos struct {
 	Known bool
 	Base  pkgbits.Index
+	File  string
 	Line  uint
 	Col   uint
 }
