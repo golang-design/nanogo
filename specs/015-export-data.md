@@ -31,7 +31,8 @@ Both directions, for everything but a generic declaration.
 | The `__.PKGDEF` archive member | `driver/archive.go` | built; nanogo writes both members `gc` writes |
 | `-importcfg` parsing | `driver/importcfg.go` | built; all four directives, in separate tables, and an unknown directive is an error |
 | Function bodies, the reader | `export/body.go`, `export/bodyread.go`, `export/bodies.go` | built; every body of every standard library package decodes, and the decode is exact |
-| Function bodies, the writer | nowhere | **not written**; a body is encoded from `syntax` plus the checker's record, and nothing does that; see below |
+| Function bodies, the element encoder | `export/bodywrite.go` | built; every body element of every standard library package is written back byte for byte as `gc` wrote it |
+| Function bodies, the builder | nowhere | **not written**; the encoder writes a body from the tree of `export/body.go`, and nothing turns `syntax` plus the checker's record into one; see below |
 
 `driver/importer.go` turns an import path into a file through `-importcfg` and
 hands it to the reader, so a package that imports compiles.
@@ -133,14 +134,15 @@ importer that instantiates it, with a message naming neither the generic nor
 the package that wrote it.
 
 So the writer refuses rather than writing something a build would get halfway
-through. **The refusal stands, and the body reader does not lift it.** Lifting
-it needs two things the reader does not provide: an encoder from `syntax` plus
-the checker's record into a body element, and the dictionary that encoding
-fills as a side effect. `objDict` writes zero for every count today, and every
-one of them is populated while a body is encoded, by the writer's `rtype`,
-`itab`, `convRTTI` and `varDictIndex` calls. A missing entry there is a
-dictionary slot `gc` reads as a different type, which is a wrong answer and
-not a refusal. So the order is the encoder first and the refusal second.
+through. **The refusal stands.** Lifting it needs two things that are still
+owed: a builder from `syntax` plus the checker's record into the body tree,
+and the dictionary that building fills as a side effect. `objDict` writes zero
+for every count today, and every one of them is populated while a body is
+built, by `gc`'s `rtype`, `itab`, `convRTTI` and `varDictIndex` calls. A
+missing entry there is a dictionary slot `gc` reads as a different type, which
+is a wrong answer and not a refusal. The element encoder below is the half
+that is built, and it fills no count: it writes back the slots a tree already
+carries.
 
 The `types2` fork carries a hand-written `srcimporter_test.go`, which
 type-checks an imported package from source. Upstream's `importer_test.go` is
@@ -284,8 +286,49 @@ The measured result, over the archives the pinned toolchain wrote:
 | bodies of function literals inside those | 196 |
 | bodies refused | 0 |
 
-**The encoder is owed.** Until it exists the reader is proved against `gc`'s
-bytes and not against nanogo's own, and nothing nanogo writes carries a body.
+### The encoder, and the same oracle turned around
+
+`export/bodywrite.go` writes the tree back into one element of `SectionBody`.
+It is the mirror of the reader, field for field and in the same order, and its
+oracle is the stronger half of the same measurement: not that `gc` accepts
+what nanogo wrote, but that what nanogo wrote **is** what `gc` wrote. For every
+body element $b$ of every standard library archive, with $D$ the decoder and
+$E$ the encoder:
+
+$$
+E(D(b)) = b
+$$
+
+byte for byte, and the reference table $E$ produced equals $b$'s entry for
+entry. The two are compared separately because they fail for different
+reasons: a payload difference is a field at the wrong width or in the wrong
+order, and a table difference is a reference made in the wrong order or not
+made at all. Dropping the `Bool` that says a call spreads its last argument
+moves byte 69 of the first element of `bytes` and every element after it.
+
+| Claim | Number |
+| --- | --- |
+| body elements encoded and compared with `gc`'s own bytes | 9,317 of 9,317 |
+| packages | 375 |
+| elements that differ from `gc`'s in one byte or one table entry | 0 |
+
+The count is the reader's own count, checked rather than assumed: a function
+literal's body is an element that hangs off the tree rather than off the list
+of declarations, so the encoder queues each literal it names and the test
+fails if the number of elements it wrote is not the number the reader said it
+decoded.
+
+**What the encoder proves is the layout, and no more.** A body names a type,
+an object, a package, a string, a position base and another body by index, and
+the index belongs to the package being written, not to the body. So the
+encoder asks a resolver for it. The resolver the round trip uses answers with
+the index the archive the tree was read from already gave it, which is what
+makes the byte comparison meaningful and is exactly its limit: the round trip
+says nothing about how a tree built from `syntax` would find an index, because
+such a tree has none.
+
+**The builder is owed.** Until it exists nothing nanogo writes carries a body,
+because nothing builds one to encode.
 
 ### Two things the format does that its writer does not say
 
@@ -345,11 +388,14 @@ record and says it has none never runs its initialisation and nothing reports
 it, and a package that says it has one and has none is a link failure naming a
 symbol nothing defines.
 
-Function bodies are read now and are still not written. What that leaves is
-one gap and not two: an importer can reach the body of a generic another
-package declares, and nanogo cannot yet hand one to an importer of its own.
-[024](024-inlining-and-devirtualization.md) is unblocked from the reading side
-by the same work and is otherwise untouched, because nothing inlines yet.
+Function bodies are read now, and the element that carries one is written
+back. What is missing between the two is the builder: nothing turns `syntax`
+plus the checker's record into a body tree, so nothing nanogo writes carries a
+body. That leaves one gap and not two: an importer can reach the body of a
+generic another package declares, and nanogo cannot yet hand one to an
+importer of its own. [024](024-inlining-and-devirtualization.md) is unblocked
+from the reading side by the same work and is otherwise untouched, because
+nothing inlines yet.
 
 ## What is in it
 
@@ -398,9 +444,10 @@ The costs are real and are accepted:
    the archive, against an estimate of 7,000 for the whole component.
 
    What is left of the estimate is the function bodies. The write half measures
-   1,294 lines: `export/pkgbits/encoder.go` at 371, `export/writer.go` at 799
-   and `driver/archive.go` at 124. `noder`'s reader for the bodies below, and
-   the writer that produces them, are still owed.
+   2,380 lines: `export/pkgbits/encoder.go` at 371, `export/writer.go` at 799,
+   `driver/archive.go` at 124 and `export/bodywrite.go` at 1,086. What is
+   still owed on that side is the builder that produces a body tree from
+   `syntax`.
 3. **Both directions are required, and which one comes first depends on where
    the allowlist starts.** A leaf package has no imports, so compiling it with
    nanogo exercises no reader, but anything that imports it reads what nanogo
@@ -615,13 +662,32 @@ What the body reader has:
   naming the declaration, and so is a body whose element does not decode
   exactly.
 
+What the body encoder has:
+
+- The standard library, byte for byte: every body element of every one of the
+  375 packages, decoded, encoded again and compared with `gc`'s own bytes and
+  `gc`'s own reference table. 9,317 elements, 0 different
+  (`export/bodywrite_test.go`). The corpus selection is the reader's, so an
+  unattended run encodes the same 20 packages and the sweep runs under
+  `NANOGO_REQUIRE_CORPUS=1`.
+- The count is checked and not assumed: the number of elements encoded has to
+  equal the number the reader decoded, which is what catches a function
+  literal's body being skipped.
+- Refusal by name: a tree whose optional field disagrees with the type beside
+  it is a `BodyError` naming the declaration, rather than an element with
+  every byte after that field moved.
+
 What the writer still needs:
 
-- The body encoder: from `syntax` plus the checker's record into a body
-  element, with the dictionary it fills as it goes.
+- The body builder: from `syntax` plus the checker's record into the tree of
+  `export/body.go`, with the dictionary it fills as it goes. The encoder above
+  takes it from there.
+- A way for a body to reach a file at all: `export.Write` takes a
+  `*types2.Package`, and building a body needs the files and the
+  `types2.Info` the driver already holds (`driver/compile.go`).
 - Generic bodies: an importer instantiates a generic declared in a package it
   only has export data for, and the instantiation compiles and runs. This is
-  the whole of what is refused, and it needs the encoder above and
+  the whole of what is refused, and it needs the builder above and
   [013](013-generics.md)'s stenciler.
 
 ## What was wrong

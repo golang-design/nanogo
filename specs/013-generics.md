@@ -54,10 +54,16 @@ codes, with the types resolved and the local variables numbered.
 
 Two things are still owed and neither is this spec's. `export/writer.go` names
 a declaration with type parameters and refuses to encode it, because writing
-one needs a body *encoder* and the dictionary that encoding fills, and
-[015](015-export-data.md) has neither. Until then a package nanogo compiles
-cannot export a generic, which is what is left of [003](003-sequencing.md)'s
-M2 gate.
+one needs a body *builder* and the dictionary that building fills, and
+[015](015-export-data.md) has neither. The element that carries a body is
+written now: `export/bodywrite.go` encodes the tree back, and every body
+element of all 375 packages comes out byte for byte as `gc` wrote it. So what
+is missing is the step in front of it, from `syntax` plus the checker's record
+into the tree. Until then a package nanogo compiles cannot export a generic,
+which is what is left of [003](003-sequencing.md)'s M2 gate.
+
+The encoder is also what the stenciler will write through, when an
+instantiated body has to reach a file rather than only `ir`.
 
 This note is at the top rather than at the end because a reader who takes the
 design below for a description of the code will be wrong about the whole file.
