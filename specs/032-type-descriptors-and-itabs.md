@@ -453,6 +453,17 @@ field:
    `R_METHODOFF` relocations against the names in the table above. `Referenced`
    grows each method's `Sig`, so the closure the driver emits covers them.
 
+   **The array has to be re-sorted, and `methodSet`'s doc does not say so.**
+   `gc` orders methods **exported first**, then by name in byte order, then by
+   package path for the unexported ones (`types.CompareSyms`), and
+   `reflectdata` computes `Xcount` as a *binary search* for the first
+   unexported name (`sort.Search` in `dcommontype`). `ir.Converter.methodSet`
+   sorts by name and then by package path with no exported-first clause, so an
+   array written in that order gives `Xcount` an answer from a binary search
+   over an unsorted predicate, and `reflect` reports a method set that is not
+   the type's. This is the same rule the descriptor lane found for an
+   interface's `Imethod` array, and it has to be applied again here.
+
 The driver decides the wrapper set from the closed descriptor list, which is
 where `gc` decides it too, and it will find the equality and hash functions the
 same way: a descriptor names the symbol and whoever writes the descriptor

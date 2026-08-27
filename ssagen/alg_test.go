@@ -94,6 +94,14 @@ func TestGeneratedEqualAgreesWithGc(t *testing.T) {
 		// An array of strings: every element compares by its contents.
 		{"array of strings", "[2]string", `pair{"a", "b"}`, `pair{"a", string([]byte{98})}`, true},
 		{"array of strings, unequal", "[2]string", `pair{"a", "b"}`, `pair{"a", "c"}`, false},
+		// An interface compares its descriptor and then its value through the
+		// runtime. A comparison of the two words would answer on the data
+		// pointer, which is a boxed value with an address of its own.
+		{"empty interface", "struct {\n\tv any\n\tn int32\n}", "pair{v: 7, n: 1}", "pair{v: 7, n: 1}", true},
+		{"empty interface, unequal", "struct {\n\tv any\n\tn int32\n}", "pair{v: 7, n: 1}", "pair{v: 8, n: 1}", false},
+		// A complex field is two floats and reaches the default branch, so
+		// negative zero in the imaginary part is the same case as above.
+		{"complex", "struct {\n\tc complex128\n\tn int32\n}", "pair{c: complex(1, 0), n: 1}", "pair{c: complex(1, negZero), n: 1}", true},
 	}
 	for _, tc2 := range tests {
 		t.Run(tc2.name, func(t *testing.T) {
@@ -183,6 +191,8 @@ func TestGeneratedHashAgreesWithEquality(t *testing.T) {
 		{"negative zero", "struct {\n\tf float64\n\tn int32\n}", "pair{f: 0.0, n: 1}", "pair{f: negZero, n: 1}"},
 		{"nested", "struct {\n\tin inner\n\tn int32\n}", "pair{in: inner{a: 1, b: 2}, n: 3}", "pair{in: inner{a: 1, b: 2}, n: 3}"},
 		{"array of strings", "[2]string", `pair{"a", "b"}`, `pair{"a", string([]byte{98})}`},
+		{"empty interface", "struct {\n\tv any\n\tn int32\n}", "pair{v: 7, n: 1}", "pair{v: 7, n: 1}"},
+		{"complex", "struct {\n\tc complex128\n\tn int32\n}", "pair{c: complex(1, 0), n: 1}", "pair{c: complex(1, negZero), n: 1}"},
 	}
 	for _, tc2 := range tests {
 		t.Run(tc2.name, func(t *testing.T) {

@@ -61,6 +61,12 @@ import (
 // about how many instructions the comparison takes and not about what it
 // answers: gc itself compares such a run field by field below the threshold.
 // This generator always takes the field-by-field path.
+//
+// gc also marks its function Noinline and turns nil checks off inside it, and
+// does not mark it a wrapper. The two functions here carry ir.Func.Wrapper
+// instead, because a comparison of two interface values panics inside them and
+// the traceback is about the map operation that reached them, not about a
+// frame of the program. What that changes is a traceback and nothing else.
 
 // algSymbolPrefix is gc's name for a generated algorithm function
 // (cmd/compile/internal/reflectdata, TypeSymPrefix). The symbol is the prefix,
