@@ -1127,7 +1127,11 @@ func (b *bodyBuilder) staticBool(ep *syntax.Expr) int {
 	}
 	switch e.Op {
 	case syntax.Not:
-		return -b.staticBool(&e.X)
+		// gc returns the operand's own result and does not negate it. That
+		// is reproduced and not corrected: the value decides which arm of
+		// an if statement gc wrote, so a sign this does not share is an arm
+		// that disagrees with the one the element holds.
+		return b.staticBool(&e.X)
 
 	case syntax.AndAnd:
 		x := b.staticBool(&e.X)
