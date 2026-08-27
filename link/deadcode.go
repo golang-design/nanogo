@@ -31,10 +31,11 @@ func ptrSize(goarch string) int {
 
 // Reachability is the result of the pass: which symbols the program uses.
 type Reachability struct {
-	l    *Loader
-	mark []bool
-	from []Global
-	n    int
+	l         *Loader
+	mark      []bool
+	from      []Global
+	rewritten []bool
+	n         int
 }
 
 // ReachedBy returns the symbol whose reference first reached g, or 0 for a
@@ -55,6 +56,21 @@ func (r *Reachability) Reachable(g Global) bool {
 
 // Count is how many symbols the program uses.
 func (r *Reachability) Count() int { return r.n }
+
+// Rewritten reports whether the linker changed a relocation of a symbol
+// an object defines.
+//
+// Only the map initialiser cleanup does that today, and what it changes
+// is one call target. The layout still has to ask, because cmd/link
+// rewrites a symbol by copying it out of its object first, and its text
+// ordering asks which object each symbol came from. A copied symbol
+// answers "not this one" and is laid out with the package's
+// duplicate-tolerant text instead of at its index. specs/045-linker.md
+// records the measurement: one function moves 0x50 bytes in a
+// hello-world, and every function after it moves with it.
+func (r *Reachability) Rewritten(g Global) bool {
+	return g > 0 && int(g) < len(r.rewritten) && r.rewritten[g]
+}
 
 // Names returns the name of every reachable symbol.
 //
@@ -96,6 +112,10 @@ type deadcodePass struct {
 	// compiler could not determine, so static analysis is given up and
 	// every exported method of every reachable type is kept.
 	reflectSeen bool
+
+	// pkginits is every initialisation function the flood reached. The
+	// map initialiser cleanup walks them after the flood.
+	pkginits []Global
 }
 
 // Deadcode marks every symbol the program uses, from the entry point.
@@ -123,8 +143,13 @@ type deadcodePass struct {
 // same program.
 func (l *Loader) Deadcode(goos, goarch string) *Reachability {
 	d := &deadcodePass{
-		l:                  l,
-		r:                  &Reachability{l: l, mark: make([]bool, len(l.objSyms)), from: make([]Global, len(l.objSyms))},
+		l: l,
+		r: &Reachability{
+			l:         l,
+			mark:      make([]bool, len(l.objSyms)),
+			from:      make([]Global, len(l.objSyms)),
+			rewritten: make([]bool, len(l.objSyms)),
+		},
 		ptrSize:            ptrSize(goarch),
 		ifaceMethod:        map[methodSig]bool{},
 		genericIfaceMethod: map[string]bool{},
@@ -157,7 +182,53 @@ func (l *Loader) Deadcode(goos, goarch string) *Reachability {
 		}
 		d.flood()
 	}
+	d.mapInitCleanup()
 	return d.r
+}
+
+// mapInitCleanup keeps the function a pruned map initialiser is
+// redirected to.
+//
+// The compiler emits a weak call from a package's initialisation function
+// to the initialiser of each of its map variables, so that a map nothing
+// reads costs nothing. When the flood does not reach one of those
+// initialisers, cmd/link rewrites the call to runtime.mapinitnoop and
+// keeps that function, and a program that has one such call has the
+// function in its binary.
+//
+// cmd/link keeps it by setting the attribute and not by marking, so the
+// symbol has no incoming edge, cmd/link -dumpdep prints no line for it,
+// and the oracle for the previous stage cannot see it. The linked
+// binary's symbol table is what says it belongs, and that is the
+// comparison TestReachableTextMatchesTheBinary makes. The function is
+// kept and not walked, which is cmd/link's behaviour: nothing it refers
+// to becomes reachable through it.
+func (d *deadcodePass) mapInitCleanup() {
+	noop := d.l.Lookup("runtime.mapinitnoop", VerABIInternal)
+	if noop == 0 {
+		return
+	}
+	for _, g := range d.pkginits {
+		st, s := d.l.def(g)
+		if s == nil {
+			continue
+		}
+		for _, rel := range s.Relocs {
+			if rel.Type&obj.R_WEAK == 0 || !rel.Type.IsDirectCall() {
+				continue
+			}
+			rs := d.l.resolve(st, rel.Sym)
+			if rs == 0 || d.r.mark[rs] {
+				continue
+			}
+			d.r.rewritten[g] = true
+			if !d.r.mark[noop] {
+				d.r.mark[noop] = true
+				d.r.from[noop] = g
+				d.r.n++
+			}
+		}
+	}
 }
 
 func (d *deadcodePass) mark(g, parent Global) {
@@ -277,6 +348,14 @@ func (d *deadcodePass) flood() {
 				}
 			}
 			d.mark(rs, g)
+		}
+
+		// An initialisation function is recorded for the map
+		// initialiser cleanup below. An auxiliary entry is what says the
+		// symbol is a function at all, so a flagged symbol with none is
+		// not one.
+		if len(s.Aux) != 0 && s.PkgInit() {
+			d.pkginits = append(d.pkginits, g)
 		}
 
 		for _, a := range s.Aux {

@@ -250,6 +250,23 @@ const (
 	R_WEAKADDROFF           = R_WEAK | R_ADDROFF
 )
 
+// IsDirectCall reports whether the relocation is a call whose target
+// address the instruction holds as an immediate.
+//
+// It is objabi's predicate over the entries this package declares, and it
+// is asked of a relocation whose weak bit is still set, so the bit is
+// cleared first: cmd/link strips it when it reads the type and asks the
+// same question of the result. The architectures nanogo does not declare
+// relocations for have direct calls of their own, and a reader that meets
+// one has met a relocation it cannot resolve either.
+func (t RelocType) IsDirectCall() bool {
+	switch t &^ R_WEAK {
+	case R_CALL, R_CALLARM, R_CALLARM64, R_CALLMIPS, R_CALLPOWER:
+		return true
+	}
+	return false
+}
+
 // An AuxType names what an auxiliary symbol is to the symbol that carries
 // it. specs/040 lists the four the compiler needs first.
 type AuxType uint8

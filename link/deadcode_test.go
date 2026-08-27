@@ -121,6 +121,106 @@ func head(b []byte) []byte {
 	return b
 }
 
+// keptWithNoEdge is the set of symbols cmd/link keeps by setting the
+// attribute rather than by marking, so that -dumpdep prints no line for
+// them and the dump is short by one name.
+//
+// There is one. The map initialiser cleanup redirects the pruned
+// initialiser of a map nothing reads to runtime.mapinitnoop and keeps
+// that function, and it does so after the flood, with no edge. The dump
+// is therefore not the whole reachable set, and
+// TestReachableTextMatchesTheBinary reads the set cmd/link actually
+// wrote out of the executable it produced.
+var keptWithNoEdge = map[string]bool{"runtime.mapinitnoop": true}
+
+// TestReachableTextMatchesTheBinary is the second reachability oracle,
+// and it sees what cmd/link -dumpdep cannot.
+//
+// The dump is a list of edges, so a symbol cmd/link keeps without an edge
+// is missing from it. The symbol table of the executable cmd/link wrote
+// from the same archives has no such gap for text: every function in the
+// binary is a function the linker kept.
+func TestReachableTextMatchesTheBinary(t *testing.T) {
+	for _, b := range []*build{&hostBuild, &reflectBuild} {
+		t.Run(b.pkg, func(t *testing.T) {
+			b := b.get(t)
+			want := nmText(t, linkExe(t, b))
+
+			l := loadProgram(t, b)
+			l.InitTasks()
+			r := l.Deadcode(runtime.GOOS, runtime.GOARCH)
+			mine, defined := map[string]bool{}, map[string]bool{}
+			for g := Global(1); g < Global(l.NSym()); g++ {
+				s := l.Def(g)
+				if s == nil || !s.Type.IsText() {
+					continue
+				}
+				name := l.symtabName(g)
+				if name == "" {
+					continue
+				}
+				defined[name] = true
+				if r.Reachable(g) {
+					mine[name] = true
+				}
+			}
+
+			var missing []string
+			for name := range want {
+				// A function in the binary that no object defines is one
+				// the linker made, and the stage that makes those is the
+				// layout and not this one.
+				if _, ok := nmMatch(defined, name); !ok {
+					continue
+				}
+				if _, ok := nmMatch(mine, name); !ok {
+					missing = append(missing, name)
+				}
+			}
+			sort.Strings(missing)
+			t.Logf("the binary holds %d text symbols, %d of them defined by an object, and nanogo reaches %d functions",
+				len(want), len(defined), len(mine))
+			if len(missing) > 0 {
+				t.Errorf("the binary holds %d functions nanogo does not reach, the first are %v",
+					len(missing), first(missing, 20))
+			}
+		})
+	}
+}
+
+// TestPrunedMapInitIsRewritten checks the two things the map initialiser
+// cleanup does, on a program that has one.
+//
+// The host build reaches time, whose package initialiser holds a weak
+// call to the initialiser of a map nothing in this program reads. The
+// call is rewritten, so runtime.mapinitnoop is kept and time.init is
+// recorded as rewritten. The second half is what the layout stage reads:
+// cmd/link rewrites a symbol by copying it out of its object, and its
+// text order then lays the copy out after the package's own text.
+func TestPrunedMapInitIsRewritten(t *testing.T) {
+	b := hostBuild.get(t)
+	l := loadProgram(t, b)
+	l.InitTasks()
+	r := l.Deadcode(runtime.GOOS, runtime.GOARCH)
+
+	init := l.Lookup("time.init", VerABIInternal)
+	if init == 0 {
+		t.Fatal("the program does not link time, so it cannot show this")
+	}
+	if mapInit := l.Lookup("time.map.init.0", VerABIInternal); mapInit == 0 {
+		t.Fatal("time has no map initialiser, so the weak call this is about is not there")
+	} else if r.Reachable(mapInit) {
+		t.Fatal("the program reads the map, so its initialiser is not pruned and this proves nothing")
+	}
+	if !r.Rewritten(init) {
+		t.Error("time.init holds a weak call to a pruned map initialiser and was not recorded as rewritten")
+	}
+	noop := l.Lookup("runtime.mapinitnoop", VerABIInternal)
+	if noop == 0 || !r.Reachable(noop) {
+		t.Error("the call was redirected to runtime.mapinitnoop and the function was not kept")
+	}
+}
+
 // TestReachabilityAgreesWithTheLinker is the oracle specs/045-linker.md
 // names for the second stage: the set nanogo keeps against the set
 // cmd/link -dumpdep reports for the same program.
@@ -148,7 +248,7 @@ func TestReachabilityAgreesWithTheLinker(t *testing.T) {
 				}
 			}
 			for name := range got {
-				if !want[name] {
+				if !want[name] && !keptWithNoEdge[name] {
 					surplus = append(surplus, name)
 				}
 			}
