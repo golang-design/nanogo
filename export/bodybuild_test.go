@@ -641,3 +641,92 @@ func TestBuildBodies(t *testing.T) {
 		t.Error("no body was built to gc's bytes, so the test proved nothing")
 	}
 }
+
+// @@@ Refusals
+
+// buildOne checks one source file and builds the body of its function f.
+func buildOne(t *testing.T, src string) error {
+	t.Helper()
+	dir := t.TempDir()
+	name := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(name, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fset := syntax.NewFileSet()
+	file, err := syntax.ParseFile(fset, name, nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &types2.Info{
+		Types:        make(map[syntax.Expr]types2.TypeAndValue),
+		Defs:         make(map[*syntax.Name]types2.Object),
+		Uses:         make(map[*syntax.Name]types2.Object),
+		Implicits:    make(map[syntax.Node]types2.Object),
+		Selections:   make(map[*syntax.SelectorExpr]*types2.Selection),
+		Scopes:       make(map[syntax.Node]*types2.Scope),
+		Instances:    make(map[*syntax.Name]types2.Instance),
+		FileVersions: make(map[*syntax.SrcFile]string),
+	}
+	conf := types2.Config{Fset: fset, Sizes: types2.SizesFor("gc", "arm64")}
+	pkg, err := conf.Check("a", []*syntax.File{file}, info)
+	if err != nil {
+		t.Fatalf("the source does not check: %v", err)
+	}
+	for _, d := range file.DeclList {
+		fd, ok := d.(*syntax.FuncDecl)
+		if !ok || fd.Name.Value != "f" {
+			continue
+		}
+		obj := info.Defs[fd.Name].(*types2.Func)
+		_, err := NewBodySource(pkg, info, fset).BuildBody("a.f", obj.Signature(), fd.Body)
+		return err
+	}
+	t.Fatal("the source declares no function f")
+	return nil
+}
+
+// TestBuildBodyRefusals checks that a body the builder does not build is
+// refused by name.
+//
+// The corpus proves what the builder builds and cannot prove what it declines:
+// a shape built wrong that the corpus does not hold would reach gc as a body
+// whose fields have all moved. Each of these is a shape gc writes and the
+// builder does not, and each has to say so.
+func TestBuildBodyRefusals(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{{
+		name: "a generic declaration",
+		src:  "package a\n\nfunc f[T any](x T) T { return x }\n",
+		want: "the declaration is generic",
+	}, {
+		name: "a method of a generic declaration",
+		src:  "package a\n\ntype T[X any] struct{ x X }\n\nfunc (t T[X]) f() X { return t.x }\n",
+		want: "the declaration is generic",
+	}, {
+		name: "a loop over a function",
+		src:  "package a\n\nfunc g(yield func(int) bool) {}\n\nfunc f() { for range g {} }\n",
+		want: "the loop ranges over a function",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := buildOne(t, tt.src)
+			if err == nil {
+				t.Fatalf("the builder built the body, and %s is a shape it does not build", tt.name)
+			}
+			e, ok := err.(*BodyError)
+			if !ok {
+				t.Fatalf("the refusal is a %T and not a *BodyError: %v", err, err)
+			}
+			if !strings.Contains(e.Reason, tt.want) {
+				t.Errorf("the refusal is %q and does not name %q", e.Reason, tt.want)
+			}
+			if !strings.Contains(e.Error(), "a.f") {
+				t.Errorf("the refusal is %q and does not name the declaration", e.Error())
+			}
+		})
+	}
+}
