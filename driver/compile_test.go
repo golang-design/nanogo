@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.design/x/nanogo/export"
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
 	"golang.design/x/nanogo/rtype"
@@ -1238,5 +1239,68 @@ func TestAddDescriptorsRefusesTwoCachesOfOneName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "two sites name one cache") {
 		t.Errorf("the refusal is %q", err)
+	}
+}
+
+// TestCheckFilesRecordsTheLanguageVersion is the Go 1.22 loop variable rule,
+// which is decided per file and read by the body builder.
+//
+// The checker fills Info.FileVersions only when the map is there to fill, and
+// a nil map answers "no version" for every file. The builder reads that as the
+// current release, so a package compiled with -lang=go1.21 would export a loop
+// that declares its variables once for the whole loop as one that declares
+// them anew on every iteration. gc reads the flag and rewrites the loop, so
+// the difference is a program that captures a different variable.
+func TestCheckFilesRecordsTheLanguageVersion(t *testing.T) {
+	const src = `package p
+
+func F() []func() {
+	var out []func()
+	for i := 0; i < 3; i++ {
+		out = append(out, func() { _ = i })
+	}
+	return out
+}
+`
+	for _, tc := range []struct {
+		lang     string
+		distinct bool
+	}{
+		{"go1.21", false},
+		{"go1.27", true},
+	} {
+		t.Run(tc.lang, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "a.go")
+			if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &Config{Package: "p", Output: filepath.Join(dir, "_pkg_.a"), Lang: tc.lang, Files: []string{path}}
+			files, fset, err := parseFiles(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pkg, info, err := checkFiles(cfg, newImporter(cfg), files, fset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(info.FileVersions) == 0 {
+				t.Fatal("the checker recorded no file version, so the loop variable rule has nothing to read")
+			}
+
+			fn := files[0].DeclList[0].(*syntax.FuncDecl)
+			obj, _ := info.Defs[fn.Name].(*types2.Func)
+			if obj == nil {
+				t.Fatal("the checker recorded no object for F")
+			}
+			body, err := export.NewBodySource(pkg, info, fset).BuildBody("p.F", obj.Signature(), fn.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loop := body.Stmts[1].(*export.ForStmt)
+			if loop.DistinctVars != tc.distinct {
+				t.Errorf("-lang=%s built the loop with DistinctVars %v, want %v", tc.lang, loop.DistinctVars, tc.distinct)
+			}
+		})
 	}
 }

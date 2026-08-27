@@ -269,6 +269,19 @@ func checkFiles(cfg *Config, imp *importer, files []*syntax.File, fset *syntax.F
 		Selections: make(map[*syntax.SelectorExpr]*types2.Selection),
 		Scopes:     make(map[syntax.Node]*types2.Scope),
 		Instances:  make(map[*syntax.Name]types2.Instance),
+
+		// FileVersions says which Go language version each file was
+		// checked against, which is -lang for every file of the package:
+		// nanogo's syntax.File carries no version of its own, so a
+		// //go:build line that names one does not reach the checker.
+		//
+		// The checker fills the map only when it is there to fill, and a
+		// nil map answers "no version" for every file. export's body
+		// builder reads that as the current release, so a package
+		// compiled with -lang=go1.21 would export a loop under the Go
+		// 1.22 variable rule. gc reads the flag and rewrites the loop, so
+		// the two disagree about which variable the loop body closes over.
+		FileVersions: make(map[*syntax.SrcFile]string),
 	}
 	var diags diagnostics
 	conf := types2.Config{
