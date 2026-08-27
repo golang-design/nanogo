@@ -510,6 +510,46 @@ func buildFuncOf(t *testing.T, p *Package, name string) *Func {
 	return nil
 }
 
+// TestBuildIndexesAnInterfaceCallInMethodOrder pins the one number a call
+// through an interface is decided by.
+//
+// Node.Index is the slot of the itab the call loads its entry point out of,
+// and rtype fills that array in MethodOrder: every exported name ahead of every
+// unexported one, then by name, then by package. The builder takes the number
+// from the checker's own method list instead, so the two orders have to agree,
+// and nothing else in the pipeline can see that they do not. A slot chosen by
+// the wrong order names a method the program did not write, and it compiles,
+// links and runs.
+//
+// The interface mixes an exported name outside ASCII with an unexported one,
+// which is the pair ir.MethodOrder records as the reason the rule is not byte
+// order by name: 'A' with a diaeresis sorts above every lower-case letter by
+// bytes and below every one of them by export.
+func TestBuildIndexesAnInterfaceCallInMethodOrder(t *testing.T) {
+	p := buildSource(t, "type mixed interface {\n\t\u00c4rger() int\n\tabc() int\n}\n\n"+
+		"func callArger(m mixed) int { return m.\u00c4rger() }\n\n"+
+		"func callAbc(m mixed) int { return m.abc() }\n")
+
+	for _, tt := range []struct{ fn, method string }{
+		{"callArger", "\u00c4rger"},
+		{"callAbc", "abc"},
+	} {
+		fn := buildFuncOf(t, p, tt.fn)
+		call := buildFirst(t, fn, OCall)
+		sel := call.X
+		if sel == nil || sel.Op != OField || sel.X == nil || sel.X.Type == nil || sel.X.Type.Kind != Interface {
+			t.Fatalf("%s does not call through an interface:\n%s", tt.fn, buildDump(fn))
+		}
+		ms := MethodOrder(sel.X.Type.Methods)
+		if sel.Index < 0 || sel.Index >= len(ms) {
+			t.Fatalf("%s indexes slot %d of a %d-method interface", tt.fn, sel.Index, len(ms))
+		}
+		if ms[sel.Index].Name != tt.method {
+			t.Errorf("%s indexes slot %d, which holds %s and not %s", tt.fn, sel.Index, ms[sel.Index].Name, tt.method)
+		}
+	}
+}
+
 // buildFind returns every node with an operation, in the order a walk reaches
 // them.
 func buildFind(fn *Func, op Op) []*Node {
