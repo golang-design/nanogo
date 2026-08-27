@@ -29,10 +29,14 @@ spec to grade itself against.
 
 | Gate | Counter | Today | Done |
 | --- | --- | --- | --- |
-| G-A | `internal/audit` probe classes | 45 ok, 47 refused, 3 wrong | 95 ok |
-| G-B | `internal/gotest` corpus classes | 356 classified, most refused | all passing |
+| G-A | `internal/audit` probe classes | 70 ok, 25 refused, 0 wrong | 95 ok |
+| G-B | `internal/gotest` corpus passes | 119 of 356, 0 miscompilations | all passing |
 | G-C | [020](020-ir.md) Go-specific rows | see the correction below | all built |
 | G-D | bootstrap standard library closure | 8 of 27 packages | 27 |
+
+G-A and G-B moved a long way in one sitting and the movement is recorded in
+`internal/audit/testdata/ratchet.txt` and `internal/gotest/testdata/ratchet.txt`,
+which are the files that decide these rows rather than this prose.
 
 Then the three gates of [001](001-bootstrap-gates.md): G1 self-host, G2
 toolchain independence, G3 the distribution.
@@ -187,20 +191,39 @@ in any plan, because fixing the construct would not fix the probe.
 - `go-stmt-closure` is refused first by `make(chan int)`, not by its closure,
   because `ir.LowerAndCollect` returns the first refusal in statement order.
 
-## Floating point is one file away
+## What the first build-out settled, and what it cost
 
-Every layer below `ssagen` is already floating-point aware and tested. The
-register allocator has a separate class with its own free list and scratch pair
-([026](026-register-allocation.md)). The lowering rules select `FADD`, `FMUL`,
-`SCVTF` and the rest. The encoder agrees with `go tool asm` on 99,368 floating
-point encodings. The ABI assigns arguments and results to F0 to F15.
+Floating point, wide struct returns, closures with captures, `defer` and `go`
+with arguments, interface construction and conversion, channels with `select`,
+generated equality and hash functions, method wrappers and the stack objects
+table are built. The probe corpus went from 45 passing with 3 wrong answers to
+70 passing with none, and Go's own corpus from 87 files to 119.
 
-What is missing is the code generator: `ssagen` copies a register with an
-integer `MOV`, spills with an integer store, and breaks a parallel-move cycle
-with an integer scratch register. So it refuses at three doors,
-`ssagen/ssagen.go:424`, `ssagen/ssagen.go:889` and `ssagen/prologue.go:214`.
-[042](042-arm64-backend.md) records this. It is the smallest piece of work in
-this spec with a whole class of programs behind it.
+Three defects came out of that work that neither corpus had reached before, and
+they are the reason the two keystones were worth doing in the order they were
+done. Each was found by a test that ran a program rather than by reading code.
+
+- `runtime.gcbits.*` was written as `SNOPTRDATA` where `gc` writes `SRODATA`.
+  The stack object record holds an offset the runtime resolves against
+  `moduledata.rodata`, so the collector was scanning stack objects through
+  whatever bits happened to lie at that address.
+- The arguments bitmap covered the reserved words of register-passed
+  parameters, which nothing on the ordinary path writes. It claimed a pointer
+  in a word the function never wrote, and a caller's previous call had left a
+  heap pointer exactly there.
+- A type descriptor was written with `AddDef`. `cmd/link` deduplicates a
+  duplicate-tolerant symbol only in the non-package space, so `type:*int32`
+  survived beside the runtime's own copy and `runtime.SetFinalizer`, which
+  compares descriptors by address, refused a finalizer whose type printed
+  identically to the one it was given.
+
+One file of Go's corpus moved backward on purpose. `uintptrescapes3.go` passed
+only because the over-conservative arguments bitmap implemented
+`//go:uintptrescapes` by accident. Narrowing the bitmap broke it, so the
+directive is refused by name now. The hole that remains is recorded in
+[016](016-directives-and-pragmas.md): a nanogo-compiled package calling an
+imported `//go:uintptrescapes` function is still miscompiled, and the refusal
+reads the declaration, so it cannot see that call.
 
 ## Write barriers are a defect, not a missing feature
 
