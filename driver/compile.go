@@ -458,7 +458,11 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	if err != nil {
 		return nil, false, err
 	}
-	extra, err := addGenerated(cfg, out, target, fset, types)
+	fns, err := generatedFuncs(cfg, types)
+	if err != nil {
+		return nil, false, err
+	}
+	extra, generated, err := addGenerated(cfg, out, target, fset, fns)
 	if err != nil {
 		return nil, false, err
 	}
@@ -469,7 +473,7 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 			return nil, false, err
 		}
 	}
-	if err := addDescriptors(cfg, out, types); err != nil {
+	if err := addDescriptors(cfg, out, types, generated); err != nil {
 		return nil, false, err
 	}
 	// The record goes in last. It names the init function by the reference
@@ -496,20 +500,58 @@ func isPackageInit(p *ir.Package, fn *ir.Func) bool {
 	return false
 }
 
-// addGenerated compiles the functions a descriptor names and no declaration
-// defines, and returns the descriptors those functions name.
+// addGenerated compiles the generated functions into the object and returns
+// the descriptors those functions name.
 //
-// A descriptor's Method holds two code pointers and one of them can be a
-// function the compiler generates: a value receiver method reached through a
-// one-word receiver needs a wrapper that loads the receiver through a pointer.
-// ssagen decides the set from the method sets of the types whose descriptors
-// this object writes, which is the same point gc decides it at.
+// generatedFuncs decided the set from the types whose descriptors this object
+// writes, which is the same point gc decides it at.
 //
 // The functions go through compileFunc, the same passes a declared function
 // goes through. A generated function that took a shorter path would be a
 // second code generator, and the first bug it hit would be one the pipeline
 // already handles.
-func addGenerated(cfg *Config, out *obj.Package, target *ssa.Target, fset *syntax.FileSet, types []*ir.Type) ([]*ir.Type, error) {
+// The second result names every symbol it defined. addDescriptors needs it:
+// a reference is resolved by name and ABI together, and a generated function
+// is a text symbol under ABIInternal while everything else a descriptor points
+// at is data under ABI0.
+func addGenerated(cfg *Config, out *obj.Package, target *ssa.Target, fset *syntax.FileSet, fns []*ir.Func) ([]*ir.Type, map[string]bool, error) {
+	var needed []*ir.Type
+	// generated is a lookup table and is never ranged over
+	// (specs/053-determinism.md).
+	generated := make(map[string]bool)
+	for _, fn := range fns {
+		if generated[fn.Sym] {
+			// Two types reach one function: T and *T name one method wrapper,
+			// and one type is in the closure once per path that reached it.
+			continue
+		}
+		r, ts, err := compileFunc(cfg, fn, target, out, fset)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Duplicate-tolerant, as gc marks it. Every package that writes a
+		// descriptor naming this wrapper generates the wrapper too, because
+		// neither can know which of them the linker will keep, and the two
+		// definitions are the same function compiled from the same method set.
+		r.Text.Flag |= obj.SymFlagDupok
+		if _, err := r.Add(out); err != nil {
+			return nil, nil, &UnsupportedError{Package: cfg.Package, What: "the generated function " + fn.Sym, Detail: err.Error()}
+		}
+		generated[fn.Sym] = true
+		needed = append(needed, ts...)
+	}
+	return needed, generated, nil
+}
+
+// generatedFuncs returns the functions the descriptors of types name and no
+// declaration defines.
+//
+// The types are descriptorSet's answer, so rtype could write every one of
+// them and the descriptor asked for here cannot fail. It is asked rather than
+// the decision being made a second time: rtype chose the type's algorithm and
+// wrote the closure that names the function, so the closure's relocation is
+// rtype's own answer, and a second decision could disagree with it.
+func generatedFuncs(cfg *Config, types []*ir.Type) ([]*ir.Func, error) {
 	fns, err := ssagen.MethodWrappers(types)
 	if err != nil {
 		return nil, &UnsupportedError{
@@ -518,23 +560,66 @@ func addGenerated(cfg *Config, out *obj.Package, target *ssa.Target, fset *synta
 			Detail:  err.Error(),
 		}
 	}
-	var needed []*ir.Type
-	for _, fn := range fns {
-		r, ts, err := compileFunc(cfg, fn, target, out, fset)
+	for _, t := range types {
+		set, err := rtype.Descriptor(t)
 		if err != nil {
-			return nil, err
+			return nil, &UnsupportedError{
+				Package: cfg.Package,
+				What:    "a type its code needs a descriptor for",
+				Detail:  err.Error(),
+			}
 		}
-		// Duplicate-tolerant, as gc marks it. Every package that writes a
-		// descriptor naming this wrapper generates the wrapper too, because
-		// neither can know which of them the linker will keep, and the two
-		// definitions are the same function compiled from the same method set.
-		r.Text.Flag |= obj.SymFlagDupok
-		if _, err := r.Add(out); err != nil {
-			return nil, &UnsupportedError{Package: cfg.Package, What: "the generated function " + fn.Sym, Detail: err.Error()}
+		more, err := algFuncs(t, set)
+		if err != nil {
+			return nil, &UnsupportedError{
+				Package: cfg.Package,
+				What:    "a type whose descriptor needs a generated algorithm",
+				Detail:  err.Error(),
+			}
 		}
-		needed = append(needed, ts...)
+		fns = append(fns, more...)
 	}
-	return needed, nil
+	return fns, nil
+}
+
+// algFuncs returns the generated equality and hash functions t's descriptor
+// names.
+//
+// The descriptor says what it needs. rtype decided the type's algorithm and
+// wrote the closure that names the function, so the symbols it returned are
+// scanned for those two names rather than the decision being made again here:
+// a second decision could disagree with the first, and the disagreement would
+// be a descriptor pointing at a function nothing defines.
+func algFuncs(t *ir.Type, set []rtype.Symbol) ([]*ir.Func, error) {
+	eq, err := ssagen.EqualSymbol(t)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := ssagen.HashSymbol(t)
+	if err != nil {
+		return nil, err
+	}
+	var out []*ir.Func
+	for _, s := range set {
+		for _, r := range s.Relocs {
+			var fn *ir.Func
+			switch r.Target {
+			case eq:
+				fn, err = ssagen.EqualFunc(t)
+			case hash:
+				fn, err = ssagen.HashFunc(t)
+			default:
+				// A name belonging to another type is that type's own to
+				// generate, and the closed set holds that type as well.
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, fn)
+		}
+	}
+	return out, nil
 }
 
 // addDescriptors writes the type descriptors of the types the code names.
@@ -551,7 +636,7 @@ func addGenerated(cfg *Config, out *obj.Package, target *ssa.Target, fset *synta
 // not be resolved by name from another object and would not be collected into
 // runtime.typelinks. specs/032 says AddHashedDef for all of them, and it is
 // wrong about the first one.
-func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type) error {
+func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, generated map[string]bool) error {
 	// defs and refs are lookup tables and are never ranged over
 	// (specs/053-determinism.md). A symbol is emitted once however many types
 	// name it: two descriptors share one pointer bitmask whenever their
@@ -604,7 +689,7 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type) error {
 			ref, ok := defs[r.Target]
 			if !ok {
 				if ref, ok = refs[r.Target]; !ok {
-					ref = out.AddNonPkgRef(&obj.Symbol{Name: r.Target, ABI: targetABI(r.Target)})
+					ref = out.AddNonPkgRef(&obj.Symbol{Name: r.Target, ABI: targetABI(r.Target, generated)})
 					// go tool nm and go tool objdump print a name only for a
 					// symbol the RefName block covers.
 					out.AddRefName(ref, r.Target)
@@ -624,12 +709,28 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type) error {
 // The ABI is half of a symbol's identity and cmd/link resolves a by-name
 // reference by name and ABI together, so a reference under the wrong one names
 // a symbol nothing defines. Almost everything a descriptor points at is data,
-// which gc leaves at ABI0. The exception is the equality routine the Equal
-// closure holds: it is a runtime function, and rtsym is what says so, because
-// specs/031-runtime-lowering.md makes rtsym the only place a runtime symbol is
-// spelled. A runtime symbol that exists only in assembly is ABI0 again, for
-// the reason ssagen's morestackCallee records.
-func targetABI(name string) uint16 {
+// which gc leaves at ABI0. Two things are not.
+//
+// The first is the equality or hash routine a closure holds when the runtime
+// owns it. rtsym is what says so, because specs/031-runtime-lowering.md makes
+// rtsym the only place a runtime symbol is spelled, and a runtime symbol that
+// exists only in assembly is ABI0 again, for the reason ssagen's
+// morestackCallee records.
+//
+// The second is a function this object generated. The linker reports the
+// mismatch clearly when it is missed, and the message is worth recording
+// because it reads like a missing definition rather than a wrong reference:
+//
+//	type:.eqfunc.main.key: relocation target type:.eq.main.key not defined
+//	for ABI0 (but is defined for ABIInternal)
+func targetABI(name string, generated map[string]bool) uint16 {
+	if generated[name] {
+		// A function this object generated. It is a Go function and it is
+		// compiled the way every Go function is, so it is ABIInternal. The
+		// set is asked rather than the name matched: a method wrapper is
+		// spelled pkg.(*T).M and nothing in that name says it was generated.
+		return obj.ABIInternal
+	}
 	if s := rtsym.Lookup(name); s != nil && !s.Assembly {
 		return obj.ABIInternal
 	}

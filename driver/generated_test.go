@@ -6,11 +6,14 @@ package driver
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
+	"golang.design/x/nanogo/rtype"
 	"golang.design/x/nanogo/ssa"
+	"golang.design/x/nanogo/ssagen"
 )
 
 // counterType returns a defined struct with one value receiver method, which
@@ -46,12 +49,28 @@ func mustLayout(t *testing.T, x *ir.Type) *ir.Type {
 func TestAddGeneratedCompilesTheMethodWrapper(t *testing.T) {
 	cfg := &Config{Package: "main"}
 	out := obj.NewPackage("main")
-	extra, err := addGenerated(cfg, out, ssa.NewArm64Target(), nil, []*ir.Type{counterType(t)})
+	fns, err := ssagen.MethodWrappers([]*ir.Type{counterType(t)})
+	if err != nil {
+		t.Fatalf("MethodWrappers: %v", err)
+	}
+	extra, generated, err := addGenerated(cfg, out, ssa.NewArm64Target(), nil, fns)
 	if err != nil {
 		t.Fatalf("addGenerated: %v", err)
 	}
 	if len(extra) != 0 {
 		t.Errorf("the wrapper named %d descriptors, want none: it loads a receiver and calls a method", len(extra))
+	}
+	// The set the descriptor writer resolves the reference with. A wrapper
+	// left out of it is referenced under ABI0 and the linker reports it as
+	// not defined for that ABI.
+	if !generated["main.(*counter).get"] {
+		t.Errorf("the wrapper is not in the generated set, which is %v", generated)
+	}
+	if got := targetABI("main.(*counter).get", generated); got != obj.ABIInternal {
+		t.Errorf("a descriptor references the wrapper under ABI %d, want ABIInternal", got)
+	}
+	if got := targetABI("main.(*counter).get", nil); got != obj.ABI0 {
+		t.Errorf("a name that is not a generated function is ABI %d, want ABI0", got)
 	}
 	sym := findDef(out, "main.(*counter).get")
 	if sym == nil {
@@ -81,7 +100,11 @@ func TestAddGeneratedSkipsAPointerReceiver(t *testing.T) {
 	base.Methods[0].PtrOnly = true
 	cfg := &Config{Package: "main"}
 	out := obj.NewPackage("main")
-	if _, err := addGenerated(cfg, out, ssa.NewArm64Target(), nil, []*ir.Type{base}); err != nil {
+	fns, err := ssagen.MethodWrappers([]*ir.Type{base})
+	if err != nil {
+		t.Fatalf("MethodWrappers: %v", err)
+	}
+	if _, _, err := addGenerated(cfg, out, ssa.NewArm64Target(), nil, fns); err != nil {
 		t.Fatalf("addGenerated: %v", err)
 	}
 	if sym := findDef(out, "main.(*counter).get"); sym != nil {
@@ -89,14 +112,13 @@ func TestAddGeneratedSkipsAPointerReceiver(t *testing.T) {
 	}
 }
 
-// TestAddGeneratedReportsARefusalByName checks that a method the generator
+// TestGeneratedFuncsReportsARefusalByName checks that a method the generator
 // cannot build is reported in the user's terms rather than as a panic.
-func TestAddGeneratedReportsARefusalByName(t *testing.T) {
+func TestGeneratedFuncsReportsARefusalByName(t *testing.T) {
 	base := counterType(t)
 	base.Methods[0].Sig = nil
 	cfg := &Config{Package: "main"}
-	out := obj.NewPackage("main")
-	_, err := addGenerated(cfg, out, ssa.NewArm64Target(), nil, []*ir.Type{base})
+	_, err := generatedFuncs(cfg, []*ir.Type{base})
 	if err == nil {
 		t.Fatal("a method with no signature produced a wrapper")
 	}
@@ -136,5 +158,59 @@ func defNames(p *obj.Package) []string {
 		if s.Name != "" {
 			out = append(out, s.Name)
 		}
+	}
+}
+
+// TestAlgFuncsReadsTheDescriptorsAnswer checks that the equality and hash
+// functions are found by what the descriptor says it needs.
+//
+// rtype decides the type's algorithm and names the function the closure points
+// at. Deciding it a second time here could disagree, and a disagreement is a
+// descriptor pointing at a function nothing defines, which the linker reports
+// and the compiler does not.
+func TestAlgFuncsReadsTheDescriptorsAnswer(t *testing.T) {
+	base := counterType(t)
+	eq, err := ssagen.EqualSymbol(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := ssagen.HashSymbol(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := []rtype.Symbol{{
+		Name: "type:.eqfunc.main.counter",
+		Relocs: []rtype.Reloc{
+			{Target: eq},
+			{Target: hash},
+			// Another type's function, which that type generates.
+			{Target: "type:.eq.main.other"},
+			// A runtime symbol, which nothing generates.
+			{Target: "runtime.strequal"},
+		},
+	}}
+	fns, err := algFuncs(base, set)
+	if err != nil {
+		t.Fatalf("algFuncs: %v", err)
+	}
+	var got []string
+	for _, fn := range fns {
+		got = append(got, fn.Sym)
+	}
+	want := []string{eq, hash}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("algFuncs returned %v, want %v", got, want)
+	}
+}
+
+// TestAlgFuncsFindsNothingWithoutAReference checks that a descriptor that
+// names no generated function produces none.
+func TestAlgFuncsFindsNothingWithoutAReference(t *testing.T) {
+	fns, err := algFuncs(counterType(t), []rtype.Symbol{{Relocs: []rtype.Reloc{{Target: "runtime.memequal64"}}}})
+	if err != nil {
+		t.Fatalf("algFuncs: %v", err)
+	}
+	if len(fns) != 0 {
+		t.Errorf("algFuncs returned %d functions for a descriptor that names none", len(fns))
 	}
 }

@@ -386,7 +386,7 @@ func TestAddDescriptorsEmitsEachSymbolOnce(t *testing.T) {
 	write := func(types []*ir.Type) []byte {
 		t.Helper()
 		p := obj.NewPackage("p")
-		if err := addDescriptors(&Config{Package: "p"}, p, types); err != nil {
+		if err := addDescriptors(&Config{Package: "p"}, p, types, nil); err != nil {
 			t.Fatalf("addDescriptors: %v", err)
 		}
 		b, err := p.Bytes()
@@ -416,7 +416,7 @@ func TestAddDescriptorsRefusesATypeWithNoMethodSet(t *testing.T) {
 	if err := ir.Layout(defined); err != nil {
 		t.Fatal(err)
 	}
-	err := addDescriptors(&Config{Package: "p"}, obj.NewPackage("p"), []*ir.Type{defined})
+	err := addDescriptors(&Config{Package: "p"}, obj.NewPackage("p"), []*ir.Type{defined}, nil)
 	if err == nil {
 		t.Fatal("addDescriptors accepted a type whose method set is unknown")
 	}
@@ -450,7 +450,7 @@ func TestTargetABIFollowsTheSymbol(t *testing.T) {
 		// ssagen's morestackCallee records.
 		{"runtime.morestack_noctxt", obj.ABI0},
 	} {
-		if got := targetABI(tt.name); got != tt.want {
+		if got := targetABI(tt.name, nil); got != tt.want {
 			t.Errorf("targetABI(%q) = %d, want %d", tt.name, got, tt.want)
 		}
 	}
@@ -866,5 +866,69 @@ func TestNosplitIsStillDropped(t *testing.T) {
 			"chain-depth computation the thing that decides: " +
 			"specs/016-directives-and-pragmas.md says which directives are " +
 			"required for correctness rather than for speed.")
+	}
+}
+
+// TestCompileEmitsTheDescriptorsSsaBuildNames pins that the package owes both
+// descriptor sets and not only the lowering table's.
+//
+// A conversion to an interface names a type word, and no row of ir.Lower's
+// table reaches one, so ssa.Build reports that set separately. A package that
+// emitted only the first set compiled without complaint and failed in the
+// linker with "relocation target type:main.local not defined", which is the
+// worst place for it: the compiler had every fact it needed and said nothing.
+//
+// Two things make this test easy to write so that it passes either way, and
+// the first version of it did both.
+//
+// The type has to be one nothing else in the package owes. int and string are
+// defined by the runtime whatever the compiled package does. A composite or
+// anything reached through new, make or a literal is owed by ir.Lower, because
+// allocating one names its descriptor and descriptorClosure then pulls in the
+// element. driver/types.go owes nothing at all here, because it returns early
+// for a main package. A type declared inside a function, converted and never
+// allocated, is owed by none of them.
+//
+// And the archive has to be read for a definition rather than for the name.
+// Every reference carries its target's name so that nm and objdump can print
+// it, so searching the bytes for the symbol finds the reference the conversion
+// creates and answers yes in exactly the case that is broken.
+func TestCompileEmitsTheDescriptorsSsaBuildNames(t *testing.T) {
+	const src = `package main
+
+func box() any {
+	type local int
+	var v local = 7
+	return v
+}
+
+func main() { _ = box() }
+`
+	out, err := compileSource(t, src, nil)
+	if err != nil {
+		t.Fatalf("the package did not compile: %v", err)
+	}
+	cmd := exec.Command("go", "tool", "nm", out)
+	nm, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go tool nm: %v\n%s", err, nm)
+	}
+	var defined, referenced bool
+	for _, line := range strings.Split(string(nm), "\n") {
+		if !strings.HasSuffix(line, " type:main.local") {
+			continue
+		}
+		referenced = true
+		// nm prints U for a symbol the object refers to and does not
+		// define. Any other class is a definition.
+		if f := strings.Fields(line); len(f) >= 2 && f[len(f)-2] != "U" {
+			defined = true
+		}
+	}
+	if !referenced {
+		t.Fatal("the archive does not name type:main.local at all, so this test is no longer measuring what it says")
+	}
+	if !defined {
+		t.Error("the archive refers to type:main.local and does not define it, so a program that converts one to an interface cannot link")
 	}
 }
