@@ -367,14 +367,14 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 537 packages agree with `go list` |
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
 | [`obj/arm64`](obj/arm64/) | 99% | 998,947 encodings agree with `go tool asm`, with none disagreeing |
-| [`ir`](ir/) | 93% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 41,084 functions and 4,191,775 nodes |
+| [`ir`](ir/) | 92% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 41,084 functions and 4,233,516 nodes |
 | [`ssa`](ssa/) | 96% | construction, lowering, decomposition, ABI assignment, register allocation, liveness and stack maps, each with a verifier that has a negative test per invariant |
 | [`ssa/rules`](ssa/rules/) | 97% | the arm64 rule set, checked by lowering the corpus and by a verifier after every rule |
-| [`export`](export/) | 96% | reads gc's export data for all 375 packages of the standard library, 13,518 declarations, and for a fixture carrying every encoding the format has, checked declaration by declaration |
+| [`export`](export/) | 93% | reads gc's export data for all 375 packages of the standard library, 13,518 declarations, and for a fixture carrying every encoding the format has, checked declaration by declaration |
 | [`export/pkgbits`](export/pkgbits/) | 93% | the container, ported from `internal/pkgbits` and exercised by every archive the reader above reads |
 | [`ssagen`](ssagen/) | 90% | emits machine code that **links and runs**, and stack maps a real collector honours |
-| [`rtsym`](rtsym/) | 96% | 121 runtime signatures checked against the runtime's own source |
-| [`rtype`](rtype/) | 93% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
+| [`rtsym`](rtsym/) | 100% | 121 runtime signatures checked against the runtime's own source |
+| [`rtype`](rtype/) | 91% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
 | [`driver`](driver/) | 95% | a real `go build -toolexec` completes |
 
 `types2` is excluded from the coverage gate, with the reason recorded in
@@ -397,13 +397,13 @@ The Go distribution is the measure of reach. The `ir` row above builds a typed
 tree from all of it, 41,084 functions. How much of that tree the middle end
 accepts is the number below.
 
-**19,367 of those functions reach SSA construction** from a tree the lowering
+**20,731 of those functions reach SSA construction** from a tree the lowering
 pass has not touched, and 17,809 of them lower completely to arm64 machine
-operations. 19,299 of the 19,367 carry a stack map.
+operations. 20,668 of the 20,731 carry a stack map.
 
 The lowering pass builds part of [`specs/020`](specs/020-ir.md)'s table, and
 the driver runs it before construction, so a real compile reaches further:
-**31,275 of them get past construction once the lowering pass has run**. A
+**38,665 of them get past construction once the lowering pass has run**. A
 composite literal, `len`, a slice expression, `new`, and `make` of a slice are
 lowered and no longer refused.
 
