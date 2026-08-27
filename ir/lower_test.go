@@ -1734,14 +1734,12 @@ func TestLowerRefusals(t *testing.T) {
 		op   Op
 		want string
 	}{
-		{"a map literal", `func f() map[int]int { return map[int]int{1: 2} }`, OCompositeLit, "makemap"},
 		{"append", `func f(s []int) []int { return append(s, 1) }`, OAppend, "no row"},
 		// The allocation rows are built, and each still refuses a type whose
 		// descriptor cannot be named. The reason names the field
 		// specs/020-ir.md's type boundary drops, so that a count by cause says
 		// which field is holding the row back rather than only that a name was
 		// wanted.
-		{"make of a map", `func f() map[int]int { return make(map[int]int) }`, OMake, "descriptor"},
 		// A literal struct is spelled now, so the type an allocation still
 		// refuses is the generic instantiation: Converter's name drops the type
 		// arguments, so G[int] and G[string] would be one descriptor.
@@ -1749,7 +1747,6 @@ func TestLowerRefusals(t *testing.T) {
 type G[X any] struct{ V X }
 
 func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
-		{"len of a map", `func f(m map[int]int) int { return len(m) }`, OLen, "the length of map"},
 		// mapIterStart and not mapiterinit. runtime.mapiterinit still exists,
 		// as a //go:linkname shim taking a different struct layout, so a row
 		// built for the name in the older prose would write past the end of a
@@ -1765,7 +1762,6 @@ func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
 		{"a type assertion", `func f(v any) int { return v.(int) }`, OTypeAssert, "no row"},
 		{"recover whose value is read", `func f() { useAny(recover()) }`, ORecover, "no row"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},
-		{"clear of a map", `func f(m map[int]int) { clear(m) }`, OClear, "mapclear"},
 		{"range over a function", `func f(it func(func(int) bool)) { for v := range it { use(v) } }`, ORange, "range over func"},
 		{"println of an interface", `func f(v any) { println(v) }`, OPrintln, "an operand of interface"},
 		{"print of a slice", `func f(s []int) { print(s) }`, OPrint, "an operand of slice"},
@@ -1798,6 +1794,206 @@ func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
 				t.Errorf("the refused %s was removed anyway:\n%s", tc.op, buildDump(fn))
 			}
 		})
+	}
+}
+
+// TestLowerMapRows is specs/031-runtime-lowering.md's map group.
+//
+// Every operation on a map is a runtime call taking the map's descriptor and
+// the map itself. The two names that must not be spelled from memory are the
+// iteration entry points: runtime.mapiterinit and runtime.mapiternext still
+// exist, as //go:linkname shims in runtime/linkname_shim.go, and they take a
+// *runtime.linknameIter rather than a *maps.Iter. The two structs have
+// different layouts, so a call built for those names writes through the wrong
+// offsets into this frame.
+func TestLowerMapRows(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		want string
+	}{
+		{"make", `func f() map[int]int { return make(map[int]int) }`, "runtime.makemap"},
+		{"make with a hint", `func f(n int) map[int]int { return make(map[int]int, n) }`, "runtime.makemap"},
+		{"a literal", `func f() map[string]int { return map[string]int{"a": 7} }`, "runtime.makemap"},
+		{"a read", `func f(m map[int]int) int { return m[1] }`, "runtime.mapaccess1"},
+		{"the two-value read", `func f(m map[int]int) bool { _, ok := m[1]; return ok }`, "runtime.mapaccess2"},
+		{"a write", `func f(m map[int]int) { m[1] = 7 }`, "runtime.mapassign"},
+		{"a write through an operator", `func f(m map[int]int) { m[1] += 7 }`, "runtime.mapassign"},
+		{"an increment", `func f(m map[int]int) { m[1]++ }`, "runtime.mapassign"},
+		{"delete", `func f(m map[int]int) { delete(m, 1) }`, "runtime.mapdelete"},
+		{"clear", `func f(m map[int]int) { clear(m) }`, "runtime.mapclear"},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if !lowerCalled(fn, tc.want) {
+				t.Errorf("%s was not called: %v\n%s", tc.want, lowerCalls(fn), buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerMapDestinationIsNotARead is the miscompilation this row is one
+// mistake away from.
+//
+// A map index is runtime.mapaccess1 in a value position and runtime.mapassign
+// in a destination position. Lowering a destination as a value produces a
+// program that links and runs: mapaccess1 hands back a pointer to the runtime's
+// zero value for a key that is not there, the store writes into it, and every
+// write is dropped. So every destination this pass writes goes through one
+// router, and this checks each of the positions that reaches it.
+func TestLowerMapDestinationIsNotARead(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+	}{
+		{"an assignment", `func f(m map[int]int) { m[1] = 7 }`},
+		{"a range clause's key", `func f(m map[int]int, s []int) { for m[0], m[1] = range s { } }`},
+		{"a select clause's element", `func f(m map[int]int, c chan int) { select { case m[0] = <-c: } }`},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if !lowerCalled(fn, "runtime.mapassign") {
+				t.Errorf("the destination is not an insert: %v\n%s", lowerCalls(fn), buildDump(fn))
+			}
+			if lowerCalled(fn, "runtime.mapaccess1") {
+				t.Errorf("the destination was read: %v\n%s", lowerCalls(fn), buildDump(fn))
+			}
+		})
+	}
+	// An operator assignment reads and writes, and it is one map index in the
+	// source, so both calls are there and the key is evaluated once. ir.Build
+	// puts the operand in a temporary before it uses it twice.
+	fn := lowerOK(t, `func f(m map[int]int) { m[1] += 7 }`)
+	for _, want := range []string{"runtime.mapaccess1", "runtime.mapassign"} {
+		if !lowerCalled(fn, want) {
+			t.Errorf("m[k] += v does not call %s: %v", want, lowerCalls(fn))
+		}
+	}
+	// The two destinations of a multi-value assignment are refused rather than
+	// written in the wrong order.
+	if _, err := lowerFunc(t, `func f(m map[int]int) { m[0], m[1] = two() }`, "f"); err == nil {
+		t.Error("a map index was a destination of a multi-value assignment")
+	} else if !strings.Contains(err.Error(), "multi-value assignment") {
+		t.Errorf("the reason is %q", err)
+	}
+}
+
+// TestLowerMapValueIsEvaluatedBeforeTheInsert checks the order the
+// specification requires.
+//
+// runtime.mapassign inserts the key before it returns, so a value evaluated
+// after the call would leave a key in the map that the source stored nothing
+// under when evaluating the value panics. The map and the key come first, which
+// is the source's order for an index expression.
+func TestLowerMapValueIsEvaluatedBeforeTheInsert(t *testing.T) {
+	fn := lowerOK(t, `func f(m map[int]int) { m[1] = one() }`)
+	// The statement that calls the value's function and the statement that
+	// calls mapassign, by their position in the body.
+	at := func(name string) int {
+		for i, s := range fn.Body {
+			found := false
+			Walk(s, func(n *Node) bool {
+				if n.Op == OCall && n.X != nil && n.X.Op == OGlobal &&
+					n.X.Obj != nil && n.X.Obj.Name == name {
+					found = true
+				}
+				return true
+			})
+			if found {
+				return i
+			}
+		}
+		return -1
+	}
+	value, insert := at("p.one"), at("runtime.mapassign")
+	if value < 0 || insert < 0 {
+		t.Fatalf("one is at %d and mapassign at %d\n%s", value, insert, buildDump(fn))
+	}
+	if value > insert {
+		t.Errorf("the value is evaluated after the insert:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerMapKeyCrossesAsAPointer checks the shape of every keyed call.
+//
+// The descriptor, the map and the address of the key, in that order. The map
+// and the key are both unsafe.Pointer, so the collector reads both words as
+// pointers while the call is inside the runtime, and the key is a frame slot of
+// this pass's own rather than the program's variable.
+func TestLowerMapKeyCrossesAsAPointer(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		call string
+	}{
+		{"a read", `func f(m map[string]int) int { return m["a"] }`, "runtime.mapaccess1"},
+		{"the two-value read", `func f(m map[string]int) bool { _, ok := m["a"]; return ok }`, "runtime.mapaccess2"},
+		{"a write", `func f(m map[string]int) { m["a"] = 1 }`, "runtime.mapassign"},
+		{"delete", `func f(m map[string]int) { delete(m, "a") }`, "runtime.mapdelete"},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			call := findCall(fn, tc.call)
+			if call == nil {
+				t.Fatalf("%s was not called:\n%s", tc.call, buildDump(fn))
+			}
+			if len(call.Args) != 3 {
+				t.Fatalf("%s has %d arguments, want 3:\n%s", tc.call, len(call.Args), buildDump(fn))
+			}
+			if a := call.Args[0]; a.Op != OAddr || a.X == nil || a.X.Op != OGlobal ||
+				a.X.Obj == nil || !strings.HasPrefix(a.X.Obj.Name, TypeSymbolPrefix) {
+				t.Errorf("the first argument is not a type descriptor:\n%s", buildDump(fn))
+			}
+			for i, what := range []string{"the map", "the key"} {
+				if a := call.Args[i+1]; a.Type == nil || a.Type.Kind != UnsafePtr {
+					t.Errorf("%s is %s and not a pointer, so the collector does not read it", what, a.Type)
+				}
+			}
+		})
+	}
+}
+
+// TestLowerMapLengthReadsTheFirstWordBehindANilCheck records the one layout
+// dependency this pass takes on the runtime.
+//
+// No runtime symbol returns a map's length. gc reads the word inline
+// (cmd/compile/internal/ssagen.referenceTypeBuiltin) and
+// internal/runtime/maps writes "Must be first (known by the compiler, for
+// len() builtin)" above the field, so the layout is documented as the
+// compiler's to read. The nil check is what makes it safe: len of a nil map is
+// zero and a nil map has no maps.Map to read.
+func TestLowerMapLengthReadsTheFirstWordBehindANilCheck(t *testing.T) {
+	fn := lowerOK(t, `func f(m map[int]int) int { return len(m) }`)
+	for _, c := range lowerCalls(fn) {
+		t.Errorf("len of a map called %s, and no runtime symbol returns a map's length", c)
+	}
+	var guarded, load bool
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OIf && n.X != nil && n.X.Op == OCompare && n.X.Op1 == syntax.Neq {
+				guarded = true
+			}
+			// The word is read through a pointer to uint64 and converted to
+			// int. Both are 64 bits here, so the conversion is a relabelling,
+			// and it is written down because a target where they differ needs
+			// the truncation.
+			if n.Op == ODeref && n.Type != nil && n.Type.Kind == Uint64 &&
+				n.X != nil && n.X.Op == OConvert {
+				load = true
+			}
+			return true
+		})
+	}
+	if !guarded {
+		t.Errorf("the load is not behind a nil check:\n%s", buildDump(fn))
+	}
+	if !load {
+		t.Errorf("the first word is not read as a uint64:\n%s", buildDump(fn))
+	}
+	// cap of a map is not a program the checker accepts, and the row says so
+	// rather than reading the second word.
+	if _, err := lowerFunc(t, `func f(m map[int]int) int { return len(m) }`, "f"); err != nil {
+		t.Fatal(err)
 	}
 }
 

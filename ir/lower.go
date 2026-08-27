@@ -683,6 +683,28 @@ func (l *lowerer) stmt(s Stmt) {
 			l.recvAssign(s)
 			return
 		}
+		if len(s.Args) == 2 && isMapIndex(s.Y) {
+			// v, ok = m[k], for the same reason.
+			l.mapAccess2(s)
+			return
+		}
+		if len(s.Args) == 0 && isMapIndex(s.X) {
+			// m[k] = v. The destination is a call and not a location, so the
+			// statement is built rather than rewritten in place.
+			if !l.mapAssign(s.Pos, s.X, s.Y) {
+				l.emit(s)
+			}
+			return
+		}
+		for _, dst := range s.Args {
+			if isMapIndex(dst) {
+				// a, m[k] = f(). The values arrive together and the IR has no
+				// node for one of them, so the insert cannot be ordered after
+				// the call without a temporary per destination, which is a row
+				// of its own rather than a case of this one.
+				l.refuse(dst, "a map index as one destination of a multi-value assignment")
+			}
+		}
 		s.X = l.expr(s.X)
 		for i := range s.Args {
 			s.Args[i] = l.expr(s.Args[i])
@@ -818,6 +840,19 @@ func (l *lowerer) expr(n Expr) Expr {
 		return l.deferStmt(n, "runtime.deferproc")
 	case OGo:
 		return l.deferStmt(n, "runtime.newproc")
+
+	case OIndex:
+		// A map index in a value position, which is a read. Every destination
+		// position goes through store instead, and that is what keeps this row
+		// a read. It is before the descent, with the two above, because the
+		// row evaluates its own operands: the specification evaluates the map
+		// and then the key, and the descent would put the key's statements
+		// wherever it reached them.
+		if isMapIndex(n) {
+			return l.mapRead(n)
+		}
+	case ODelete:
+		return l.mapDelete(n)
 	}
 
 	if n.Op == OCall && isFuncSymbol(n.X) {
@@ -937,6 +972,14 @@ func (l *lowerer) lenCap(n Expr) Expr {
 		}
 		return l.constLen(n, x, x.Type.Elem.Len)
 
+	case Map:
+		if n.Op == OCap {
+			// cap of a map is not a program the checker accepts.
+			l.refuse(n, "the capacity of a map")
+			return n
+		}
+		return l.mapLen(n)
+
 	case Chan:
 		name := "runtime.chanlen"
 		if n.Op == OCap {
@@ -999,7 +1042,7 @@ func (l *lowerer) compositeLit(n Expr) Expr {
 	case Slice:
 		return l.sliceLit(n)
 	case Map:
-		l.refuse(n, "a map literal needs runtime.makemap, and the row that calls it is not built")
+		return l.mapLit(n)
 	default:
 		l.refuse(n, "a literal of "+t.Kind.String())
 	}
@@ -1218,8 +1261,10 @@ func (l *lowerer) makeExpr(n Expr) Expr {
 	case Slice:
 	case Chan:
 		return l.makeChan(n)
+	case Map:
+		return l.makeMap(n)
 	default:
-		l.refuse(n, "a make of "+t.Kind.String()+" needs runtime.makemap and the descriptor of a map type, whose group specs/032 does not build")
+		l.refuse(n, "a make of "+t.Kind.String())
 		return n
 	}
 	if t.Elem == nil || len(n.Args) < 1 || len(n.Args) > 2 {
@@ -1276,7 +1321,7 @@ func (l *lowerer) chanArg(c Expr) Expr {
 	return &Node{Op: OConvert, Pos: c.Pos, Type: lowerUnsafePtr, X: c}
 }
 
-// elemAddr copies a value into a fresh frame slot and returns the slot's
+// valueAddr copies a value into a fresh frame slot and returns the slot's
 // address, as the unsafe.Pointer the runtime takes.
 //
 // The copy is not avoidable by taking the address of a variable that already
@@ -1286,7 +1331,12 @@ func (l *lowerer) chanArg(c Expr) Expr {
 // program keeps assigning is not that value. The copy is also what keeps the
 // program's own variables out of the frame: taking their address would make
 // every variable ever sent a frame slot.
-func (l *lowerer) elemAddr(v Expr) Expr {
+//
+// A map key crosses every map symbol the same way and for the second reason.
+// The runtime reads the key through the pointer and, for an insert, copies it
+// into the table, so a frame slot is enough and the program's own variable
+// stays out of the frame.
+func (l *lowerer) valueAddr(v Expr) Expr {
 	return &Node{Op: OConvert, Pos: v.Pos, Type: lowerUnsafePtr,
 		X: l.addrOf(ref(l.spill(v), v.Pos))}
 }
@@ -1333,7 +1383,7 @@ func (l *lowerer) chanSend(n Expr) Expr {
 	// which is the source's order: the specification evaluates the channel
 	// operand first.
 	ch := l.chanArg(n.X)
-	return runtimeCall(n.Pos, "runtime.chansend1", ch, l.elemAddr(n.Y))
+	return runtimeCall(n.Pos, "runtime.chansend1", ch, l.valueAddr(n.Y))
 }
 
 // chanRecv builds the one-value receive.
@@ -1388,6 +1438,28 @@ func (l *lowerer) recvAssign(s Stmt) {
 	l.assignTo(s, 1, ref(got, pos))
 }
 
+// store emits an assignment of val into one destination.
+//
+// Every destination this pass writes goes through here, and that is the whole
+// reason it exists rather than each row calling expr on its own destination. A
+// map index is a different runtime call in a destination position from the one
+// it is in a value position, and lowering it as a value produces a program that
+// links, runs and drops the write. One router, so that a row added later cannot
+// forget.
+//
+// The destination is lowered here and not by the caller, because a map index
+// destination is not lowered at all: its map and its key are, and the index
+// itself becomes a call.
+func (l *lowerer) store(pos syntax.Pos, op1 syntax.Operator, dst, val Expr) {
+	if isMapIndex(dst) {
+		l.mapStore(pos, dst, val)
+		return
+	}
+	out := Assign(pos, l.expr(dst), val)
+	out.Op1 = op1
+	l.emit(out)
+}
+
 // assignTo writes one value into destination i of a multi-value assignment,
 // keeping the statement's own sense of whether it declares its destinations.
 //
@@ -1398,9 +1470,7 @@ func (l *lowerer) assignTo(s Stmt, i int, val Expr) {
 	if dst == nil || namesNoStorage(dst) {
 		return
 	}
-	out := Assign(s.Pos, l.expr(dst), val)
-	out.Op1 = s.Op1
-	l.emit(out)
+	l.store(s.Pos, s.Op1, dst, val)
 }
 
 // namesNoStorage reports whether a destination is the blank identifier.
@@ -1518,6 +1588,368 @@ func constIndex(n Expr) (int64, bool) {
 		return 0, false
 	}
 	return c.Int64()
+}
+
+// Maps.
+//
+// specs/031-runtime-lowering.md's map group. Go's map is a swiss table from
+// 1.24 on, and every operation on one is a runtime call taking the map's
+// *abi.MapType descriptor, the *maps.Map itself and, where there is a key, the
+// address of the key.
+//
+// Nothing here reads the maps.Map, with one exception this file argues where it
+// is written: len. The runtime owns that layout, a nil map has no maps.Map at
+// all, and every symbol below already answers for the nil case. mapaccess1 and
+// mapaccess2 return the zero value, mapassign panics, mapdelete and mapclear do
+// nothing, and mapIterStart starts an iteration that is already finished. A nil
+// check emitted here would be a second answer to a question the runtime has
+// already answered.
+//
+// The element does not cross the call. mapaccess1, mapaccess2 and mapassign
+// each return a *pointer* into the table, and the value is read or written
+// through it, which is what lets one symbol serve every element type. The key
+// crosses as the address of a frame slot, for the reason valueAddr gives.
+//
+// A pointer into a table is an interior pointer to a heap object, which is what
+// gc holds too: the collector finds the object from the span, so the whole
+// group stays alive while the pointer does.
+
+// mapArg returns a map value as the *maps.Map every map symbol takes.
+//
+// A map is one word and the runtime's parameter is a pointer, so the conversion
+// is a relabelling. It is written down rather than left out because the word
+// must reach the collector as a pointer: the argument bitmap of the call is
+// read off the argument types, and a map described as a number would let the
+// table be freed while the call is walking it.
+func (l *lowerer) mapArg(m Expr) Expr {
+	return &Node{Op: OConvert, Pos: m.Pos, Type: lowerUnsafePtr, X: m}
+}
+
+// mapKeyElem returns the key and element types of a map operand, or the reason
+// it is not one.
+func mapKeyElem(m Expr) (key, elem *Type, why string) {
+	if m == nil || m.Type == nil {
+		return nil, nil, "a map operand with no type"
+	}
+	if m.Type.Kind != Map {
+		return nil, nil, "a map operation on " + m.Type.Kind.String()
+	}
+	if m.Type.Key == nil || m.Type.Elem == nil {
+		return nil, nil, "a map with no key type or no element type"
+	}
+	return m.Type.Key, m.Type.Elem, ""
+}
+
+// isMapIndex reports whether n indexes a map.
+//
+// It is the test every destination is put through, because a map index in a
+// destination position is a different runtime call from the same expression in
+// a value position. specs/021-ssa-construction.md's indexAddr refuses a map, so
+// an index that reached it would be reported rather than miscompiled, but the
+// failure this guards is not that one: lowering a destination through expr
+// produces a perfectly ordinary mapaccess1 and a store into the zero value the
+// runtime hands back for a key that is not there. That program links, runs and
+// drops every write.
+func isMapIndex(n Expr) bool {
+	return n != nil && n.Op == OIndex && n.X != nil && n.X.Type != nil && n.X.Type.Kind == Map
+}
+
+// mapOperands lowers the map and the key of a map index, in that order, and
+// returns the call operands they become.
+//
+// The order is the specification's: a map index evaluates its operand and then
+// its index. The map is put in storage first, so that a map expression with an
+// effect happens before the key's rather than after it; a map operand that
+// already names storage is left where it is, because a load has no effect to
+// order against.
+func (l *lowerer) mapOperands(idx Expr, pos syntax.Pos) (desc, m, key Expr, why string) {
+	mv := l.stable(l.expr(idx.X))
+	_, _, why = mapKeyElem(mv)
+	if why != "" {
+		return nil, nil, nil, why
+	}
+	desc, why = l.descriptor(mv.Type, pos)
+	if desc == nil {
+		return nil, nil, nil, why
+	}
+	return desc, l.mapArg(mv), l.valueAddr(l.expr(idx.Y)), ""
+}
+
+// mapPtrCall builds a map symbol whose result is a pointer to the element.
+func (l *lowerer) mapPtrCall(name string, pos syntax.Pos, args ...Expr) Expr {
+	return &Node{
+		Op: OCall, Pos: pos, Type: lowerUnsafePtr,
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc(name)},
+		Args: args,
+	}
+}
+
+// mapElem reads the element a map symbol returned a pointer to.
+func (l *lowerer) mapElem(p Expr, elem *Type, pos syntax.Pos) Expr {
+	return &Node{Op: ODeref, Pos: pos, Type: elem,
+		X: &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(elem), X: p}}
+}
+
+// mapRead builds m[k] in the one-value form.
+//
+// runtime.mapaccess1 never returns nil. A key that is not in the map gets a
+// pointer to the runtime's zero value for the element type, which is what makes
+// the one-value form a read with no branch in it.
+func (l *lowerer) mapRead(n Expr) Expr {
+	pos := n.Pos
+	desc, m, key, why := l.mapOperands(n, pos)
+	if why != "" {
+		l.refuse(n, why)
+		return n
+	}
+	return l.mapElem(l.mapPtrCall("runtime.mapaccess1", pos, desc, m, key), n.X.Type.Elem, pos)
+}
+
+// mapAccess2 builds v, ok = m[k].
+//
+// It is a statement row rather than an expression one, for the reason
+// recvAssign is: the IR has no node for a value pair. runtime.mapaccess2
+// returns two values, so the call is built by hand the way selectgo's is, with
+// a tuple result and one destination per component.
+//
+// Both destinations are written after the call and neither before it, which is
+// the specification's order for a multi-value assignment.
+func (l *lowerer) mapAccess2(s Stmt) {
+	idx, pos := s.Y, s.Pos
+	desc, m, key, why := l.mapOperands(idx, pos)
+	if why != "" {
+		l.refuse(idx, why)
+		l.emit(s)
+		return
+	}
+	p := l.tempObj(lowerUnsafePtr, pos)
+	got := l.tempObj(lowerBool, pos)
+	l.emit(&Node{
+		Op: OAssign, Pos: pos, Type: voidType,
+		Args: []Expr{ref(p, pos), ref(got, pos)},
+		Y: &Node{
+			Op: OCall, Pos: pos, Type: mapAccessResult,
+			X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.mapaccess2")},
+			Args: []Expr{desc, m, key},
+		},
+	})
+	l.assignTo(s, 0, l.mapElem(ref(p, pos), idx.X.Type.Elem, pos))
+	l.assignTo(s, 1, ref(got, pos))
+}
+
+// mapAccessResult is what runtime.mapaccess2 returns: a pointer to the element,
+// and whether the key was there.
+//
+// The pointer component is unsafe.Pointer and not a number, because the value
+// is live in a register across the store that follows and the collector reads
+// the register map off this type.
+var mapAccessResult = func() *Type {
+	t := &Type{Kind: Tuple, Fields: []Field{
+		{Name: "r0", Type: lowerUnsafePtr},
+		{Name: "r1", Type: lowerBool},
+	}}
+	if err := Layout(t); err != nil {
+		panic("ir: the result of runtime.mapaccess2 does not lay out: " + err.Error())
+	}
+	return t
+}()
+
+// mapStore inserts a value the caller has already built.
+//
+// It is what the store router reaches for a map index destination, and the
+// value is a value: a range clause's key, a chosen receive's element. The
+// destination is not lowered, because a map index destination is a call and not
+// a location.
+func (l *lowerer) mapStore(pos syntax.Pos, dst, val Expr) {
+	desc, m, key, why := l.mapOperands(dst, pos)
+	if why != "" {
+		l.refuse(dst, why)
+		return
+	}
+	l.mapInsert(pos, desc, m, key, dst.X.Type.Elem, val)
+}
+
+// mapAssign builds m[k] = v from the two expressions the source wrote.
+//
+// The order is the specification's and it is the whole of what this adds over
+// mapStore: the map, then the key, then the value. A value evaluated after the
+// call would be a value whose panic leaves a key inserted that the source never
+// stored anything under.
+func (l *lowerer) mapAssign(pos syntax.Pos, dst, val Expr) (ok bool) {
+	desc, m, key, why := l.mapOperands(dst, pos)
+	if why != "" {
+		l.refuse(dst, why)
+		return false
+	}
+	l.mapInsert(pos, desc, m, key, dst.X.Type.Elem, l.expr(val))
+	return true
+}
+
+// mapInsert emits the call and the store through the pointer it returns.
+//
+// runtime.mapassign inserts the key when it is not there and returns a pointer
+// to the element. The pointer goes into a frame slot rather than staying in the
+// tree, so that it is evaluated where it is written: an assignment whose
+// destination held the call would leave the order of the call and the value to
+// specs/021-ssa-construction.md, which is not this pass's to decide.
+func (l *lowerer) mapInsert(pos syntax.Pos, desc, m, key Expr, elem *Type, val Expr) {
+	held := l.hold(val)()
+	p := l.spill(l.mapPtrCall("runtime.mapassign", pos, desc, m, key))
+	l.emit(Assign(pos, l.mapElem(ref(p, pos), elem, pos), held))
+}
+
+// mapDelete builds delete(m, k).
+func (l *lowerer) mapDelete(n Expr) Expr {
+	pos := n.Pos
+	if n.X == nil || n.Y == nil {
+		l.refuse(n, "a delete with no map or no key")
+		return n
+	}
+	idx := &Node{Op: OIndex, Pos: pos, Type: voidType, X: n.X, Y: n.Y}
+	desc, m, key, why := l.mapOperands(idx, pos)
+	if why != "" {
+		l.refuse(n, why)
+		return n
+	}
+	return runtimeCall(pos, "runtime.mapdelete", desc, m, key)
+}
+
+// makeMap builds make of a map.
+//
+// runtime.makemap takes three parameters and the third is last: the descriptor,
+// the hint, and a *maps.Map the runtime uses instead of allocating. gc passes
+// the address of a frame buffer for a map that does not escape and this passes
+// nil, for the reason the allocation section gives: specs/023-escape-analysis.md
+// is not built, so the heap is the answer that is always correct.
+//
+// runtime.makemap64 is unreachable on this target. gc reaches it only where int
+// is narrower than the hint's own type, and specs/030-abi.md makes int 64 bits.
+// A hint above the largest int, written as a uint64, converts to a negative int
+// and makemap clamps it to zero, which is what gc does with it too.
+//
+// runtime.makemap_small is not built either. It is a size optimisation for a
+// map with no hint, and it returns a map with no descriptor recorded, so the
+// first mapassign would still need the descriptor this row already names.
+func (l *lowerer) makeMap(n Expr) Expr {
+	t, pos := n.Type, n.Pos
+	if t.Key == nil || t.Elem == nil {
+		l.refuse(n, "a make of a map with no key type or no element type")
+		return n
+	}
+	if len(n.Args) > 1 {
+		l.refuse(n, fmt.Sprintf("a make of a map with %d bounds", len(n.Args)))
+		return n
+	}
+	hint := intConst(pos, lowerInt, 0)
+	if len(n.Args) == 1 {
+		hint = l.widen(n.Args[0])
+	}
+	return l.newMap(n, t, hint, pos)
+}
+
+// newMap emits the makemap call for a map type and a hint.
+func (l *lowerer) newMap(n Expr, t *Type, hint Expr, pos syntax.Pos) Expr {
+	desc, why := l.descriptor(t, pos)
+	if desc == nil {
+		l.refuse(n, why)
+		return nil
+	}
+	call := &Node{
+		Op: OCall, Pos: pos, Type: lowerUnsafePtr,
+		X: &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.makemap")},
+		// The third parameter is the buffer, and nil asks the runtime to
+		// allocate. It is spelled as a pointer rather than as a number so that
+		// the argument bitmap of the call describes it as one.
+		Args: []Expr{desc, hint, l.zeroOf(lowerUnsafePtr, pos)},
+	}
+	// The value is the *maps.Map the call returns, and a map is one word
+	// (specs/030-abi.md), so the conversion is a relabelling and not a copy.
+	return &Node{Op: OConvert, Pos: pos, Type: t, X: call}
+}
+
+// mapLit builds a map literal.
+//
+// The literal is a fresh map and one insert per element, in the order the
+// source wrote them, which is what the specification requires of a literal
+// whose keys are not constant: the keys and the values are evaluated in
+// order, and a duplicate non-constant key leaves the last one.
+//
+// The hint is the number of elements, so the table is sized once rather than
+// grown per insert. gc builds a static array of keys and values for a large
+// literal and loops over it, which is a code-size choice over the same
+// semantics and is not built here.
+func (l *lowerer) mapLit(n Expr) Expr {
+	t, pos := n.Type, n.Pos
+	if t.Key == nil || t.Elem == nil {
+		l.refuse(n, "a map literal with no key type or no element type")
+		return n
+	}
+	made := l.newMap(n, t, intConst(pos, lowerInt, int64(len(n.Args))), pos)
+	if made == nil {
+		return n
+	}
+	m := l.spill(made)
+	for _, e := range n.Args {
+		if e == nil || e.Op != OAssign || e.X == nil || e.Y == nil {
+			l.refuse(n, "an element of a map literal is not a key and a value")
+			return n
+		}
+		if !l.mapAssign(e.Pos, &Node{Op: OIndex, Pos: e.Pos, Type: t.Elem, X: ref(m, pos), Y: e.X}, e.Y) {
+			return n
+		}
+	}
+	return ref(m, pos)
+}
+
+// mapLen builds len(m).
+//
+// It is the one place in this file that reads the runtime's maps.Map, and the
+// dependency is taken rather than avoided because there is nothing to avoid it
+// with: no runtime symbol returns a map's length, gc reads the word inline
+// (cmd/compile/internal/ssagen.referenceTypeBuiltin), and the runtime writes
+// "Must be first (known by the compiler, for len() builtin)" above the field.
+// A layout the runtime documents as the compiler's is a layout the compiler is
+// meant to read.
+//
+// The nil check is not optional. len of a nil map is zero and a nil map has no
+// maps.Map to read the word out of, so the load has to be behind the check. gc
+// emits the same branch and marks it unlikely.
+//
+//	n := 0
+//	if m != nil {
+//		n = int(*(*uint64)(m))
+//	}
+//
+// The field is a uint64 and len is an int. Both are 64 bits on this target
+// (specs/030-abi.md), so the conversion is a relabelling, and it is written
+// down because a target where they differ would need the truncation gc emits.
+func (l *lowerer) mapLen(n Expr) Expr {
+	pos := n.Pos
+	m := l.stable(n.X)
+	out := l.tempObj(n.Type, pos)
+	l.emit(define(pos, ref(out, pos), intConst(pos, n.Type, 0)))
+	word := &Node{Op: ODeref, Pos: pos, Type: lowerUint64,
+		X: &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(lowerUint64), X: l.mapArg(m)}}
+	l.emit(&Node{
+		Op: OIf, Pos: pos, Type: voidType,
+		X: &Node{Op: OCompare, Op1: syntax.Neq, Pos: pos, Type: lowerBool,
+			X: l.mapArg(cloneExpr(m)), Y: l.zeroOf(lowerUnsafePtr, pos)},
+		Body: []Stmt{Assign(pos, ref(out, pos),
+			&Node{Op: OConvert, Pos: pos, Type: n.Type, X: word})},
+	})
+	return ref(out, pos)
+}
+
+// mapClear builds clear(m).
+func (l *lowerer) mapClear(n Expr) Expr {
+	pos := n.Pos
+	m := l.stable(n.X)
+	desc, why := l.descriptor(m.Type, pos)
+	if desc == nil {
+		l.refuse(n, why)
+		return n
+	}
+	return runtimeCall(pos, "runtime.mapclear", desc, l.mapArg(m))
 }
 
 // range.
@@ -1639,7 +2071,7 @@ func (l *lowerer) rangeStmt(n *Node) {
 	// source wrote, and the element is read only when the clause asked for it.
 	l.push()
 	if len(n.Args) > 0 && n.Args[0] != nil {
-		l.emit(Assign(n.Pos, l.expr(n.Args[0]), ref(idx, n.Pos)))
+		l.store(n.Pos, 0, n.Args[0], ref(idx, n.Pos))
 	}
 	if len(n.Args) > 1 && n.Args[1] != nil {
 		if elem == nil {
@@ -1649,7 +2081,7 @@ func (l *lowerer) rangeStmt(n *Node) {
 			l.emit(n)
 			return
 		}
-		l.emit(Assign(n.Pos, l.expr(n.Args[1]), elem(ref(idx, n.Pos))))
+		l.store(n.Pos, 0, n.Args[1], elem(ref(idx, n.Pos)))
 	}
 	for _, s := range n.Body {
 		l.stmt(s)
@@ -1718,7 +2150,7 @@ func (l *lowerer) rangeChan(n *Node, x Expr) {
 	// declaration ir.Build put at the head of the body copies a value that is
 	// already there.
 	if len(n.Args) > 0 && n.Args[0] != nil {
-		l.emit(Assign(pos, l.expr(n.Args[0]), ref(o, pos)))
+		l.store(pos, 0, n.Args[0], ref(o, pos))
 	}
 	if len(n.Args) > 1 && n.Args[1] != nil {
 		l.refuse(n, "a range over a channel with two variables")
@@ -1939,7 +2371,7 @@ func (l *lowerer) selectStmt(n *Node) {
 				l.emit(n)
 				return
 			}
-			addr = l.elemAddr(l.expr(k.val))
+			addr = l.valueAddr(l.expr(k.val))
 		} else {
 			k.slot, addr = l.elemSlot(elem, pos)
 		}
@@ -2034,9 +2466,7 @@ func (l *lowerer) selectAssign(k *selectCase, i int, val Expr, pos syntax.Pos) {
 	if dst == nil || namesNoStorage(dst) {
 		return
 	}
-	out := Assign(pos, l.expr(dst), val)
-	out.Op1 = k.op1
-	l.emit(out)
+	l.store(pos, k.op1, dst, val)
 }
 
 // arrayOf returns the array type of n elements of t.
@@ -2290,18 +2720,22 @@ func (l *lowerer) copyExpr(n Expr) Expr {
 	return ref(o, pos)
 }
 
-// clearExpr builds the clear builtin for a slice.
+// clearExpr builds the clear builtin.
 //
-// specs/020-ir.md gives clear two rows, and the map one needs runtime.mapclear,
-// which rtsym does not carry.
+// specs/020-ir.md gives clear two rows and both are here. A slice is a memory
+// clear over its own elements, and a map is runtime.mapclear: the runtime owns
+// the table's layout, so there is no region for this pass to clear.
 func (l *lowerer) clearExpr(n Expr) Expr {
 	x := n.X
 	if x == nil || x.Type == nil {
 		l.refuse(n, "a clear with no operand")
 		return n
 	}
+	if x.Type.Kind == Map {
+		return l.mapClear(n)
+	}
 	if x.Type.Kind != Slice {
-		l.refuse(n, "a clear of "+x.Type.Kind.String()+" needs runtime.mapclear, and the row that calls it is not built")
+		l.refuse(n, "a clear of "+x.Type.Kind.String())
 		return n
 	}
 	pos := n.Pos

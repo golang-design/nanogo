@@ -232,8 +232,8 @@ func TestCompileRefusals(t *testing.T) {
 			// two are different decks. A refusal that named the wrong one
 			// would send a reader to the wrong spec.
 			name: "a construct lowering refuses names the function and the pass",
-			src:  "package main\n\nfunc f() int {\n\tm := make(map[int]int)\n\treturn len(m)\n}\n",
-			want: []string{"function f", "a.go:3:6", "ir.Lower", "make", "specs/032"},
+			src:  "package main\n\nfunc f(s []int) []int {\n\treturn append(s, 1)\n}\n",
+			want: []string{"function f", "a.go:3:6", "ir.Lower", "append"},
 		},
 		{
 			// By name and by position. A package whose variables have no
