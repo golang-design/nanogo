@@ -119,14 +119,16 @@ func TestDescriptorCarriesTheTypeFlag(t *testing.T) {
 	if syms[0].Kind != obj.SRODATA {
 		t.Errorf("the descriptor is kind %v, want SRODATA", syms[0].Kind)
 	}
-	// The bitmask is not read-only data. gc puts a ptrmask in the no-pointer
-	// data section, and a "type:"-named symbol in it would be flagged as a
-	// descriptor and decoded as one.
+	// The bitmask is read-only data too, as gc marks it. A stack object record
+	// holds the offset of the mask from the start of its own section and the
+	// runtime resolves that offset against moduledata.rodata, so a mask in
+	// another section is read at an address that holds something else. It
+	// carries no "type:" name, so it takes no descriptor flag from it.
 	bits, ok := find(syms, "runtime.gcbits.0100000000000000")
 	if !ok {
 		t.Fatalf("the bitmask is not emitted; the symbols are %v", names(syms))
 	}
-	if bits.Kind != obj.SNOPTRDATA {
-		t.Errorf("the bitmask is kind %v, want SNOPTRDATA", bits.Kind)
+	if bits.Kind != obj.SRODATA {
+		t.Errorf("the bitmask is kind %v, want SRODATA", bits.Kind)
 	}
 }

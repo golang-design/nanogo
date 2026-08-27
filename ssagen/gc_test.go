@@ -109,6 +109,43 @@ func gcFunc(t *testing.T, name string, late bool) *compiled {
 	})
 }
 
+// gcReachFunc builds a function whose object is reached only through the
+// stack objects table.
+//
+// The address is passed to a callee that collects while holding it. The
+// caller's last use of the object is the address itself, so the locals bitmap
+// does not describe the object at the call, and the only thing that can keep
+// it alive is FUNCDATA_StackObjects: the collector finds the pointer in the
+// callee's frame, sees that it points into this one, and looks the object up.
+//
+// This is stackobj.go's shape, which is the corpus file that found the gap.
+func gcReachFunc(t *testing.T, name string) *compiled {
+	t.Helper()
+	local := &ir.Object{Name: "obj", Type: typePtrInt, Class: ir.ClassLocal, Addrtaken: true}
+	return hand(t, name, func(f *ssa.Func) {
+		f.Frame = []*ir.Object{local}
+		e := f.Entry
+		e.Kind = ssa.BlockRet
+		mem := e.NewValue(0, ssa.OpInitMem, ssa.MemType)
+
+		addr := func(m *ssa.Value) *ssa.Value {
+			a := e.NewValue(0, ssa.OpLocalAddr, typePtrInt, m)
+			a.Aux = local
+			return a
+		}
+		mk := e.NewValue(0, ssa.OpStaticCall, ssa.MemType, mem)
+		mk.Aux = &ir.Object{Name: "main.mk"}
+		p := e.NewValue(0, ssa.OpSelectN, typePtrInt, mk)
+		st := e.NewValue(0, ssa.OpStore, ssa.MemType, addr(mk), p, mk)
+		st.AuxInt = typePtrInt.Size
+
+		hold := e.NewValue(0, ssa.OpStaticCall, ssa.MemType, addr(st), st)
+		hold.Aux = &ir.Object{Name: "main.hold"}
+		r := e.NewValue(0, ssa.OpSelectN, typeInt, hold)
+		e.Control = e.NewValue(0, ssa.OpMakeResult, ssa.MemType, r, hold)
+	})
+}
+
 // gcHelpers is the half of the program gc compiles.
 //
 // The object is reachable from nowhere but the nanogo frame once mk returns:
@@ -163,6 +200,16 @@ func use(p *int) int {
 	return *p
 }
 
+//go:noinline
+func hold(p **int) int {
+	// The only reference to the object during this collection is the pointer
+	// into the caller's frame that this frame holds. Nothing in the caller's
+	// bitmap describes the object, so it survives only if the caller's stack
+	// objects table says where it is and what is in it.
+	gcNow()
+	seen = **p
+	return **p
+}
 
 func report(r int) {
 	println("result", r, "finalized", duringGC, "seen", seen)
@@ -242,6 +289,10 @@ func TestStackMapKeepsALiveSlotAndFreesADeadOne(t *testing.T) {
 		// the assertion is the finaliser and not what use returned.
 		{"dead", func(t *testing.T, n string) *compiled { return gcFunc(t, n, false) },
 			gcCallerSrc, "finalized 1"},
+		// The object is dead in the bitmap at the collection and a pointer to
+		// it is live in the callee. Only the stack objects table can keep it,
+		// so this case is the table and nothing else.
+		{"reachable", gcReachFunc, gcCallerSrc, "result 24301 finalized 0 seen 24301"},
 		// The pointer is an argument the function never reads. The arguments
 		// bitmap says the incoming word holds a pointer at every safepoint,
 		// so the object survives, and it can only do so if the entry wrote

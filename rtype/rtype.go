@@ -786,9 +786,15 @@ func gcbits(t *ir.Type) (Symbol, error) {
 			mask[i/8] |= 1 << uint(i%8)
 		}
 	}
+	// Read-only data, as gc marks it (reflectdata.dgcptrmask sets SRODATA).
+	// The section is not a preference: a stack object record holds the offset
+	// of this symbol from the start of its section, and the runtime resolves
+	// that offset against moduledata.rodata. A mask in the data segment is
+	// then read at an address that is not a mask, and the collector scans a
+	// stack object by whatever bits it finds there.
 	return Symbol{
 		Name:  fmt.Sprintf("runtime.gcbits.%x", mask),
-		Kind:  obj.SNOPTRDATA,
+		Kind:  obj.SRODATA,
 		Align: ir.PtrSize,
 		Dupok: true,
 		Data:  mask,
