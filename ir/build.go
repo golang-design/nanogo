@@ -1383,7 +1383,24 @@ func (b *builder) rangeStmt(s *syntax.ForStmt, rc *syntax.RangeClause) {
 			n.Args = append(n.Args, b.name(name))
 			continue
 		}
-		n.Args = append(n.Args, b.stabilize(b.expr(lhs)))
+		// The destination's own temporaries stay with it rather than going
+		// into the list this statement is in, and it is not stabilized. A
+		// range clause's destination is written once per iteration, and the
+		// specification evaluates an index expression's operands with the
+		// assignment that reads it, so a temporary in front of the loop
+		// evaluates them once: "for a[f()] = range [2]int{}" calls f twice and
+		// hoisting the index calls it once. An expression's Init runs
+		// immediately before the expression, which is inside the loop.
+		//
+		// stabilize is right where a destination is read and written by one
+		// statement. This destination is written and never read.
+		b.push()
+		dst := b.expr(lhs)
+		pre := b.pop()
+		if dst != nil && len(pre) > 0 {
+			dst.Init = append(pre, dst.Init...)
+		}
+		n.Args = append(n.Args, dst)
 	}
 	n.Body = b.block(s.Body.List)
 	if rc.Def {

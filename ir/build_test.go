@@ -2877,6 +2877,66 @@ func buildAssertNoRef(t *testing.T, n *Node, o *Object, what string) {
 // where the program asked for a pointer to 123. Nothing said so, because both
 // forms produce a pointer of the right type and the corpus is what caught it,
 // in Go's own test/newexpr.go.
+// TestBuildRangeDestinationIsEvaluatedEachIteration is the one destination in
+// this file that is not stabilized.
+//
+// A range clause with no := writes its destination once per iteration, and the
+// specification evaluates an index expression's operands with the assignment
+// that reads it. So "for a[one()] = range [2]int{}" calls one twice, and a
+// temporary holding the index in front of the loop calls it once. The failure
+// is silent: the program runs and the loop writes the same element every time.
+//
+// The temporaries stay on the destination's own Init, which runs immediately
+// before the destination, and the lowering pass writes the destination inside
+// the loop body.
+func TestBuildRangeDestinationIsEvaluatedEachIteration(t *testing.T) {
+	fn := buildFuncOf(t, buildSource(t, `
+func f(a *[2]int) {
+	for a[one()] = range [2]int{} {
+	}
+}
+`), "f")
+
+	var loop *Node
+	for _, s := range fn.Body {
+		if s != nil && s.Op == ORange {
+			loop = s
+		}
+	}
+	if loop == nil {
+		t.Fatalf("no range statement:\n%s", buildDump(fn))
+	}
+	if len(loop.Args) != 1 || loop.Args[0] == nil {
+		t.Fatalf("the range clause has %d destinations:\n%s", len(loop.Args), buildDump(fn))
+	}
+	calls := func(list []Stmt) bool {
+		found := false
+		for _, s := range list {
+			Walk(s, func(n *Node) bool {
+				if n.Op == OCall && n.X != nil && n.X.Op == OGlobal &&
+					n.X.Obj != nil && n.X.Obj.Name == "p.one" {
+					found = true
+				}
+				return true
+			})
+		}
+		return found
+	}
+	if !calls(loop.Args[0].Init) {
+		t.Errorf("the index is not evaluated with the destination:\n%s", buildDump(fn))
+	}
+	// And it is nowhere else: a copy in front of the loop is the evaluation
+	// this test exists to catch.
+	for _, s := range fn.Body {
+		if s == loop {
+			break
+		}
+		if calls([]Stmt{s}) {
+			t.Errorf("the index is evaluated in front of the loop:\n%s", buildDump(fn))
+		}
+	}
+}
+
 func TestBuildNewOfAnExpressionKeepsItsOperand(t *testing.T) {
 	for _, tc := range []struct {
 		what string
