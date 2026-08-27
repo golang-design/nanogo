@@ -1789,12 +1789,40 @@ func (b *builder) callValue(n ir.Expr) *Value {
 		b.errorf(InvNone, "a call with no function")
 		return nil
 	}
-	args := make([]*Value, 0, len(n.Args)+2)
+	args := make([]*Value, 0, len(n.Args)+3)
 	op := OpStaticCall
+	var auxInt int64
 	var callee *ir.Object
 	switch {
 	case fun.Op == ir.OGlobal && fun.Obj != nil && fun.Obj.Class == ir.ClassFunc:
 		callee = fun.Obj
+	case isInterfaceMethod(fun):
+		op = OpInterCall
+		if fun.X.Type.EmptyIface {
+			// The empty interface declares no method, so no selection on one
+			// reaches here and the IR that produced this is wrong. It is an
+			// error and not a refusal: the first word of such a value is a
+			// *_type, and a slot read out of it at an itab's offsets is
+			// whatever the descriptor holds there.
+			b.errorf(InvNone, "a call through %v, which is the empty interface and has no method table", fun.X.Type)
+			return nil
+		}
+		if fun.Index < 0 || fun.Index >= len(fun.X.Type.Methods) {
+			b.errorf(InvNone, "a call through %v selects method %d of %d", fun.X.Type, fun.Index, len(fun.X.Type.Methods))
+			return nil
+		}
+		x := b.expr(fun.X)
+		// The table, then the receiver. cmd/compile's shape: the entry point
+		// is loaded out of the table by selection, and the receiver is the
+		// one-word data half of the interface value, which is the first
+		// argument of the method the table names.
+		//
+		// There is no nil check. Selection loads the entry point from the
+		// table's address plus the slot, and that load faults on a nil
+		// interface, which is the same fault an explicit check would make.
+		args = append(args, b.value(OpITab, unsafePtrType, fun.Pos, x))
+		args = append(args, b.value(OpIData, unsafePtrType, fun.Pos, x))
+		auxInt = itabFunOffset + int64(fun.Index)*ir.PtrSize
 	case fun.Type != nil && fun.Type.Kind == ir.FuncKind:
 		op = OpClosureCall
 		args = append(args, b.expr(fun))
@@ -1814,9 +1842,32 @@ func (b *builder) callValue(n ir.Expr) *Value {
 	args = append(args, b.memory())
 	c := b.value(op, MemType, n.Pos, args...)
 	c.Aux = callee
+	c.AuxInt = auxInt
 	b.setMemory(c)
 	return c
 }
+
+// isInterfaceMethod reports whether fun is a method selected on an interface
+// value.
+//
+// It is the one selection that keeps its receiver inside it, which is how the
+// IR spells it (ir.Build's methodCall): the callee is the selection and the
+// receiver is the value the selection was made on. ir.Build asks the same
+// question the same way.
+func isInterfaceMethod(fun ir.Expr) bool {
+	return fun != nil && fun.Op == ir.OField && fun.X != nil &&
+		fun.X.Type != nil && fun.X.Type.Kind == ir.Interface
+}
+
+// itabFunOffset is the offset of internal/abi.ITab.Fun, the array of the
+// concrete type's methods in the interface's own order.
+//
+// ITab is Inter, Type, Hash and four bytes of padding, then Fun, so the array
+// starts at the fourth word. Read out of the installed runtime's
+// internal/abi/iface.go, and rtype/itab.go writes the array at the same
+// offset: a call site and a writer that disagreed would load a word that is
+// not a function.
+const itabFunOffset = 3 * ir.PtrSize
 
 // String concatenation.
 

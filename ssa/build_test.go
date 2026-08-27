@@ -2490,6 +2490,77 @@ func TestBuildConvertsAConcreteValueToAnEmptyInterface(t *testing.T) {
 	}
 }
 
+// TestBuildCallsThroughAnItab pins the shape of a call to a method of an
+// interface.
+//
+// Three claims, and each one is a wrong call rather than a build failure when
+// it is broken. The callee is loaded out of the value's first word, which is
+// the itab. The receiver is the value's second word, which is the one-word
+// receiver the itab's entry point takes. And the slot is at
+// internal/abi.ITab.Fun plus the method's own index, which is the offset
+// rtype/itab.go writes the array at.
+func TestBuildCallsThroughAnItab(t *testing.T) {
+	sig := mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{tInt}})
+	tPair := mkType(&ir.Type{Kind: ir.Interface, Name: "main.pair", PkgPath: "main", Methods: []ir.Method{
+		{Name: "first", Sig: sig, Pkg: "main"},
+		{Name: "second", Sig: sig, Pkg: "main"},
+	}})
+
+	for slot, name := range []string{"first", "second"} {
+		t.Run(name, func(t *testing.T) {
+			iface := obj("i", tPair, ir.ClassLocal)
+			dst := obj("dst", tInt, ir.ClassLocal)
+			call := &ir.Node{Op: ir.OCall, Type: tInt, X: &ir.Node{
+				Op: ir.OField, Type: sig, X: local(iface), Index: slot,
+			}}
+			f := build(t, fun("call", []*ir.Object{iface, dst}, asn(local(dst), call)))
+
+			c := findOp(f, OpInterCall)
+			if c == nil {
+				t.Fatalf("the call is not a call through a table:\n%s", f)
+			}
+			if len(c.Args) != 3 {
+				t.Fatalf("the call takes %d operands, want the table, the receiver and memory", len(c.Args))
+			}
+			if c.Args[0].Op != OpITab {
+				t.Errorf("the first operand is %v, want the interface's first word", c.Args[0].Op)
+			}
+			if c.Args[1].Op != OpIData {
+				t.Errorf("the receiver is %v, want the interface's second word", c.Args[1].Op)
+			}
+			if want := int64(24 + slot*8); c.AuxInt != want {
+				t.Errorf("the call reads the table at %d, want %d", c.AuxInt, want)
+			}
+			if findOp(f, OpClosureCall) != nil || findOp(f, OpStaticCall) != nil {
+				t.Errorf("the call also built a call of another kind:\n%s", f)
+			}
+		})
+	}
+}
+
+// TestBuildRefusesACallThroughTheEmptyInterface guards the one interface with
+// no table.
+//
+// The empty interface declares no method, so its first word is a *_type and a
+// slot read out of it at an itab's offsets is whatever the descriptor holds
+// there. No selection on one is legal Go, so reaching it means the IR was
+// built wrongly and the answer is an error rather than a refusal.
+func TestBuildRefusesACallThroughTheEmptyInterface(t *testing.T) {
+	sig := mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{tInt}})
+	iface := obj("i", tEface, ir.ClassLocal)
+	dst := obj("dst", tInt, ir.ClassLocal)
+	call := &ir.Node{Op: ir.OCall, Type: tInt, X: &ir.Node{
+		Op: ir.OField, Type: sig, X: local(iface), Index: 0,
+	}}
+	_, err := Build(fun("call", []*ir.Object{iface, dst}, asn(local(dst), call)))
+	if err == nil {
+		t.Fatal("the call built, so a *_type is read as a method table")
+	}
+	if !strings.Contains(err.Error(), "method table") {
+		t.Errorf("the refusal is %q and does not say what is missing", err)
+	}
+}
+
 // TestBuildConvertsAConcreteValueToAnInterfaceWithMethods pins the type word
 // of the other half of specs/032's conversion.
 //
