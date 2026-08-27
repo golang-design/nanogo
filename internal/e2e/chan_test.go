@@ -95,6 +95,70 @@ func closeRange() int {
 	return total
 }
 
+// selectOne is a select with one ready case and nothing else. It has to pick
+// that case, and the value has to arrive in the clause's own variable.
+func selectOne() int {
+	c := make(chan int, 1)
+	c <- 7
+	select {
+	case v := <-c:
+		return v
+	}
+}
+
+// selectDefault is the non-blocking shape. Nothing is ready, so selectgo
+// reports the default by returning an index below zero, and the switch's
+// default arm is what that reaches.
+//
+// Each arm returns rather than assigning one variable, and that is a limit of
+// the register allocator and not of this row: a three-arm select whose arms
+// merge into one variable makes a phi with three spilled operands, and
+// ssa/regalloc.go reserves two scratch registers.
+func selectDefault() int {
+	c := make(chan int)
+	select {
+	case <-c:
+		return 1
+	case c <- 1:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// selectSendAndReceive puts a send and a receive in one select, which is the
+// shape that needs the two groups of the case array in the right order: the
+// sends first and the receives after, with a count of each.
+func selectSendAndReceive() int {
+	full := make(chan int, 1)
+	full <- 1
+	empty := make(chan int, 1)
+	total := 0
+	for i := 0; i < 2; i++ {
+		select {
+		case v := <-full:
+			total = total + v*10
+		case empty <- 5:
+			total = total + 100
+		}
+	}
+	return total + <-empty
+}
+
+// selectClosed reads the second result. A closed channel is always ready, and
+// the receive reports that no value arrived.
+func selectClosed() int {
+	c := make(chan int)
+	close(c)
+	select {
+	case v, ok := <-c:
+		if ok || v != 0 {
+			return 0
+		}
+		return 9
+	}
+}
+
 func main() {
 	d := handoff() - 7
 	if d != 0 {
@@ -113,6 +177,22 @@ func main() {
 		d = d / (d - d)
 	}
 	d = closeRange() - 13
+	if d != 0 {
+		d = d / (d - d)
+	}
+	d = selectOne() - 7
+	if d != 0 {
+		d = d / (d - d)
+	}
+	d = selectDefault() - 3
+	if d != 0 {
+		d = d / (d - d)
+	}
+	d = selectSendAndReceive() - 115
+	if d != 0 {
+		d = d / (d - d)
+	}
+	d = selectClosed() - 9
 	if d != 0 {
 		d = d / (d - d)
 	}
@@ -154,7 +234,26 @@ func produce(c chan *node, n int) {
 	c <- v
 }
 
-func main() {
+// pick is the select half of the same claim. The case array holds the channel
+// and the address of the element, and both words are pointers: an array
+// described as holding none lets the collector free the channel a goroutine is
+// parked in, or free what the element points at.
+//
+// The receive lands in a frame slot of the row's own and the slot is copied
+// into v in the chosen arm, so the slot is live across the call and holds a
+// pointer the collector must follow.
+func pick(c chan *node, spare chan *node) int {
+	churn()
+	select {
+	case v := <-c:
+		return v.next.a - v.a
+	case spare <- &node{a: 1}:
+		<-spare
+		return 1
+	}
+}
+
+func straight() int {
 	c := make(chan *node, 1)
 	total := 0
 	for i := 0; i < 64; i++ {
@@ -164,7 +263,23 @@ func main() {
 		v := <-c
 		total = total + v.next.a - v.a
 	}
-	d := total - 64
+	return total
+}
+
+func chosen() int {
+	c := make(chan *node, 1)
+	spare := make(chan *node, 1)
+	total := 0
+	for i := 0; i < 64; i++ {
+		go produce(c, i)
+		runtime.GC()
+		total = total + pick(c, spare)
+	}
+	return total
+}
+
+func main() {
+	d := straight() + chosen() - 128
 	if d != 0 {
 		d = d / (d - d)
 	}

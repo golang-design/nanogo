@@ -1122,6 +1122,252 @@ func TestLowerTwoValueReceiveWritesBothDestinations(t *testing.T) {
 	}
 }
 
+// TestLowerSelectCaseArrayIsAllPointers is the GC description
+// specs/031-runtime-lowering.md calls the part that is easy to get wrong.
+//
+// runtime.scase is the channel and the address of the element, and both are
+// pointers. A word of it described as a number lets the collector free the
+// channel a goroutine is parked in, or free what the element points at, and
+// neither failure appears where the mistake is. The claim is asserted on the
+// type here and run under gccheckmark in internal/e2e.
+func TestLowerSelectCaseArrayIsAllPointers(t *testing.T) {
+	if scaseType.Size != 2*PtrSize {
+		t.Errorf("an scase is %d bytes, want %d", scaseType.Size, 2*PtrSize)
+	}
+	if !scaseType.HasPointers() {
+		t.Fatal("an scase holds no pointer, so the collector reads neither word")
+	}
+	if got := scaseType.PtrBytes(); got != 2*PtrSize {
+		t.Errorf("an scase describes %d bytes of pointer, want %d", got, 2*PtrSize)
+	}
+	for i, name := range []string{"c", "elem"} {
+		f := scaseType.Fields[i]
+		if f.Name != name {
+			t.Errorf("field %d is %s, want %s", i, f.Name, name)
+		}
+		if f.Type.Kind != UnsafePtr {
+			t.Errorf("field %s is %s, want a pointer", f.Name, f.Type.Kind)
+		}
+		if f.Offset != int64(i)*PtrSize {
+			t.Errorf("field %s is at %d, want %d", f.Name, f.Offset, int64(i)*PtrSize)
+		}
+	}
+	// The array the frame holds, which is what the locals bitmap describes.
+	l := &lowerer{fn: &Func{Name: "f"}, ptrs: make(map[*Type]*Type), hdrs: make(map[*Type]*Type)}
+	arr := l.arrayOf(scaseType, 3)
+	if got := arr.PtrBytes(); got != 6*PtrSize {
+		t.Errorf("a three-case array describes %d bytes of pointer, want %d", got, 6*PtrSize)
+	}
+	// The frame slot the array lives in is address-taken, so ssa.Build puts it
+	// in the frame rather than in a register, which is where selectgo requires
+	// it. A register-resident case array would be an address of nothing.
+	fn := lowerOK(t, `func f(a, b chan int) { select { case <-a: none(); case b <- 1: none() } }`)
+	found := false
+	for _, o := range fn.Locals {
+		if o.Type != nil && o.Type.Kind == Array && o.Type.Elem == scaseType {
+			found = true
+			if !o.Addrtaken {
+				t.Error("the case array is not address-taken, so it may live in a register")
+			}
+			if o.Type.Len != 2 {
+				t.Errorf("the case array holds %d cases, want 2", o.Type.Len)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no case array in the frame:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerSelectRow checks the shape of the lowered select.
+//
+// selectgo needs the sends at the front of the case array and the receives
+// after, and it is told how many of each. A count that disagreed with the
+// array would have the runtime read a receive as a send, which sends whatever
+// the destination slot holds.
+func TestLowerSelectRow(t *testing.T) {
+	for _, tc := range []struct {
+		row     string
+		body    string
+		cases   int
+		nsends  int
+		nrecvs  int
+		block   bool
+		clauses int
+	}{
+		{"one receive", `func f(c chan int) { select { case v := <-c: use(v) } }`, 1, 0, 1, true, 1},
+		{"one send", `func f(c chan int) { select { case c <- 1: none() } }`, 1, 1, 0, true, 1},
+		{"a receive and a default", `func f(c chan int) { select { case <-c: none(); default: none() } }`, 1, 0, 1, false, 2},
+		{"a send and a receive", `func f(a, b chan int) { select { case <-a: none(); case b <- 1: none() } }`, 2, 1, 1, true, 2},
+		{"two sends and two receives", `func f(a, b chan int) { select { case <-a: none(); case b <- 1: none(); case <-b: none(); case a <- 2: none() } }`, 4, 2, 2, true, 4},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if len(fn.Body) != 1 || fn.Body[0].Op != OSwitch {
+				t.Fatalf("the body is not one switch:\n%s", buildDump(fn))
+			}
+			sw := fn.Body[0]
+			// The setup is in the switch's own init list, so a label on the
+			// select names the switch and a labelled break finds it.
+			if len(sw.Init) == 0 {
+				t.Fatalf("the setup is not in the switch's init list:\n%s", buildDump(fn))
+			}
+			if len(sw.Body) != tc.clauses {
+				t.Errorf("the switch has %d clauses, want %d:\n%s", len(sw.Body), tc.clauses, buildDump(fn))
+			}
+			call := findCall(fn, "runtime.selectgo")
+			if call == nil {
+				t.Fatalf("runtime.selectgo was not called:\n%s", buildDump(fn))
+			}
+			if len(call.Args) != 6 {
+				t.Fatalf("selectgo has %d arguments, want 6:\n%s", len(call.Args), buildDump(fn))
+			}
+			if got := constOf(t, call.Args[3]); got != int64(tc.nsends) {
+				t.Errorf("selectgo is told %d sends, want %d", got, tc.nsends)
+			}
+			if got := constOf(t, call.Args[4]); got != int64(tc.nrecvs) {
+				t.Errorf("selectgo is told %d receives, want %d", got, tc.nrecvs)
+			}
+			if got := call.Args[5]; got.Op != OConst || (got.Val.String() == "true") != tc.block {
+				t.Errorf("selectgo blocks: %s, want %v", got.Val, tc.block)
+			}
+			// The third array is the race detector's program counters, which
+			// this compiler never writes.
+			if pc := call.Args[2]; pc.Op != OConst {
+				t.Errorf("the program-counter array is not nil:\n%s", buildDump(fn))
+			}
+			// Two results, read into two destinations. A one-result call would
+			// leave the second word of the pair wherever the callee left it.
+			var pair *Node
+			for _, st := range sw.Init {
+				if st.Op == OAssign && st.Y == call {
+					pair = st
+				}
+			}
+			if pair == nil || len(pair.Args) != 2 {
+				t.Fatalf("selectgo's results are not read into two destinations:\n%s", buildDump(fn))
+			}
+			if call.Type == nil || call.Type.Kind != Tuple || len(call.Type.Fields) != 2 {
+				t.Fatalf("selectgo's type is %v, want a two-field tuple", call.Type)
+			}
+			// The case values of the switch are exactly the indices of the
+			// array, and the sends have the low ones.
+			var indices []int64
+			for _, c := range sw.Body {
+				if len(c.Args) == 0 {
+					continue
+				}
+				indices = append(indices, constOf(t, c.Args[0]))
+			}
+			if len(indices) != tc.cases {
+				t.Fatalf("%d case values, want %d:\n%s", len(indices), tc.cases, buildDump(fn))
+			}
+			seen := make(map[int64]bool, len(indices))
+			for _, i := range indices {
+				if i < 0 || i >= int64(tc.cases) || seen[i] {
+					t.Errorf("the case values are %v, want each of 0..%d once", indices, tc.cases-1)
+					break
+				}
+				seen[i] = true
+			}
+		})
+	}
+}
+
+// TestLowerSelectSendsComeFirst checks the split selectgo is told about.
+//
+// The runtime reads cas0[0:nsends] as sends and the rest as receives, so a
+// clause in the wrong half is a send through a receive's destination slot.
+func TestLowerSelectSendsComeFirst(t *testing.T) {
+	// The source order is receive, send, receive, so the indices cannot be
+	// the source's: the send has to take index zero.
+	fn := lowerOK(t, `func f(a, b chan int) { select { case <-a: none(); case b <- 1: none(); case <-b: none() } }`)
+	sw := fn.Body[0]
+	// The channel each index was given, read off the case array stores.
+	got := make(map[int64]string)
+	for _, st := range sw.Init {
+		if st.Op != OAssign || st.X == nil || st.X.Op != OField || st.X.Index != scaseChan {
+			continue
+		}
+		idx := constOf(t, st.X.X.Y)
+		name := ""
+		if v := st.Y.X; v != nil && v.Op == OLocal && v.Obj != nil {
+			name = v.Obj.Name
+		}
+		got[idx] = name
+	}
+	if got[0] != "b" {
+		t.Errorf("case 0 is the channel %q, want the send to b: %v", got[0], got)
+	}
+	if got[1] != "a" || got[2] != "b" {
+		t.Errorf("the receives are not at 1 and 2 in source order: %v", got)
+	}
+}
+
+// TestLowerSelectWritesBothFieldsOfEveryCase is why the case array needs no
+// clear.
+//
+// A select inside a loop reaches the same frame slots on the next iteration,
+// so a field left over from the iteration before would name the channel that
+// iteration chose. Every execution writes both words of every case.
+func TestLowerSelectWritesBothFieldsOfEveryCase(t *testing.T) {
+	fn := lowerOK(t, `func f(a, b chan int) { select { case <-a: none(); case b <- 1: none() } }`)
+	sw := fn.Body[0]
+	fields := make(map[[2]int64]bool)
+	for _, st := range sw.Init {
+		if st.Op != OAssign || st.X == nil || st.X.Op != OField {
+			continue
+		}
+		fields[[2]int64{constOf(t, st.X.X.Y), int64(st.X.Index)}] = true
+	}
+	for i := int64(0); i < 2; i++ {
+		for _, f := range []int64{scaseChan, scaseElem} {
+			if !fields[[2]int64{i, f}] {
+				t.Errorf("field %d of case %d is never written:\n%s", f, i, buildDump(fn))
+			}
+		}
+	}
+	if lowerCalled(fn, "runtime.memclrHasPointers") {
+		t.Errorf("the case array is cleared as well as written:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerSelectOfOnlyADefault is the clause list with no communication in
+// it. The default always runs, and it is still wrapped in a switch: a break
+// the clause writes leaves the select and would otherwise leave whatever
+// encloses it.
+func TestLowerSelectOfOnlyADefault(t *testing.T) {
+	fn := lowerOK(t, `func f() { for { select { default: break } } }`)
+	if lowerCalled(fn, "runtime.selectgo") {
+		t.Errorf("a select with no communication called selectgo:\n%s", buildDump(fn))
+	}
+	loop := fn.Body[0]
+	if loop.Op != OFor || len(loop.Body) != 1 || loop.Body[0].Op != OSwitch {
+		t.Fatalf("the default clause is not wrapped in a switch:\n%s", buildDump(fn))
+	}
+	sw := loop.Body[0]
+	if sw.X != nil || len(sw.Body) != 1 || len(sw.Body[0].Args) != 0 {
+		t.Errorf("the switch is not one default clause:\n%s", buildDump(fn))
+	}
+}
+
+// constOf reads the integer a constant node carries.
+func constOf(t *testing.T, n *Node) int64 {
+	t.Helper()
+	if n == nil || n.Op != OConst {
+		t.Fatalf("%v is not a constant", n)
+	}
+	c, ok := n.Val.(ConstValue)
+	if !ok {
+		t.Fatalf("%v is not a numeric constant", n.Val)
+	}
+	v, exact := c.Int64()
+	if !exact {
+		t.Fatalf("%v does not fit an int64", n.Val)
+	}
+	return v
+}
+
 // TestLowerSliceExpressionRows is specs/020's row: bounds checks plus pointer
 // arithmetic.
 func TestLowerSliceExpressionRows(t *testing.T) {
@@ -1446,6 +1692,7 @@ func TestLowerRefusals(t *testing.T) {
 		{"defer of a builtin", `func f(c chan int) { defer close(c) }`, ODefer, "holds a close and not a call"},
 		{"defer of println", `func f(n int) { defer println(n) }`, ODefer, "holds a println and not a call"},
 		{"defer of recover", `func f() { defer recover() }`, ODefer, "holds a recover and not a call"},
+		{"a select with no clauses", `func f() { select {} }`, OSelect, "runtime.block"},
 		{"a type assertion", `func f(v any) int { return v.(int) }`, OTypeAssert, "no row"},
 		{"recover whose value is read", `func f() { useAny(recover()) }`, ORecover, "no row"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},

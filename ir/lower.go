@@ -231,6 +231,7 @@ var (
 	lowerByte      = mustLayoutNamed(Uint8, "byte")
 	lowerUintptr   = mustLayoutNamed(Uintptr, "uintptr")
 	lowerInt64     = mustLayoutNamed(Int64, "int64")
+	lowerUint16    = mustLayoutNamed(Uint16, "uint16")
 	lowerUint64    = mustLayoutNamed(Uint64, "uint64")
 	lowerUnsafePtr = mustLayoutNamed(UnsafePtr, "unsafe.Pointer")
 )
@@ -417,6 +418,10 @@ func (l *lowerer) hold(n Expr) func() Expr {
 
 func intConst(pos syntax.Pos, t *Type, v int64) Expr {
 	return &Node{Op: OConst, Pos: pos, Type: t, Val: Const{Val: constant.MakeInt64(v)}}
+}
+
+func boolConst(pos syntax.Pos, v bool) Expr {
+	return &Node{Op: OConst, Pos: pos, Type: lowerBool, Val: Const{Val: constant.MakeBool(v)}}
 }
 
 // Runtime calls.
@@ -704,6 +709,9 @@ func (l *lowerer) stmt(s Stmt) {
 		// no-op.
 		l.flush(s)
 		l.emit(runtimeCall(s.Pos, "runtime.gorecover"))
+
+	case OSelect:
+		l.selectStmt(s)
 
 	case ORange:
 		// Init is not flushed here. It holds the range expression's
@@ -1723,6 +1731,301 @@ func (l *lowerer) rangeChan(n *Node, x Expr) {
 	// No condition. The loop leaves through the break above and through
 	// nothing else, which is what makes the receive the only exit.
 	l.emit(&Node{Op: OFor, Pos: pos, Type: voidType, Init: init, Body: body})
+}
+
+// select.
+//
+// specs/020-ir.md's row and specs/031-runtime-lowering.md's shape:
+// runtime.selectgo over an array of cases, and a jump table on the index it
+// returns. Everything hard about the row is in the two frame arrays.
+//
+// # The arrays
+//
+// selectgo takes a [ncases]scase and a [2*ncases]uint16, and it requires both
+// to be on the goroutine's stack. scase is two words, the channel and the
+// address of the element, and both of them are pointers. That is the part
+// specs/031 calls easy to get wrong: an scase described as holding no pointer
+// lets the collector free a channel a goroutine is parked in, or free the
+// object the element points at, and neither failure is at the mistake.
+//
+// The arrays are written whole on every execution rather than cleared first. A
+// select inside a loop reaches the same frame slots on the next iteration, and
+// a field left over from the iteration before would name a channel that
+// iteration chose.
+//
+// # The order of the cases
+//
+// selectgo needs the sends first and the receives after, and it is told how
+// many of each. Within each group the order is free: selectgo shuffles the
+// cases into a poll order of its own, which is what makes a select with two
+// ready cases pick between them at random. So a send takes the next index from
+// the front of the array and a receive the next after the sends, both in
+// source order, and the index each clause was given is the case value of the
+// switch below.
+//
+// # What is evaluated when
+//
+// The specification evaluates the channel operand of every clause, and the
+// value of every send, exactly once and in source order on entry. The
+// destinations of a receive are not in that list: they are written only if
+// that communication happens. So the element of a receive lands in a frame
+// slot of the row's own, and the assignment to what the source wrote is in the
+// chosen arm of the switch. gc takes the address of the destination instead
+// and hands it to selectgo, which evaluates the destination on entry.
+
+// scaseType is runtime.scase: the channel and the address of the element.
+//
+// It carries no name, for the reason rtypeType carries none: a name would make
+// TypeSymbol produce a descriptor gc never emits and the linker would never
+// resolve. Nothing asks this type for one today, and a stack object table
+// would.
+var scaseType = func() *Type {
+	t := &Type{Kind: Struct, Fields: []Field{
+		{Name: "c", Type: lowerUnsafePtr},
+		{Name: "elem", Type: lowerUnsafePtr},
+	}}
+	if err := Layout(t); err != nil {
+		panic("ir: runtime.scase does not lay out: " + err.Error())
+	}
+	return t
+}()
+
+// The fields of an scase, in the order runtime/select.go declares them.
+const (
+	scaseChan = 0
+	scaseElem = 1
+)
+
+// selectResult is what runtime.selectgo returns: the index of the chosen case,
+// and whether a receive received a value rather than finding the channel
+// closed.
+var selectResult = func() *Type {
+	t := &Type{Kind: Tuple, Fields: []Field{
+		{Name: "r0", Type: lowerInt},
+		{Name: "r1", Type: lowerBool},
+	}}
+	if err := Layout(t); err != nil {
+		panic("ir: the result of runtime.selectgo does not lay out: " + err.Error())
+	}
+	return t
+}()
+
+// selectCase is one communication clause, taken apart.
+type selectCase struct {
+	clause *Node  // the OCase the source wrote
+	pre    []Stmt // the operand temporaries ir.Build hoisted out of it
+	send   bool
+	ch     Expr
+	val    Expr   // the sent value, for a send
+	dsts   []Expr // the destinations, for a receive
+	op1    syntax.Operator
+	index  int     // the position this case takes in the scase array
+	slot   *Object // the frame slot a receive lands in
+}
+
+// selectStmt builds a select.
+func (l *lowerer) selectStmt(n *Node) {
+	pos := n.Pos
+	l.flush(n)
+	bail := func(what string) {
+		l.refuse(n, what)
+		l.emit(n)
+	}
+	if len(n.Body) == 0 {
+		// select {} parks the goroutine for good, which is runtime.block.
+		bail("a select with no clauses blocks for good, which is runtime.block, and rtsym does not carry it")
+		return
+	}
+
+	var cases []*selectCase
+	var deflt *Node
+	for _, c := range n.Body {
+		if c == nil || c.Op != OCase {
+			bail("a select whose clause is not a case")
+			return
+		}
+		// ir.Build puts the communication statement in the clause's Init, and
+		// the operand temporaries it needed in front of it. So the
+		// communication is the last statement and the rest is scaffolding the
+		// select runs on entry.
+		if len(c.Init) == 0 {
+			if deflt != nil {
+				bail("a select with two default clauses")
+				return
+			}
+			deflt = c
+			continue
+		}
+		comm := c.Init[len(c.Init)-1]
+		k := &selectCase{clause: c, pre: c.Init[:len(c.Init)-1]}
+		switch {
+		case comm.Op == OSend:
+			k.send, k.ch, k.val = true, comm.X, comm.Y
+		case comm.Op == ORecv:
+			// case <-c: with no destination at all.
+			k.ch = comm.X
+		case comm.Op == OAssign && comm.Y != nil && comm.Y.Op == ORecv:
+			k.ch, k.op1 = comm.Y.X, comm.Op1
+			if comm.X != nil {
+				k.dsts = []Expr{comm.X}
+			} else {
+				k.dsts = comm.Args
+			}
+		default:
+			bail("a select clause whose communication is a " + comm.Op.String())
+			return
+		}
+		cases = append(cases, k)
+	}
+
+	if len(cases) == 0 {
+		// Only a default clause, which always runs. It is still wrapped in a
+		// switch, because a break the clause writes leaves the select and
+		// would otherwise leave whatever encloses it.
+		l.emit(&Node{Op: OSwitch, Pos: pos, Type: voidType,
+			Body: []Stmt{{Op: OCase, Pos: deflt.Pos, Type: voidType, Body: l.stmts(deflt.Body)}}})
+		return
+	}
+
+	nsends := 0
+	for _, k := range cases {
+		if k.send {
+			nsends++
+		}
+	}
+	ncas := len(cases)
+
+	// The setup goes in the switch's own init list rather than in front of it,
+	// for the reason rangeChan gives: a statement between a label and the
+	// statement it names takes the label, and "break L" would then find no
+	// select.
+	l.push()
+	selv := l.tempObj(l.arrayOf(scaseType, int64(ncas)), pos)
+	order := l.tempObj(l.arrayOf(lowerUint16, int64(2*ncas)), pos)
+
+	send, recv := 0, nsends
+	for _, k := range cases {
+		for _, s := range k.pre {
+			l.stmt(s)
+		}
+		if k.send {
+			k.index, send = send, send+1
+		} else {
+			k.index, recv = recv, recv+1
+		}
+		ch := l.expr(k.ch)
+		elem, why := chanElem(ch)
+		if elem == nil {
+			l.refuse(n, why)
+			l.emit(l.pop()...)
+			l.emit(n)
+			return
+		}
+		l.emit(Assign(pos, l.scaseField(selv, k.index, scaseChan, pos), l.chanArg(ch)))
+		var addr Expr
+		if k.send {
+			if k.val == nil || k.val.Type == nil {
+				l.refuse(n, "a select clause sends an operand with no type")
+				l.emit(l.pop()...)
+				l.emit(n)
+				return
+			}
+			addr = l.elemAddr(l.expr(k.val))
+		} else {
+			k.slot, addr = l.elemSlot(elem, pos)
+		}
+		l.emit(Assign(pos, l.scaseField(selv, k.index, scaseElem, pos), addr))
+	}
+
+	chosen := l.tempObj(lowerInt, pos)
+	received := l.tempObj(lowerBool, pos)
+	l.emit(&Node{
+		Op: OAssign, Pos: pos, Type: voidType,
+		Args: []Expr{ref(chosen, pos), ref(received, pos)},
+		Y: &Node{
+			Op: OCall, Pos: pos, Type: selectResult,
+			X: &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.selectgo")},
+			Args: []Expr{
+				l.arrayBase(selv, pos),
+				l.arrayBase(order, pos),
+				// The third array is the caller's program counters, which the
+				// race detector reads and nothing else writes. gc passes nil
+				// unless the build is instrumented, and this compiler has no
+				// instrumented build.
+				l.zeroOf(l.ptrTo(lowerUintptr), pos),
+				intConst(pos, lowerInt, int64(nsends)),
+				intConst(pos, lowerInt, int64(ncas-nsends)),
+				// A select with a default clause does not block, and selectgo
+				// reports the default by returning an index below zero.
+				boolConst(pos, deflt == nil),
+			},
+		},
+	})
+	init := l.pop()
+
+	// The jump table. The switch's default arm is the select's default clause:
+	// the index is one of the cases or it is below zero, and below zero is
+	// what selectgo returns when nothing was ready.
+	clauses := make([]Stmt, 0, len(cases)+1)
+	for _, k := range cases {
+		l.push()
+		if len(k.dsts) > 0 {
+			l.selectAssign(k, 0, ref(k.slot, pos), pos)
+		}
+		if len(k.dsts) > 1 {
+			l.selectAssign(k, 1, ref(received, pos), pos)
+		}
+		for _, s := range k.clause.Body {
+			l.stmt(s)
+		}
+		clauses = append(clauses, &Node{Op: OCase, Pos: k.clause.Pos, Type: voidType,
+			Args: []Expr{intConst(pos, lowerInt, int64(k.index))}, Body: l.pop()})
+	}
+	if deflt != nil {
+		clauses = append(clauses, &Node{Op: OCase, Pos: deflt.Pos, Type: voidType,
+			Body: l.stmts(deflt.Body)})
+	}
+	l.emit(&Node{Op: OSwitch, Pos: pos, Type: voidType,
+		Init: init, X: ref(chosen, pos), Body: clauses})
+}
+
+// selectAssign writes one destination of a chosen receive clause.
+//
+// A destination that names no storage is not written, which is the rule the
+// two-value receive follows: the communication has already happened and the
+// store would be into a location of no size.
+func (l *lowerer) selectAssign(k *selectCase, i int, val Expr, pos syntax.Pos) {
+	dst := k.dsts[i]
+	if dst == nil || namesNoStorage(dst) {
+		return
+	}
+	out := Assign(pos, l.expr(dst), val)
+	out.Op1 = k.op1
+	l.emit(out)
+}
+
+// arrayOf returns the array type of n elements of t.
+func (l *lowerer) arrayOf(t *Type, n int64) *Type {
+	a := &Type{Kind: Array, Elem: t, Len: n}
+	if err := Layout(a); err != nil {
+		panic("ir: an array of " + fmt.Sprint(n) + " does not lay out: " + err.Error())
+	}
+	return a
+}
+
+// arrayBase returns the address of the first element of a frame array, as the
+// pointer the runtime takes.
+func (l *lowerer) arrayBase(o *Object, pos syntax.Pos) Expr {
+	elem := &Node{Op: OIndex, Pos: pos, Type: o.Type.Elem,
+		X: ref(o, pos), Y: intConst(pos, lowerInt, 0)}
+	return &Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: l.addrOf(elem)}
+}
+
+// scaseField returns one field of one element of the case array.
+func (l *lowerer) scaseField(o *Object, i, field int, pos syntax.Pos) Expr {
+	elem := &Node{Op: OIndex, Pos: pos, Type: scaseType,
+		X: ref(o, pos), Y: intConst(pos, lowerInt, int64(i))}
+	return &Node{Op: OField, Pos: pos, Type: lowerUnsafePtr, X: elem, Index: field}
 }
 
 // widen converts an integer to a machine word, so that it can be added to a
