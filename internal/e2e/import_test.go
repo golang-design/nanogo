@@ -452,6 +452,18 @@ var linkingShapes = []linkShape{
 		main: "\tvar c lib.Code = 42\n\tvar v interface{ V() int } = c\n\tos.Exit(v.V())\n",
 	},
 	{
+		// The pointer to a declared type is the defining package's to write
+		// too. gc's NeedEmit hands an unnamed type to whichever package meets
+		// it, and the package that meets *lib.Counter here is a gc-compiled
+		// importer whose export data never mentioned the pointer, so nobody
+		// wrote type:*<path>.Counter and cmd/link had no descriptor to build
+		// go:info.*<path>.Counter out of. A method with a pointer receiver
+		// reaches it on every call, which is what this shape does.
+		name: "a type whose method takes a pointer receiver",
+		lib:  "type Counter struct{ N int }\n\nfunc (c *Counter) Add(d int) int {\n\tc.N = c.N + d\n\treturn c.N\n}\n",
+		main: "\tc := lib.Counter{N: 2}\n\tos.Exit(c.Add(40))\n",
+	},
+	{
 		name: "a constant and a function",
 		lib:  "const S = 21\n\nfunc Double(x int) int { return x * 2 }\n",
 		main: "\tos.Exit(lib.Double(lib.S))\n",

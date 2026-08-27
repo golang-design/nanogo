@@ -76,12 +76,26 @@ func checkExportedTypes(cfg *Config, pkg *types2.Package, fset *syntax.FileSet) 
 		// struct's fields, so a variable of an exported type reaches the
 		// unexported types inside it.
 		t, err := conv.Convert(obj.Type())
+		// The pointer to it as well. An importer that takes the address of a
+		// value of this type refers to type:*<path>.T, and a method with a
+		// pointer receiver makes it do so on every call: the receiver's own
+		// DWARF entry is go:info.*<path>.T, which cmd/link builds out of that
+		// descriptor. Nobody else owes it. The type is declared here, gc's
+		// NeedEmit hands an unnamed type to whichever package meets it, and
+		// the package that meets it may be one gc compiled from export data
+		// that never mentioned the pointer. The failure is the linker's:
+		//
+		//	sym 6: relocation target go:info.*xread/lib.Point not defined
+		var ptr *ir.Type
+		if err == nil {
+			ptr, err = conv.Convert(types2.NewPointer(obj.Type()))
+		}
 		var set []*ir.Type
 		if err == nil {
 			// The whole closure, because cmd/link's defgotype walks from the
 			// descriptor into the type of every struct field, and each edge it
 			// follows is a relocation that has to resolve.
-			set, err = descriptorClosure([]*ir.Type{t})
+			set, err = descriptorClosure([]*ir.Type{t, ptr})
 		}
 		if err == nil {
 			owed = append(owed, set...)
