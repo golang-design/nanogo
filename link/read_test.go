@@ -588,7 +588,13 @@ func TestFormatErrorMessage(t *testing.T) {
 	}
 }
 
-func TestCoveredBytes(t *testing.T) {
+// TestStringRegionCoverage checks the union the reader measures and the
+// rule it refuses on.
+//
+// The region is "abcdefghij" from offset 0, and each case names the spans
+// some reference reached.
+func TestStringRegionCoverage(t *testing.T) {
+	region := []byte("abcdefghij")
 	for _, c := range []struct {
 		name  string
 		spans []strSpan
@@ -598,13 +604,56 @@ func TestCoveredBytes(t *testing.T) {
 		{"one", []strSpan{{2, 5}}, 3},
 		{"the same string twice", []strSpan{{2, 5}, {2, 5}}, 3},
 		{"a suffix of another", []strSpan{{2, 8}, {5, 8}}, 6},
-		{"disjoint, out of order", []strSpan{{9, 11}, {2, 5}}, 5},
+		{"disjoint, out of order", []strSpan{{9, 10}, {2, 5}}, 4},
 		{"touching", []strSpan{{2, 5}, {5, 9}}, 7},
 		{"overlapping", []strSpan{{2, 6}, {4, 9}}, 7},
+		{"the whole region", []strSpan{{0, 10}}, 10},
 	} {
-		if got := coveredBytes(c.spans); got != c.want {
-			t.Errorf("%s: coveredBytes = %d, want %d", c.name, got, c.want)
+		o := &Object{Name: "x.o", stringIntervals: c.spans}
+		got, err := o.checkStringRegion(region, 0, uint32(len(region)), 0)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
 		}
+		if got != c.want {
+			t.Errorf("%s: %d bytes covered, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestStringRegionRefusesWhatIsNotAString is the accounting rule for the
+// bytes no reference reached. gc leaves dead names behind, and a dead name
+// is still a name, so anything else in the region is a reference the
+// reader did not resolve.
+func TestStringRegionRefusesWhatIsNotAString(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		region string
+		spans  []strSpan
+		want   string
+	}{
+		{"a dead name is allowed", "abcio.Copy", []strSpan{{0, 3}}, ""},
+		{"a zero byte is not a string", "abc\x00def", []strSpan{{0, 3}}, "the region holds strings"},
+		{"a newline is not graphic", "abc\ndef", []strSpan{{0, 3}}, "the region holds strings"},
+		{"invalid utf8", "abc\xff\xfe", []strSpan{{0, 3}}, "are not text"},
+		{"a gap in front of the first string", "\x01bcdef", []strSpan{{1, 6}}, "the region holds strings"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := &Object{Name: "x.o", stringIntervals: c.spans}
+			_, err := o.checkStringRegion([]byte(c.region), 0, uint32(len(c.region)), 0)
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("the reader refused a region of strings: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("the reader accepted a region that holds something other than strings")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("the refusal is %q, it must name %q", err, c.want)
+			}
+		})
 	}
 }
 

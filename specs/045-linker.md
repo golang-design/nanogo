@@ -196,19 +196,33 @@ it would slice every later block one entry short.
 | Every symbol reference resolves in its index space | The read past the end of an array that [040](040-object-format.md) puts in the writer |
 | Every auxiliary type is one the format defines | A record whose meaning the reader invented |
 
-Two facts are measured rather than refused, because a refusal for either
-one would refuse objects `cmd/link` accepts.
+### The string region is not covered, and the reason is gc's
 
-The first is the string region. Every byte between the header and the
-Autolib block should belong to some string a later block references, and a
-gap would be a string the reader never resolved. The reader reports the
-covered fraction, and the corpus test states it over every archive of a
-real build. A refusal follows once the measurement says the coverage is
-total.
+The rule a first reading suggests for the string region is that every byte
+between the header and the Autolib block belongs to some string a later
+block references. It is false, and the measurement is what says so: a
+hello-world program links 2,062,201 bytes of string region and about 9,000
+of them are reached by nothing.
 
-The second is trailing bytes. gc pads its objects past `offsets[BlkEnd]`,
-so the bytes after the last block are not part of the format. The reader
-counts them and ignores them.
+The cause is an asymmetry in gc's writer. Its string table adds the name of
+every symbol the writer traverses, and that traversal reaches the inlined
+callees an `AuxFuncInfo` inline tree names. The block that writes reference
+names walks references only, so it emits no entry for one of those callees,
+and a cross-package reference is an index pair that needs no name. Nothing
+points at the bytes and they are dead. They are the names of functions
+inlined from other packages, `io.Copy` and `sync/atomic.(*Int32).Load`
+among them.
+
+So the reader requires the weaker fact that holds: the region holds
+strings and nothing else. A byte no reference reached must be graphic text,
+because a byte that is not is a string reference the reader failed to
+resolve, which is the failure the accounting exists to catch. The covered
+fraction is reported beside it, and the corpus gates it above 99 per cent,
+which a reader that stopped resolving one block's strings would fall below.
+
+Trailing bytes are the other measurement. gc pads its objects past
+`offsets[BlkEnd]`, so the bytes after the last block are not part of the
+format. The reader counts them and ignores them.
 
 ### What a symbol carries out of the reader
 

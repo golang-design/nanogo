@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.design/x/nanogo/obj"
 )
@@ -540,9 +542,72 @@ func (o *Object) readBlocks(b []byte, base int64) error {
 	if err := o.checkRefs(base); err != nil {
 		return err
 	}
-	o.StringCovered = coveredBytes(o.stringIntervals)
+	covered, err := o.checkStringRegion(b, strStart, strEnd, base)
+	if err != nil {
+		return err
+	}
+	o.StringCovered = covered
 	o.stringIntervals = nil
 	return nil
+}
+
+// checkStringRegion returns how many bytes of the string region a
+// reference reached, and refuses a region that holds anything but strings.
+//
+// The region is not covered completely, and the reason is gc's. Its string
+// table adds the name of every symbol the writer traverses, and the
+// traversal reaches the inlined callees an AuxFuncInfo inline tree names,
+// while the block that writes reference names does not: it walks
+// references only, and an inlined callee of another package is reached
+// through the auxiliary symbols. A cross-package reference needs no name
+// in the object, so nothing points at those bytes and they are dead. A
+// hello-world program links about 9,000 such bytes.
+//
+// Dead strings are still strings, so what the reader can require is that
+// the region holds nothing else. A byte that is not graphic text is a
+// string reference the reader failed to resolve, and that is the failure
+// this accounting exists to catch.
+func (o *Object) checkStringRegion(b []byte, start, end uint32, base int64) (int, error) {
+	spans := o.stringIntervals
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].off != spans[j].off {
+			return spans[i].off < spans[j].off
+		}
+		return spans[i].end < spans[j].end
+	})
+	covered := 0
+	at := start
+	gap := func(lo, hi uint32) error {
+		if lo >= hi {
+			return nil
+		}
+		g := b[lo:hi]
+		if !utf8.Valid(g) {
+			return errorf(o.Name, base+int64(lo), "%d bytes of the string region that no reference reached are not text", hi-lo)
+		}
+		for i, r := range string(g) {
+			if !unicode.IsGraphic(r) {
+				return errorf(o.Name, base+int64(lo)+int64(i), "a byte of the string region that no reference reached is %q, and the region holds strings", r)
+			}
+		}
+		return nil
+	}
+	for _, s := range spans {
+		if err := gap(at, s.off); err != nil {
+			return 0, err
+		}
+		if s.off > at {
+			at = s.off
+		}
+		if s.end > at {
+			covered += int(s.end - at)
+			at = s.end
+		}
+	}
+	if err := gap(at, end); err != nil {
+		return 0, err
+	}
+	return covered, nil
 }
 
 // checkRefs verifies that every symbol reference the object holds resolves
@@ -602,32 +667,6 @@ func (o *Object) checkRefs(base int64) error {
 		}
 	}
 	return nil
-}
-
-// coveredBytes is the size of the union of a set of spans. Two references
-// to one string name the same span, so the union and not the sum is what
-// says how much of the region was reached.
-func coveredBytes(spans []strSpan) int {
-	if len(spans) == 0 {
-		return 0
-	}
-	sort.Slice(spans, func(i, j int) bool {
-		if spans[i].off != spans[j].off {
-			return spans[i].off < spans[j].off
-		}
-		return spans[i].end < spans[j].end
-	})
-	total, end := 0, spans[0].off
-	for _, s := range spans {
-		if s.off > end {
-			end = s.off
-		}
-		if s.end > end {
-			total += int(s.end - end)
-			end = s.end
-		}
-	}
-	return total
 }
 
 func le32(b []byte, off int) uint32 { return binary.LittleEndian.Uint32(b[off:]) }
