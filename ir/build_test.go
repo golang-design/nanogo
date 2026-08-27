@@ -1460,6 +1460,31 @@ func TestBuildEvaluationOrder(t *testing.T) {
 			body: `func f() { for p1() == 0 { } }`,
 			want: []string{"for((p.p1() == 0))"},
 		},
+		{
+			// The index names a variable the same statement writes, so a
+			// destination that read it at its own assignment would read the
+			// new value. It wrote a[0] rather than a[1] and the program ran.
+			what: "the index of a destination before any destination is written",
+			body: `func f(a []int, i int) { i, a[i] = 0, 99 }`,
+			want: []string{
+				".autotmp_0 = a",
+				".autotmp_1 = i",
+				"i = 0",
+				".autotmp_0[.autotmp_1] = 99",
+			},
+		},
+		{
+			// The same rule for a pointer indirection. It stored through the
+			// new pointer rather than the old one.
+			what: "the pointer of a destination before any destination is written",
+			body: `func f(p *int, q *int) { p, *p = q, 7 }`,
+			want: []string{
+				".autotmp_0 = p",
+				".autotmp_1 = q",
+				"p = .autotmp_1",
+				"*.autotmp_0 = 7",
+			},
+		},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			p := buildSource(t, tc.body)
@@ -1471,6 +1496,82 @@ func TestBuildEvaluationOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildRangeHoldsTheDestinationOperands is the same rule for a range
+// clause that assigns rather than declares.
+//
+// A clause with two destinations writes both once per iteration, which is a
+// parallel assignment, so the operands of the index expressions and the
+// pointer indirections on the left are evaluated before the first destination
+// is written. specs/021-ssa-construction.md writes the index and then the
+// element, so every destination's temporaries belong in front of the first
+// one and not in front of the destination they came from.
+//
+//	for i, x[i] = range y { break }
+//
+// wrote x[0] and left x[1] alone, which is test/range.go of Go's own corpus.
+//
+// The single destination is the other half. Its operands are still evaluated
+// once per iteration and not once in front of the loop, so "for a[p1()] =
+// range y" calls p1 on every iteration.
+func TestBuildRangeHoldsTheDestinationOperands(t *testing.T) {
+	initOf := func(t *testing.T, n *Node) []string {
+		t.Helper()
+		if n == nil {
+			return nil
+		}
+		out := make([]string, 0, len(n.Init))
+		for _, s := range n.Init {
+			out = append(out, buildStr(s))
+		}
+		return out
+	}
+	rangeOf := func(t *testing.T, body string) *Node {
+		t.Helper()
+		p := buildSource(t, body)
+		fn := buildFuncOf(t, p, "f")
+		for _, s := range fn.Body {
+			if s != nil && s.Op == ORange {
+				return s
+			}
+		}
+		t.Fatalf("%s built no range statement:\n%s", body, buildDump(fn))
+		return nil
+	}
+
+	t.Run("two destinations", func(t *testing.T) {
+		n := rangeOf(t, `func f(a []int, y []int, i int) { for i, a[i] = range y { } }`)
+		if len(n.Args) != 2 {
+			t.Fatalf("%d destinations, want two", len(n.Args))
+		}
+		want := []string{".autotmp_0 = a", ".autotmp_1 = i"}
+		if got := initOf(t, n.Args[0]); strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("the first destination holds\n%s\nwant\n%s",
+				strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+		if got := initOf(t, n.Args[1]); len(got) != 0 {
+			t.Errorf("the second destination holds %v, which is read after the first is written", got)
+		}
+		if got := buildStr(n.Args[1]); got != ".autotmp_0[.autotmp_1]" {
+			t.Errorf("the second destination is %s, want the held slice and the held index", got)
+		}
+	})
+
+	t.Run("one destination", func(t *testing.T) {
+		n := rangeOf(t, `func f(a []int, y []int) { for a[p1()] = range y { } }`)
+		if len(n.Args) != 1 {
+			t.Fatalf("%d destinations, want one", len(n.Args))
+		}
+		want := []string{".autotmp_0 = p.p1()"}
+		if got := initOf(t, n.Args[0]); strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("the destination holds\n%s\nwant\n%s",
+				strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+		if got := buildStr(n.Args[0]); got != "a[.autotmp_0]" {
+			t.Errorf("the destination is %s, want the slice and the held index", got)
+		}
+	})
 }
 
 // buildObjOf returns the object of a name in a function.

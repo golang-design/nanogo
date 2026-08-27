@@ -1386,7 +1386,9 @@ func (b *builder) rangeStmt(s *syntax.ForStmt, rc *syntax.RangeClause) {
 	n.X = x
 	n.Init = b.pop()
 
-	for _, lhs := range syntax.UnpackListExpr(rc.Lhs) {
+	dsts := syntax.UnpackListExpr(rc.Lhs)
+	var pre []Stmt
+	for _, lhs := range dsts {
 		if rc.Def {
 			name, _ := syntax.Unparen(lhs).(*syntax.Name)
 			if name == nil {
@@ -1396,24 +1398,39 @@ func (b *builder) rangeStmt(s *syntax.ForStmt, rc *syntax.RangeClause) {
 			n.Args = append(n.Args, b.name(name))
 			continue
 		}
-		// The destination's own temporaries stay with it rather than going
-		// into the list this statement is in, and it is not stabilized. A
-		// range clause's destination is written once per iteration, and the
-		// specification evaluates an index expression's operands with the
-		// assignment that reads it, so a temporary in front of the loop
-		// evaluates them once: "for a[f()] = range [2]int{}" calls f twice and
-		// hoisting the index calls it once. An expression's Init runs
-		// immediately before the expression, which is inside the loop.
-		//
-		// stabilize is right where a destination is read and written by one
-		// statement. This destination is written and never read.
+		// The destination's own temporaries stay with the statement rather
+		// than going into the list this statement is in. A range clause's
+		// destination is written once per iteration, and the specification
+		// evaluates an index expression's operands with the assignment that
+		// reads it, so a temporary in front of the loop evaluates them once:
+		// "for a[f()] = range [2]int{}" calls f twice and hoisting the index
+		// calls it once. An expression's Init runs immediately before the
+		// expression, which is inside the loop.
 		b.push()
 		dst := b.expr(lhs)
-		pre := b.pop()
-		if dst != nil && len(pre) > 0 {
-			dst.Init = append(pre, dst.Init...)
+		if len(dsts) > 1 {
+			// A clause with two destinations assigns them at once, which is a
+			// parallel assignment: the operands of the index expressions and
+			// the pointer indirections on the left are evaluated before the
+			// first destination is written.
+			dst = b.stabilizeParallel(dst)
 		}
+		pre = append(pre, b.pop()...)
 		n.Args = append(n.Args, dst)
+	}
+	// Every destination's temporaries go in front of the first destination
+	// that is written, and not in front of the destination they belong to.
+	// specs/021-ssa-construction.md writes the index and then the element, so
+	// a temporary held with the second one would read the first after the loop
+	// wrote it, and "for i, x[i] = range y" would write x[0] rather than x[1].
+	if len(pre) > 0 {
+		for _, dst := range n.Args {
+			if dst == nil {
+				continue
+			}
+			dst.Init = append(pre, dst.Init...)
+			break
+		}
 	}
 	n.Body = b.block(s.Body.List)
 	if rc.Def {
@@ -1632,7 +1649,7 @@ func (b *builder) assign(pos syntax.Pos, lhs, rhs []syntax.Expr, def bool) {
 	case len(lhs) == len(rhs):
 		dsts := make([]Expr, len(lhs))
 		for i := range lhs {
-			dsts[i] = b.stabilize(b.lvalue(lhs[i]))
+			dsts[i] = b.stabilizeParallel(b.lvalue(lhs[i]))
 		}
 		srcs := make([]Expr, len(rhs))
 		for i := range rhs {
@@ -1658,7 +1675,7 @@ func (b *builder) multiAssign(pos syntax.Pos, lhs []syntax.Expr, rhs syntax.Expr
 	}
 	dsts := make([]Expr, len(lhs))
 	for i := range lhs {
-		dsts[i] = b.stabilize(b.lvalue(lhs[i]))
+		dsts[i] = b.stabilizeParallel(b.lvalue(lhs[i]))
 	}
 	src := b.expr(rhs)
 	srcTypes := b.valueTypes(rhs, len(lhs))
@@ -1772,22 +1789,54 @@ func (b *builder) snapshot(n Expr) Expr {
 // stabilize holds the parts of a destination that are evaluated, so that the
 // destination can be written and read in one statement without evaluating
 // those parts twice.
-func (b *builder) stabilize(n Expr) Expr {
+//
+// A name is held as it is. The statement writes one destination, so nothing
+// between the two reads of the name can change it, which is what ++, -- and an
+// operation assignment need.
+func (b *builder) stabilize(n Expr) Expr { return b.hold(n, b.stable) }
+
+// stabilizeParallel is stabilize for a destination of a parallel assignment.
+//
+// The specification evaluates the operands of every index expression and every
+// pointer indirection on the left before it writes any destination, so a name
+// among those operands has to be read before the first write rather than at
+// the write that reads it. stabilize keeps a name, so
+//
+//	i, a[i] = 0, 99
+//
+// wrote a[0] instead of a[1], and
+//
+//	p, *p = &n, 7
+//
+// wrote through the new pointer instead of the old one. Each was a silent
+// wrong answer: the program ran and computed a value Go does not define.
+// test/range.go of Go's own corpus is the file that reports it.
+func (b *builder) stabilizeParallel(n Expr) Expr { return b.hold(n, b.snapshot) }
+
+// hold is stabilize with the treatment of a name as a parameter.
+//
+// The recursion carries the treatment, because a field of an array of a struct
+// is one destination and its innermost index is evaluated under the same rule
+// as its outermost one.
+func (b *builder) hold(n Expr, keep func(Expr) Expr) Expr {
 	if n == nil {
 		return nil
 	}
 	switch n.Op {
 	case OField:
-		n.X = b.stabilize(n.X)
+		n.X = b.hold(n.X, keep)
 	case ODeref:
-		n.X = b.stable(n.X)
+		n.X = keep(n.X)
 	case OIndex:
 		if n.X != nil && n.X.Type != nil && n.X.Type.Kind == Array {
-			n.X = b.stabilize(n.X)
+			// An array is the storage the assignment writes and not a value it
+			// reads, so the destination goes on naming it and the recursion
+			// carries on into whatever addresses it.
+			n.X = b.hold(n.X, keep)
 		} else {
-			n.X = b.stable(n.X)
+			n.X = keep(n.X)
 		}
-		n.Y = b.stable(n.Y)
+		n.Y = keep(n.Y)
 	}
 	return n
 }
