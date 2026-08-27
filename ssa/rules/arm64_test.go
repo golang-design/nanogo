@@ -46,10 +46,20 @@ var (
 	// map was never computed. The clear picks a different runtime symbol for
 	// each, and specs/031 says why: the wrong one leaves stale pointers
 	// visible to the collector.
+	//
+	// "Never computed" is Align zero and not an empty pointer map: ir.Layout
+	// leaves the map nil for every pointer-free type and states the invariant
+	// that a laid-out type has a non-zero alignment.
 	tPtrP = &ir.Type{Kind: ir.Ptr, Size: 8, Align: 8, Name: "**int",
 		Elem: &ir.Type{Kind: ir.Ptr, Size: 8, Align: 8, Elem: tI64, PtrBits: []byte{1}}}
 	tPtrX = &ir.Type{Kind: ir.Ptr, Size: 8, Align: 8, Name: "*unknown",
-		Elem: &ir.Type{Kind: ir.Struct, Size: 16, Align: 8}}
+		Elem: &ir.Type{Kind: ir.Struct, Size: 16}}
+	// A pointer-free region whose size is not a multiple of the pointer size,
+	// which is what a select with three clauses makes: the array selectgo
+	// orders the clauses through is [2*n]uint16.
+	tPtr12 = &ir.Type{Kind: ir.Ptr, Size: 8, Align: 8, Name: "*[6]uint16",
+		Elem: &ir.Type{Kind: ir.Array, Size: 12, Align: 2, Len: 6,
+			Elem: &ir.Type{Kind: ir.Uint16, Size: 2, Align: 2, Name: "uint16"}}}
 )
 
 // builder assembles a small SSA function by hand.
@@ -1458,6 +1468,20 @@ b0:
   t1 = Arg <**int>
   t2 = ARM64MOVDconst <uint64> [8]
   t3 = ARM64CALLstatic <mem> {runtime.memclrHasPointers} t1 t2 t0
+  t4 = ARM64RET <mem> t3
+  Ret t4
+`},
+		{"a clear of a pointer-free region of twelve bytes calls memclrNoHeapPointers", func() *ssa.Func {
+			p := newBuilder()
+			c := aux(p.val(ssa.OpZero, ssa.MemType, p.arg(tPtr12), p.mem), 12, nil)
+			p.setMem(c)
+			return p.ret()
+		}, `
+b0:
+  t0 = InitMem <mem>
+  t1 = Arg <*[6]uint16>
+  t2 = ARM64MOVDconst <uint64> [12]
+  t3 = ARM64CALLstatic <mem> {runtime.memclrNoHeapPointers} t1 t2 t0
   t4 = ARM64RET <mem> t3
   Ret t4
 `},

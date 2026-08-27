@@ -833,18 +833,29 @@ func lowerZero(v *ssa.Value, e *ssa.Edit) bool {
 // hasPointers reports whether the region a pointer addresses can hold a
 // pointer. The answer is the type's PtrBits, which ir.Layout computed once and
 // which the collector reads, so nothing recomputes it here.
+//
+// An empty pointer map is the answer for a type with no pointers and not the
+// absence of an answer: ir.Layout leaves PtrBits nil for every pointer-free
+// type, whatever its size, and ir.Type.HasPointers reads the field that way.
+// Layout's own invariant says which types were never given a map at all, and
+// it is not the size: "if t.Align != 0 then every type reachable from t has
+// Align != 0".
+//
+// Guessing "has pointers" for a type whose map is merely empty is not the safe
+// half of the choice. runtime.memclrHasPointers calls bulkBarrierPreWrite,
+// which throws when the address or the size is not a multiple of the pointer
+// size, so the guess turns every clear of a pointer-free region whose size is
+// not a multiple of eight into a fatal error at run time. A select with three
+// clauses is one: its ordering array is [6]uint16, which is twelve bytes.
 func hasPointers(ptr *ir.Type) bool {
-	if ptr == nil || ptr.Elem == nil {
-		// An address of unknown shape. Assume pointers: the clear that scans
-		// is slower and the clear that does not is corruption.
+	if ptr == nil || ptr.Elem == nil || ptr.Elem.Align == 0 {
+		// An address of unknown shape, or of a type ir.Layout never ran on, so
+		// there is no map to read rather than an empty one. Assume pointers:
+		// the clear that scans is slower and the clear that does not leaves
+		// stale pointers where the collector reads them.
 		return true
 	}
-	for _, b := range ptr.Elem.PtrBits {
-		if b != 0 {
-			return true
-		}
-	}
-	return len(ptr.Elem.PtrBits) == 0 && ptr.Elem.Size >= ir.PtrSize
+	return ptr.Elem.HasPointers()
 }
 
 // ---------------------------------------------------------------------------
