@@ -488,19 +488,18 @@ func runtimeCall(pos syntax.Pos, name string, args ...Expr) Stmt {
 //
 // # What a caller must still do
 //
-// The reference this section builds names a symbol, and nothing in this deck
-// writes that symbol into an object. Nothing calls this pass in a real build
-// either: driver/compile.go's pass list starts at ssa.Build, so a program that
-// reaches one of these rows is refused at compile time exactly as it was
-// before, and the corpus test is the only caller. specs/032 lists the three
-// wiring changes that close the seam and the order they have to land in. The
-// one that matters here is that calling this pass without a writer for the
-// descriptors turns a compile-time refusal into an undefined symbol at link
-// time, which is loud rather than silent.
+// The reference this section builds names a symbol and does not write it. The
+// caller collects the types through LowerAndCollect and hands them to the
+// writer: driver/compile.go runs this pass first, ahead of ssa.Build, and
+// emits a descriptor for every type the two passes named. A caller that ran
+// this pass without that writer would turn a compile-time refusal into an
+// undefined symbol at link time, which is loud rather than silent, and it is
+// the reason the collection and the pass are one call.
 //
-// The rows are built ahead of the writer for that reason: the count of causes
-// is what says which row to build next, and a row blocked on a writer in
-// another package should not read as a row blocked on this pass.
+// An earlier draft of this comment said the pass list started at ssa.Build and
+// that the corpus test was the only caller. Both stopped being true when
+// specs/032-type-descriptors-and-itabs.md landed the writer, and every row
+// here reaches a real build now.
 
 // rtypeType is the type of a type descriptor, as this pass sees it: six words,
 // which is the size of internal/abi.Type on a 64-bit target.
