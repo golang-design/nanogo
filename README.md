@@ -85,25 +85,14 @@ before `main` runs, and nanogo compiles none of those.
 
 ### Calling code the Go toolchain compiled
 
-`fmt.Println` is refused, for the reason below. Put the printing in a package
-nanogo does not compile, and it works:
-
-```go
-// say/say.go
-package say
-
-import "fmt"
-
-// Number writes n and a newline to standard output.
-// The Go toolchain compiles this package, so it may use anything Go has.
-func Number(n int) { fmt.Println(n) }
-```
+A package nanogo compiles calls the standard library directly. `fmt.Println`
+works, and so does everything under it:
 
 ```go
 // main.go
 package main
 
-import "count/say"
+import "fmt"
 
 func sum(xs ...int) int {
 	total := 0
@@ -114,7 +103,7 @@ func sum(xs ...int) int {
 }
 
 func main() {
-	say.Number(sum(1, 2, 3, 4))
+	fmt.Println(sum(1, 2, 3, 4))
 }
 ```
 
@@ -125,10 +114,10 @@ $ ./count
 10
 ```
 
-nanogo compiled the variadic function, the range loop and the call. The
-toolchain compiled `say` and the standard library under it. `fmt` works there
-because package initialization runs: `os.Stdout` is a real file by the time
-`main` starts.
+nanogo compiled the variadic function, the range loop, and the conversion of
+an `int` to the `any` that `fmt` takes. The toolchain compiled `fmt` and the
+standard library under it. Package initialization runs, so `os.Stdout` is a
+real file by the time `main` starts.
 
 ## Can nanogo compile your program?
 
