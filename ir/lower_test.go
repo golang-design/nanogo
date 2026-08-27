@@ -1761,7 +1761,6 @@ type W struct{ P *int }
 
 func f(v any) W { return v.(W) }`, OTypeAssert, "its own data word"},
 		{"a type switch on an interface case", `func f(v any) int { switch v.(type) { case error: return 1 }; return 0 }`, OTypeSwitch, "runtime.interfaceSwitch"},
-		{"recover whose value is read", `func f() { useAny(recover()) }`, ORecover, "no row"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},
 		{"range over a function", `func f(it func(func(int) bool)) { for v := range it { use(v) } }`, ORange, "range over func"},
 		{"println of an interface", `func f(v any) { println(v) }`, OPrintln, "an operand of interface"},
@@ -3341,4 +3340,38 @@ func ifaceWordRead(n *Node, index int) bool {
 	}
 	h := p.Type.Elem
 	return h.Kind == Struct && h.Name == "eface" && len(h.Fields) == 2
+}
+
+// TestLowerRecoverValueRead checks that a recover whose value is read is the
+// same call the statement form emits, with its result kept.
+//
+// The call must be the deferred function's own: runtime.gorecover counts the
+// frames between itself and runtime.gopanic and recovers only where there is
+// exactly one, so a helper around it would be a recover that never recovers.
+func TestLowerRecoverValueRead(t *testing.T) {
+	fn := lowerOK(t, `func f() { useAny(recover()) }`)
+	c := findCall(fn, "runtime.gorecover")
+	if c == nil {
+		t.Fatalf("recover did not reach gorecover: %v\n%s", lowerCalls(fn), buildDump(fn))
+	}
+	if len(c.Args) != 0 {
+		t.Errorf("gorecover takes %d arguments, want none", len(c.Args))
+	}
+	if c.Type == nil || c.Type.Kind != Interface {
+		t.Errorf("the call gives back a %v, want the interface recover returns", c.Type)
+	}
+	// One call and not two. A second would recover a panic the first already
+	// took, and the value the program reads would be nil.
+	if got := lowerCalls(fn); len(got) != 1 {
+		t.Errorf("the body calls %v, want one gorecover", got)
+	}
+}
+
+// TestLowerRecoverAssigned reads the value into a variable, which is the shape
+// of the idiom the specification is written around.
+func TestLowerRecoverAssigned(t *testing.T) {
+	fn := lowerOK(t, `func f() int { if r := recover(); r != nil { return 1 }; return 0 }`)
+	if !lowerCalled(fn, "runtime.gorecover") {
+		t.Errorf("recover did not reach gorecover: %v\n%s", lowerCalls(fn), buildDump(fn))
+	}
 }

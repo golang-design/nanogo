@@ -741,10 +741,10 @@ func (l *lowerer) stmt(s Stmt) {
 	case ORecover:
 		// recover() whose value nobody reads, which is the shape of the
 		// idiom: defer func() { recover() }(). It is handled here and not in
-		// expr because the position is what makes it buildable. The result is
-		// an interface, and a statement discards it, so nothing below the IR
-		// has to decompose one. A recover whose value is read reaches expr and
-		// is refused there.
+		// expr because a statement discards the result, so nothing below the
+		// IR has to place a pair of registers nobody reads. A recover whose
+		// value is read reaches expr, which builds the same call with its
+		// result kept.
 		//
 		// The call has to be in the deferred function itself.
 		// runtime.gorecover counts the frames between itself and
@@ -940,6 +940,8 @@ func (l *lowerer) expr(n Expr) Expr {
 		return l.closureExpr(n)
 	case OTypeAssert:
 		return l.typeAssert(n)
+	case ORecover:
+		return l.recoverExpr(n)
 	case OUnsafeAdd:
 		// Pointer arithmetic. The offset was written with an integer type of
 		// its own, which the specification leaves free, so it is widened to a
@@ -3788,4 +3790,29 @@ func (l *lowerer) typeSwitchCase(n, c *Node, x *ifaceRef) bool {
 	pre := l.pop()
 	c.Body = append(pre, l.stmts(c.Body)...)
 	return ok
+}
+
+// recoverExpr lowers a recover whose value is read.
+//
+// The call is the same one the statement form emits and it is in the same
+// place: the body of the deferred function itself. runtime.gorecover counts
+// the frames between itself and runtime.gopanic and recovers only where there
+// is exactly one, so a pass that moved this call into a helper would turn a
+// recover into a no-op that nothing reports.
+//
+// What separates this row from the statement form is only the result. recover
+// returns any, so the call gives back two words, and the value reaches an
+// ordinary interface destination from there: specs/030-abi.md places an
+// interface result in two registers and specs/025's decomposition splits it.
+// The statement form drops the result and is kept because dropping it costs
+// nothing.
+func (l *lowerer) recoverExpr(n Expr) Expr {
+	if n.Type == nil || n.Type.Kind != Interface {
+		l.refuse(n, "a recover whose result is not an interface")
+		return n
+	}
+	return &Node{
+		Op: OCall, Pos: n.Pos, Type: n.Type,
+		X: &Node{Op: OGlobal, Pos: n.Pos, Type: funcType, Obj: runtimeFunc("runtime.gorecover")},
+	}
 }
