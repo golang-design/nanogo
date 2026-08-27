@@ -46,6 +46,12 @@ type Body struct {
 	// Stmts is the body, and Rbrace is its closing brace.
 	Stmts  []Stmt
 	Rbrace Pos
+
+	// Dict is the object dictionary the declaration this body belongs to
+	// needs, which [BodySource.BuildBody] fills while it builds the body.
+	// It is nil for a body read from an archive, which names the slots of a
+	// dictionary that archive already holds.
+	Dict *Dict
 }
 
 // A Local is one local variable's declaration in a body.

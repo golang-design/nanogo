@@ -855,6 +855,46 @@ func buildOne(t *testing.T, src string) error {
 	return nil
 }
 
+// buildOneBody checks one source file and returns the body of its function f.
+func buildOneBody(t *testing.T, src string) (*Body, error) {
+	t.Helper()
+	dir := t.TempDir()
+	name := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(name, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fset := syntax.NewFileSet()
+	file, err := syntax.ParseFile(fset, name, nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &types2.Info{
+		Types:        make(map[syntax.Expr]types2.TypeAndValue),
+		Defs:         make(map[*syntax.Name]types2.Object),
+		Uses:         make(map[*syntax.Name]types2.Object),
+		Implicits:    make(map[syntax.Node]types2.Object),
+		Selections:   make(map[*syntax.SelectorExpr]*types2.Selection),
+		Scopes:       make(map[syntax.Node]*types2.Scope),
+		Instances:    make(map[*syntax.Name]types2.Instance),
+		FileVersions: make(map[*syntax.SrcFile]string),
+	}
+	conf := types2.Config{Fset: fset, Sizes: types2.SizesFor("gc", "arm64")}
+	pkg, err := conf.Check("a", []*syntax.File{file}, info)
+	if err != nil {
+		t.Fatalf("the source does not check: %v", err)
+	}
+	for _, d := range file.DeclList {
+		fd, ok := d.(*syntax.FuncDecl)
+		if !ok || fd.Name.Value != "f" {
+			continue
+		}
+		obj := info.Defs[fd.Name].(*types2.Func)
+		return NewBodySource(pkg, info, fset).BuildBody("a.f", obj.Signature(), fd.Body)
+	}
+	t.Fatal("the source declares no function f")
+	return nil, nil
+}
+
 // TestBuildBodyRefusals checks that a body the builder does not build is
 // refused by name.
 //
@@ -868,13 +908,13 @@ func TestBuildBodyRefusals(t *testing.T) {
 		src  string
 		want string
 	}{{
-		name: "a generic declaration",
-		src:  "package a\n\nfunc f[T any](x T) T { return x }\n",
-		want: "the declaration is generic",
-	}, {
-		name: "a method of a generic declaration",
+		name: "a method of a generic type",
 		src:  "package a\n\ntype T[X any] struct{ x X }\n\nfunc (t T[X]) f() X { return t.x }\n",
-		want: "the declaration is generic",
+		want: "the declaration is a method of a generic type",
+	}, {
+		name: "a type declared inside a generic declaration",
+		src:  "package a\n\nfunc f[T any](x T) any { type s struct{ v T }; return s{x} }\n",
+		want: "carries the enclosing type parameters",
 	}, {
 		name: "a loop over a function",
 		src:  "package a\n\nfunc g(yield func(int) bool) {}\n\nfunc f() { for range g {} }\n",
@@ -898,5 +938,71 @@ func TestBuildBodyRefusals(t *testing.T) {
 				t.Errorf("the refusal is %q and does not name the declaration", e.Error())
 			}
 		})
+	}
+}
+
+// TestBuildBodyFillsTheDictionary checks the slots a generic declaration's
+// body names.
+//
+// The corpus compares two encodings of one declaration, so it proves that the
+// slot a body names is the slot gc names. What it cannot prove is what the
+// slot holds: a dictionary with an entry too many, or with the entries in
+// another order, encodes a body to the same bytes. This names the entries.
+func TestBuildBodyFillsTheDictionary(t *testing.T) {
+	src := "package a\n\nfunc f[T any](x T) T {\n\tvar y []T\n\t_ = y\n\treturn x\n}\n"
+	body, err := buildOneBody(t, src)
+	if err != nil {
+		t.Fatalf("the builder refused a generic declaration: %v", err)
+	}
+	d := body.Dict
+	if d == nil {
+		t.Fatal("the body carries no dictionary")
+	}
+	if len(d.TypeParams) != 1 || d.TypeParams[0].Obj().Name() != "T" {
+		t.Fatalf("the dictionary holds %d type parameters and the declaration has one", len(d.TypeParams))
+	}
+	// T takes the first slot, because the parameter names it before the
+	// body does, and []T the second, because gc writes the element of the
+	// type a slice names before the element of the slice.
+	want := []string{"T", "[]T"}
+	got := make([]string, len(d.Derived))
+	for i, typ := range d.Derived {
+		got[i] = types2.TypeString(typ, nil)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("the derived types are %v and gc's order is %v", got, want)
+	}
+	// x is of type T and y of type []T, and each needs its runtime type to
+	// lay the frame out.
+	if len(d.RTypes) != 2 {
+		t.Errorf("the dictionary holds %d runtime types and the body needs two", len(d.RTypes))
+	}
+	if len(d.Itabs)+len(d.Subdicts)+len(d.MethodExprs) != 0 {
+		t.Errorf("the body names no method table, no subdictionary and no method expression, and the dictionary holds %d, %d and %d",
+			len(d.Itabs), len(d.Subdicts), len(d.MethodExprs))
+	}
+}
+
+// TestBuildBodyOfAnOrdinaryDeclarationHasNoDictionary checks that a
+// declaration with no type parameter names no slot.
+func TestBuildBodyOfAnOrdinaryDeclarationHasNoDictionary(t *testing.T) {
+	body, err := buildOneBody(t, "package a\n\nfunc f(x int) int { return x }\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := body.Dict
+	if d == nil {
+		t.Fatal("the body carries no dictionary")
+	}
+	if d.Generic() {
+		t.Error("the declaration declares no type parameter and the dictionary says it does")
+	}
+	if n := len(d.Derived) + len(d.RTypes) + len(d.Itabs) + len(d.Subdicts) + len(d.MethodExprs); n != 0 {
+		t.Errorf("the dictionary holds %d entries and an ordinary declaration needs none", n)
+	}
+	for i, l := range body.Params {
+		if l.DictRType != -1 {
+			t.Errorf("parameter %d holds dictionary slot %d and its type needs none", i, l.DictRType)
+		}
 	}
 }
