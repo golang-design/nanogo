@@ -92,6 +92,10 @@ type bodyWriter struct {
 	// order it named them. A literal's body is an element of its own, so
 	// whoever holds the elements has to write each one after this one.
 	nested []*FuncLitExpr
+
+	// check collects the reason the body cannot be offered for inlining,
+	// and is nil on the ordinary write path. See bodyinline.go.
+	check *inlineCheck
 }
 
 // refuse reports a body the encoder cannot write.
@@ -168,6 +172,7 @@ func (w *bodyWriter) typeUse(t TypeUse) {
 
 // objUse writes a use of a package-scope declaration.
 func (w *bodyWriter) objUse(o ObjUse) {
+	w.check.obj(o)
 	w.Sync(pkgbits.SyncObject)
 	if w.Version().Has(pkgbits.DerivedFuncInstance) {
 		w.Bool(false)
@@ -310,7 +315,9 @@ func (w *bodyWriter) exprType(t *ExprType) {
 func (w *bodyWriter) stmts(list []Stmt) {
 	w.Sync(pkgbits.SyncStmts)
 	for _, s := range list {
-		w.Code(s.stmtKind())
+		kind := s.stmtKind()
+		w.check.stmt(kind)
+		w.Code(kind)
 		w.stmt(s)
 	}
 	w.Code(StmtEnd)
@@ -663,7 +670,9 @@ func (w *bodyWriter) expr(e Expr) {
 		w.Code(ExprReshape)
 		w.typeUse(*rs)
 	}
-	w.Code(e.exprKind())
+	kind := e.exprKind()
+	w.check.expr(kind)
+	w.Code(kind)
 	w.expr1(e)
 }
 

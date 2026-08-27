@@ -5,6 +5,7 @@
 package export
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -21,9 +22,9 @@ import (
 // syntax and carries no index at all, so every reference is one the writer
 // allocated. Reading the file back is what says the allocation was right.
 
-// writeSource parses and type checks src as one package, builds the body of
-// every function it declares, and writes the export data.
-func writeSource(t *testing.T, path, src string, file func(string) string) ([]byte, *types2.Package, []InlineFunc) {
+// buildSource parses and type checks src as one package and builds the body of
+// every function it declares, in name order so that the set is fixed.
+func buildSource(t *testing.T, path, src string) (*types2.Package, []InlineFunc) {
 	t.Helper()
 	fset := syntax.NewFileSet()
 	sf := fset.AddFile(path+"/a.go", len(src))
@@ -47,16 +48,31 @@ func writeSource(t *testing.T, path, src string, file func(string) string) ([]by
 		t.Fatalf("check: %v", err)
 	}
 
-	src2 := NewBodySource(pkg, info, fset)
+	decls := declaredFuncs(info, []*syntax.File{f})
+	names := make([]string, 0, len(decls))
+	for name := range decls {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	source := NewBodySource(pkg, info, fset)
 	var funcs []InlineFunc
-	for name, fd := range declaredFuncs(info, []*syntax.File{f}) {
+	for _, name := range names {
+		fd := decls[name]
 		obj := info.Defs[fd.Name].(*types2.Func)
-		body, err := src2.BuildBody(path+"."+name, obj.Signature(), fd.Body)
+		body, err := source.BuildBody(path+"."+name, obj.Signature(), fd.Body)
 		if err != nil {
 			t.Fatalf("BuildBody(%s): %v", name, err)
 		}
-		funcs = append(funcs, InlineFunc{Obj: obj, Name: name, Cost: 1, Body: body})
+		funcs = append(funcs, InlineFunc{Obj: obj, Name: name, Cost: MaxInlineCost, Body: body})
 	}
+	return pkg, funcs
+}
+
+// writeSource builds every body of src and writes the export data.
+func writeSource(t *testing.T, path, src string, file func(string) string) ([]byte, *types2.Package, []InlineFunc) {
+	t.Helper()
+	pkg, funcs := buildSource(t, path, src)
 	payload, _, err := Write(pkg, false, &Bodies{Funcs: funcs, File: file})
 	if err != nil {
 		t.Fatalf("Write(%s): %v", path, err)
@@ -145,26 +161,34 @@ func Add(a, b int) int { return a + b }
 	}
 }
 
-// TestWriteCarriesAFunctionLiteralsBody is the case that makes a body a tree
-// of elements rather than one element.
-func TestWriteCarriesAFunctionLiteralsBody(t *testing.T) {
-	const src = `package p
+// litSource is a package whose one function holds a function literal.
+const litSource = `package p
 
 func Make(n int) func() int {
 	return func() int { return n }
 }
 `
-	payload, _, _ := writeSource(t, "xtest/r", src, nil)
-	dec := pkgbits.NewPkgDecoder("xtest/r", string(payload))
-	if n := dec.NumElems(pkgbits.SectionBody); n != 2 {
-		t.Fatalf("the file holds %d body elements, want 2", n)
+
+// TestWriteEncodesAFunctionLiteralAsItsOwnElement is the case that makes a
+// body a tree of elements rather than one element.
+func TestWriteEncodesAFunctionLiteralAsItsOwnElement(t *testing.T) {
+	pkg, funcs := buildSource(t, "xtest/r", litSource)
+	pw := newPkgWriter(pkg, nil, nil)
+	pw.writeBody("xtest/r", funcs[0].Name, funcs[0].Body, nil)
+	if n := pw.NumElems(pkgbits.SectionBody); n != 2 {
+		t.Fatalf("the writer wrote %d body elements, want 2", n)
 	}
-	bodies := readBack(t, "xtest/r", payload)
-	if len(bodies) != 1 {
-		t.Fatalf("the private root lists %d bodies, want 1", len(bodies))
-	}
-	if bodies[0].Nested != 1 {
-		t.Errorf("the body names %d function literals, want 1", bodies[0].Nested)
+}
+
+// TestWriteDoesNotOfferABodyWithAFunctionLiteral is the first shape's limit.
+//
+// The writer encodes a function literal's body, and the set nanogo offers gc
+// for inlining does not hold one yet. So the element is writable and the body
+// is not offered, and the file carries neither.
+func TestWriteDoesNotOfferABodyWithAFunctionLiteral(t *testing.T) {
+	payload, _, _ := writeSource(t, "xtest/r", litSource, nil)
+	if bodies := readBack(t, "xtest/r", payload); len(bodies) != 0 {
+		t.Fatalf("the file carries %d bodies, want none", len(bodies))
 	}
 }
 
@@ -246,7 +270,7 @@ func TestWriteRefusesAGenericBodyItWasHanded(t *testing.T) {
 				err, _ = v.(error)
 			}
 		}()
-		pw.writeBody("xtest/t", "F", body)
+		pw.writeBody("xtest/t", "F", body, nil)
 		return nil
 	}()
 	if err == nil {
@@ -254,5 +278,60 @@ func TestWriteRefusesAGenericBodyItWasHanded(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dictionary") {
 		t.Errorf("the refusal is %q and does not name the dictionary", err)
+	}
+}
+
+// TestWriteDoesNotOfferABodyGcCannotInline names the two shapes that make an
+// inlined body a wrong program rather than a slow one, and the one gc's own
+// inliner refuses outright.
+func TestWriteDoesNotOfferABodyGcCannotInline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+	}{
+		{"recover", `package p
+
+func F() any { return recover() }
+`},
+		{"defer", `package p
+
+func F(f func()) { defer f() }
+`},
+		{"go", `package p
+
+func F(f func()) { go f() }
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pkg, funcs := buildSource(t, "xtest/"+tc.name, tc.src)
+			if len(funcs) != 1 {
+				t.Fatalf("built %d bodies, want 1", len(funcs))
+			}
+			if kept := writableBodies(pkg, nil, funcs); len(kept) != 0 {
+				t.Fatalf("the writer offered %s for inlining", kept[0].Name)
+			}
+		})
+	}
+}
+
+// TestWriteOffersAnOrdinaryBody is the other side of the check: a body with
+// none of those shapes is offered, so the check is a filter and not a wall.
+func TestWriteOffersAnOrdinaryBody(t *testing.T) {
+	const src = `package p
+
+func Abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+`
+	pkg, funcs := buildSource(t, "xtest/ok", src)
+	kept := writableBodies(pkg, nil, funcs)
+	if len(kept) != 1 {
+		t.Fatalf("the writer offered %d bodies, want 1", len(kept))
+	}
+	if kept[0].Cost != MaxInlineCost {
+		t.Errorf("the body is offered at cost %d, want %d", kept[0].Cost, MaxInlineCost)
 	}
 }

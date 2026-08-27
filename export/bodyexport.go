@@ -178,9 +178,12 @@ func (pw *pkgWriter) litBodyIdx(e *FuncLitExpr) pkgbits.Index {
 // @@@ Writing the elements
 
 // writeBody writes b into a new element and returns its index.
-func (pw *pkgWriter) writeBody(path, name string, b *Body) pkgbits.Index {
+//
+// check collects the reasons the body cannot be offered for inlining and is
+// nil on the write path, where the decision has already been made.
+func (pw *pkgWriter) writeBody(path, name string, b *Body, check *inlineCheck) pkgbits.Index {
 	enc := pw.NewEncoder(pkgbits.SectionBody, pkgbits.SyncFuncBody)
-	pw.encodeBodyInto(enc, path, name, b)
+	pw.encodeBodyInto(enc, path, name, b, check)
 	return enc.Idx
 }
 
@@ -190,8 +193,8 @@ func (pw *pkgWriter) writeBody(path, name string, b *Body) pkgbits.Index {
 // A literal's body is an element of its own, so a body is a tree of elements
 // and not one element. The walk is depth first in the order the literals were
 // named, which is the order gc's own writer produces.
-func (pw *pkgWriter) encodeBodyInto(enc *pkgbits.Encoder, path, name string, b *Body) {
-	w := &bodyWriter{Encoder: enc, refs: pw.refs, path: path, name: name}
+func (pw *pkgWriter) encodeBodyInto(enc *pkgbits.Encoder, path, name string, b *Body, check *inlineCheck) {
+	w := &bodyWriter{Encoder: enc, refs: pw.refs, path: path, name: name, check: check}
 	w.encodeBody(b)
 	enc.Flush()
 
@@ -199,7 +202,7 @@ func (pw *pkgWriter) encodeBodyInto(enc *pkgbits.Encoder, path, name string, b *
 		if lit.Decoded == nil {
 			w.refuse("a function literal in the body carries no body of its own")
 		}
-		pw.encodeBodyInto(pw.lits[lit], path, name+".func", lit.Decoded)
+		pw.encodeBodyInto(pw.lits[lit], path, name+".func", lit.Decoded, check)
 	}
 }
 
@@ -212,7 +215,7 @@ func (pw *pkgWriter) writeBodies(path string, funcs []InlineFunc) []bodyEntry {
 	out := make([]bodyEntry, 0, len(funcs))
 	for i := range funcs {
 		fn := &funcs[i]
-		out = append(out, bodyEntry{path: path, name: fn.Name, idx: pw.writeBody(path, fn.Name, fn.Body)})
+		out = append(out, bodyEntry{path: path, name: fn.Name, idx: pw.writeBody(path, fn.Name, fn.Body, nil)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].idx < out[j].idx })
 	return out
@@ -221,11 +224,14 @@ func (pw *pkgWriter) writeBodies(path string, funcs []InlineFunc) []bodyEntry {
 // @@@ Deciding which bodies can be written
 
 // writableBodies returns the entries of funcs whose bodies the writer can
-// allocate every element of.
+// allocate every element of and gc's inliner can be offered.
 //
 // A body is optional data. The declaration it belongs to is written either
-// way, so a body the writer cannot allocate an element for is left out rather
-// than made a refusal of the package.
+// way, so a body that fails either test is left out rather than made a
+// refusal of the package. Which declarations reach here at all is the
+// caller's decision: the driver refuses one by what the declaration is, such
+// as a //go: directive it carries, and this refuses one by what its body
+// holds.
 //
 // The decision is made by writing the body into a package the caller never
 // sees. Which elements a body needs is a property of the types and the
@@ -242,10 +248,14 @@ func writableBodies(pkg *types2.Package, file func(string) string, funcs []Inlin
 	probe := newPkgWriter(pkg, nil, file)
 	for i := range funcs {
 		fn := funcs[i]
-		if !writesInto(probe, pkg.Path(), &fn) {
+		check := &inlineCheck{}
+		if !writesInto(probe, pkg.Path(), &fn, check) {
 			// The probe now holds elements it claimed and did not fill, so
 			// it cannot answer for the next body. Start a fresh one.
 			probe = newPkgWriter(pkg, nil, file)
+			continue
+		}
+		if check.reason != "" {
 			continue
 		}
 		out = append(out, fn)
@@ -253,12 +263,13 @@ func writableBodies(pkg *types2.Package, file func(string) string, funcs []Inlin
 	return out
 }
 
-// writesInto reports whether probe can write fn's body.
+// writesInto reports whether probe can write fn's body, and fills check with
+// what would keep the body from being offered for inlining.
 //
 // Only the writer's own two refusals are caught. Anything else is a defect in
 // the writer rather than a body it has no shape for, and swallowing it here
 // would turn it into a body that silently never reaches a file.
-func writesInto(probe *pkgWriter, path string, fn *InlineFunc) (ok bool) {
+func writesInto(probe *pkgWriter, path string, fn *InlineFunc, check *inlineCheck) (ok bool) {
 	defer func() {
 		switch v := recover().(type) {
 		case nil:
@@ -269,6 +280,6 @@ func writesInto(probe *pkgWriter, path string, fn *InlineFunc) (ok bool) {
 			panic(v)
 		}
 	}()
-	probe.writeBody(path, fn.Name, fn.Body)
+	probe.writeBody(path, fn.Name, fn.Body, check)
 	return true
 }
