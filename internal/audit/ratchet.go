@@ -85,17 +85,18 @@ const ratchetHeader = `# What the probe corpus proved about nanogo, on the day t
 #	                  the whole fix and is the right resting state until the
 #	                  front end exists, because a variable that is silently
 #	                  empty is worse than a build that stops.
-#	panic-fires       refused. A non-empty interface leads with an *itab and an
+#	panic-fires       ok. A non-empty interface leads with an *itab and an
 #	                  empty one leads with a *_type, and the conversion between
 #	                  them was the identity, so an *itab reached the slot the
-#	                  runtime reads a descriptor out of.
+#	                  runtime reads a descriptor out of. It is a guarded load of
+#	                  the descriptor out of the itab now, the way
+#	                  cmd/compile's walkConvInterface does it.
 #
-# That last fix took panic-iface from ok to refused, which this file records as
-# a fall. The fall is intentional and reviewed. panic-iface holds the identical
-# construct and passes nil, so the miscompiled path never ran: it was ok because
-# the probe did not reach the bug, not because the program was compiled right.
-# The conversion reads the descriptor out of the itab behind a nil check, the
-# way cmd/compile's walkConvInterface does, and specs/032 owns it.
+# That fix passed through a reviewed fall on the way. Refusing the conversion
+# took panic-iface from ok to refused for as long as the conversion was unbuilt,
+# because panic-iface holds the identical construct and passes nil: it was ok
+# because the probe did not reach the bug, not because the program was compiled
+# right. Both are ok now.
 #
 # The go:embed refusal is pinned as an exact string in driver/help_test.go:
 # "go:embed". That coupling is deliberate. Changing one
