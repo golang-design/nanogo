@@ -1,6 +1,6 @@
 ---
 title: "The linker"
-status: draft
+status: in progress
 layer: back end
 gate: G2
 depends_on:
@@ -10,22 +10,24 @@ depends_on:
 
 # Linker
 
-**This spec describes unbuilt work.** There is no `link` package. nanogo's
-objects are linked by `go tool link`, and that is the one external dependency
-this deck most depends on being kept: `ssagen`'s `TestLinkAndRun` calls it 25
-times to turn compiled source into a running process, and
-[040](040-object-format.md)'s whole proof rests on it accepting the object.
-Every `nanogo build` says so on the way out, on success and on failure alike:
-`nanogo: the executable was written by go tool link; nanogo has no linker
-(specs/045-linker.md)`. The line names this file, so a reader who wonders what
-wrote the binary arrives here.
+**The first two stages are built and the rest is not.** The `link` package
+reads objects and archives, and it marks what a program uses from the entry
+point. It assigns no addresses, builds no `pclntab` and no `moduledata`, and
+writes no executable, so nanogo's objects are still linked by `go tool link`.
+That is the one external dependency this deck most depends on being kept:
+`ssagen`'s `TestLinkAndRun` calls it to turn compiled source into a running
+process, and [040](040-object-format.md)'s whole proof rests on it accepting
+the object. Every `nanogo build` says so on the way out, on success and on
+failure alike: `nanogo: the executable was written by go tool link; nanogo has
+no linker (specs/045-linker.md)`. The line names this file, so a reader who
+wonders what wrote the binary arrives here.
 
 So the reader should hold two facts together. Every claim below about what a Go
 linker must build, `pclntab` and `moduledata` and the ABI wrappers, is
 knowledge nanogo has acted on from the writing side: the object carries the
 `AuxFuncInfo`, the pc-value tables and the funcdata that a linker assembles
-into those structures, and `cmd/link` reads them. None of the reading side
-exists.
+into those structures, and `cmd/link` reads them. Of the reading side, the
+reader and the reachability pass exist.
 
 The gate for G2 ([001](001-bootstrap-gates.md)): nanogo cannot claim toolchain
 independence while `go tool link` produces its executables. This spec is one of
@@ -124,8 +126,8 @@ that is already in the tree, and none of them needs the stage after it.
 
 | Stage | What proves it |
 | --- | --- |
-| Read a `goobj` archive back into symbols, relocations and aux records | Round trip: read what `obj` wrote and compare against the structures that produced it. `go tool nm` and `go tool objdump` are the second opinion, and both already read nanogo's objects |
-| Reachability from the entry point | The set nanogo keeps against the set `cmd/link -dumpdep` reports for the same program |
+| **Built.** Read a `goobj` archive back into symbols, relocations and aux records | Round trip: read what `obj` wrote and compare against the structures that produced it. `go tool nm` is the second opinion, and it agrees over the whole archive set of a real build |
+| **Built.** Reachability from the entry point | The set nanogo keeps against the set `cmd/link -dumpdep` reports for the same program. Two programs, one of 9,024 and one of 13,807 named symbols, agree exactly, and so does every interface and reflection attribute the dump prints |
 | Address assignment over text, rodata, data and bss | Section sizes against `cmd/link`'s for the same objects, which [040](040-object-format.md)'s tests already link |
 | `pclntab` | A panic deep in a call chain prints the same stack, with the same line numbers, as the `cmd/link` build of the same source. `runtime.Callers` agrees |
 | `moduledata` | The runtime starts. Nothing subtler is needed: a wrong `moduledata` does not boot |
@@ -280,10 +282,38 @@ without it.
 The oracle is `cmd/link -dumpdep`, which prints one line per edge the same
 pass traverses. The comparison is over the symbol *set* and not the edge
 list, because the edge list depends on the order a work queue pops and two
-correct implementations may differ there. Three normalisations make the two
-sets comparable: a symbol with no name is printed by neither side, a name
-in the dump carries an attribute suffix that is stripped before the compare
-and checked separately, and two statics of one name are one line.
+correct implementations may differ there. Two normalisations make the sets
+comparable: a symbol with no name is printed by neither side, and a name in
+the dump carries an attribute suffix, which is stripped before the compare
+and then checked on its own. The suffix is stripped as a suffix and not
+found by searching, because a symbol name holds spaces and angle brackets
+of its own: `go:string." < "` is a real symbol.
+
+### Two facts the oracle produced
+
+Both were found by the disagreement and neither is in `cmd/link`'s
+documentation.
+
+**A marker relocation says what a type is and not that the program uses
+it.** `R_USEIFACE` and the first of a method's three `R_METHODOFF`
+relocations mark their target as a type that reached an interface. They do
+not make it reachable. A pass that marks the target keeps every type any
+compiled function converts to an interface, whether or not that function is
+in the binary, and then keeps the methods of all of them. What the marker
+does is set the attribute, and re-visit the target *only if it was already
+reached*, so that its child types inherit the attribute. Marking
+unconditionally kept 1,104 symbols `cmd/link` drops, out of 9,024.
+
+**The order objects are loaded in decides which of two content-identical
+symbols keeps its name.** A content-addressable symbol merges by hash, and
+the first definition of a hash is the one the whole program then refers to.
+Two loaders that agree on every symbol can disagree on 15 names out of
+9,024, one name per merged pair, purely because they read the archives in
+different orders. `cmd/link` loads the main package and then the packages
+each object names in its Autolib list, breadth first, and a linker that
+wants the same names loads them the same way. The set is the same either
+way, so this is a fact about names and not about reachability, which is why
+it takes a comparison by name to see it.
 
 ## Scope, stated as exclusions
 
@@ -305,6 +335,13 @@ sections, and a fixed load layout.
 
 ## Testing
 
+- The reader reads every archive of a real build, and refuses one it cannot
+  account for. `go tool nm` reports the same symbols.
+- Reachability is compared with `cmd/link -dumpdep` on the same archives, over
+  the symbol set and over the attributes.
+- The descriptor decoders the method pass needs are checked against gc's own
+  naming: a decoded method name is the tail of the symbol name of the function
+  its relocations point at, and an itab holds the type its name says.
 - Link nanogo's own objects and run the result. This is G2's gate and it is the
   test that matters.
 - Compare against `go tool link` on the same objects: same entry point, same
@@ -329,3 +366,6 @@ sections, and a fixed load layout.
   states it once. This spec states the shape and not its history.
 - The absence of a `link` package was found by listing the tree against
   [002](002-architecture.md)'s package layout.
+- The string region was said to be covered completely by the strings some
+  block references. The measurement said otherwise and named the reason,
+  which is now the section above.

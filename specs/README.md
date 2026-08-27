@@ -125,7 +125,7 @@ believed.
 | [042](042-arm64-backend.md) | arm64 backend | `in progress` | the first target |
 | [043](043-amd64-backend.md) | amd64 backend | `draft` | the test of target neutrality; not written |
 | [044](044-plan9-assembler.md) | Plan 9 assembler | `draft` | G3; not written |
-| [045](045-linker.md) | Linker | `draft` | G2; `pclntab` and `moduledata`; not written |
+| [045](045-linker.md) | Linker | `in progress` | G2; the object reader and reachability agree with `cmd/link`; addresses, `pclntab` and `moduledata` not written |
 | [046](046-debug-info.md) | Debug information | `in progress` | tracebacks built, DWARF not |
 
 ### Driver
