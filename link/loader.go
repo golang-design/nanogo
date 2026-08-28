@@ -85,6 +85,11 @@ type Loader struct {
 	synth         []synthetic
 	extra         map[Global][]Global
 	mainInitTasks Global
+
+	// strvars is the value the linker gives each string variable the
+	// compiler left zero filled. [Loader.SetStringVar] records them and
+	// specs/045-linker.md says why .bss cannot be laid out without them.
+	strvars []stringVar
 }
 
 // A synthetic symbol is one the linker built. It has a name, a version,

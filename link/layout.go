@@ -116,6 +116,11 @@ const (
 	symTextEnd    = "runtime.etext"
 )
 
+// fipsBracketSize is the space each FIPS bracketing symbol takes. One
+// byte is enough to give the symbol an address of its own, which is all
+// a bracket is for.
+const fipsBracketSize = 1
+
 // A library is one package as the layout sees it: the objects of one
 // archive, and the packages its objects name in their Autolib lists.
 type library struct {
@@ -150,6 +155,10 @@ type Layout struct {
 	addr []uint64
 	kind []Kind
 	libs []*library
+	// made is the symbols this stage built. A linker writes into the
+	// program as well as reading from it, and a symbol the reachability
+	// pass never saw is reachable because the linker made it.
+	made map[Global]bool
 }
 
 // Addr returns the address a symbol was given, and whether it has one.
@@ -186,6 +195,7 @@ func (l *Loader) Layout(r *Reachability, t *Target) *Layout {
 		target: t,
 		addr:   make([]uint64, l.NSym()),
 		kind:   make([]Kind, l.NSym()),
+		made:   map[Global]bool{},
 	}
 	a.buildLibraries()
 	a.assignText(r)
@@ -194,8 +204,41 @@ func (l *Loader) Layout(r *Reachability, t *Target) *Layout {
 			a.kind[g] = a.group(g, s)
 		}
 	}
+	a.applyInitTasks(r)
+	a.applyStringVars(r)
 	a.assignData(r)
 	return a
+}
+
+// reachable reports whether a symbol takes space in the output.
+//
+// It is the reachability pass's answer for a symbol an object defines,
+// and true for a symbol this stage built, which the pass ran too early to
+// see.
+func (a *Layout) reachable(r *Reachability, g Global) bool {
+	return r.Reachable(g) || a.made[g]
+}
+
+// define builds a symbol this stage adds to the program and returns it.
+//
+// The alignment is left unset, so the layout gives it the one its size
+// asks for. That is cmd/link's rule for a symbol its own passes create:
+// every one of them is built with a size and no alignment.
+func (a *Layout) define(name string, kind Kind, size uint32) Global {
+	g := a.l.addSynthetic(name, VerABI0, kind, size, nil)
+	a.setKind(g, kind)
+	return g
+}
+
+// setKind records the kind of a symbol this stage built, growing the
+// tables when the symbol is one the loader added after they were sized.
+func (a *Layout) setKind(g Global, kind Kind) {
+	for int(g) >= len(a.addr) {
+		a.addr = append(a.addr, 0)
+		a.kind = append(a.kind, Kxxx)
+	}
+	a.kind[g] = kind
+	a.made[g] = true
 }
 
 // Section returns the output section of a name, or nil.
@@ -306,13 +349,7 @@ func (a *Layout) assignText(r *Reachability) {
 		name string
 		kind Kind
 	}{{textFIPSStart, KTEXTFIPSSTART}, {textFIPSEnd, KTEXTFIPSEND}} {
-		g := l.addSynthetic(br.name, VerABI0, br.kind, 1, nil)
-		for int(g) >= len(a.addr) {
-			a.addr = append(a.addr, 0)
-			a.kind = append(a.kind, Kxxx)
-		}
-		a.kind[g] = br.kind
-		textp = append(textp, g)
+		textp = append(textp, a.define(br.name, br.kind, fipsBracketSize))
 	}
 
 	seen := make([]bool, l.NSym())
@@ -500,24 +537,25 @@ func (a *Layout) dataAlign(g Global) int64 {
 
 // The sections this stage lays out, and the ones it does not.
 //
-// A section is laid out here when every symbol in it comes out of an
-// object, because then the two linkers have the same members and the
-// size is a number they must agree on. Five are in that position, and
-// what the linker adds to each of them has size zero:
+// A section is laid out here when the two linkers agree on what is in
+// it, because then the size is a number they must agree on:
 //
 //	.go.module   the module descriptor, in a section of its own
+//	.bss         the zero filled data that holds a pointer
 //	.noptrbss    the zero filled data that holds no pointer
 //	.go.type     the type descriptors and the itabs
 //	.go.func     the function descriptors
 //
-// The rest are not, and the reason is never that the arithmetic is
-// unknown. .rodata holds the garbage collection data for the globals and
-// the typelink and itablink tables, .gopclntab holds a structure of its
-// own, and .noptrdata and .data hold the FIPS brackets, none of which is
-// built. .bss is the one that is blocked on an input rather than on a
-// stage: the linker fills in three string variables that the compiler
-// left zero filled, which moves them from .bss to .data, and one of the
-// three is named by the import configuration rather than by the objects.
+// Four of the five hold only symbols the objects define, and what the
+// linker adds to those four has size zero. .bss holds the same symbols
+// less the string variables [Layout.applyStringVars] moves out of it, so
+// the caller must name those before this runs.
+//
+// The rest are not laid out here, and the reason is never that the
+// arithmetic is unknown. .rodata holds the garbage collection data for
+// the globals, .gopclntab holds a structure of its own, and .noptrdata
+// and .data hold the FIPS brackets and the symbols the initialisation
+// task list and the module descriptor add, none of which is built.
 // cmd/link also breaks a tie between two symbols of one size by its own
 // symbol numbering, which counts the symbols the unbuilt stages create,
 // so two symbols of one size can be laid out in an order this package
@@ -528,7 +566,7 @@ func (a *Layout) assignData(r *Reachability) {
 	buckets := make([][]Global, numKind)
 	for g := Global(1); g < Global(len(a.kind)); g++ {
 		k := a.kind[g]
-		if k == Kxxx || k.IsText() || !r.Reachable(g) {
+		if k == Kxxx || k.IsText() || !a.reachable(r, g) {
 			continue
 		}
 		buckets[k] = append(buckets[k], g)
@@ -547,6 +585,7 @@ func (a *Layout) assignData(r *Reachability) {
 			Syms:   []Global{g},
 		})
 	}
+	a.addSection(a.dataSection(".bss", 0, buckets, KBSS))
 	a.addSection(a.dataSection(".noptrbss", 0, buckets, KNOPTRBSS, KGCMASK, KCOVERAGE_COUNTER))
 	// The type descriptors start one pointer into their section, so that
 	// no type reference has offset zero.

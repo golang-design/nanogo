@@ -76,7 +76,37 @@ func (l *Loader) initTaskSym(root, name string) Global {
 			targets = append(targets, g)
 		}
 	}
-	return l.addSynthetic(name, VerABI0, Kxxx, 0, targets)
+	// The list is initialised data and not read-only, which cmd/link's
+	// inittaskSym marks with a reference to issue 58857. The size is one
+	// pointer per record and it is given at layout time, where the width
+	// of a pointer is known.
+	return l.addSynthetic(name, VerABI0, KNOPTRDATA, 0, targets)
+}
+
+// applyInitTasks gives the initialisation task lists their sizes and
+// moves the runtime's slice header to the initialised data.
+//
+// The lists are the linker's own symbols and hold one pointer per record
+// that has a function to run. The header is a variable the runtime
+// declares and the compiler left zero filled, and the linker fills it in
+// with the address of the list and the two counts, which moves it out of
+// .bss the way a string variable moves.
+func (a *Layout) applyInitTasks(r *Reachability) {
+	l := a.l
+	for _, name := range []string{"go:main.inittasks", "go:runtime.inittasks"} {
+		g := l.Lookup(name, VerABI0)
+		syn := l.synthetic(g)
+		if syn == nil || !a.reachable(r, g) {
+			continue
+		}
+		syn.size = uint32(a.target.PtrSize) * uint32(len(syn.targets))
+		a.setKind(g, syn.kind)
+	}
+	if g := l.Lookup("runtime.runtime_inittasks", VerABI0); g != 0 && a.reachable(r, g) {
+		if a.kind[g] == KBSS {
+			a.kind[g] = KNOPTRDATA
+		}
+	}
 }
 
 // MainInitTasks is the list the program runs at startup, or 0.

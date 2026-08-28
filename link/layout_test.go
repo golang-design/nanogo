@@ -97,12 +97,12 @@ func TestTextLayoutAgreesWithTheLinker(t *testing.T) {
 // for address assignment, over the data sections a linker at this stage
 // can lay out completely.
 //
-// Every symbol in these four comes out of an object, so the two linkers
-// have the same members and the size is a number they must agree on. The
-// other sections hold pclntab, the garbage collection data for the
-// globals, the typelink and itablink tables and the FIPS brackets, none
-// of which is built, and .bss holds the string variables the linker
-// fills in, one of which the import configuration names.
+// The two linkers have the same members in these five, so the size is a
+// number they must agree on. Four hold only symbols the objects define.
+// .bss holds those less the string variables the linker fills in, which
+// [setStringVars] gives it from the same places cmd/link takes them
+// from. The sections this stage does not build hold pclntab, the garbage
+// collection data for the globals and the FIPS brackets.
 func TestDataSectionSizesAgreeWithTheLinker(t *testing.T) {
 	target := TargetFor(runtime.GOOS, runtime.GOARCH)
 	if target == nil || runtime.GOOS != "darwin" {
@@ -112,6 +112,7 @@ func TestDataSectionSizesAgreeWithTheLinker(t *testing.T) {
 	// replaced and the leading one doubled.
 	machoName := map[string]string{
 		".go.module": "__go_module",
+		".bss":       "__bss",
 		".noptrbss":  "__noptrbss",
 		".go.type":   "__go_type",
 		".go.func":   "__go_func",
@@ -122,6 +123,7 @@ func TestDataSectionSizesAgreeWithTheLinker(t *testing.T) {
 			want := machoSections(t, linkExe(t, b))
 
 			l := loadProgram(t, b)
+			setStringVars(t, l, b)
 			l.InitTasks()
 			r := l.Deadcode(runtime.GOOS, runtime.GOARCH)
 			a := l.Layout(r, target)
@@ -182,4 +184,61 @@ func TestRuntimePackagesMatchTheToolchain(t *testing.T) {
 			len(want), len(got), want, got)
 	}
 	t.Logf("%d runtime packages agree with the installed toolchain", len(got))
+}
+
+// setStringVars gives the loader the string variables the linker fills
+// in, from the places cmd/link takes them from.
+//
+// None of the three is in any object. The module graph reaches cmd/link
+// through the modinfo line of the import configuration, and the two
+// others are the toolchain's description of itself, which it prints for
+// -V. Reading them from the executable would prove nothing, because the
+// executable is the thing under comparison.
+func setStringVars(t *testing.T, l *Loader, b *build) {
+	t.Helper()
+	goCmd := goTool(t)
+	if root := strings.TrimSpace(string(out(t, goCmd, "env", "GOROOT"))); root != "" {
+		// cmd/go clears GOROOT for -trimpath, and cmd/link then leaves
+		// the variable alone rather than writing an empty string.
+		l.SetStringVar("runtime.defaultGOROOT", root)
+	}
+	l.SetStringVar("runtime.buildVersion", linkerBuildVersion(t, goCmd))
+	data, err := os.ReadFile(b.cfg)
+	if err != nil {
+		t.Fatalf("reading the import configuration: %v", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		arg, ok := strings.CutPrefix(line, "modinfo ")
+		if !ok {
+			continue
+		}
+		info, err := strconv.Unquote(strings.TrimSpace(arg))
+		if err != nil {
+			t.Fatalf("the import configuration has a modinfo line this cannot read: %v", err)
+		}
+		l.SetStringVar("runtime.modinfo", info)
+	}
+}
+
+// linkerBuildVersion is the value cmd/link writes into
+// runtime.buildVersion.
+//
+// It is the toolchain version, and the experiments that differ from the
+// baseline appended. The linker prints the same pair for -V, with a
+// space where the variable takes a dash for a version that holds none.
+func linkerBuildVersion(t *testing.T, goCmd string) string {
+	t.Helper()
+	line := strings.TrimSpace(string(out(t, goCmd, "tool", "link", "-V")))
+	version, ok := strings.CutPrefix(line, "link version ")
+	if !ok {
+		t.Fatalf("go tool link -V printed %q, which names no version", line)
+	}
+	if base, exp, ok := strings.Cut(version, " X:"); ok {
+		sep := " "
+		if !strings.Contains(base, "-") {
+			sep = "-"
+		}
+		return base + sep + "X:" + exp
+	}
+	return version
 }
