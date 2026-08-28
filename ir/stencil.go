@@ -36,6 +36,13 @@ import (
 // checker object, and a package-level object keeps the one identity it had,
 // which objKey states.
 //
+// Substitution is not total, and there is one place it stops: a name. The
+// checker's substituter rebuilds a type literal and returns a defined type
+// with no type parameters of its own unchanged, so "type S []T" declared
+// inside the body still holds T afterwards. That is the whole of what
+// checkLocalType refuses and it is the only construct that can reach the IR
+// still holding a type parameter.
+//
 // # The worklist
 //
 // A call to a generic function is discovered where the callee's name is
