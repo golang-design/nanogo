@@ -324,13 +324,18 @@ func hold(w *wide) int {
 // against moduledata.rodata, which is the one place the word the runtime fills
 // in cannot be used.
 //
+// No finaliser on these. The frame dies when onStack returns and its cells
+// are then unreachable, so a count taken afterwards says only whether the
+// finaliser goroutine has run yet, which is a race and not an answer. What
+// the frame proves is the sum: hold collects twice while the frame holds the
+// only reference, so a mask that describes nothing frees the cells and
+// clobberfree writes a recognisable pattern into them.
+//
 //go:noinline
 func onStack(n int) int {
 	var w wide
 	for i := range w {
-		c := &cell{n + i}
-		runtime.SetFinalizer(c, func(*cell) { finalized++ })
-		w[i] = c
+		w[i] = &cell{n + i}
 	}
 	return hold(&w)
 }
