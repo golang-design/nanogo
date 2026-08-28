@@ -1004,7 +1004,10 @@ func targetABI(r rtype.Reloc, generated map[string]bool) uint16 {
 		// spelled pkg.(*T).M and nothing in that name says it was generated.
 		return obj.ABIInternal
 	}
-	if s := rtsym.Lookup(name); s != nil && !s.Assembly {
+	if s := rtsym.Lookup(name); s != nil && (!s.Assembly || s.Internal) {
+		// An assembly symbol is ABI0 unless the runtime's TEXT directive says
+		// otherwise, which rtsym.Internal records. The two morestack entry
+		// points are ABI0 and the eight write barriers are ABIInternal.
 		return obj.ABIInternal
 	}
 	return obj.ABI0

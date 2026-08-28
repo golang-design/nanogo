@@ -165,6 +165,17 @@ const (
 	// is the move into it.
 	OpARM64LoweredGetClosurePtr
 
+	// The write barrier, which is a call and a register read in one operation.
+	//
+	// runtime.gcWriteBarrier2 does not follow the Go ABI: it takes nothing,
+	// returns a pointer to two buffer slots in R25, and clobbers R27 and the
+	// link register and nothing else. The two halves cannot be separate
+	// operations, because R25 is also the third reload register
+	// specs/026-register-allocation.md reserves, so a spill placed between a
+	// call and a read of R25 would destroy the buffer pointer this returns.
+	// One operation is what leaves the allocator nowhere to put it.
+	OpARM64LoweredWB
+
 	// Group 6: floating point.
 	//
 	// The width follows the same convention as the integer forms: FADD covers
@@ -250,6 +261,7 @@ const (
 	encAddr                          // ADRP and ADD
 	encFrame                         // ADD from RSP
 	encGetClosure                    // a register move out of the closure register
+	encWB                            // BL to the write barrier, then a move out of R25
 	encCondSet                       // CSET, with the condition in Aux
 	encBranchCond                    // B.cond
 	encCompareBranch                 // CBZ, CBNZ
@@ -415,6 +427,11 @@ var arm64Ops = [opARM64End - OpARM64ADD]arm64Op{
 	// each use rather than holding it, and the closure register holds the
 	// closure only until the first call this function makes.
 	OpARM64LoweredGetClosurePtr - OpARM64ADD: ai("ARM64LoweredGetClosurePtr", 0, encGetClosure).w64(),
+
+	// A call by the allocator's reckoning, so that every value live across it
+	// is spilled. gcWriteBarrier2 clobbers less than that, and the difference
+	// is instructions and never correctness.
+	OpARM64LoweredWB - OpARM64ADD: ai("ARM64LoweredWB", -1, encWB).takes().makes().callop().w64(),
 
 	OpARM64FADD - OpARM64ADD:  ai("ARM64FADD", 2, encFArith).comm(),
 	OpARM64FSUB - OpARM64ADD:  ai("ARM64FSUB", 2, encFArith),
@@ -789,6 +806,17 @@ func ARM64Encode(v *Value, dst arm64.Reg, args []arm64.Reg, out []uint32) (int, 
 		return oneIf(arm64.AddRegImm(arm64.Size64, dst, arm64.RSP, v.AuxInt))
 	case encGetClosure:
 		return one(arm64.MovRegReg(arm64.Size64, dst, arm64.RegClosure))
+	case encWB:
+		// The branch's target is a relocation the caller fills in, as encCall
+		// is, and the move takes the buffer pointer out of the register the
+		// barrier returns it in.
+		w, ok := arm64.Bl(0)
+		if !ok {
+			return 0, false
+		}
+		out[0] = w
+		out[1] = arm64.MovRegReg(arm64.Size64, dst, arm64.RegWBBuf)
+		return 2, true
 	case encCondSet:
 		// Aux holds the condition, and it is the same value a conditional
 		// branch on the same comparison carries. specs/042 group 4 folds a

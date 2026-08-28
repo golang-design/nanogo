@@ -52,6 +52,22 @@ type Sym struct {
 	// signature that no source states.
 	Assembly bool
 
+	// Internal marks an assembly symbol the runtime declares <ABIInternal>.
+	//
+	// It is read only beside Assembly, because a symbol with a Go declaration
+	// is ABIInternal by construction. An assembly symbol is not: the two
+	// morestack entry points are ABI0 and the eight write barriers are
+	// ABIInternal, and the assembly says which in the TEXT directive.
+	//
+	// A caller that inferred the ABI from Assembly alone would name a barrier
+	// under ABI0. cmd/link resolves a by-name reference by name and ABI
+	// together, so that reference is to a symbol nothing defines, and the
+	// message it prints names neither the barrier nor the caller. The
+	// distinction is recorded here rather than at the one call site, because
+	// specs/031-runtime-lowering.md makes this table the one place a runtime
+	// symbol is spelled.
+	Internal bool
+
 	// Group is what the symbol is for, so that a reader can find the family
 	// rather than the name.
 	Group Group
@@ -358,14 +374,20 @@ var syms = []Sym{
 	//
 	// runtime.writeBarrier is the flag that guards them and is a variable, not
 	// a function. It is in vars below.
-	{Name: "runtime.gcWriteBarrier1", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
-	{Name: "runtime.gcWriteBarrier2", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
-	{Name: "runtime.gcWriteBarrier3", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
-	{Name: "runtime.gcWriteBarrier4", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
-	{Name: "runtime.gcWriteBarrier5", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
-	{Name: "runtime.gcWriteBarrier6", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
-	{Name: "runtime.gcWriteBarrier7", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
-	{Name: "runtime.gcWriteBarrier8", Sig: "func() unsafe.Pointer", Assembly: true, Group: GroupBarrier},
+	// Each is declared <ABIInternal> in the runtime's own assembly, which is
+	// why every one of them carries Internal beside Assembly. A caller that
+	// took the ABI from Assembly alone would name these under ABI0, and
+	// cmd/link resolves a by-name reference by name and ABI together: the
+	// reference would be to a symbol nothing defines, and the message names
+	// neither the barrier nor the caller.
+	{Name: "runtime.gcWriteBarrier1", Sig: "func() unsafe.Pointer", Assembly: true, Internal: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier2", Sig: "func() unsafe.Pointer", Assembly: true, Internal: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier3", Sig: "func() unsafe.Pointer", Assembly: true, Internal: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier4", Sig: "func() unsafe.Pointer", Assembly: true, Internal: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier5", Sig: "func() unsafe.Pointer", Assembly: true, Internal: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier6", Sig: "func() unsafe.Pointer", Assembly: true, Internal: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier7", Sig: "func() unsafe.Pointer", Assembly: true, Internal: true, Group: GroupBarrier},
+	{Name: "runtime.gcWriteBarrier8", Sig: "func() unsafe.Pointer", Assembly: true, Internal: true, Group: GroupBarrier},
 	// The copies that carry a barrier of their own. A copy of a value holding
 	// a pointer cannot be a memmove while the collector is marking, so the
 	// runtime does the copy and the barrier together. wbZero and wbMove are

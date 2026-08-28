@@ -596,3 +596,56 @@ func TestEveryGroupHasASymbol(t *testing.T) {
 		}
 	}
 }
+
+// TestAssemblySymbolsCarryTheAbiTheRuntimeDeclares checks Internal against the
+// runtime's own TEXT directives.
+//
+// An assembly symbol has no Go declaration, so nothing else says which ABI it
+// is. The two families differ: runtime.morestack_noctxt is declared with no
+// tag and is ABI0, and every runtime.gcWriteBarrier is declared <ABIInternal>.
+//
+// cmd/link resolves a by-name reference by name and ABI together, so a caller
+// that names a barrier under ABI0 refers to a symbol nothing defines, and the
+// message names neither the barrier nor the caller. The comment above this
+// table has said which family is which since the entries were added; this is
+// the check that says it to the compiler.
+func TestAssemblySymbolsCarryTheAbiTheRuntimeDeclares(t *testing.T) {
+	dir := filepath.Join(runtime.GOROOT(), "src", "runtime")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.Getenv("NANOGO_REQUIRE_CORPUS") == "1" {
+			t.Fatalf("NANOGO_REQUIRE_CORPUS=1 and the runtime source could not be read: %v", err)
+		}
+		t.Skip("no runtime source under GOROOT")
+	}
+	var asm strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".s") {
+			continue
+		}
+		if b, err := os.ReadFile(filepath.Join(dir, e.Name())); err == nil {
+			asm.Write(b)
+		}
+	}
+	if asm.Len() == 0 {
+		t.Skip("no runtime assembly found")
+	}
+
+	n := 0
+	for _, s := range All() {
+		if !s.Assembly {
+			continue
+		}
+		n++
+		// The directive is TEXT <pkg>·<name><tag>(SB). The tag is what says
+		// the ABI, so the two spellings are searched for by name.
+		internal := strings.Contains(asm.String(), "·"+s.Base()+"<ABIInternal>(SB)")
+		if internal != s.Internal {
+			t.Errorf("%s is declared ABIInternal in the runtime: %v, and the table says %v",
+				s.Name, internal, s.Internal)
+		}
+	}
+	if n == 0 {
+		t.Error("no assembly symbol was checked; the table lost its Assembly entries")
+	}
+}

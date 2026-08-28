@@ -175,6 +175,16 @@ const (
 	// destroyed between the read and the use.
 	RegScratchThird = R25
 
+	// RegWBBuf is the register runtime.gcWriteBarrier2 returns its buffer
+	// pointer in. It is R25, and that is not a coincidence to be tidied away:
+	// the runtime chose the register and this compiler only reads it.
+	//
+	// It is the same register as RegScratchThird, which is why
+	// specs/042-arm64-backend.md makes the call and the read of it one
+	// operation. A reload staged through R25 between the two would destroy the
+	// pointer, and the reload is the allocator's to place.
+	RegWBBuf = R25
+
 	// The floating-point pair the allocator holds back for materialisation,
 	// which is what R16 and R17 are for the integer file. F30 and F31 are
 	// taken because specs/030-abi.md gives no role to any register above F15,
