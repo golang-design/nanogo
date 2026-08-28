@@ -34,8 +34,10 @@ func refreshRatchet() bool { return os.Getenv("NANOGO_REFRESH_RATCHET") == "1" }
 var subset = []string{
 	"helloworld.go", // runs, and agrees with gc
 	"empty.go",      // compiles
-	"for.go",        // refused
-	"map.go",        // refused, for a different reason
+	"for.go",        // runs too, over a construct helloworld has none of
+	"map.go",        // and again, over the complex rows
+	"turing.go",     // refused
+	"range4.go",     // refused, for a different reason
 	"undef.go",      // errorcheck, rejected
 	"escape2.go",    // errorcheck whose flags nanogo has no equivalent of
 	"bom.go",        // runoutput, a kind this harness does not carry out
