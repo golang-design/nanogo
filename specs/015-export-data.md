@@ -194,6 +194,14 @@ dictionary is not the one a body carries:
   enclosing type parameters implicitly, and neither the builder nor the writer
   keeps a record of which declaration a local type was declared in.
 
+**A refusal reaches the user as a refusal.** `export.UnsupportedError` names
+the declaration, and `driver/compile.go` wraps it in `driver.UnsupportedError`
+so that the message says "nanogo cannot compile". The package is on the
+allowlist, so its export data is owed, and a build that stopped for a named
+gap is a refusal and not a compiler bug. `internal/gotest` reads the two apart
+by exactly that phrase, and it counted the export writer's message as nanogo
+rejecting legal Go until the wrapping was there.
+
 `bodyRefs.dictIdx` is the guard underneath all of it. `elemRefs` answers with
 the slot the archive a body was read from already holds. `declRefs` answers
 from the dictionary the declaration carries and refuses when it carries none,

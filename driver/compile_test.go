@@ -963,6 +963,33 @@ func TestCompileRefusesWhatTheStencilerDoesNotBuild(t *testing.T) {
 	}
 }
 
+// TestCompileRefusesADeclarationTheExportWriterCannotEncode checks the channel
+// an export refusal arrives on.
+//
+// export.UnsupportedError names the declaration the writer has no encoding
+// for, and the package is on the allowlist, so its export data is owed and the
+// build has failed for a construct nanogo cannot compile. Reported as anything
+// else it reads as a compiler bug: internal/gotest classifies a message that
+// does not say "nanogo cannot compile" as nanogo rejecting legal Go.
+func TestCompileRefusesADeclarationTheExportWriterCannotEncode(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	_, err := compileSource(t, "package main\n\ntype Box[T any] struct{ V T }\n\nfunc main() {}\n", nil)
+	if err == nil {
+		t.Fatal("the package was accepted")
+	}
+	var ue *UnsupportedError
+	if !errors.As(err, &ue) {
+		t.Fatalf("the failure is not an UnsupportedError: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nanogo cannot compile ") {
+		t.Errorf("the message does not name a construct nanogo cannot compile:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), "main.Box") {
+		t.Errorf("the message does not name the declaration:\n%v", err)
+	}
+}
+
 // TestCompileRefusesALifetimeDirective covers the two directives whose whole
 // meaning is object lifetime.
 //

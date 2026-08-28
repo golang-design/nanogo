@@ -1201,6 +1201,19 @@ func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package, hasInit bool,
 	}
 	payload, fingerprint, err := export.Write(pkg, hasInit, bodies)
 	if err != nil {
+		// A declaration the writer has no encoding for is a construct nanogo
+		// cannot compile, and it is reported as one. The package is on the
+		// allowlist, so its export data is owed: a message that did not say
+		// "nanogo cannot compile" would read as a compiler bug rather than as
+		// the named gap it is (specs/015-export-data.md).
+		var unsupported *export.UnsupportedError
+		if errors.As(err, &unsupported) {
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "a declaration its export data must carry",
+				Detail:  unsupported.Name + ": " + unsupported.Reason,
+			}
+		}
 		return err
 	}
 	p.Fingerprint = fingerprint
