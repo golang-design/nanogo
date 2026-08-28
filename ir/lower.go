@@ -1820,6 +1820,10 @@ func (l *lowerer) convertExpr(n Expr) Expr {
 	case from.Kind == Interface && to.Kind == Interface && !to.EmptyIface && !sameIface(from, to):
 		return l.ifaceToIface(n, from, to, pos)
 
+	case to.Kind == Interface && from.Kind != Interface &&
+		IfaceDataWordOf(from) == IfaceDataAddress:
+		return l.ifaceDataHome(n, x, pos)
+
 	case from.Kind == String && to.Kind == Slice:
 		switch elemKind(to) {
 		case Uint8:
@@ -1854,6 +1858,29 @@ func (l *lowerer) convertExpr(n Expr) Expr {
 		return l.stringCall(n, to, "runtime.intstring", v)
 	}
 	return n
+}
+
+// ifaceDataHome gives the operand of a conversion to an interface a home, for
+// the operands whose data word is the address of a copy.
+//
+// runtime.convT and runtime.convTnoptr copy from a pointer the caller
+// supplies, so such a value has to be somewhere an address can point at. This
+// pass owns the frame, so it is the only pass that can put it there:
+// specs/021-ssa-construction.md's classify decides where every local lives
+// before construction begins, and a temporary introduced after that decision
+// is a slot no bitmap describes.
+//
+// The call itself is not built here, because the IR has no node that makes an
+// interface value out of two words. Construction builds it, asks
+// IfaceDataWordOf the same question of the same type, and finds the operand
+// addressable. ir.IfaceData says why the two halves cannot be one.
+//
+// Marking the object is not bookkeeping. classify reads Addrtaken, and an
+// object it leaves in an SSA value is one construction refuses to address.
+func (l *lowerer) ifaceDataHome(n Expr, x Expr, pos syntax.Pos) Expr {
+	home := l.stable(x)
+	markAddrtaken(home)
+	return &Node{Op: OConvert, Pos: pos, Type: n.Type, X: home}
 }
 
 // sameIface reports whether two interface types are the same type.

@@ -1292,6 +1292,35 @@ func (b *builder) addr(n ir.Expr) *Value {
 	return b.zeroValue(b.intType)
 }
 
+// addressable reports whether addr builds an address for n without reporting.
+//
+// It is the set of forms the switch above accepts, asked before the fact
+// rather than after it, because a caller that needs an address has an
+// alternative only while it still has the choice. ir.Lower asks the same
+// question with its own addressable, and the two lists are the same list: a
+// form this one accepts and that one does not is a value the lowering pass
+// leaves alone and this pass then addresses, which is the case a local that
+// classify put in a value would be.
+func (b *builder) addressable(n ir.Expr) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Op {
+	case ir.OLocal:
+		// A global named through OLocal is addressable wherever it lives. A
+		// local is addressable only where classify put it, and classify has
+		// already run.
+		return n.Obj != nil && (n.Obj.Class == ir.ClassGlobal || b.frame[n.Obj])
+	case ir.OGlobal:
+		return n.Obj != nil
+	case ir.ODeref, ir.OIndex:
+		return true
+	case ir.OField:
+		return b.addressable(n.X)
+	}
+	return false
+}
+
 // fieldBase returns the address of the struct a field selects from, and the
 // struct type.
 func (b *builder) fieldBase(x ir.Expr) (*Value, *ir.Type) {
@@ -1727,14 +1756,14 @@ var zerobaseObj = func() *ir.Object {
 // Everything else is boxed, which means a copy in the heap and the address of
 // the copy, and the runtime has one helper per shape it can box by value.
 //
-// The helpers that take an address are not reachable from here. runtime.convT
-// and runtime.convTnoptr copy from a pointer the caller supplies, so the value
-// needs a frame slot to be addressed through, and construction has already
-// decided which objects live in the frame by the time an expression is built.
-// A type they would be needed for is refused by name instead.
+// Which of them is ir.IfaceDataWordOf's answer, and it is asked here rather
+// than decided here because the lowering pass asks the same question of the
+// same type: the address case needs the value to have a home, and only that
+// pass can give it one. The comment on ir.IfaceData says why the two halves
+// cannot be one.
 func (b *builder) dataWord(n ir.Expr, x *Value, from *ir.Type) *Value {
-	switch {
-	case from.Size == 0:
+	switch ir.IfaceDataWordOf(from) {
+	case ir.IfaceDataZero:
 		// A value of a zero-sized type has no bits to carry, and the word is
 		// still a pointer the collector scans, so it has to be one. The
 		// address of runtime.zerobase is that pointer: runtime.mallocgc
@@ -1742,30 +1771,71 @@ func (b *builder) dataWord(n ir.Expr, x *Value, from *ir.Type) *Value {
 		// relocation and not a call. cmd/compile writes the same word.
 		return b.globalAddr(zerobaseObj, n.Pos)
 
-	case directIface(from):
+	case ir.IfaceDataDirect:
 		// One word, and that word is a pointer. The value is the data word.
 		return x
 
-	case from.Kind == ir.String:
+	case ir.IfaceDataString:
 		return b.box(n, "runtime.convTstring", x)
 
-	case from.Kind == ir.Slice:
+	case ir.IfaceDataSlice:
 		// convTslice takes []byte and copies the header, so the element type
 		// does not reach it. cmd/compile passes any slice to it for the same
 		// reason.
 		return b.box(n, "runtime.convTslice", x)
 
-	case boxableWord(from) && from.Size == 8 && from.Align == 8:
+	case ir.IfaceDataWord64:
 		return b.box(n, "runtime.convT64", b.rawBits(from, x, n.Pos))
 
-	case boxableWord(from) && from.Size == 4 && from.Align == 4:
+	case ir.IfaceDataWord32:
 		return b.box(n, "runtime.convT32", b.rawBits(from, x, n.Pos))
 
-	case boxableWord(from) && from.Size == 2 && from.Align == 2:
+	case ir.IfaceDataWord16:
 		return b.box(n, "runtime.convT16", x)
+
+	case ir.IfaceDataAddress:
+		return b.boxByAddress(n, from)
 	}
-	b.unsupported(n, fmt.Sprintf("a conversion from %v to an interface, whose data word needs runtime.convT with the address of a copy in the frame", from))
+	b.unsupported(n, fmt.Sprintf("a conversion from %v to an interface, whose data word this convention has no shape for", from))
 	return nil
+}
+
+// boxByAddress copies the operand of n into the heap through its address and
+// returns the address of the copy.
+//
+// runtime.convT and runtime.convTnoptr take the source type's descriptor and a
+// pointer to the value. The descriptor is the source's whatever the
+// destination interface is: the helper reads a size and a pointer map out of
+// it to make the copy, and the itab a non-empty destination leads with says
+// nothing about either.
+//
+// The address is taken of the operand expression rather than of the value this
+// pass built for it, so the copy is the storage the lowering pass gave the
+// value and not a second one. That is why an operand this pass cannot address
+// is reported rather than boxed: it means the tree reached construction
+// without the pass that gives it a home, and boxing a fresh temporary here
+// would put the address of a frame slot no other pass knows about into a
+// bitmap that does not describe it.
+func (b *builder) boxByAddress(n ir.Expr, from *ir.Type) *Value {
+	if n == nil || n.X == nil || !b.addressable(n.X) {
+		b.unsupported(n, fmt.Sprintf("a conversion from %v to an interface, whose data word needs runtime.convT with the address of a copy the lowering pass did not make", from))
+		return nil
+	}
+	word := b.typeWord(n, from)
+	addr := b.addr(n.X)
+	if b.err != nil {
+		return nil
+	}
+	// No Sig. rtsym carries a name and a signature and this pass keeps only
+	// the name, so a runtime call is one of the hand-built calls Value.Sig
+	// names as the reason the reads are still the fallback. The helper returns
+	// one pointer, which is a register, so the area is the same either way.
+	c := b.value(OpStaticCall, MemType, n.Pos, word, addr, b.memory())
+	c.Aux = RuntimeFunc(ir.IfaceConvSym(from))
+	b.setMemory(c)
+	r := b.value(OpSelectN, b.ptrTo(nil), n.Pos, c)
+	r.AuxInt = 0
+	return r
 }
 
 // box calls one of the runtime's boxing helpers and returns the pointer it
@@ -1799,27 +1869,6 @@ func (b *builder) rawBits(t *ir.Type, x *Value, pos syntax.Pos) *Value {
 	}
 	u := &ir.Type{Kind: k, Size: t.Size, Align: t.Align, Name: k.String()}
 	return b.value(OpBitcast, u, pos, x)
-}
-
-// directIface reports whether a value of t is its own data word.
-//
-// cmd/compile's types.IsDirectIface: one machine word wide, and that word
-// holds a pointer. It is not the same question as "pointer shaped". A uintptr
-// is one word and holds no pointer, so an interface holding one carries the
-// integer's address and not the integer, and a one-field struct holding a
-// pointer is not pointer shaped and is its own data word.
-func directIface(t *ir.Type) bool {
-	return t.Size == ir.PtrSize && t.PtrBytes() == ir.PtrSize
-}
-
-// boxableWord reports whether t is a single scalar the by-value helpers take.
-//
-// convT16, convT32 and convT64 take an unsigned integer of their own width, so
-// what reaches them has to be one machine value of exactly that width. A
-// struct or an array of the same width is not one: it is several values by the
-// time specs/025's decomposition has run, and the helper reads one.
-func boxableWord(t *ir.Type) bool {
-	return t.Kind.IsInteger() || t.Kind.IsFloat()
 }
 
 // sameType reports whether two IR types are one type.

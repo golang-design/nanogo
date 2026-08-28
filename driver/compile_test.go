@@ -836,15 +836,16 @@ func TestCompileReportsAPassFailure(t *testing.T) {
 
 	// The same shape out of Compile, which is what proves the loop calls the
 	// wrapper and that the position is the function's own and not the file's.
-	// A conversion of a concrete value to an interface is what ssa.Build
+	// A conversion of a slice to a pointer to an array is what ssa.Build
 	// refuses today, and when that closes this subtest takes the next
-	// construct and the one above does not move.
+	// construct and the one above does not move. It used to be a conversion of
+	// a concrete value to an interface, which now compiles.
 	t.Run("out of Compile", func(t *testing.T) {
 		arm64Only(t)
 		needGoCommand(t)
-		_, err := compileSource(t, "package main\n\nfunc f(b bool) any { return b }\n", nil)
+		_, err := compileSource(t, "package main\n\nfunc f(b []byte) *[9]byte { return (*[9]byte)(b) }\n", nil)
 		if err == nil {
-			t.Fatal("Compile accepted a conversion from a bool to an interface")
+			t.Fatal("Compile accepted a conversion from a slice to a pointer to an array")
 		}
 		for _, want := range []string{"function f", "a.go:3:6", "ssa.Build"} {
 			if !strings.Contains(err.Error(), want) {

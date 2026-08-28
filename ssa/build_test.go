@@ -2701,36 +2701,90 @@ func TestBuildBoxesAZeroSizedValue(t *testing.T) {
 	}
 }
 
-// TestBuildRefusesADataWordItCannotBox names the two shapes construction has
-// no answer for, so that neither is compiled into a wrong one.
-func TestBuildRefusesADataWordItCannotBox(t *testing.T) {
+// TestBuildBoxesThroughTheAddressOfTheOperand covers the data word that is the
+// address of a copy.
+//
+// runtime.convT and runtime.convTnoptr take the source type's descriptor and a
+// pointer to the value, and the pointer is the operand's own storage rather
+// than a copy this pass makes: specs/025-lowering-and-rules.md's pass gives
+// the value a home, because specs/021's classify decides where every local
+// lives before construction begins.
+//
+// The choice between the two helpers is the source type's pointer map, and
+// getting it backwards is not a wrong answer. It is a pointer in an object the
+// collector never scans, so the pointee is freed while the interface still
+// reaches it. ir.IfaceConvSym is where the choice is made and internal/e2e is
+// where it is proved.
+func TestBuildBoxesThroughTheAddressOfTheOperand(t *testing.T) {
+	tPtrInt := mkType(&ir.Type{Kind: ir.Ptr, Elem: tInt})
+	tHeld := mkType(&ir.Type{Kind: ir.Struct, Name: "held",
+		Fields: []ir.Field{{Name: "a", Type: tInt}, {Name: "p", Type: tPtrInt}}})
+
 	for _, tt := range []struct {
 		name string
 		from *ir.Type
-		to   *ir.Type
 		want string
 	}{
-		// One byte wide. cmd/compile indexes runtime.staticuint64s and this
-		// does not, so there is no helper left that takes it by value.
-		{"a one-byte type", tBool, tEface, "runtime.convT"},
-		// Two words. convT and convTnoptr take an address and construction has
-		// no frame slot to give them.
-		{"a two-word struct", tStruct, tEface, "runtime.convT"},
+		{"a two-word struct of integers", tStruct, "runtime.convTnoptr"},
+		{"a two-word struct holding a pointer", tHeld, "runtime.convT"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			src := obj("src", tt.from, ir.ClassLocal)
-			dst := obj("dst", tt.to, ir.ClassLocal)
+			dst := obj("dst", tEface, ir.ClassLocal)
+			// The address is taken, which is what the lowering pass does for
+			// this shape and what puts the object in the frame.
+			src.Addrtaken = true
 			fn := fun("convert", []*ir.Object{src, dst},
-				asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tt.to}),
+				asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tEface}),
 			)
-			_, err := Build(fn)
-			if err == nil {
-				t.Fatal("the conversion built, so a data word nothing can fill reaches the runtime")
+			f, err := Build(fn)
+			if err != nil {
+				t.Fatalf("Build: %v", err)
 			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("the refusal is %q and does not name %q", err, tt.want)
+			var called string
+			for _, b := range f.Blocks {
+				for _, v := range b.Values {
+					if v.Op != OpStaticCall {
+						continue
+					}
+					if c, _ := v.Aux.(*ir.Object); c != nil && strings.HasPrefix(c.Name, "runtime.convT") {
+						called = c.Name
+					}
+				}
+			}
+			if called != tt.want {
+				t.Errorf("the data word is copied by %q, want %q\n%s", called, tt.want, f)
+			}
+			// convT reads a size and a pointer map out of the source type's
+			// descriptor, so the package owes it whatever the destination is.
+			if len(f.Descriptors) != 1 || f.Descriptors[0] != tt.from {
+				t.Errorf("the function records %v as the descriptors it names, want just the source type", f.Descriptors)
 			}
 		})
+	}
+}
+
+// TestBuildRefusesADataWordWithNoHome is the guard that is left.
+//
+// A conversion whose operand has no storage is a tree that reached
+// construction without the lowering pass that gives it some. Boxing a fresh
+// temporary here would put the address of a frame slot no other pass knows
+// about into a bitmap that does not describe it, so it is reported instead.
+func TestBuildRefusesADataWordWithNoHome(t *testing.T) {
+	// A one-byte value classify leaves in an SSA value, so no address of it
+	// exists. cmd/compile indexes runtime.staticuint64s for this shape and
+	// this does not, so no helper takes it by value either.
+	src := obj("src", tBool, ir.ClassLocal)
+	dst := obj("dst", tEface, ir.ClassLocal)
+	fn := fun("convert", []*ir.Object{src, dst},
+		asn(local(dst), &ir.Node{Op: ir.OConvert, X: local(src), Type: tEface}),
+	)
+	_, err := Build(fn)
+	if err == nil {
+		t.Fatal("the conversion built, so a data word nothing can fill reaches the runtime")
+	}
+	if want := "the lowering pass did not make"; !strings.Contains(err.Error(), want) {
+		t.Errorf("the refusal is %q and does not say %q", err, want)
 	}
 }
 
@@ -2771,33 +2825,6 @@ func TestBuildNamesOneDescriptorPerType(t *testing.T) {
 	}
 	if objs[0] != objs[2] {
 		t.Error("two conversions of one type name two objects")
-	}
-}
-
-// TestDirectIfaceIsWidthAndPointerness pins the predicate the data word turns
-// on, which is not "pointer shaped".
-func TestDirectIfaceIsWidthAndPointerness(t *testing.T) {
-	tUintptr := mkType(&ir.Type{Kind: ir.Uintptr, Name: "uintptr"})
-	tBox := mkType(&ir.Type{Kind: ir.Struct, Name: "box", Fields: []ir.Field{{Name: "p", Type: tIntPtr}}})
-	tMap := mkType(&ir.Type{Kind: ir.Map, Key: tInt, Elem: tInt})
-
-	for _, tt := range []struct {
-		name string
-		typ  *ir.Type
-		want bool
-	}{
-		{"a pointer", tIntPtr, true},
-		{"a map", tMap, true},
-		{"a function", tFunc, true},
-		{"a one-field struct holding a pointer", tBox, true},
-		{"a uintptr, which is one word and holds no pointer", tUintptr, false},
-		{"an int", tInt, false},
-		{"a string", tString, false},
-		{"a one-byte type", tBool, false},
-	} {
-		if got := directIface(tt.typ); got != tt.want {
-			t.Errorf("directIface(%s) is %v, want %v", tt.name, got, tt.want)
-		}
 	}
 }
 

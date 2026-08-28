@@ -341,7 +341,7 @@ data word is `dataWord`'s answer:
 | a string | `runtime.convTstring` |
 | a slice | `runtime.convTslice` |
 | a scalar 8, 4 or 2 bytes wide, aligned to its width | `runtime.convT64`, `convT32`, `convT16` |
-| anything else | **refused**, by name |
+| anything else | `runtime.convT` or `convTnoptr`, with the address of the operand |
 
 The first row is `types.IsDirectIface`, which is width and pointerness and not
 a kind test. A `uintptr` is one word and holds no pointer, so it is boxed. A
@@ -352,11 +352,51 @@ A float is reinterpreted before the call. `convT64` declares `uint64`, and
 as a float is written to a floating-point register and read out of an integer
 one.
 
-Two shapes have no answer here and each names itself. A one-byte type is
-`runtime.staticuint64s` indexed by the value, and anything wider than the
-by-value helpers is `runtime.convT` or `convTnoptr` with the address of a copy
-in the frame, which construction has no slot to make: it decided which objects
-live in the frame before it built any expression.
+`ir.IfaceDataWordOf` is that table, as one function, because two passes read it
+and neither can act on the answer alone.
+
+### The last row needs two passes, and that is why the table is a function
+
+`runtime.convT` and `convTnoptr` copy from a pointer the caller supplies, so
+the value has to be somewhere an address can point at. Construction cannot put
+it there: [021](021-ssa-construction.md)'s `classify` decides where every local
+lives before any expression is built, and a slot introduced after that decision
+is one no bitmap describes. [025](025-lowering-and-rules.md)'s pass owns the
+frame and can, so it gives the operand a home and marks it address-taken.
+
+Construction cannot be replaced either, because the IR has no node that makes
+an interface value out of two words. `OpIMake` is construction's, so the call
+is built there, where the operand is already addressable.
+
+The two halves have to agree exactly. A value spilled and not boxed is a
+temporary nothing reads, and a value boxed and not spilled is the address of
+storage that does not exist. One function answers for both, and construction
+keeps the refusal for an operand it cannot address, which is the tree that
+reached it without the lowering pass.
+
+### `convT` against `convTnoptr` fails in two directions and only one is quiet
+
+The choice is the source type's pointer map. `convT` allocates an object the
+collector scans and `convTnoptr` one it does not.
+
+A pointer-holding type through `convTnoptr` is caught by the runtime at the
+allocation, which throws `objects with pointers must be zeroed` out of
+`mallocgc`. A pointer-free type through `convT` is correct and only wasteful.
+
+What is quiet is the descriptor rather than the helper. Both read the size and
+the pointer map out of the descriptor they are given, and it is the **source**
+type's whatever the destination interface is: a non-empty destination leads
+with an itab, which says nothing about how to copy the value. A copy made with
+the wrong descriptor is a heap object whose pointers the collector does not
+know about, the pointee is freed while the interface still reaches it, and no
+message appears anywhere. `internal/e2e` holds a finaliser on such a pointee
+under `GODEBUG=gccheckmark=1,clobberfree=1` and `GOGC=1`, which is the harness
+[027](027-liveness-and-stackmaps.md) uses for the same class of mistake.
+
+One shape still names itself. A one-byte type is `runtime.staticuint64s`
+indexed by the value in `cmd/compile`, and here it is a copy through
+`convTnoptr` like any other value no helper takes by value: correct, and one
+allocation where `gc` makes none.
 
 ### An interface with methods becomes an empty one by a load
 
@@ -1403,3 +1443,23 @@ every silent wrong answer this project has found came out.
 
 The number above is the fix. `internal/e2e` now declares a `T` in each of three
 functions and compares the names and the values against `gc`.
+
+### The data word that needed an address was refused for two years of commits
+
+The table above ended in "**refused**, by name" for everything wider than the
+by-value helpers, and the reason given was that construction has no frame slot
+to make. That was true of construction and not of the compiler: the pass below
+it owns the frame and had a spill for exactly this.
+
+It was the largest single refusal of Go's own test corpus and it blocked three
+of nanogo's own packages. Closing it moved the corpus from 170 files to 179 and
+the refusals from 55 to 44, and `obj` became the third package nanogo compiles.
+
+Two costs came with it and both are recorded above rather than in a commit
+message. The source type's descriptor is now named for every such conversion,
+including a conversion to a non-empty interface, so a package can owe a
+descriptor it did not owe before. And `test/cmp.go` stopped being refused and
+started reaching [025](025-lowering-and-rules.md)'s assertion, which is a panic
+naming a `Load` no rule lowered. That class was already there, in `test/const.go`,
+and is one of the functions this spec's own count calls "still wider than a
+register".
