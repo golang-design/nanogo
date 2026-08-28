@@ -45,6 +45,15 @@ func (l *Loader) StringVars() []string {
 	return out
 }
 
+// SetGoroot records the root the toolchain was installed under.
+//
+// A standard library object names its files under a placeholder, so that
+// the object is the same wherever the toolchain sits, and the linker
+// puts the real root back. A link that is given none leaves the
+// placeholder, which is what a build that asked for no path in the
+// binary produces.
+func (l *Loader) SetGoroot(path string) { l.goroot = path }
+
 // suffixStringData is the name of the read-only symbol that holds the
 // bytes of a string variable the linker filled in.
 const suffixStringData = ".str"

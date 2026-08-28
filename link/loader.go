@@ -90,6 +90,11 @@ type Loader struct {
 	// compiler left zero filled. [Loader.SetStringVar] records them and
 	// specs/045-linker.md says why .bss cannot be laid out without them.
 	strvars []stringVar
+
+	// goroot is the root the toolchain was installed under, which the
+	// linker puts in place of the placeholder a standard library object
+	// carries in its file names. [Loader.SetGoroot] records it.
+	goroot string
 }
 
 // A synthetic symbol is one the linker built. It has a name, a version,

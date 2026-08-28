@@ -237,3 +237,50 @@ func firstNameDiff(mine, theirs []byte) string {
 	return "at 0x" + strconv.FormatInt(int64(start), 16) + " nanogo has " +
 		strconv.Quote(name(mine)) + " and cmd/link has " + strconv.Quote(name(theirs))
 }
+
+// TestFileTabsAgreeWithTheLinker compares the file name table and the
+// compilation unit table with cmd/link's, byte for byte.
+//
+// The two are compared together because neither means anything without
+// the other: an entry of the unit table is an offset into the file
+// table, so a file table whose names moved is a unit table that points
+// at the middle of a name. A function reaches a file name through both.
+func TestFileTabsAgreeWithTheLinker(t *testing.T) {
+	target := TargetFor(runtime.GOOS, runtime.GOARCH)
+	if target == nil || runtime.GOOS != "darwin" {
+		t.Skipf("the section the oracle reads is Mach-O's, and this is %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	for _, b := range []*build{&hostBuild, &reflectBuild} {
+		t.Run(b.pkg, func(t *testing.T) {
+			b := b.get(t)
+			img := readPclntab(t, linkExe(t, b))
+			_, _, p := buildPcln(t, b, target)
+
+			if got, want := uint64(p.nfiles), img.nfiles; got != want {
+				t.Errorf("the table names %d files and cmd/link's names %d", got, want)
+			}
+			if !bytes.Equal(p.FileTab, img.filetab) {
+				t.Errorf("the file name table is %#x bytes and cmd/link's is %#x: %s",
+					len(p.FileTab), len(img.filetab), firstNameDiff(p.FileTab, img.filetab))
+			}
+			if !bytes.Equal(p.CuTab, img.cutab) {
+				t.Errorf("the compilation unit table is %#x bytes and cmd/link's is %#x: %s",
+					len(p.CuTab), len(img.cutab), firstEntryDiff(p.CuTab, img.cutab))
+			}
+			t.Logf("%d files in %#x bytes, %d compilation unit entries", p.nfiles, len(p.FileTab), len(p.CuTab)/4)
+		})
+	}
+}
+
+// firstEntryDiff describes where two tables of uint32 part company.
+func firstEntryDiff(mine, theirs []byte) string {
+	for i := 0; i+4 <= len(mine) && i+4 <= len(theirs); i += 4 {
+		a := binary.LittleEndian.Uint32(mine[i:])
+		b := binary.LittleEndian.Uint32(theirs[i:])
+		if a != b {
+			return "entry " + strconv.Itoa(i/4) + " is 0x" + strconv.FormatUint(uint64(a), 16) +
+				" for nanogo and 0x" + strconv.FormatUint(uint64(b), 16) + " for cmd/link"
+		}
+	}
+	return "the shorter table is a prefix of the longer one"
+}

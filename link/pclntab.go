@@ -34,9 +34,27 @@ type Pcln struct {
 	// table describes and of every function inlined into one of them.
 	FuncNameTab []byte
 
+	// CuTab is one entry per file index of every compilation unit the
+	// table describes, holding the offset of that file's name in
+	// FileTab. A _func record names a file by an index into its own
+	// unit's run of this table, so the two hops are what let a function
+	// name a file with one small number.
+	CuTab []byte
+
+	// FileTab is the null terminated name of every file the table names.
+	FileTab []byte
+
 	// funcName is the offset of each name in FuncNameTab. A _func record
 	// names its function by this offset.
 	funcName map[Global]uint32
+	// cuOffset is where each compilation unit's run of CuTab starts,
+	// counted in entries, indexed by the unit's position in the table.
+	cuOffset []uint32
+	// cuIndex is the position of an object's compilation unit in the
+	// table, by the object's own index.
+	cuIndex map[int]int
+	// nfiles is how many names FileTab holds, which the header states.
+	nfiles int
 }
 
 // generatedAlign is the boundary every table the linker generates is
@@ -52,7 +70,149 @@ func (a *Layout) generatedAlign(n int64) int64 { return rndInt(n, a.target.PtrSi
 func (a *Layout) Pclntab() *Pcln {
 	p := &Pcln{Funcs: a.Textp, funcName: map[Global]uint32{}}
 	a.buildFuncNameTab(p)
+	a.buildFileTabs(p)
 	return p
+}
+
+// buildFileTabs writes the file name table and the compilation unit
+// table in front of it.
+//
+// A function names a file by an index into its own compilation unit's
+// file list, which is a small number and is the only thing the pc to
+// file table can afford to hold. The linker turns that into one index
+// per unit into a table of unique names: CuTab holds a run per unit, and
+// entry j of a unit's run is where the name of that unit's file j starts
+// in FileTab. So a lookup is the unit's offset, plus the function's file
+// index, then the name at the offset that entry holds.
+//
+// A unit's run covers every index from zero to the largest one any of
+// its functions used, and an index in that range that no function used
+// gets the invalid offset, because the dead code pass may have dropped
+// the only function that named the file.
+func (a *Layout) buildFileTabs(p *Pcln) {
+	l := a.l
+	p.cuIndex = map[int]int{}
+	var units []int
+	for _, g := range p.Funcs {
+		o, ok := l.compilationUnit(g)
+		if !ok {
+			continue
+		}
+		if _, seen := p.cuIndex[o]; !seen {
+			p.cuIndex[o] = len(units)
+			units = append(units, o)
+		}
+	}
+
+	// Walk the file indexes every function names, in the pc to file
+	// table and in the inline tree, and record the name of each one once.
+	offsets := map[string]uint32{}
+	entries := make([]uint32, len(units))
+	var size int64
+	visit := func(o int, i uint32) {
+		files := l.objs[o].obj.Files
+		if int(i) >= len(files) {
+			return
+		}
+		if _, ok := offsets[files[i]]; !ok {
+			offsets[files[i]] = uint32(size)
+			size += int64(len(a.expandFile(files[i]))) + 1
+		}
+		if u := p.cuIndex[o]; entries[u] < i+1 {
+			entries[u] = i + 1
+		}
+	}
+	for _, g := range p.Funcs {
+		fi, ok := l.funcInfo(g)
+		if !ok {
+			continue
+		}
+		o, ok := l.compilationUnit(g)
+		if !ok {
+			continue
+		}
+		for _, f := range fi.files {
+			visit(o, f)
+		}
+		for _, n := range fi.inlTree {
+			visit(o, n.file)
+		}
+	}
+
+	p.cuOffset = make([]uint32, len(units))
+	total := uint32(0)
+	for u, n := range entries {
+		p.cuOffset[u] = total
+		total += n
+	}
+	cutab := make([]byte, a.generatedAlign(int64(total)*4))
+	for u, o := range units {
+		files := l.objs[o].obj.Files
+		for j := uint32(0); j < entries[u]; j++ {
+			off := ^uint32(0)
+			if int(j) < len(files) {
+				if got, ok := offsets[files[j]]; ok {
+					off = got
+				}
+			}
+			binary.LittleEndian.PutUint32(cutab[4*(p.cuOffset[u]+j):], off)
+		}
+	}
+	p.CuTab = cutab
+
+	filetab := make([]byte, a.generatedAlign(size))
+	for name, off := range offsets {
+		copy(filetab[off:], a.expandFile(name))
+	}
+	p.FileTab = filetab
+	p.nfiles = len(offsets)
+}
+
+// compilationUnit returns the object a function was compiled in, which
+// is the compilation unit its file indexes are counted against, and
+// whether it has one. A text symbol the linker made rather than compiled
+// has none.
+func (l *Loader) compilationUnit(g Global) (int, bool) {
+	st, _ := l.def(g)
+	if st == nil {
+		return 0, false
+	}
+	return st.idx, true
+}
+
+// filePrefix is what the compiler puts in front of a file name in the
+// object, left from the days when a file was a symbol of its own.
+const filePrefix = "gofile.."
+
+// gorootPlaceholder is what the compiler writes in place of the root the
+// toolchain was installed under, so that an object compiled from the
+// standard library is the same wherever the toolchain is.
+const gorootPlaceholder = "$GOROOT"
+
+// expandFile is the name a file has in the table.
+//
+// The prefix the object carries comes off, and the placeholder the
+// compiler wrote for the toolchain root is replaced by the root this
+// link was given. A link with no root leaves the placeholder, which is
+// what cmd/link does for a build that asked for no path in the binary.
+func (a *Layout) expandFile(name string) string {
+	name = trimPrefix(name, filePrefix)
+	root := a.l.goroot
+	if root == "" || !hasPrefix(name, gorootPlaceholder) {
+		return name
+	}
+	rest := name[len(gorootPlaceholder):]
+	if rest == "" || (rest[0] != '/' && rest[0] != '\\') {
+		return name
+	}
+	return root + rest
+}
+
+func trimPrefix(s, p string) string {
+	if hasPrefix(s, p) {
+		return s[len(p):]
+	}
+	return s
 }
 
 // buildFuncNameTab writes the function name table.

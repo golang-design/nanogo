@@ -204,8 +204,10 @@ func setStringVars(t *testing.T, l *Loader, b *build) {
 	goCmd := goTool(t)
 	if root := strings.TrimSpace(string(out(t, goCmd, "env", "GOROOT"))); root != "" {
 		// cmd/go clears GOROOT for -trimpath, and cmd/link then leaves
-		// the variable alone rather than writing an empty string.
+		// the variable alone rather than writing an empty string. The
+		// same root is what a standard library file name expands under.
 		l.SetStringVar("runtime.defaultGOROOT", root)
+		l.SetGoroot(root)
 	}
 	l.SetStringVar("runtime.buildVersion", linkerBuildVersion(t, goCmd))
 	data, err := os.ReadFile(b.cfg)
