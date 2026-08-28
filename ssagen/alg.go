@@ -7,6 +7,7 @@ package ssagen
 import (
 	"fmt"
 	"go/constant"
+	"strings"
 
 	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/rtsym"
@@ -87,6 +88,22 @@ func EqualSymbol(t *ir.Type) (string, error) { return algSymbol(equalSymbolPrefi
 
 // HashSymbol returns the linker symbol of the generated hash function of t.
 func HashSymbol(t *ir.Type) (string, error) { return algSymbol(hashSymbolPrefix, t) }
+
+// GeneratedAlg reports whether name is the symbol of a generated equality or
+// hash function.
+//
+// The driver scans a descriptor's relocations for the functions the descriptor
+// makes it owe, and resolves each name against the closed descriptor set. A
+// name in this family that the set does not hold is a descriptor naming a
+// function nobody will write, which is an undefined symbol at link, so the
+// driver has to be able to tell such a name from every other target a
+// descriptor points at.
+//
+// The two prefixes end in a dot, so neither matches the closure symbols
+// type:.eqfunc. and type:.hashfunc. that point at these functions.
+func GeneratedAlg(name string) bool {
+	return strings.HasPrefix(name, equalSymbolPrefix) || strings.HasPrefix(name, hashSymbolPrefix)
+}
 
 func algSymbol(prefix string, t *ir.Type) (string, error) {
 	s, err := ir.TypeLinkString(t)

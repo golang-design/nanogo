@@ -663,6 +663,14 @@ func generatedFuncs(cfg *Config, types []*ir.Type) ([]*ir.Func, error) {
 			Detail:  err.Error(),
 		}
 	}
+	owners, err := algOwners(types)
+	if err != nil {
+		return nil, &UnsupportedError{
+			Package: cfg.Package,
+			What:    "a type whose descriptor needs a generated algorithm",
+			Detail:  err.Error(),
+		}
+	}
 	for _, t := range types {
 		set, err := rtype.Descriptor(t)
 		if err != nil {
@@ -672,7 +680,7 @@ func generatedFuncs(cfg *Config, types []*ir.Type) ([]*ir.Func, error) {
 				Detail:  err.Error(),
 			}
 		}
-		more, err := algFuncs(t, set)
+		more, err := algFuncs(owners, set)
 		if err != nil {
 			return nil, &UnsupportedError{
 				Package: cfg.Package,
@@ -685,36 +693,73 @@ func generatedFuncs(cfg *Config, types []*ir.Type) ([]*ir.Func, error) {
 	return fns, nil
 }
 
-// algFuncs returns the generated equality and hash functions t's descriptor
-// names.
+// algOwner names the type a generated equality or hash function belongs to,
+// and which of the two it is.
+type algOwner struct {
+	typ  *ir.Type
+	hash bool
+}
+
+// algOwners indexes the closed descriptor set by the symbols of the generated
+// functions its types own.
 //
-// The descriptor says what it needs. rtype decided the type's algorithm and
+// A descriptor does not only name its own type's functions. A map's Hasher
+// names the *key's* hash, so the descriptor that owes a generated function and
+// the type that owns it are two different types, and a scan that resolved a
+// name against the descriptor's own type alone found nothing and generated
+// nothing. The set is closed, and rtype.Referenced puts a map's key in it, so
+// the owner of every name a descriptor in the set can point at is in the set
+// as well.
+//
+// The map is a lookup table and is never ranged over
+// (specs/053-determinism.md): the order of the answer is the order the
+// descriptors are scanned in.
+func algOwners(types []*ir.Type) (map[string]algOwner, error) {
+	owners := make(map[string]algOwner, 2*len(types))
+	for _, t := range types {
+		eq, err := ssagen.EqualSymbol(t)
+		if err != nil {
+			return nil, err
+		}
+		hash, err := ssagen.HashSymbol(t)
+		if err != nil {
+			return nil, err
+		}
+		owners[eq] = algOwner{typ: t}
+		owners[hash] = algOwner{typ: t, hash: true}
+	}
+	return owners, nil
+}
+
+// algFuncs returns the generated equality and hash functions the descriptor
+// symbols in set name.
+//
+// The descriptor says what it needs. rtype decided each type's algorithm and
 // wrote the closure that names the function, so the symbols it returned are
-// scanned for those two names rather than the decision being made again here:
-// a second decision could disagree with the first, and the disagreement would
-// be a descriptor pointing at a function nothing defines.
-func algFuncs(t *ir.Type, set []rtype.Symbol) ([]*ir.Func, error) {
-	eq, err := ssagen.EqualSymbol(t)
-	if err != nil {
-		return nil, err
-	}
-	hash, err := ssagen.HashSymbol(t)
-	if err != nil {
-		return nil, err
-	}
+// scanned for those names rather than the decision being made again here: a
+// second decision could disagree with the first, and the disagreement would be
+// a descriptor pointing at a function nothing defines.
+//
+// A name in the family that the closed set does not own is reported. It would
+// otherwise be a relocation the linker resolves against nothing, which is a
+// diagnostic about a symbol rather than about a type.
+func algFuncs(owners map[string]algOwner, set []rtype.Symbol) ([]*ir.Func, error) {
 	var out []*ir.Func
 	for _, s := range set {
 		for _, r := range s.Relocs {
-			var fn *ir.Func
-			switch r.Target {
-			case eq:
-				fn, err = ssagen.EqualFunc(t)
-			case hash:
-				fn, err = ssagen.HashFunc(t)
-			default:
-				// A name belonging to another type is that type's own to
-				// generate, and the closed set holds that type as well.
+			if !ssagen.GeneratedAlg(r.Target) {
 				continue
+			}
+			o, ok := owners[r.Target]
+			if !ok {
+				return nil, fmt.Errorf("%s names %s and the descriptor set holds no type that owns it", s.Name, r.Target)
+			}
+			var fn *ir.Func
+			var err error
+			if o.hash {
+				fn, err = ssagen.HashFunc(o.typ)
+			} else {
+				fn, err = ssagen.EqualFunc(o.typ)
 			}
 			if err != nil {
 				return nil, err

@@ -312,6 +312,12 @@ func mapTail(t *ir.Type) ([]byte, []Reloc, []Symbol, error) {
 // So the refusal is asked of the group rather than restated here, and it moves
 // on its own when the literal struct is spelled.
 //
+// The key's hash is asked of hashClosure and not of hashFunc, for the same
+// reason. hashClosure is what the writer above calls, and it answers a key
+// whose hash the compiler generates as well as one the runtime carries;
+// hashFunc answers only the second, so asking it here refused every map whose
+// key needs a generated hash while the writer was ready to name one.
+//
 // Descriptor is asked and its symbols are thrown away, which is work rather
 // than a shallower check because a shallower check is a second opinion that can
 // disagree with the writer. The cost is bounded: nothing per node asks for a
@@ -322,7 +328,7 @@ func mapEmittable(t *ir.Type) error {
 	if err != nil {
 		return err
 	}
-	if fn, _, err := hashFunc(t.Key); err != nil {
+	if fn, _, err := hashClosure(t.Key); err != nil {
 		return err
 	} else if fn == "" {
 		return fmt.Errorf("rtype: the key type %s of %s has no hash function, so it cannot be a map key", t.Key, t)

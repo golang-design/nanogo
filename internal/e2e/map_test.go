@@ -160,3 +160,140 @@ func TestToolexecKeepsAMapsValuesThroughACollection(t *testing.T) {
 		t.Fatalf("the collector or the program rejected what the map held: %v\n%s", err, b)
 	}
 }
+
+// The generated hash of a map key, run as a program.
+//
+// A key that compares as something other than one region of memory has no
+// hash the runtime carries, so the compiler generates one and the map
+// descriptor's Hasher points at it. Two facts are being checked and only a
+// running map checks either: that the function exists at all, and that it
+// agrees with the equality function beside it. Two keys that compare equal
+// and hold different bytes are what says so. Each pair below is built so that
+// no string in it shares a data pointer with its counterpart, so a hash over
+// the bytes of the header rather than over the contents answers differently
+// for the two and the lookup misses.
+//
+// The element is a pointer and the map is the only reference to it, and the
+// program runs under gccheckmark and clobberfree as the collector program
+// above does, so a group whose pointer map is wrong is a crash here.
+//
+// Every check divides by zero and the process dies: the exit status is the
+// assertion.
+const generatedHashProgram = `package main
+
+import "runtime"
+
+// producer is the shape dist.Producer has: two strings, which is the smallest
+// type whose hash the compiler has to write.
+type producer struct {
+	Tool    string
+	Version string
+}
+
+type node struct {
+	n int
+}
+
+//go:noinline
+func made(s string) string {
+	b := []byte(s)
+	return string(b)
+}
+
+//go:noinline
+func key(tool, version string) producer {
+	return producer{Tool: made(tool), Version: made(version)}
+}
+
+//go:noinline
+func value(n int) *node { return &node{n: n} }
+
+//go:noinline
+func churn() {
+	for i := 0; i < 4096; i++ {
+		_ = &node{n: i}
+	}
+}
+
+func main() {
+	m := map[producer]*node{}
+	m[key("gc", "go1.27")] = value(1)
+	m[key("nanogo", "3fbcea1")] = value(2)
+	m[producer{Tool: "gc", Version: "go1.28"}] = value(3)
+
+	// A key built from separate bytes finds the entry the first one made,
+	// which is the invariant a generated hash has to hold with the generated
+	// equality function.
+	if len(m) != 3 {
+		crash()
+	}
+	if v, ok := m[key("gc", "go1.27")]; !ok || v.n != 1 {
+		crash()
+	}
+	if v, ok := m[producer{Tool: made("nanogo"), Version: made("3fbcea1")}]; !ok || v.n != 2 {
+		crash()
+	}
+	// A key that differs in one field only is a different key.
+	if _, ok := m[key("gc", "go1.29")]; ok {
+		crash()
+	}
+
+	churn()
+	runtime.GC()
+	churn()
+
+	total := 0
+	for k, v := range m {
+		runtime.GC()
+		if k.Tool == "" || k.Version == "" {
+			crash()
+		}
+		total = total + v.n
+	}
+	if total != 6 {
+		crash()
+	}
+
+	delete(m, key("gc", "go1.27"))
+	if len(m) != 2 {
+		crash()
+	}
+	if _, ok := m[key("gc", "go1.27")]; ok {
+		crash()
+	}
+}
+
+//go:noinline
+func crash() {
+	d := 0
+	d = d / d
+}
+`
+
+// TestToolexecHashesAMapKeyTheCompilerGeneratedAHashFor is the evidence that
+// the driver writes the body of the hash a map descriptor names.
+//
+// The Hasher of a map names the *key's* hash function, and no other descriptor
+// names it: a struct descriptor has an Equal field and no Hasher. So the
+// function is owed by whoever writes the map's descriptor, and until the
+// driver resolved the name against the closed descriptor set rather than
+// against the type whose descriptor named it, nothing generated the body and
+// rtype refused the map instead.
+func TestToolexecHashesAMapKeyTheCompilerGeneratedAHashFor(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/genhash\n\ngo 1.27\n",
+		"main.go": generatedHashProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "genhash", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	cmd := exec.Command(filepath.Join(h.mod, "genhash"))
+	cmd.Env = append(os.Environ(), "GODEBUG=gccheckmark=1,clobberfree=1", "GOGC=1")
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the map lost a key its generated hash and equality function disagreed about: %v\n%s", err, b)
+	}
+}

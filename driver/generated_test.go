@@ -199,6 +199,11 @@ func defNames(p *obj.Package) []string {
 // and the compiler does not.
 func TestAlgFuncsReadsTheDescriptorsAnswer(t *testing.T) {
 	base := counterType(t)
+	other := twoStringsType(t)
+	owners, err := algOwners([]*ir.Type{base, other})
+	if err != nil {
+		t.Fatalf("algOwners: %v", err)
+	}
 	eq, err := ssagen.EqualSymbol(base)
 	if err != nil {
 		t.Fatal(err)
@@ -207,18 +212,24 @@ func TestAlgFuncsReadsTheDescriptorsAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	otherHash, err := ssagen.HashSymbol(other)
+	if err != nil {
+		t.Fatal(err)
+	}
 	set := []rtype.Symbol{{
 		Name: "type:.eqfunc.main.counter",
 		Relocs: []rtype.Reloc{
 			{Target: eq},
 			{Target: hash},
-			// Another type's function, which that type generates.
-			{Target: "type:.eq.main.other"},
+			// Another type's function. A map's Hasher names one, so the name
+			// is resolved against the closed set and not against the type
+			// whose descriptor named it.
+			{Target: otherHash},
 			// A runtime symbol, which nothing generates.
 			{Target: "runtime.strequal"},
 		},
 	}}
-	fns, err := algFuncs(base, set)
+	fns, err := algFuncs(owners, set)
 	if err != nil {
 		t.Fatalf("algFuncs: %v", err)
 	}
@@ -226,20 +237,96 @@ func TestAlgFuncsReadsTheDescriptorsAnswer(t *testing.T) {
 	for _, fn := range fns {
 		got = append(got, fn.Sym)
 	}
-	want := []string{eq, hash}
+	want := []string{eq, hash, otherHash}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("algFuncs returned %v, want %v", got, want)
+	}
+}
+
+// TestAlgFuncsReportsANameTheSetDoesNotOwn checks that a generated name whose
+// type is not in the closed descriptor set is reported here.
+//
+// It would otherwise be a relocation cmd/link resolves against nothing, and
+// the diagnostic would name a symbol rather than a type.
+func TestAlgFuncsReportsANameTheSetDoesNotOwn(t *testing.T) {
+	owners, err := algOwners([]*ir.Type{counterType(t)})
+	if err != nil {
+		t.Fatalf("algOwners: %v", err)
+	}
+	set := []rtype.Symbol{{Name: "type:.hashfunc.main.absent", Relocs: []rtype.Reloc{{Target: "type:.hash.main.absent"}}}}
+	if _, err := algFuncs(owners, set); err == nil {
+		t.Fatal("a generated name no type in the set owns produced no refusal")
 	}
 }
 
 // TestAlgFuncsFindsNothingWithoutAReference checks that a descriptor that
 // names no generated function produces none.
 func TestAlgFuncsFindsNothingWithoutAReference(t *testing.T) {
-	fns, err := algFuncs(counterType(t), []rtype.Symbol{{Relocs: []rtype.Reloc{{Target: "runtime.memequal64"}}}})
+	owners, err := algOwners([]*ir.Type{counterType(t)})
+	if err != nil {
+		t.Fatalf("algOwners: %v", err)
+	}
+	fns, err := algFuncs(owners, []rtype.Symbol{{Relocs: []rtype.Reloc{{Target: "runtime.memequal64"}}}})
 	if err != nil {
 		t.Fatalf("algFuncs: %v", err)
 	}
 	if len(fns) != 0 {
 		t.Errorf("algFuncs returned %d functions for a descriptor that names none", len(fns))
+	}
+}
+
+// twoStringsType returns a defined struct of two strings, which is a type that
+// compares as something other than one region of memory: it needs a generated
+// equality function and a generated hash function.
+func twoStringsType(t *testing.T) *ir.Type {
+	t.Helper()
+	str := mustLayout(t, &ir.Type{Kind: ir.String, Name: "string", Basic: "string"})
+	return mustLayout(t, &ir.Type{
+		Kind:    ir.Struct,
+		Name:    "main.producer",
+		PkgPath: "main",
+		Fields:  []ir.Field{{Name: "Tool", Type: str}, {Name: "Version", Type: str}},
+		Methods: []ir.Method{},
+	})
+}
+
+// TestGeneratedFuncsWritesTheKeysHashForAMap is the map half of the rule that
+// whoever writes a descriptor defines the functions it names.
+//
+// A map's Hasher points at the hash of the *key* type, and no descriptor names
+// a key's hash anywhere else: a struct descriptor has an Equal field and no
+// Hasher. So a scan that resolved a name against the type whose descriptor
+// named it found nothing here, the function was never generated, and the map
+// descriptor would carry a relocation against an undefined symbol. rtype
+// refused the map rather than emit that, which is the refusal this closes.
+func TestGeneratedFuncsWritesTheKeysHashForAMap(t *testing.T) {
+	key := twoStringsType(t)
+	elem := mustLayout(t, &ir.Type{Kind: ir.Int64, Name: "int", Basic: "int"})
+	m := mustLayout(t, &ir.Type{Kind: ir.Map, Key: key, Elem: elem})
+	cfg := &Config{Package: "main"}
+	types, err := descriptorSet(cfg, []*ir.Type{m})
+	if err != nil {
+		t.Fatalf("descriptorSet: %v", err)
+	}
+	fns, err := generatedFuncs(cfg, types)
+	if err != nil {
+		t.Fatalf("generatedFuncs: %v", err)
+	}
+	want, err := ssagen.HashSymbol(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, fn := range fns {
+		got = append(got, fn.Sym)
+	}
+	found := false
+	for _, s := range got {
+		if s == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the map's key hash %s is not generated; the driver generated %v", want, got)
 	}
 }

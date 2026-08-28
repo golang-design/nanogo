@@ -228,7 +228,7 @@ compile.
 | Package | What stops it |
 | --- | --- |
 | `syntax` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, reached through `FileSet`. [032](032-type-descriptors-and-itabs.md) owns the descriptor and [013](013-generics.md) the instantiation |
-| `dist` | `rtype: dist.Producer needs a generated hash function, which specs/032 has no writer for` |
+| `dist` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, the same reason `syntax` stops on and reached here through `Producer`'s map. The generated hash it used to stop on is written now |
 | `export/pkgbits` | `ir: lowering DumpTo: closure: the closure captures the result err, whose storage the single exit of a function that defers owns`. [020](020-ir.md) owns the row |
 
 `loader` and `types2` wait on `syntax`. `export` waits on `pkgbits`. `link`,
@@ -242,7 +242,10 @@ arrives in the frame to be read there, which [030](030-abi.md) now does at the
 call site as well as at the return, and then a data word that is the address of
 a copy, which [032](032-type-descriptors-and-itabs.md) now writes; `obj`
 compiles. `dist` and `export/pkgbits` wanted the same data word and are now on
-their own next reason. A work list that shortens by one item per fix is not
+their own next reason. `dist` then wanted the body of the hash its
+`map[Producer]int` names, which [032](032-type-descriptors-and-itabs.md) now
+generates, and moved to the generic instantiation `syntax` waits on: two of
+the three rows are one row. A work list that shortens by one item per fix is not
 what this measurement shows: it shows how deep each package's stack of reasons
 is, and only the count of compiling packages moves.
 
