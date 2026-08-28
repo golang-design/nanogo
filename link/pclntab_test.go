@@ -284,3 +284,36 @@ func firstEntryDiff(mine, theirs []byte) string {
 	}
 	return "the shorter table is a prefix of the longer one"
 }
+
+// TestPcTabAgreesWithTheLinker compares the table of pc-value tables
+// with cmd/link's, byte for byte.
+//
+// This is the table a garbage collection stack scan reads to find the
+// stack map of a frame, and the one a traceback reads for a line number.
+// A byte out of place here is a program that runs and reports the wrong
+// frame, so the comparison is over the bytes and the first offset that
+// differs is reported.
+func TestPcTabAgreesWithTheLinker(t *testing.T) {
+	target := TargetFor(runtime.GOOS, runtime.GOARCH)
+	if target == nil || runtime.GOOS != "darwin" {
+		t.Skipf("the section the oracle reads is Mach-O's, and this is %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	for _, b := range []*build{&hostBuild, &reflectBuild} {
+		t.Run(b.pkg, func(t *testing.T) {
+			b := b.get(t)
+			img := readPclntab(t, linkExe(t, b))
+			_, _, p := buildPcln(t, b, target)
+
+			if bytes.Equal(p.PcTab, img.pctab) {
+				t.Logf("%d pc-value tables in %#x bytes agree with cmd/link", len(p.pcOffset), len(p.PcTab))
+				return
+			}
+			off := 0
+			for off < len(p.PcTab) && off < len(img.pctab) && p.PcTab[off] == img.pctab[off] {
+				off++
+			}
+			t.Errorf("the pc-value table is %#x bytes and cmd/link's is %#x, and the first byte that differs is at 0x%x",
+				len(p.PcTab), len(img.pctab), off)
+		})
+	}
+}

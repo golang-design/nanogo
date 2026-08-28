@@ -44,6 +44,10 @@ type Pcln struct {
 	// FileTab is the null terminated name of every file the table names.
 	FileTab []byte
 
+	// PcTab is every pc-value table of every function, concatenated and
+	// deduplicated.
+	PcTab []byte
+
 	// funcName is the offset of each name in FuncNameTab. A _func record
 	// names its function by this offset.
 	funcName map[Global]uint32
@@ -55,6 +59,14 @@ type Pcln struct {
 	cuIndex map[int]int
 	// nfiles is how many names FileTab holds, which the header states.
 	nfiles int
+
+	// info is the AuxFuncInfo record of each function, decoded once
+	// because every table below reads it.
+	info map[Global]funcInfo
+	// pcOffset is where each pc-value table's bytes start in PcTab. A
+	// table with no bytes is at zero, which the runtime reads as no
+	// table.
+	pcOffset map[Global]uint32
 }
 
 // generatedAlign is the boundary every table the linker generates is
@@ -68,10 +80,73 @@ func (a *Layout) generatedAlign(n int64) int64 { return rndInt(n, a.target.PtrSi
 
 // Pclntab builds the pclntab of the program.
 func (a *Layout) Pclntab() *Pcln {
-	p := &Pcln{Funcs: a.Textp, funcName: map[Global]uint32{}}
+	p := &Pcln{
+		Funcs:    a.Textp,
+		funcName: map[Global]uint32{},
+		info:     map[Global]funcInfo{},
+		pcOffset: map[Global]uint32{},
+	}
+	for _, g := range p.Funcs {
+		if fi, ok := a.l.funcInfo(g); ok {
+			p.info[g] = fi
+		}
+	}
 	a.buildFuncNameTab(p)
 	a.buildFileTabs(p)
+	a.buildPctab(p)
 	return p
+}
+
+// buildPctab writes the table of pc-value tables.
+//
+// Every pc-value table a function carries is an auxiliary symbol of its
+// own, and the linker concatenates them into one and gives each function
+// the offset of each of its tables. The offsets deduplicate: two
+// functions with the same table share one copy, which is most of what
+// makes the table as small as it is.
+//
+// The first byte is padding and belongs to no table, because an offset
+// of zero is how the runtime says a function has no table of that kind.
+// A table with no bytes gets that offset for the same reason.
+func (a *Layout) buildPctab(p *Pcln) {
+	l := a.l
+	size := int64(1)
+	var order []Global
+	save := func(g Global) {
+		if _, seen := p.pcOffset[g]; seen {
+			return
+		}
+		n := int64(a.symSize(g))
+		if n == 0 {
+			p.pcOffset[g] = 0
+		} else {
+			p.pcOffset[g] = uint32(size)
+			size += n
+		}
+		order = append(order, g)
+	}
+	for _, g := range p.Funcs {
+		fi, ok := p.info[g]
+		if !ok {
+			continue
+		}
+		save(fi.pcsp)
+		save(fi.pcfile)
+		save(fi.pcline)
+		for _, d := range fi.pcdata {
+			save(d)
+		}
+		if len(fi.inlTree) > 0 {
+			save(fi.pcinline)
+		}
+	}
+	tab := make([]byte, a.generatedAlign(size))
+	for _, g := range order {
+		if s := l.Def(g); s != nil {
+			copy(tab[p.pcOffset[g]:], s.Data)
+		}
+	}
+	p.PcTab = tab
 }
 
 // buildFileTabs writes the file name table and the compilation unit
@@ -123,7 +198,7 @@ func (a *Layout) buildFileTabs(p *Pcln) {
 		}
 	}
 	for _, g := range p.Funcs {
-		fi, ok := l.funcInfo(g)
+		fi, ok := p.info[g]
 		if !ok {
 			continue
 		}
@@ -239,7 +314,7 @@ func (a *Layout) buildFuncNameTab(p *Pcln) {
 	}
 	for _, g := range p.Funcs {
 		add(g)
-		for _, node := range a.l.inlTree(g) {
+		for _, node := range p.info[g].inlTree {
 			add(node.fn)
 		}
 	}
@@ -265,6 +340,12 @@ type funcInfo struct {
 	startLine        int32
 	files            []uint32
 	inlTree          []inlNode
+
+	// The pc-value tables are auxiliary symbols of the function and not
+	// contents of the record. specs/040-object-format.md owns that
+	// correction and this field is what it means here.
+	pcsp, pcfile, pcline, pcinline Global
+	pcdata                         []Global
 }
 
 // An inlNode is one call the compiler inlined into a function.
@@ -299,22 +380,31 @@ func (l *Loader) funcInfo(g Global) (funcInfo, bool) {
 		if au.Type != obj.AuxFuncInfo {
 			continue
 		}
-		fi := l.Def(l.resolve(st, au.Sym))
-		if fi == nil || len(fi.Data) < funcInfoFixed {
+		rec := l.Def(l.resolve(st, au.Sym))
+		if rec == nil || len(rec.Data) < funcInfoFixed {
 			return funcInfo{}, false
 		}
-		return decodeFuncInfo(l, st, fi.Data)
+		fi, ok := decodeFuncInfo(l, st, rec.Data)
+		if !ok {
+			return funcInfo{}, false
+		}
+		for _, pc := range s.Aux {
+			switch pc.Type {
+			case obj.AuxPcsp:
+				fi.pcsp = l.resolve(st, pc.Sym)
+			case obj.AuxPcfile:
+				fi.pcfile = l.resolve(st, pc.Sym)
+			case obj.AuxPcline:
+				fi.pcline = l.resolve(st, pc.Sym)
+			case obj.AuxPcinline:
+				fi.pcinline = l.resolve(st, pc.Sym)
+			case obj.AuxPcdata:
+				fi.pcdata = append(fi.pcdata, l.resolve(st, pc.Sym))
+			}
+		}
+		return fi, true
 	}
 	return funcInfo{}, false
-}
-
-// inlTree returns the calls the compiler inlined into a function.
-func (l *Loader) inlTree(g Global) []inlNode {
-	fi, ok := l.funcInfo(g)
-	if !ok {
-		return nil
-	}
-	return fi.inlTree
 }
 
 // decodeFuncInfo reads one AuxFuncInfo record.
