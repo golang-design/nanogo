@@ -77,6 +77,7 @@ other row of the tables further down names a call nothing produces yet:
 | `selectgo` | `select` with at least one communication clause | IR lowering |
 | `printlock`, `printunlock`, `printsp`, `printnl` and the `print*` family | `print` and `println` | IR lowering |
 | `printslice`, `printeface`, `printiface` | the same two builtins, one symbol per shape. `gc` calls `LookupRuntime` with the operand's type, which substitutes the declaration's `any` placeholder and keeps the symbol, so nothing is instantiated per element or per dynamic type. The signature spelled here is the runtime's own: `[]byte`, `eface` and `iface` | IR lowering |
+| `complex128div` | every complex division, at `complex128` whatever width the source wrote. `walkDivMod` converts both operands and converts the result back. The obvious formula divides by the square of the modulus and overflows for operands whose squares do not fit, so the runtime scales first; `cmd/compile` keeps an inlined form in `ssagen` behind a comment saying it is not executed. The other three operators expand into float operations and reach no symbol | IR lowering |
 | the fourteen equality algorithms | a type descriptor's `Equal` field | descriptor encoding |
 
 The **Where** column is four passes and not one. The earliest is SSA

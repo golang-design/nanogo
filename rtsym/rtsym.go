@@ -73,6 +73,7 @@ const (
 	GroupGoroutine
 	GroupDefer
 	GroupPrint
+	GroupComplex
 )
 
 var groupNames = [...]string{
@@ -88,6 +89,7 @@ var groupNames = [...]string{
 	GroupGoroutine: "goroutine",
 	GroupDefer:     "defer",
 	GroupPrint:     "print",
+	GroupComplex:   "complex",
 }
 
 func (g Group) String() string {
@@ -330,6 +332,14 @@ var syms = []Sym{
 	// which one, the same way printfloat32 and printfloat64 divide.
 	{Name: "runtime.printcomplex64", Sig: "func(complex64)", Group: GroupPrint},
 	{Name: "runtime.printcomplex128", Sig: "func(complex128)", Group: GroupPrint},
+
+	// Complex division. Every complex division is this call, at complex128
+	// whatever width the source wrote, which is what walkDivMod builds. The
+	// obvious formula divides by the square of the modulus and overflows for
+	// operands whose squares do not fit, so the runtime scales the operands
+	// first. cmd/compile keeps an inlined form in ssagen behind a comment
+	// saying it is not executed.
+	{Name: "runtime.complex128div", Sig: "func(complex128, complex128) complex128", Group: GroupComplex},
 
 	// Interface and string comparison. specs/031's table names these as the
 	// calls an equality or an ordering lowers to.
