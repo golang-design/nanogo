@@ -44,6 +44,7 @@ pass matched 235.go
 pass rejected alias.go
 pass rejected alias2.go
 pass matched align.go
+pass matched append.go
 pass rejected append1.go
 pass matched args.go
 pass matched armimm.go
@@ -177,6 +178,7 @@ pass matched simassign.go
 pass matched sizeof.go
 pass rejected slice3err.go
 pass matched slicecap.go
+pass matched stack.go
 pass matched stackobj.go
 pass matched stackobj2.go
 pass matched stackobj3.go
