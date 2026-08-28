@@ -296,11 +296,66 @@ func (a *ABI) ArgHome(o *ir.Object) (int64, bool) {
 //
 // It is the same recursion specs/025-lowering-and-rules.md decomposes a value
 // by, so the parts here and the values that pass produces are the same words
-// in the same order. complete is false when the walk stopped at the bound,
-// which is by itself enough to know the value does not fit in registers.
+// in the same order. complete is false when the walk stopped at the bound or
+// when the convention refuses the type registers at all, and either is enough
+// to know the value does not fit in registers.
+//
+// The parts are returned in both cases. A value in the argument area still
+// needs its words described, because the arguments bitmap of
+// specs/027-liveness-and-stackmaps.md is built from them.
 func ABILeaves(t *ir.Type) (parts []ABIPart, complete bool) {
 	parts = abiFlatten(nil, t, 0)
-	return parts, len(parts) < abiMaxParts
+	return parts, len(parts) < abiMaxParts && abiRegisterizable(t)
+}
+
+// abiRegisterizable reports whether the convention lets a value of type t
+// travel in registers at all.
+//
+// Go's internal ABI passes an array in registers only when it is "trivial",
+// which means a length of zero or one. gc states the rule in
+// types.CalcArraySize:
+//
+//	// ABIInternal only allows "trivial" arrays (i.e., length 0 or 1)
+//	// to be passed by register.
+//	switch n {
+//	case 0:  t.intRegs, t.floatRegs = 0, 0
+//	case 1:  t.intRegs, t.floatRegs = elem.intRegs, elem.floatRegs
+//	default: t.intRegs, t.floatRegs = math.MaxUint8, math.MaxUint8
+//	}
+//
+// and MaxUint8 is above any register count, so such an array never fits. The
+// refusal reaches whatever contains it, because types.CalcStructSize sums its
+// fields' counts and caps the sum at MaxUint8 as well. `go tool compile -S`
+// agrees on all four edges: a [1]int parameter takes a register, a [0]int
+// takes none and shifts nothing, a [2]byte is read from FP, and a struct
+// holding a [2]byte is read from FP whole.
+//
+// Without this rule nanogo gave a [16]byte result sixteen registers and put
+// the error that followed it in the frame, which is the opposite of both
+// placements gc makes. Inside a nanogo-only program the wrong rule is
+// self-consistent, so nothing but a comparison against gc finds it.
+func abiRegisterizable(t *ir.Type) bool {
+	if t == nil {
+		return true
+	}
+	switch t.Kind {
+	case ir.Array:
+		if t.Len > 1 {
+			return false
+		}
+		return abiRegisterizable(t.Elem)
+	case ir.Struct, ir.Tuple:
+		for i := range t.Fields {
+			if !abiRegisterizable(t.Fields[i].Type) {
+				return false
+			}
+		}
+		return true
+	}
+	// Every other shape is a scalar, a pointer, or one of the built-in
+	// multi-word types abiFlatten spells out, and each of those has a fixed
+	// register count.
+	return true
 }
 
 // abiFlatten appends the parts of t at offset off.
@@ -499,36 +554,93 @@ func abiRoundUp(n, align int64) int64 {
 	return (n + align - 1) / align * align
 }
 
+// ABIWalk places one function's arguments and results with one assigner, and
+// returns the size of the argument area the two need together.
+//
+// The two lists share the stack part of the area and are separated only by the
+// register counters, which restart. gc's abi.ABIAnalyzeFuncType is the same
+// walk: it rounds one stack counter to a word between the two lists and takes
+// the spill base from where the results left it, not from where the arguments
+// did.
+//
+//	info.inparams  = assignParams(ft.RecvParams(), false)
+//	s.stackOffset  = types.RoundUp(s.stackOffset, int64(types.RegSize))
+//	s.rUsed        = RegAmounts{}
+//	info.outparams = assignParams(ft.Results(), true)
+//	info.offsetToSpillArea = alignTo(s.stackOffset, types.RegSize)
+//
+// The spill base is why the two cannot be walked apart. A result in the stack
+// part moves every spill slot above it, so an argument placement made without
+// the results puts the slots over words the callee writes its results into.
+func ABIWalk(t *Target, argTypes, resTypes []*ir.Type, objs []*ir.Object) (in, out []ABIValue, size int64, err error) {
+	if t == nil || t.ClassOf == nil {
+		return nil, nil, 0, fmt.Errorf("ssa: abi: no target")
+	}
+	as := &abiAssigner{t: t, regs: &t.ArgRegs}
+	in, spilled, err := as.placeAll(argTypes, objs)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	as.stack = abiRoundUp(as.stack, ir.PtrSize)
+	as.next = [NumRegClass]int{}
+	as.regs = &t.ResultRegs
+	as.isReturn = true
+	out, _, err = as.placeAll(resTypes, nil)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return in, out, as.finish(in, spilled), nil
+}
+
 // ABIArgs places a list of argument types and returns the size of the argument
 // area they need.
 //
 // It is the placement of one call's operands: the stack part first, then the
-// spill slots the callee writes when it grows the stack.
+// spill slots the callee writes when it grows the stack. A caller that also
+// has results to place must use ABIWalk, because the results sit between the
+// two parts.
 func ABIArgs(t *Target, types []*ir.Type) ([]ABIValue, int64, error) {
-	if t == nil || t.ClassOf == nil {
-		return nil, 0, fmt.Errorf("ssa: abi: no target")
-	}
-	as := &abiAssigner{t: t, regs: &t.ArgRegs}
-	in, spilled, err := as.placeAll(types, nil)
-	if err != nil {
-		return nil, 0, err
-	}
-	return in, as.finish(in, spilled), nil
+	in, _, size, err := ABIWalk(t, types, nil, nil)
+	return in, size, err
 }
 
 // ABIResults places a list of result types. The register counters restart,
 // which is what specs/030-abi.md means by walking the result list again, and
 // nothing is spilled.
-func ABIResults(t *Target, types []*ir.Type) ([]ABIValue, int64, error) {
+//
+// The stack part starts at base, which is where the arguments of the same
+// boundary left it. It is zero only for a boundary with no argument in the
+// stack part.
+func ABIResults(t *Target, base int64, types []*ir.Type) ([]ABIValue, int64, error) {
 	if t == nil || t.ClassOf == nil {
 		return nil, 0, fmt.Errorf("ssa: abi: no target")
 	}
-	as := &abiAssigner{t: t, regs: &t.ResultRegs, isReturn: true}
+	as := &abiAssigner{t: t, regs: &t.ResultRegs, isReturn: true,
+		stack: abiRoundUp(base, ir.PtrSize)}
 	out, _, err := as.placeAll(types, nil)
 	if err != nil {
 		return nil, 0, err
 	}
 	return out, abiRoundUp(as.stack, ir.PtrSize), nil
+}
+
+// ABIStackEnd returns where a placement left the stack part of its area.
+//
+// Only a value the registers could not hold occupies that part, so the walk
+// skips the rest: a value in registers carries a spill offset, which is above
+// the part and is not what a result continues from.
+func ABIStackEnd(vals []ABIValue) int64 {
+	end := int64(0)
+	for i := range vals {
+		av := &vals[i]
+		if av.InReg || av.Type == nil {
+			continue
+		}
+		if e := av.Off + av.Type.Size; e > end {
+			end = e
+		}
+	}
+	return end
 }
 
 // placeAll walks a list of types and reports which of the results took a spill
@@ -621,19 +733,10 @@ func (a *abiPass) run() error {
 	// therefore walks both lists, with the register counters restarted between
 	// them: that restart is the only difference the spec names, and the
 	// shared stack counter is the one it does not.
-	as := &abiAssigner{t: a.t, regs: &a.t.ArgRegs}
-	in, spilled, err := as.placeAll(types, a.objs)
+	in, out, argsSize, err := ABIWalk(a.t, types, a.resultTypes(), a.objs)
 	if err != nil {
 		return fmt.Errorf("ssa: abi: %s: %w", a.f.Name, err)
 	}
-	as.next = [NumRegClass]int{}
-	as.regs = &a.t.ResultRegs
-	as.isReturn = true
-	out, _, err := as.placeAll(a.resultTypes(), nil)
-	if err != nil {
-		return fmt.Errorf("ssa: abi: %s: %w", a.f.Name, err)
-	}
-	argsSize := as.finish(in, spilled)
 
 	a.f.ABI = &ABI{In: in, Out: out, ArgsSize: argsSize, Calls: make([]*ABICall, a.f.NumValues())}
 	a.rewriteArgs()
@@ -1029,9 +1132,11 @@ func (a *abiPass) splitOperands(v *Value) {
 	var size int64
 	var err error
 	if v.Op == OpMakeResult {
-		place, size, err = ABIResults(a.t, types)
+		place, size, err = ABIResults(a.t, ABIStackEnd(a.f.ABI.In), types)
 	} else {
-		place, size, err = ABIArgs(a.t, types)
+		// The call's results are walked with its arguments, because the
+		// spill slots the size covers sit above both.
+		place, _, size, err = ABIWalk(a.t, types, abiCallResultTypes(v), nil)
 	}
 	if err != nil || len(place) != len(v.Args)-lo-a.memArgs(v) {
 		return
@@ -1181,28 +1286,49 @@ func (a *abiPass) callResults(call *Value) error {
 	for _, v := range sel {
 		types = append(types, v.Type)
 	}
-	place, _, err := ABIResults(a.t, types)
+	args, _, _, err := ABICallArgs(a.t, call)
+	if err != nil {
+		return a.unreadableResult(call, "the convention does not place the call's arguments")
+	}
+	place, _, err := ABIResults(a.t, ABIStackEnd(args), types)
 	if err != nil || len(place) != len(sel) {
 		return a.unreadableResult(call, "the convention does not place the call's results")
 	}
 
 	// The survey runs first, because a result the walk below cannot place has
 	// to stop the function rather than renumber half of a list.
-	split := false
+	split, framed := false, false
 	for i := range place {
 		av := &place[i]
+		if !av.InReg && av.Type != nil && av.Type.Size > 0 {
+			// The registers could not hold it, so the callee wrote it into
+			// the area and the call site reads it back from there.
+			if a.resultStore(sel[i]) == nil {
+				return a.resultRefusal(sel[i], "the call site does not read it into one place, so the words it arrived in have nowhere to go")
+			}
+			framed = true
+			continue
+		}
 		if !Multiword(sel[i].Type) {
 			continue
 		}
 		switch {
 		case len(av.Parts) < 2:
 			// One word or none, which every store the machine has can write.
-		case !av.InReg:
-			return a.resultRefusal(sel[i], "the result registers cannot hold it, and reading it back from the frame is not built")
 		case a.resultStore(sel[i]) == nil:
 			return a.resultRefusal(sel[i], "the call site does not write it to one place, so its words have nowhere to go")
 		default:
 			split = true
+		}
+	}
+	if framed {
+		mem := a.memoryOf(call)
+		for i := range place {
+			av := &place[i]
+			if av.InReg || av.Type == nil || av.Type.Size == 0 {
+				continue
+			}
+			a.readFromArea(call, sel[i], a.resultStore(sel[i]), av, mem)
 		}
 	}
 	if !split {
@@ -1259,6 +1385,40 @@ func (a *abiPass) resultReads(call *Value) ([]*Value, bool) {
 		out[i] = v
 	}
 	return out, true
+}
+
+// readFromArea turns the call site's read of a result that arrived in the
+// outgoing argument area into a block move out of that area.
+//
+// It is the mirror of rewriteResults, which is the callee's half: the callee
+// copies the value into the area ahead of its return, and the caller copies it
+// out of the area after the call. Go's convention puts such a result after the
+// arguments the registers could not hold, and av.Off is that offset, because
+// ABIWalk placed the two lists with one stack counter.
+//
+// The store the call site already makes becomes the move, rather than being
+// removed and replaced. Its identifier and its position in the memory chain
+// stay, so every value that read the memory it produced still reads the same
+// value and no chain has to be repaired.
+//
+// The SelectN stays as well, with no reader. It names one place of the call's
+// result list, and the code generator walks that list by index: a result
+// removed here is a result the generator cannot count past. It is given no
+// home, because nothing reads it, and the generator then emits nothing for it.
+func (a *abiPass) readFromArea(call, sel, st *Value, av *ABIValue, mem *Value) {
+	if st == nil || mem == nil {
+		return
+	}
+	o := a.home("~R", int(sel.AuxInt), av.Type, av.Off, false)
+	src := a.mk(st, st.Block, st.Pos, OpLocalAddr, abiPtrTo(av.Type), st.Args[2])
+	src.Aux = o
+	dst := st.Args[0]
+	prev := st.Args[2]
+	st.Op = OpMove
+	st.Type = MemType
+	st.AuxInt = av.Type.Size
+	setArgs(st, dst, src, prev)
+	a.touched[st.Block.ID] = true
 }
 
 // resultStore returns the store that writes a whole call result into one
@@ -1567,7 +1727,7 @@ func ABIUseReg(t *Target, v *Value, i int) (Reg, bool) {
 	case v.Op.IsCall():
 		out, lo, _, err = ABICallArgs(t, v)
 	default:
-		out, _, err = ABIResults(t, abiOperandTypes(v, 0))
+		out, _, err = ABIResults(t, abiFuncArgStackEnd(v), abiOperandTypes(v, 0))
 	}
 	if err != nil {
 		return NoReg, false
@@ -1639,7 +1799,52 @@ func ABICallArgs(t *Target, v *Value) (out []ABIValue, lo int, size int64, err e
 	}
 	// No record, so the operand list still describes what the call passes.
 	// Selection creates calls of its own, runtime.memmove among them, and
-	// they are placed by the walk like any other.
-	out, size, err = ABIArgs(t, abiOperandTypes(v, lo))
+	// they are placed by the walk like any other. The results are walked with
+	// them so that the size covers the whole area.
+	out, _, size, err = ABIWalk(t, abiOperandTypes(v, lo), abiCallResultTypes(v), nil)
 	return out, lo, size, err
+}
+
+// abiCallResultTypes returns the types a call's results are read as, in the
+// order the result area holds them, or nil when the reads are not one per
+// result.
+//
+// The walk is over the call's own block, which is where the code generator
+// looks for them: a result read anywhere else is one it cannot place.
+func abiCallResultTypes(call *Value) []*ir.Type {
+	if call == nil || call.Block == nil {
+		return nil
+	}
+	var out []*ir.Type
+	for _, v := range call.Block.Values {
+		if v.Op != OpSelectN || len(v.Args) == 0 || v.Args[0] != call {
+			continue
+		}
+		i := int(v.AuxInt)
+		if i < 0 || i >= abiMaxParts {
+			return nil
+		}
+		for len(out) <= i {
+			out = append(out, nil)
+		}
+		if out[i] != nil {
+			return nil
+		}
+		out[i] = v.Type
+	}
+	for _, t := range out {
+		if t == nil {
+			return nil
+		}
+	}
+	return out
+}
+
+// abiFuncArgStackEnd returns where the stack part of a function's own incoming
+// argument area ended, which is where its results continue from.
+func abiFuncArgStackEnd(v *Value) int64 {
+	if v == nil || v.Block == nil || v.Block.Func == nil || v.Block.Func.ABI == nil {
+		return 0
+	}
+	return ABIStackEnd(v.Block.Func.ABI.In)
 }

@@ -2071,7 +2071,7 @@ func TestTheAssignmentHasToBeThere(t *testing.T) {
 	// integer result beside it takes R0 rather than being pushed along by it.
 	e := &emitter{opt: Options{Sym: "test.f"}, a: &ssa.Alloc{Target: ssa.NewArm64Target()}}
 	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
-	pl, err := e.resultPlaces([]*ir.Type{f64, typeInt})
+	pl, err := e.resultPlaces(0, []*ir.Type{f64, typeInt})
 	if err != nil {
 		t.Fatalf("a floating-point result was refused: %v", err)
 	}
@@ -2083,7 +2083,7 @@ func TestTheAssignmentHasToBeThere(t *testing.T) {
 	}
 	// A result of no width takes no register and is not an error.
 	empty := &ir.Type{Kind: ir.Struct, Size: 0, Align: 1, Name: "struct{}"}
-	if pl, err := e.resultPlaces([]*ir.Type{empty}); err != nil || len(pl) != 1 || pl[0].inReg {
+	if pl, err := e.resultPlaces(0, []*ir.Type{empty}); err != nil || len(pl) != 1 || pl[0].inReg {
 		t.Errorf("a result of no width gave %v and %v", pl, err)
 	}
 	// A result the register set cannot hold has no form here.
@@ -2091,7 +2091,7 @@ func TestTheAssignmentHasToBeThere(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		big.Fields = append(big.Fields, ir.Field{Name: "f", Type: typeInt, Offset: int64(i) * 8})
 	}
-	if _, err := e.resultPlaces([]*ir.Type{big}); err == nil {
+	if _, err := e.resultPlaces(0, []*ir.Type{big}); err == nil {
 		t.Error("a five-word result was placed as one register")
 	}
 }

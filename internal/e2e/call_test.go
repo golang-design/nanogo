@@ -269,3 +269,124 @@ func TestToolexecAssignsInParallel(t *testing.T) {
 		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
 	}
 }
+
+// arrayResultProgram returns an array the result registers cannot hold.
+//
+// Go's internal ABI passes an array in registers only when its length is zero
+// or one, which gc states in types.CalcArraySize. nanogo gave every element a
+// register of its own, so ([16]byte, error) took sixteen result registers for
+// the array and pushed the error into the frame. gc does the opposite with
+// both: the array is in the frame at 8(RSP) and the error is in R0 and R1.
+//
+// Inside a nanogo-only program the wrong rule was self-consistent and gave
+// right answers, so nothing but a comparison against gc could report it. This
+// program is that comparison. Every function crosses the boundary in a
+// different direction:
+//
+//   - hash returns an array in the frame and an error in registers,
+//   - stackAndFrame has stack arguments as well, so the array is placed after
+//     them rather than at the start of the area,
+//   - two returns two frame results, so the second is placed after the first,
+//   - takes reads an array parameter that arrives in the frame,
+//   - trivial returns the arrays the convention does keep in registers.
+const arrayResultProgram = `package main
+
+import "fmt"
+
+type myErr struct{ s string }
+
+func (e *myErr) Error() string { return e.s }
+
+//go:noinline
+func hash(i int) ([16]byte, error) {
+	var b [16]byte
+	for j := range b {
+		b[j] = byte(i*j + j)
+	}
+	if i == 7 {
+		return b, &myErr{"seven"}
+	}
+	return b, nil
+}
+
+//go:noinline
+func stackAndFrame(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17 int) ([16]byte, int) {
+	var b [16]byte
+	b[0] = byte(a16)
+	b[15] = byte(a17)
+	return b, a0 + a17
+}
+
+//go:noinline
+func two(i int) ([16]byte, [24]byte) {
+	var a [16]byte
+	var b [24]byte
+	a[0], a[15] = byte(i), byte(i+1)
+	b[0], b[23] = byte(i+2), byte(i+3)
+	return a, b
+}
+
+//go:noinline
+func takes(b [16]byte, n int) int {
+	s := n
+	for _, v := range b {
+		s = s + int(v)
+	}
+	return s
+}
+
+//go:noinline
+func trivial(x [1]int, y [0]int, n int) ([1]int, int) {
+	_ = y
+	return [1]int{x[0] * 3}, n + 1
+}
+
+func sum(b []byte) int {
+	s := 0
+	for i, v := range b {
+		s = s + int(v)*(i+1)
+	}
+	return s
+}
+
+func main() {
+	for i := 0; i < 9; i++ {
+		b, err := hash(i)
+		msg := "nil"
+		if err != nil {
+			msg = err.Error()
+		}
+		fmt.Println("hash", i, sum(b[:]), msg)
+		fmt.Println("takes", takes(b, i))
+	}
+
+	b, n := stackAndFrame(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+	fmt.Println("stackAndFrame", sum(b[:]), n)
+
+	p, q := two(5)
+	fmt.Println("two", sum(p[:]), sum(q[:]))
+
+	r, m := trivial([1]int{7}, [0]int{}, 4)
+	fmt.Println("trivial", r[0], m)
+}
+`
+
+// TestToolexecPassesAnArrayThroughTheFrame builds the program above and
+// compares every line against gc.
+func TestToolexecPassesAnArrayThroughTheFrame(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/arrayresult\n\ngo 1.27\n",
+		"main.go": arrayResultProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "arrayresult", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "arrayresult"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

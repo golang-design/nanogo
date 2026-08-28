@@ -1362,12 +1362,26 @@ func (e *emitter) callValue(v *ssa.Value) {
 // specs/030-abi.md walks the results with the register counters restarted, and
 // the allocator read the same walk when it pre-coloured a call's results and a
 // return's values.
-func (e *emitter) resultPlaces(types []*ir.Type) ([]place, error) {
-	vals, _, err := ssa.ABIResults(e.a.Target, types)
+//
+// base is where the arguments of the same boundary left the stack part of the
+// area. A result the registers cannot hold sits after them, so a walk that
+// started at zero would read it out of a word an argument occupies.
+func (e *emitter) resultPlaces(base int64, types []*ir.Type) ([]place, error) {
+	vals, _, err := ssa.ABIResults(e.a.Target, base, types)
 	if err != nil {
 		return nil, err
 	}
 	return valuePlaces(vals)
+}
+
+// callResultBase returns where one call's arguments left the stack part of the
+// outgoing area.
+func (e *emitter) callResultBase(v *ssa.Value) (int64, error) {
+	vals, _, _, err := ssa.ABICallArgs(e.a.Target, v)
+	if err != nil {
+		return 0, err
+	}
+	return ssa.ABIStackEnd(vals), nil
 }
 
 // storeArg writes one outgoing argument into the frame.
@@ -1422,7 +1436,12 @@ func (e *emitter) results(call *ssa.Value) {
 			return
 		}
 	}
-	places, err := e.resultPlaces(types)
+	base, err := e.callResultBase(call)
+	if err != nil {
+		e.fail("v%d: %v", call.ID, err)
+		return
+	}
+	places, err := e.resultPlaces(base, types)
 	if err != nil {
 		e.fail("v%d: %v", call.ID, err)
 		return
@@ -1430,13 +1449,19 @@ func (e *emitter) results(call *ssa.Value) {
 	x := make([]xfer, 0, len(sel))
 	for i, v := range sel {
 		e.done[v.ID] = true
-		dst := e.home(v)
-		if dst.Kind == ssa.LocNone {
-			continue
-		}
 		p := places[i]
 		if !p.inReg {
-			e.fail("v%d: a result that arrives in the frame is not read", v.ID)
+			// The result arrived in the outgoing argument area and not in a
+			// register, so there is no register to move it out of. The abi
+			// pass turned the call site's read of it into a block move out of
+			// that area (ssa.readFromArea) and left this value with no
+			// reader; a call whose result it could not rewrite that way is
+			// refused there, so reaching here means the move is already in
+			// the graph.
+			continue
+		}
+		dst := e.home(v)
+		if dst.Kind == ssa.LocNone {
 			continue
 		}
 		x = append(x, xfer{dst: dst, src: ssa.RegLoc(ssa.Reg(p.reg)), v: v})
@@ -1454,7 +1479,9 @@ func (e *emitter) ret(v *ssa.Value) {
 	for _, a := range args {
 		types = append(types, a.Type)
 	}
-	places, err := e.resultPlaces(types)
+	// A return continues from where this function's own arguments left the
+	// stack part of its incoming area.
+	places, err := e.resultPlaces(ssa.ABIStackEnd(e.f.ABI.In), types)
 	if err != nil {
 		e.fail("v%d: %v", v.ID, err)
 		return

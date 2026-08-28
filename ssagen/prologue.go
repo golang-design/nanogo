@@ -190,19 +190,26 @@ func partPlace(v *ssa.ABIValue, p *ssa.ABIPart) place {
 // and a return need: there the placement and the operand list are walked
 // together, so they must have the same length.
 //
-// A value of more than one word is refused. specs/030-abi.md's assignment pass
-// splits every such value that travels in registers, so one that reaches here
-// travels in the argument area whole, and the code generator has no form that
-// writes it there.
+// A value of more than one word that travels in registers is refused.
+// specs/030-abi.md's assignment pass splits every one of those into one
+// operand per register, so one that reaches here is a value the pass did not
+// see and the code generator has no form for.
+//
+// A value of more than one word that the registers could not hold is one
+// entry, at the offset of the whole value in the argument area. It is moved as
+// a block and not a word at a time, so it needs one place and not several: the
+// abi pass turned both sides of it into an OpMove already, and this entry is
+// what tells the code generator the value is not in a register.
 func valuePlaces(vals []ssa.ABIValue) ([]place, error) {
 	out := make([]place, 0, len(vals))
 	for i := range vals {
 		v := &vals[i]
-		if len(v.Parts) > 1 {
+		if len(v.Parts) > 1 && v.InReg {
 			return nil, fmt.Errorf("value %d is %v, which does not fit one register", i, v.Type)
 		}
-		if len(v.Parts) == 0 {
-			// A value of no width occupies no register and no word.
+		if len(v.Parts) == 0 || !v.InReg {
+			// A value of no width occupies no register and no word, and a
+			// value in the argument area occupies words and no register.
 			out = append(out, place{off: v.Off, typ: v.Type})
 			continue
 		}

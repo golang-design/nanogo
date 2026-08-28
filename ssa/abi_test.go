@@ -63,13 +63,12 @@ func TestABILeavesMatchesDecomposition(t *testing.T) {
 		abiArray("a3", 3, abiTI32),
 		abiStruct("mixed", 2, abiTStr),
 	}
+	// The offsets are the same whether or not the convention gives the value
+	// registers, because they describe the words and not the placement. A
+	// three-element array is the one here the convention refuses.
 	for _, typ := range types {
 		want := decomposeOffsets(t, typ)
-		parts, complete := ABILeaves(typ)
-		if !complete {
-			t.Errorf("%v: the walk stopped at the bound", typ)
-			continue
-		}
+		parts, _ := ABILeaves(typ)
 		if len(parts) != len(want) {
 			t.Errorf("%v: the assignment walk has %d parts and decomposition made %d", typ, len(parts), len(want))
 			continue
@@ -554,7 +553,7 @@ func TestAssignABIRejectsNoTarget(t *testing.T) {
 	if _, _, err := ABIArgs(nil, nil); err == nil {
 		t.Error("a nil target placed an argument list")
 	}
-	if _, _, err := ABIResults(nil, nil); err == nil {
+	if _, _, err := ABIResults(nil, 0, nil); err == nil {
 		t.Error("a nil target placed a result list")
 	}
 	// A value with no type has no placement, and guessing one would be a
@@ -710,7 +709,7 @@ func TestACallsResultsAreNotPreColoured(t *testing.T) {
 	// The placement itself is still the walk, and the code generator reads
 	// it: results restart the counters, so they are the first two result
 	// registers whatever the arguments took.
-	out, _, err := ABIResults(tg, []*ir.Type{abiTInt, abiTPtr})
+	out, _, err := ABIResults(tg, 0, []*ir.Type{abiTInt, abiTPtr})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,7 +858,7 @@ func TestAssignABISplitsAWideCallResult(t *testing.T) {
 	}
 	// The words come back in the first five result registers, which is where
 	// the callee's return leaves them.
-	out, _, err := ABIResults(tg, words)
+	out, _, err := ABIResults(tg, 0, words)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -906,23 +905,105 @@ func TestAssignABIRenumbersTheResultsAfterAWideOne(t *testing.T) {
 	}
 }
 
-// TestAssignABIRefusesAResultTheRegistersCannotHold is the case the caller's
-// half is not built for.
+// TestAssignABIReadsAResultTheRegistersCannotHold covers the caller's half of
+// a result that travels in the argument area.
 //
 // gc puts a result the sixteen result registers cannot hold in the incoming
 // argument area of the callee, after the arguments the registers could not
-// hold. rewriteResults writes it there, and nothing reads it back at the call
-// site. A refusal that names the function is what the pass produces instead of
-// a store no rule lowers.
-func TestAssignABIRefusesAResultTheRegistersCannotHold(t *testing.T) {
+// hold. rewriteResults writes it there and readFromArea reads it back, so the
+// store the call site made becomes a block move out of a slot of the outgoing
+// area. The SelectN stays with no reader, because it still names one place of
+// the call's result list and the code generator counts that list by index.
+func TestAssignABIReadsAResultTheRegistersCannotHold(t *testing.T) {
 	tg := NewArm64Target()
-	f, _ := abiCallReturning(abiStruct("s20", 20, abiTInt))
+	f, call := abiCallReturning(abiStruct("s20", 20, abiTInt))
+	Decompose(f)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatalf("a twenty-word result was refused at the call site: %v\n%s", err, f)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+
+	// The store became a move of the whole value out of the area.
+	var mv *Value
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpMove {
+				mv = v
+			}
+			if v.Op == OpStore {
+				t.Errorf("a store of the whole result is left in the graph\n%s", f)
+			}
+		}
+	}
+	if mv == nil || mv.AuxInt != 160 {
+		t.Fatalf("the call site does not move the 160-byte result out of the area\n%s", f)
+	}
+	src := mv.Args[1]
+	if src.Op != OpLocalAddr {
+		t.Fatalf("the move reads %v and not an address in the area\n%s", src.Op, f)
+	}
+	o, _ := src.Aux.(*ir.Object)
+	if o == nil {
+		t.Fatalf("the move reads an address of no object\n%s", f)
+	}
+	var home *ABIHome
+	for i := range f.ABI.Homes {
+		if f.ABI.Homes[i].Obj == o {
+			home = &f.ABI.Homes[i]
+		}
+	}
+	if home == nil {
+		t.Fatalf("the slot the move reads is not named in the ABI\n%s", f)
+	}
+	if home.Incoming {
+		t.Error("the call site reads its result out of its own incoming area")
+	}
+	if home.Off != 0 {
+		t.Errorf("the result is at %d of the outgoing area, want 0", home.Off)
+	}
+	// The SelectN is still there, because the generator walks the list by
+	// index and a missing entry moves every entry after it.
+	found := false
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpSelectN && len(v.Args) > 0 && v.Args[0] == call {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the result the area holds is no longer named\n%s", f)
+	}
+}
+
+// TestAssignABIRefusesAFrameResultWithNowhereToPutIt covers a result in the
+// argument area that the call site does not read into one place.
+//
+// The move needs a destination and there is none, so the pass refuses the
+// function rather than leave a value the code generator meets as a register.
+func TestAssignABIRefusesAFrameResultWithNowhereToPutIt(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiStruct("s20", 20, abiTInt)
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	call := b.NewValue(0, OpStaticCall, MemType, mem)
+	call.Aux = &ir.Object{Name: "main.g"}
+	sel := b.NewValue(0, OpSelectN, typ, call)
+	// The result is read by a second call rather than written to one place.
+	use := b.NewValue(0, OpStaticCall, MemType, sel, call)
+	use.Aux = &ir.Object{Name: "main.h"}
+	b.Control = b.NewValue(0, OpMakeResult, MemType, use)
+
 	Decompose(f)
 	err := AssignABI(f, tg)
 	if err == nil {
-		t.Fatalf("a twenty-word result was accepted at the call site\n%s", f)
+		t.Fatalf("a result with nowhere to go was accepted\n%s", f)
 	}
-	if !strings.Contains(err.Error(), "the result registers cannot hold it") {
+	if !strings.Contains(err.Error(), "have nowhere to go") {
 		t.Errorf("the refusal is %q, and it has to say why", err)
 	}
 }
@@ -1179,8 +1260,11 @@ func TestAssignABINamesAnArgumentThatHasNoParameter(t *testing.T) {
 // no built type reaches.
 func TestABIFlattensAnArray(t *testing.T) {
 	parts, complete := ABILeaves(abiArray("a4", 4, abiTI32))
-	if !complete || len(parts) != 4 {
+	if len(parts) != 4 {
 		t.Fatalf("a four-element array has %d parts", len(parts))
+	}
+	if complete {
+		t.Error("a four-element array was given registers")
 	}
 	for i, p := range parts {
 		if p.Off != int64(i)*4 || p.Type != abiTI32 {
@@ -1335,5 +1419,84 @@ func TestABICallRecordIsIgnoredForACallSelectionMade(t *testing.T) {
 	}
 	if _, ok := (&ABICall{Vals: []ABIValue{{Copied: true}}}).Operand(0); ok {
 		t.Error("a copied value was returned as an operand")
+	}
+}
+
+// TestArrayRegistersMatchTheConvention pins the rule that decides whether an
+// array travels in registers.
+//
+// Go's internal ABI passes an array in registers only when its length is zero
+// or one. gc states it in types.CalcArraySize and enforces it by giving a
+// longer array a register count of MaxUint8, which no register file holds, and
+// types.CalcStructSize propagates the refusal by capping the sum of its
+// fields' counts the same way.
+//
+// The expectations are `go tool compile -S` on arm64:
+//
+//	f1(x [1]int, y int)     x in R0, y in R1
+//	f0(x [0]int, y int)     y in R0, x nowhere
+//	f2(x [2]byte, y int)    x at main.x(FP), y in R0
+//	fs2(x struct{a [2]byte; b int}, y int)
+//	                        x at main.x(FP) and main.x+8(FP), y in R2
+//	fs1(x struct{a [1]int; b int}, y int)
+//	                        x in R0 and R1, y in R2
+//
+// Before this rule nanogo gave [16]byte sixteen registers, which exhausted the
+// result set and pushed the error after it into the frame. gc does the
+// opposite with both: the array is in the frame and the error is in R0 and R1.
+func TestArrayRegistersMatchTheConvention(t *testing.T) {
+	byteT := &ir.Type{Kind: ir.Uint8, Size: 1, Align: 1, Name: "byte"}
+	cases := []struct {
+		name string
+		typ  *ir.Type
+		fits bool
+	}{
+		{"[16]byte", abiArray("a16", 16, byteT), false},
+		{"[2]byte", abiArray("a2", 2, byteT), false},
+		{"[1]int", abiArray("a1", 1, abiTInt), true},
+		{"[0]int", abiArray("a0", 0, abiTInt), true},
+		{"[1][2]byte", abiArray("aa", 1, abiArray("a2", 2, byteT)), false},
+		{"[1][1]int", abiArray("aa", 1, abiArray("a1", 1, abiTInt)), true},
+		{"struct{[2]byte; int}", &ir.Type{Kind: ir.Struct, Size: 16, Align: 8, Name: "s2",
+			Fields: []ir.Field{
+				{Name: "a", Type: abiArray("a2", 2, byteT), Offset: 0},
+				{Name: "b", Type: abiTInt, Offset: 8},
+			}}, false},
+		{"struct{[1]int; int}", &ir.Type{Kind: ir.Struct, Size: 16, Align: 8, Name: "s1",
+			Fields: []ir.Field{
+				{Name: "a", Type: abiArray("a1", 1, abiTInt), Offset: 0},
+				{Name: "b", Type: abiTInt, Offset: 8},
+			}}, true},
+		{"int", abiTInt, true},
+		{"string", abiTStr, true},
+		{"interface", abiTIface, true},
+	}
+	for _, c := range cases {
+		if _, fits := ABILeaves(c.typ); fits != c.fits {
+			t.Errorf("%s fits in registers = %v, want %v", c.name, fits, c.fits)
+		}
+	}
+
+	// The placement gc makes for ([16]byte, error): the array in the frame at
+	// offset zero, the error in the first two result registers.
+	tg := NewArm64Target()
+	iface := abiTIface
+	out, size, err := ABIResults(tg, 0, []*ir.Type{abiArray("a16", 16, byteT), iface})
+	if err != nil {
+		t.Fatalf("([16]byte, error) was not placed: %v", err)
+	}
+	if out[0].InReg || out[0].Off != 0 {
+		t.Errorf("the [16]byte result is InReg=%v at %d, want the frame at 0", out[0].InReg, out[0].Off)
+	}
+	if !out[1].InReg || len(out[1].Parts) != 2 {
+		t.Fatalf("the error result is InReg=%v with %d parts", out[1].InReg, len(out[1].Parts))
+	}
+	for i, p := range out[1].Parts {
+		if p.Reg != tg.ResultRegs[ClassInt][i] {
+			t.Errorf("word %d of the error is in %v, want %v", i, p.Reg, tg.ResultRegs[ClassInt][i])
+		}
+	}
+	if size != 16 {
+		t.Errorf("the result area is %d bytes, want 16", size)
 	}
 }
