@@ -7,6 +7,7 @@ package ir
 import (
 	"fmt"
 
+	"golang.design/x/nanogo/syntax"
 	"golang.design/x/nanogo/types2"
 )
 
@@ -35,6 +36,16 @@ type Converter struct {
 	// tuples is the cache for result tuples, which are not types of values and
 	// so are kept apart from cache.
 	tuples map[*types2.Tuple]*Type
+
+	// gens holds the scope-disambiguation number of each function-scoped
+	// defined type of the package being converted, and is nil for a converter
+	// that meets none. LocalTypeGens fills it and Type.Gen says what the
+	// number is for.
+	//
+	// It is not ranged over. It is read by the one object that asks for its
+	// own number, so specs/053-determinism.md's rule about maps is met by the
+	// walk that built it rather than by this lookup.
+	gens map[*types2.TypeName]int
 }
 
 // NewConverter returns a Converter with an empty cache.
@@ -47,6 +58,20 @@ func NewConverter() *Converter {
 		tuples: make(map[*types2.Tuple]*Type),
 	}
 }
+
+// Locals tells the converter the scope-disambiguation number of every
+// function-scoped defined type of the package it is about to convert, which
+// LocalTypeGens computes from the package's files.
+//
+// A converter that is never told numbers a function-scoped type zero, which is
+// correct only for a caller that meets none: driver's check of the types a
+// package owes its importers walks the package scope, and a type declared
+// inside a function is not in it.
+//
+// It is told rather than asked because the number is declaration order over
+// the package's source, and the converter sees a type graph, whose walk order
+// is neither the source's nor stable across the types that reach it first.
+func (c *Converter) Locals(gens map[*types2.TypeName]int) { c.gens = gens }
 
 // Convert returns the IR type of t, with Size, Align, PtrBits and every field
 // offset already computed.
@@ -192,8 +217,11 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 		// generates code may branch on them. The shape still comes from the
 		// underlying type.
 		out.Name = namedString(t)
-		if obj := t.Obj(); obj != nil && obj.Pkg() != nil {
-			out.PkgPath = obj.Pkg().Path()
+		if obj := t.Obj(); obj != nil {
+			if obj.Pkg() != nil {
+				out.PkgPath = obj.Pkg().Path()
+			}
+			out.Gen = c.gens[obj]
 		}
 		// The name above is the generic type's, without the arguments, so an
 		// instantiation has to be marked as one. See the field's comment.
@@ -336,6 +364,78 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 		return fmt.Errorf("ir: a constraint union has no run-time representation")
 	}
 	return fmt.Errorf("ir: no IR type for %T", t)
+}
+
+// LocalTypeGens numbers the types a package declares inside its functions.
+//
+// files must be the files that were checked, in the order they were given to
+// the checker, and info the Info they filled. The number is one counter over
+// the whole package, incremented at each function-scoped type declaration in
+// source order, which is what gc's declCollector does:
+//
+//	// Assign a unique ID to function-scoped defined types.
+//	if c.withinFunc {
+//		*c.typegen++
+//		d.gen = *c.typegen
+//	}
+//
+// Two rules of that walk are not obvious and both change the numbers. An alias
+// declares no type and takes no number. And the counter is shared across the
+// files rather than restarted at each one, so the number a type gets depends
+// on how many function-scoped declarations the files before it hold.
+//
+// Type.Gen says what the number is for and TypeLinkString is where it is
+// spelled.
+func LocalTypeGens(files []*syntax.File, info *types2.Info) map[*types2.TypeName]int {
+	if info == nil {
+		return nil
+	}
+	gens := make(map[*types2.TypeName]int)
+	gen := 0
+	for _, f := range files {
+		syntax.Walk(f, &localTypeWalk{info: info, gen: &gen, gens: gens})
+	}
+	return gens
+}
+
+// localTypeWalk is the visitor LocalTypeGens walks each file with.
+//
+// withinFunc is what makes a declaration function-scoped, and it is a property
+// of the subtree rather than of the walk: the visitor a block returns for its
+// children is a copy with the flag set, so a type declared after a function
+// body, at package scope, is not numbered by the body that preceded it.
+type localTypeWalk struct {
+	info       *types2.Info
+	gen        *int
+	gens       map[*types2.TypeName]int
+	withinFunc bool
+}
+
+func (w *localTypeWalk) Visit(n syntax.Node) syntax.Visitor {
+	switch n := n.(type) {
+	case *syntax.TypeDecl:
+		if !w.withinFunc || n.Alias {
+			return w
+		}
+		// The counter advances for the declaration, whether or not the checker
+		// defined an object for its name. gc's collector reads the
+		// declaration and not the object, so a name this side cannot resolve
+		// must still consume the number, or every declaration after it in the
+		// package is numbered one lower than gc numbers it.
+		*w.gen++
+		if obj, ok := w.info.Defs[n.Name].(*types2.TypeName); ok {
+			w.gens[obj] = *w.gen
+		}
+		return w
+
+	case *syntax.BlockStmt:
+		if !w.withinFunc {
+			inner := *w
+			inner.withinFunc = true
+			return &inner
+		}
+	}
+	return w
 }
 
 // namedString names a defined type for a diagnostic.

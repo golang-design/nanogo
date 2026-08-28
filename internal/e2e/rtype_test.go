@@ -79,3 +79,82 @@ func TestToolexecTypeDescriptorIsOneSymbol(t *testing.T) {
 		t.Fatalf("the program nanogo compiled did not run: %v\n%s", err, b)
 	}
 }
+
+// localTypeProgram declares a type called T in each of two functions.
+//
+// The two are different types and Go gives them one name: reflect.Type.String
+// reports main.T for either, and gc prints main.T for both. So the name does
+// not tell them apart, and a compiler that names a descriptor by it alone
+// writes one symbol for two layouts. cmd/link then keeps one, and a value of
+// either type carries the other's fields.
+//
+// Go's own test/append.go is where this was found. verifyStruct declares
+// type T struct{a, b, c string} and verifyInterface declares type T
+// interface{}, and reflect.DeepEqual read the struct's three string headers
+// out of an interface value, so the program died inside fmt with a bus error
+// on a pointer that was never a pointer.
+//
+// The program prints what each type is and what a value of it holds, and gc
+// prints the same lines. The names it prints must be the same for the two
+// types, because gc's are: the number that tells them apart is the linker's
+// and reflect never sees it.
+const localTypeProgram = `package main
+
+import "fmt"
+
+//go:noinline
+func structSide() (any, string) {
+	type T struct{ a, b, c string }
+	type S []T
+	v := S{{"x", "y", "z"}}
+	return v, fmt.Sprintf("%T", v)
+}
+
+//go:noinline
+func ifaceSide() (any, string) {
+	type T interface{}
+	type S []T
+	v := S{1, "two"}
+	return v, fmt.Sprintf("%T", v)
+}
+
+//go:noinline
+func intSide() (any, string) {
+	type T int
+	type S []T
+	v := S{7, 8}
+	return v, fmt.Sprintf("%T", v)
+}
+
+func main() {
+	sv, sn := structSide()
+	iv, in := ifaceSide()
+	nv, nn := intSide()
+	fmt.Println("struct", sn, sv)
+	fmt.Println("iface", in, iv)
+	fmt.Println("int", nn, nv)
+	if sn != in || in != nn {
+		fmt.Println("the three types print under different names")
+	}
+}
+`
+
+// TestToolexecNamesALocalTypeApartFromAnotherFunctionsOfTheSameName builds the
+// program above and compares every line against gc.
+func TestToolexecNamesALocalTypeApartFromAnotherFunctionsOfTheSameName(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/localtype\n\ngo 1.27\n",
+		"main.go": localTypeProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "localtype", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "localtype"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

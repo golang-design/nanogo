@@ -527,8 +527,23 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 		}
 		if !link {
 			name = shortenPath(name)
+			b.WriteString(name)
+			return nil
 		}
 		b.WriteString(name)
+		if t.Gen != 0 {
+			// A type declared inside a function. Two functions of one package
+			// may each declare a T, and without this the two share a symbol
+			// and the linker keeps one of them, so a value of either type
+			// carries the other's layout. Type.Gen holds the number and gc
+			// spells it the same way, as type:main.T·1.
+			//
+			// The link string is also what the type hash is computed over and
+			// what interface identity is decided by, so the two types differ
+			// there as well, which is the same fact and not a second one.
+			b.WriteString("·")
+			b.WriteString(strconv.Itoa(t.Gen))
+		}
 		return nil
 	}
 

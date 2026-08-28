@@ -1178,9 +1178,13 @@ func main() { _ = box() }
 	if err != nil {
 		t.Fatalf("go tool nm: %v\n%s", err, nm)
 	}
+	// local is declared inside a function, so its symbol carries the
+	// scope-disambiguation number specs/032 sets out: box holds the package's
+	// first such declaration, and gc spells it type:main.local·1 too.
+	const sym = " type:main.local·1"
 	var defined, referenced bool
 	for _, line := range strings.Split(string(nm), "\n") {
-		if !strings.HasSuffix(line, " type:main.local") {
+		if !strings.HasSuffix(line, sym) {
 			continue
 		}
 		referenced = true
@@ -1191,10 +1195,10 @@ func main() { _ = box() }
 		}
 	}
 	if !referenced {
-		t.Fatal("the archive does not name type:main.local at all, so this test is no longer measuring what it says")
+		t.Fatalf("the archive does not name%s at all, so this test is no longer measuring what it says", sym)
 	}
 	if !defined {
-		t.Error("the archive refers to type:main.local and does not define it, so a program that converts one to an interface cannot link")
+		t.Errorf("the archive refers to%s and does not define it, so a program that converts one to an interface cannot link", sym)
 	}
 }
 

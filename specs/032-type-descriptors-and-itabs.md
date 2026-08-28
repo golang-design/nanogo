@@ -102,6 +102,37 @@ with `TFlagExtraStar` set, so that the descriptors of `T` and `*T` share one
 string. A descriptor that pointed at the bare name would make `reflect` report
 a name one character short.
 
+### A type declared inside a function needs a third thing in the link string
+
+Two functions of one package may each declare a type called `T`, and the two
+are different types. Both name strings are `main.T`, because that is what
+`reflect.Type.String` reports for either, so the name string cannot tell them
+apart and must not try to: a compiler that printed `main.T·1` would answer a
+question about a type with a name no program can write.
+
+The link string has to tell them apart, because the linker deduplicates by it.
+`gc` numbers each function-scoped type declaration of a package, in source
+order over all its files, and writes `type:main.T·1`. `cmd/compile`'s collector
+is the rule:
+
+```go
+// Assign a unique ID to function-scoped defined types.
+if c.withinFunc {
+	*c.typegen++
+	d.gen = *c.typegen
+}
+```
+
+Two parts of that walk change every number after them. An alias declares no
+type and takes no number. And the counter runs over the package rather than
+over each function, so a type's number depends on how many function-scoped
+declarations the files before it hold.
+
+`ir.Type.Gen` carries the number, `ir.LocalTypeGens` computes it from the
+package's files, and `ir.TypeLinkString` is the one place it is spelled. It
+reaches the type hash and interface identity with the link string, which is the
+same fact rather than a second one.
+
 ### Naming and encoding are two questions, and the second is harder
 
 A type may have a canonical name and still have no writer for its bytes. That
@@ -1351,3 +1382,24 @@ The first draft of this spec did not separate the link string from the name
 string. `gc` writes a type twice and the two differ, and a descriptor built
 from one where the other belongs makes `reflect` report a name one character
 short. The two spellings are set out above.
+
+### Two types shared one symbol, and the corpus said so before a probe did
+
+The link string's own comment said two types have the same link string exactly
+when they are the same type. That was false for a type declared inside a
+function: `main.T` named both, one descriptor stood for two layouts, and
+`cmd/link` kept one of them.
+
+Go's own `test/append.go` is where it surfaced. `verifyStruct` declares
+`type T struct{ a, b, c string }` and `verifyInterface` declares
+`type T interface{}`, and `reflect.DeepEqual` read three string headers out of
+an interface value, so the program died inside `fmt` on a pointer that was
+never a pointer. No probe in `internal/audit` declared a type inside two
+functions, so nothing there could see it either. `test/append.go` did not
+report it while nanogo refused the file: the file was counted as a refusal and
+no program ran. `ssagen: a frame object past the ADD immediate needs the R27
+expansion` lifted that refusal, and the bug came out with it, which is how
+every silent wrong answer this project has found came out.
+
+The number above is the fix. `internal/e2e` now declares a `T` in each of three
+functions and compares the names and the values against `gc`.

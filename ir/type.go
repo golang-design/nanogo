@@ -259,6 +259,24 @@ type Type struct {
 	// empty for a type literal.
 	Name string
 
+	// Gen is the scope-disambiguation number of a type declared inside a
+	// function, and is zero for every type declared at package scope.
+	//
+	// Two functions of one package may each declare a type called T, and the
+	// two are different types. Name holds "main.T" for both, because that is
+	// what reflect.Type.String reports for either, so the name alone does not
+	// identify a type and the linker deduplicates by name. gc gives each
+	// function-scoped declaration a number, counted over the package in
+	// declaration order, and writes the symbol as type:main.T·1. This is that
+	// number, and TypeLinkString is where it is spelled.
+	//
+	// The number does not reach a descriptor's own name field, and reflect
+	// never prints it: gc prints main.T for both types, which is a program
+	// answering a question about two types with one string, and a compiler
+	// naming two types with one symbol is a program reading one type's layout
+	// out of the other's values.
+	Gen int
+
 	// PkgPath is the import path of the package that declared the type, and is
 	// empty for a predeclared type and for a type literal.
 	//

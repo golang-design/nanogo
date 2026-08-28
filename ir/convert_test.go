@@ -1286,3 +1286,124 @@ type Lit = interface {
 		t.Fatalf("the method list is %v, want %v", got, want)
 	}
 }
+
+// TestATypeDeclaredInsideAFunctionHasItsOwnLinkName pins the invariant
+// TypeLinkString states: two types have the same link string exactly when they
+// are the same type.
+//
+// Two functions of one package may each declare a T, and the two are different
+// types. Both are called main.T, because that is what reflect.Type.String
+// reports for either, so the name alone does not tell them apart and the
+// linker deduplicates by name. Without a number the compiler writes one
+// descriptor, the linker keeps one of the two, and a value of either type
+// carries the other's layout: Go's own test/append.go read a []struct{a, b, c
+// string} out of a []interface{} and the program died inside fmt.
+func TestATypeDeclaredInsideAFunctionHasItsOwnLinkName(t *testing.T) {
+	p := buildSource(t, `
+func f() {
+	type T struct{ a, b, c int }
+	var v T
+	sink(v.a)
+}
+
+func gg() {
+	type T struct{ a int }
+	var v T
+	sink(v.a)
+}
+`)
+	typeOf := func(fname string) *Type {
+		t.Helper()
+		return buildObjOf(t, buildFuncOf(t, p, fname), "v").Type
+	}
+	ft, gt := typeOf("f"), typeOf("gg")
+
+	fl, err := TypeLinkString(ft)
+	if err != nil {
+		t.Fatalf("TypeLinkString of f's T: %v", err)
+	}
+	gl, err := TypeLinkString(gt)
+	if err != nil {
+		t.Fatalf("TypeLinkString of gg's T: %v", err)
+	}
+	if fl == gl {
+		t.Errorf("both Ts link as %q, so one descriptor stands for two types", fl)
+	}
+	// The spellings are gc's own, which numbers function-scoped declarations
+	// over the package in source order and writes type:p.T·1.
+	if want := "p.T·1"; fl != want {
+		t.Errorf("f's T links as %q, and gc spells it %q", fl, want)
+	}
+	if want := "p.T·2"; gl != want {
+		t.Errorf("gg's T links as %q, and gc spells it %q", gl, want)
+	}
+
+	// The number is the linker's and reflect never sees it. gc prints main.T
+	// for both types, and a compiler that printed main.T·1 would answer a
+	// question about a type with a name no program can write.
+	for _, tc := range []struct {
+		what string
+		typ  *Type
+	}{{"f's T", ft}, {"gg's T", gt}} {
+		got, err := TypeNameString(tc.typ)
+		if err != nil {
+			t.Fatalf("TypeNameString of %s: %v", tc.what, err)
+		}
+		if want := "p.T"; got != want {
+			t.Errorf("%s prints as %q, and gc prints %q", tc.what, got, want)
+		}
+	}
+}
+
+// TestAnAliasInsideAFunctionTakesNoNumber checks the two rules of gc's walk
+// that change every number after them: an alias declares no type and is not
+// counted, and the counter runs over the package rather than over a function.
+func TestAnAliasInsideAFunctionTakesNoNumber(t *testing.T) {
+	p := buildSource(t, `
+func f() {
+	type A = int
+	type T struct{ a int }
+	var v T
+	sink(v.a)
+}
+
+func gg() {
+	type T struct{ b int }
+	var v T
+	sink(v.b)
+}
+`)
+	for _, tc := range []struct {
+		fname string
+		want  string
+	}{{"f", "p.T·1"}, {"gg", "p.T·2"}} {
+		got, err := TypeLinkString(buildObjOf(t, buildFuncOf(t, p, tc.fname), "v").Type)
+		if err != nil {
+			t.Fatalf("TypeLinkString of %s's T: %v", tc.fname, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s's T links as %q, want %q", tc.fname, got, tc.want)
+		}
+	}
+}
+
+// TestATypeDeclaredAtPackageScopeTakesNoNumber checks the other side: the
+// number belongs to a declaration inside a function, and a package-scope type
+// is named by its path and nothing else.
+func TestATypeDeclaredAtPackageScopeTakesNoNumber(t *testing.T) {
+	p := buildSource(t, `
+type Outer struct{ a int }
+
+func f() {
+	var v Outer
+	sink(v.a)
+}
+`)
+	got, err := TypeLinkString(buildObjOf(t, buildFuncOf(t, p, "f"), "v").Type)
+	if err != nil {
+		t.Fatalf("TypeLinkString: %v", err)
+	}
+	if want := "p.Outer"; got != want {
+		t.Errorf("Outer links as %q, want %q", got, want)
+	}
+}

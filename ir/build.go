@@ -258,8 +258,13 @@ func Build(pkg *types2.Package, files []*syntax.File, info *types2.Info) (*Packa
 	if pkg == nil || info == nil {
 		return nil, fmt.Errorf("ir: Build needs a checked package and its Info")
 	}
+	conv := NewConverter()
+	// Before anything is converted: a type declared inside a function is named
+	// by this number and by nothing else, and a converter told after the fact
+	// would have cached the type without it.
+	conv.Locals(LocalTypeGens(files, info))
 	b := &builder{
-		conv:  NewConverter(),
+		conv:  conv,
 		info:  info,
 		tpkg:  pkg,
 		objs:  make(map[objKey]*Object),
