@@ -68,7 +68,7 @@
 # Sorted, so a refresh produces a diff and not a reshuffle
 # (specs/053-determinism.md).
 
-probes 96
+probes 97
 
 probe ok append-int
 probe ok append-slice
@@ -113,6 +113,7 @@ probe ok iface-slice
 probe ok import-call
 probe ok init-func
 probe ok int-arith
+probe ok long-pointer-mask
 probe ok make-byte-slice
 probe ok make-method-slice
 probe ok make-struct-slice

@@ -380,3 +380,51 @@ func TestALeafWithAGrowableFrameCarriesTheGrowthMap(t *testing.T) {
 		t.Errorf("the tail's arguments bitmap is %#x, and the tail wrote a pointer into the first word", args[8])
 	}
 }
+
+// TestStackObjectMaskIsTheBitmapAndNotTheOnDemandWord covers the half of
+// specs/032's GCData rule that has no second chance.
+//
+// Past internal/abi.MaxPtrmaskBytes*8 pointer words a type's descriptor points
+// at a word the runtime fills the mask into, in BSS, rather than at the mask.
+// A record here holds the offset of its mask from the start of the section and
+// the runtime resolves that offset against moduledata.rodata, so that word
+// would be read at an address that is not a mask and the object scanned by
+// whatever bits are there. gc keeps the two apart by passing onDemandAllowed
+// false from the one caller that describes a stack object, and this pass does
+// it by asking rtype.StackObjectMask rather than by reading the descriptor's
+// own GCData relocation, which is where it used to read it.
+//
+// The bound is 128 words, so the local here is past it and the local in the
+// test above is not. The pair is the test.
+func TestStackObjectMaskIsTheBitmapAndNotTheOnDemandWord(t *testing.T) {
+	const src = "package main\n\ntype wide [200]*int\n\nfunc use(p *wide) int\n\n" +
+		"func f() int {\n\tvar w wide\n\treturn use(&w)\n}\n"
+	c := compile(t, src, "f")
+	p := obj.NewPackage("main")
+	r := emit(t, c, p)
+
+	if len(r.Funcdata) != 3 {
+		t.Fatalf("%d funcdata symbols, want the two bitmaps and the stack objects table", len(r.Funcdata))
+	}
+	so := r.Funcdata[ssa.FUNCDATA_StackObjects]
+	if len(so.Relocs) != 1 {
+		t.Fatalf("%d relocations, want one to the type's pointer mask", len(so.Relocs))
+	}
+	mask := p.Def(so.Relocs[0].Sym)
+	if mask == nil {
+		t.Fatalf("the mask relocation names %v, which this object does not define", so.Relocs[0].Sym)
+	}
+	if strings.HasPrefix(mask.Name, "type:.gcmask.") {
+		t.Fatalf("the record points at %q, which is the word the runtime fills in and is in BSS", mask.Name)
+	}
+	if !strings.HasPrefix(mask.Name, "runtime.gcbits.") {
+		t.Fatalf("the record points at %q, want a pointer mask", mask.Name)
+	}
+	if mask.Type != obj.SRODATA {
+		t.Errorf("%s is %v, and the runtime resolves this offset against moduledata.rodata", mask.Name, mask.Type)
+	}
+	// 200 pointer words is 200 bits, which is 25 bytes rounded up to a word.
+	if want := 32; len(mask.Data) != want {
+		t.Errorf("the mask is %d bytes, want %d", len(mask.Data), want)
+	}
+}

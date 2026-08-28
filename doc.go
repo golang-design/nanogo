@@ -51,7 +51,7 @@
 // the position and the construct.
 //
 // No program the probe corpus reaches behaves differently from the one gc
-// builds. That is a measurement over 96 programs compiled twice and run
+// builds. That is a measurement over 97 programs compiled twice and run
 // twice, not a proof. Two costs it cannot sample for remain: a pointer to a
 // local that escapes its frame outlives that frame, and a pointer store emits
 // no write barrier. "nanogo help" describes both, and

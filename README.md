@@ -206,7 +206,7 @@ compiles however many of them it takes.
 
 Nothing the probe corpus reaches. Every program in it that nanogo compiles
 behaves the way the same program compiled by `gc` behaves. That is a
-measurement over 96 programs compiled twice and run twice, and a corpus is a
+measurement over 97 programs compiled twice and run twice, and a corpus is a
 sample, so it is not a proof.
 
 Two costs the corpus cannot sample for, both silent and neither a refusal:

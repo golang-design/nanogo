@@ -307,6 +307,34 @@ func churn() {
 	}
 }
 
+// hold collects while its caller's frame holds the only reference.
+//
+//go:noinline
+func hold(w *wide) int {
+	churn()
+	runtime.GC()
+	runtime.GC()
+	return sum(w)
+}
+
+// onStack puts one in a frame rather than in the heap or in a global. The
+// address is taken and escapes into a call, so the value is a stack object and
+// the collector reads its pointer map through the record in the function's
+// stack objects table. That record names the mask by an offset resolved
+// against moduledata.rodata, which is the one place the word the runtime fills
+// in cannot be used.
+//
+//go:noinline
+func onStack(n int) int {
+	var w wide
+	for i := range w {
+		c := &cell{n + i}
+		runtime.SetFinalizer(c, func(*cell) { finalized++ })
+		w[i] = c
+	}
+	return hold(&w)
+}
+
 func sum(w *wide) int {
 	s := 0
 	for _, c := range w {
@@ -323,6 +351,7 @@ func main() {
 	}
 	heap := fill(1000)
 	small := fillNarrow()
+	frame := onStack(500)
 
 	for i := 0; i < 3; i++ {
 		churn()
@@ -338,7 +367,7 @@ func main() {
 	for _, c := range small {
 		ns = ns + c.n
 	}
-	fmt.Println("root", rs, "heap", sum(heap), "narrow", ns, "finalized", finalized)
+	fmt.Println("root", rs, "heap", sum(heap), "narrow", ns, "frame", frame, "finalized", finalized)
 	runtime.KeepAlive(heap)
 	runtime.KeepAlive(small)
 }
@@ -365,7 +394,8 @@ func TestToolexecScansATypeWhoseMaskTheRuntimeBuilds(t *testing.T) {
 
 	// 200 cells at 0, 2, 4 ... is 200*199, the heap's 200 from 1000 up is
 	// 200*1000 + 199*200/2, and the narrow one's 128 from 0 is 127*128/2.
-	const want = "root 39800 heap 219900 narrow 8128 finalized 0\n"
+	// The frame's 200 cells run from 500 up, which is 200*500 + 199*200/2.
+	const want = "root 39800 heap 219900 narrow 8128 frame 119900 finalized 0\n"
 	got := runUnderCollector(t, filepath.Join(h.mod, "longmask"))
 	if string(got) != want {
 		t.Errorf("the program printed\n%s\nand every object a live root reaches must survive:\n%s", got, want)
