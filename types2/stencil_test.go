@@ -327,9 +327,10 @@ func TestSubstitutesSaysWhereSubstitutionStops(t *testing.T) {
 	}
 
 	// A defined type is its name, so the answer for List[V] is about the type
-	// argument it carries. The declaration's own body is reached through its
-	// underlying type, which is what a caller asking about a declaration
-	// passes.
+	// argument it carries and not about what List was declared as. That is
+	// what makes the underlying type the thing a caller asking about a
+	// declaration has to pass: the generic List holds its own T, which is
+	// nobody's type argument, so the name alone says nothing.
 	list := sig.Params().At(2).Type().(*Named)
 	if !s.Substitutes(list) {
 		t.Error("List[V] holds no type parameter of the substitution")
@@ -337,8 +338,8 @@ func TestSubstitutesSaysWhereSubstitutionStops(t *testing.T) {
 	if s.Substitutes(list.Origin()) {
 		t.Error("List, with no type arguments, was reported as holding one")
 	}
-	if !s.Substitutes(list.Origin().Underlying()) {
-		t.Error("the underlying type of List holds no type parameter")
+	if !s.Substitutes(NewSlice(tparams[1])) {
+		t.Error("[]V holds no type parameter of the substitution")
 	}
 
 	var none *Substitution

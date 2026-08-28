@@ -338,6 +338,13 @@ keeps one. This is simpler than assigning ownership to the defining package,
 which would require a second pass over already-compiled packages when a new
 importer appears.
 
+The deduplicable mark is not written yet, and it cannot be needed yet. Only a
+generic the package being compiled declares is instantiated, and only that
+package can instantiate it, so no two objects can define one instantiation. The
+mark becomes an obligation with the cross-package half, and `driver/compile.go`
+already sets `obj.SymFlagDupok` on the wrapper it generates for the same
+reason, so the mechanism is there and the caller is not.
+
 ### Methods
 
 A method on a generic *type* is instantiated with the type, so `List[int].Push`
