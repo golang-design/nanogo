@@ -380,7 +380,7 @@ func TestAddDescriptorsEmitsEachSymbolOnce(t *testing.T) {
 	write := func(types []*ir.Type) []byte {
 		t.Helper()
 		p := obj.NewPackage("p")
-		if err := addDescriptors(&Config{Package: "p"}, p, types, nil, nil, nil, nil); err != nil {
+		if err := addDescriptors(&Config{Package: "p"}, p, types, nil, nil, nil, nil, nil); err != nil {
 			t.Fatalf("addDescriptors: %v", err)
 		}
 		b, err := p.Bytes()
@@ -412,7 +412,7 @@ func TestAddDescriptorsWritesAnItabAsANamedDefinition(t *testing.T) {
 	seven, coder := itabPair(t)
 	p := obj.NewPackage("p")
 	itabs := []ir.Itab{{Type: seven, Iface: coder}, {Type: seven, Iface: coder}}
-	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{coder, seven}, itabs, nil, nil, nil); err != nil {
+	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{coder, seven}, itabs, nil, nil, nil, nil); err != nil {
 		t.Fatalf("addDescriptors: %v", err)
 	}
 	name, err := ir.ItabSymbol(seven, coder)
@@ -453,7 +453,7 @@ func TestAddDescriptorsResolvesAnItabAgainstItsOwnDescriptors(t *testing.T) {
 	seven, coder := itabPair(t)
 	p := obj.NewPackage("p")
 	itabs := []ir.Itab{{Type: seven, Iface: coder}}
-	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{coder, seven}, itabs, nil, nil, nil); err != nil {
+	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{coder, seven}, itabs, nil, nil, nil, nil); err != nil {
 		t.Fatalf("addDescriptors: %v", err)
 	}
 	name, err := ir.ItabSymbol(seven, coder)
@@ -548,7 +548,7 @@ func TestAddDescriptorsMarksATypeUsedInIface(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := obj.NewPackage("p")
-	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{elem}, nil, nil, nil, nil); err != nil {
+	if err := addDescriptors(&Config{Package: "p"}, p, []*ir.Type{elem}, nil, nil, nil, nil, nil); err != nil {
 		t.Fatalf("addDescriptors: %v", err)
 	}
 	sym := findNonPkgDef(p, "type:int")
@@ -581,7 +581,7 @@ func TestAddDescriptorsRefusesATypeWithNoMethodSet(t *testing.T) {
 	if err := ir.Layout(defined); err != nil {
 		t.Fatal(err)
 	}
-	err := addDescriptors(&Config{Package: "p"}, obj.NewPackage("p"), []*ir.Type{defined}, nil, nil, nil, nil)
+	err := addDescriptors(&Config{Package: "p"}, obj.NewPackage("p"), []*ir.Type{defined}, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("addDescriptors accepted a type whose method set is unknown")
 	}
@@ -1232,7 +1232,7 @@ func TestAddDescriptorsWritesACacheAsAPackageDefinition(t *testing.T) {
 	p := obj.NewPackage("main")
 	asserts := []ir.TypeAssert{{Sym: "main.f..typeAssert.0", Iface: coder, CanFail: true}}
 	switches := []ir.InterfaceSwitch{{Sym: "main.g..interfaceSwitch.0", Cases: []*ir.Type{coder}}}
-	if err := addDescriptors(&Config{Package: "main"}, p, []*ir.Type{coder}, nil, asserts, switches, nil); err != nil {
+	if err := addDescriptors(&Config{Package: "main"}, p, []*ir.Type{coder}, nil, nil, asserts, switches, nil); err != nil {
 		t.Fatalf("addDescriptors: %v", err)
 	}
 	for _, tc := range []struct{ name, gotype string }{
@@ -1290,7 +1290,7 @@ func TestAddDescriptorsRefusesTwoCachesOfOneName(t *testing.T) {
 	_, coder := itabPair(t)
 	p := obj.NewPackage("main")
 	same := ir.TypeAssert{Sym: "main.f..typeAssert.0", Iface: coder}
-	err := addDescriptors(&Config{Package: "main"}, p, []*ir.Type{coder}, nil, []ir.TypeAssert{same, same}, nil, nil)
+	err := addDescriptors(&Config{Package: "main"}, p, []*ir.Type{coder}, nil, nil, []ir.TypeAssert{same, same}, nil, nil)
 	if err == nil {
 		t.Fatal("two caches of one name were written")
 	}

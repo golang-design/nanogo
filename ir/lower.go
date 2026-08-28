@@ -110,6 +110,19 @@ type Collected struct {
 	// against the itab of the pair.
 	Itabs []Itab
 
+	// FuncValues are the functions whose static func value the lowered tree
+	// names, in the order it named them.
+	//
+	// A func value is one word holding the function's address, and a literal
+	// that captures nothing needs no state of its own, so one symbol serves
+	// every evaluation of it. gc writes that symbol as <fn>·f and walkClosure
+	// takes it rather than allocating; the linker merges the copies every
+	// package emits. Allocating instead is one call to the heap for a value
+	// that has nothing in it, and it is a difference a program can see: Go's
+	// own test/closure.go reads runtime.MemStats around two calls to a
+	// function that returns such a literal and fails if either allocated.
+	FuncValues []string
+
 	// TypeAsserts and InterfaceSwitches are the two runtime caches the lowered
 	// tree names, in the order it named them.
 	//
@@ -136,11 +149,12 @@ func LowerAndCollect(fn *Func) (Collected, error) {
 		return Collected{}, fmt.Errorf("ir: Lower needs a function")
 	}
 	l := &lowerer{
-		fn:    fn,
-		ptrs:  make(map[*Type]*Type),
-		hdrs:  make(map[*Type]*Type),
-		descs: make(map[string]*Object),
-		itabs: make(map[string]*Object),
+		fn:       fn,
+		ptrs:     make(map[*Type]*Type),
+		hdrs:     make(map[*Type]*Type),
+		descs:    make(map[string]*Object),
+		itabs:    make(map[string]*Object),
+		funcvals: make(map[string]*Object),
 	}
 	l.openCaptures()
 	fn.Body = l.stmts(fn.Body)
@@ -168,6 +182,7 @@ func (l *lowerer) collected() Collected {
 	return Collected{
 		Types:             l.needed,
 		Itabs:             l.needItabs,
+		FuncValues:        l.needFuncvals,
 		TypeAsserts:       l.asserts,
 		InterfaceSwitches: l.switches,
 	}
@@ -206,6 +221,12 @@ type lowerer struct {
 	// pair and rtype writes it from a different encoder.
 	itabs     map[string]*Object
 	needItabs []Itab
+
+	// funcvals and needFuncvals are the same pair of records for the static
+	// func value of a function this tree names. A func value is named by the
+	// function it points at, so two literals of one function are one symbol.
+	funcvals     map[string]*Object
+	needFuncvals []string
 
 	// asserts and switches are the runtime caches this function names. There
 	// is no lookup table beside them, and that is the difference between a
@@ -3909,20 +3930,37 @@ func (l *lowerer) closureExpr(n Expr) Expr {
 // (specs/032-type-descriptors-and-itabs.md derives GCData from the type).
 func (l *lowerer) funcValue(n Expr, o *Object, t *Type) Expr {
 	pos := n.Pos
-	cell := l.allocate(n, lowerUintptr, pos)
-	if cell == nil {
-		return n
+	// A static symbol and not an allocation. The one word holds the
+	// function's address and nothing else, so it does not depend on the
+	// evaluation and one symbol serves every one of them. gc's walkClosure
+	// says the same in one line: "If no closure variables, don't allocate a
+	// closure object; use a static funcval."
+	//
+	// The allocation this replaced was one call to the heap for a value with
+	// nothing in it, and a program can see it. Go's own test/closure.go reads
+	// runtime.MemStats around two calls to a function returning such a literal
+	// and fails when either allocated.
+	name := o.Name + funcValueSuffix
+	fo, ok := l.funcvals[name]
+	if !ok {
+		fo = &Object{Name: name, Type: lowerUintptr, Class: ClassGlobal, Pos: pos}
+		l.funcvals[name] = fo
+		l.needFuncvals = append(l.needFuncvals, o.Name)
 	}
-	p := l.spill(cell)
-	entry := &Node{
-		Op: OAddr, Pos: pos, Type: l.ptrTo(o.Type),
-		X: &Node{Op: OGlobal, Pos: pos, Type: o.Type, Obj: o},
+	return &Node{
+		Op: OConvert, Pos: pos, Type: t,
+		X: &Node{
+			Op: OAddr, Pos: pos, Type: l.ptrTo(lowerUintptr),
+			X: &Node{Op: OGlobal, Pos: pos, Type: lowerUintptr, Obj: fo},
+		},
 	}
-	l.emit(Assign(pos,
-		&Node{Op: ODeref, Pos: pos, Type: lowerUintptr, X: ref(p, pos)},
-		&Node{Op: OConvert, Pos: pos, Type: lowerUintptr, X: entry}))
-	return &Node{Op: OConvert, Pos: pos, Type: t, X: ref(p, pos)}
 }
+
+// funcValueSuffix is gc's suffix for the static func value of a function
+// (cmd/compile/internal/reflectdata, TypeLinksymPrefix and the ·f it appends).
+// rtype spells the same suffix for the algorithm closures a descriptor points
+// at, and the linker merges the copies every package emits.
+const funcValueSuffix = "·f"
 
 // isFuncSymbol reports whether n names a function rather than a value of
 // function type.

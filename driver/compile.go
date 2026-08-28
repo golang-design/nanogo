@@ -410,6 +410,10 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// over interface cases read, unioned the same way. Unlike a descriptor and
 	// unlike an itab these are not canonical: each belongs to one site of one
 	// function, and the runtime stores into it, so nothing merges two.
+	// The functions whose static func value the code names. A literal that
+	// captures nothing is one word holding the function's address, so one
+	// symbol serves every evaluation and the linker merges the copies.
+	var funcvals []string
 	var (
 		asserts  []ir.TypeAssert
 		switches []ir.InterfaceSwitch
@@ -476,6 +480,7 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 		}
 		needed = append(needed, c.Types...)
 		itabs = append(itabs, c.Itabs...)
+		funcvals = append(funcvals, c.FuncValues...)
 		asserts = append(asserts, c.TypeAsserts...)
 		switches = append(switches, c.InterfaceSwitches...)
 	}
@@ -541,7 +546,7 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 			return nil, false, err
 		}
 	}
-	if err := addDescriptors(cfg, out, types, itabs, asserts, switches, generated); err != nil {
+	if err := addDescriptors(cfg, out, types, itabs, funcvals, asserts, switches, generated); err != nil {
 		return nil, false, err
 	}
 	// The record goes in last. It names the init function by the reference
@@ -761,7 +766,7 @@ func algFuncs(t *ir.Type, set []rtype.Symbol) ([]*ir.Func, error) {
 // hashed for the reason a descriptor is named, and one reason more: cmd/link
 // collects a go:itab. symbol into runtime.itablinks by its name prefix, and it
 // reads no name for a symbol in the hashed index space.
-func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.Itab, asserts []ir.TypeAssert, switches []ir.InterfaceSwitch, generated map[string]bool) error {
+func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.Itab, funcvals []string, asserts []ir.TypeAssert, switches []ir.InterfaceSwitch, generated map[string]bool) error {
 	// defs and refs are lookup tables and are never ranged over
 	// (specs/053-determinism.md). A symbol is emitted once however many types
 	// name it: two descriptors share one pointer bitmask whenever their
@@ -814,6 +819,37 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.
 			syms = append(syms, d)
 			relocs = append(relocs, s.Relocs)
 		}
+	}
+	for _, fn := range funcvals {
+		name := fn + irFuncValueSuffix
+		if _, ok := defs[name]; ok {
+			// Two functions of this package took the value of one function,
+			// or one took it twice through two literals of the same body.
+			continue
+		}
+		// One word holding the function's address, which is what a func value
+		// is when the literal captures nothing. gc writes the same symbol,
+		// dupok and read-only.
+		//
+		// A non-package definition and not a hashed one, because the code
+		// refers to it by name and a hashed symbol's identity is its content.
+		// Not a package definition either: obj refuses a duplicate-tolerant
+		// symbol there, because cmd/link deduplicates by name in the
+		// non-package index space only, and two packages do emit this one when
+		// both take the value of a function one of them declares.
+		d := &obj.Symbol{
+			Name:  name,
+			Type:  obj.SRODATA,
+			Size:  uint32(irPtrSize),
+			Align: uint32(irPtrSize),
+			Data:  make([]byte, irPtrSize),
+			Flag:  obj.SymFlagDupok,
+		}
+		defs[name] = out.AddNonPkgDef(d)
+		syms = append(syms, d)
+		relocs = append(relocs, []rtype.Reloc{{
+			Off: 0, Size: 8, Type: obj.R_ADDR, Target: fn, GoFunc: true,
+		}})
 	}
 	for _, it := range itabs {
 		set, err := rtype.Itab(it.Type, it.Iface)
@@ -1187,6 +1223,13 @@ func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package, hasInit bool,
 	}
 	return f.Close()
 }
+
+// irFuncValueSuffix and irPtrSize are ir's, named here so that this file does
+// not spell either a second time.
+const (
+	irFuncValueSuffix = "\u00b7f"
+	irPtrSize         = 8
+)
 
 // rtypeSize is the size of the object symbol a descriptor symbol defines.
 //

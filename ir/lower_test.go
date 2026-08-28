@@ -1660,7 +1660,12 @@ func TestLowerDeferSnapshotsAGlobalCallee(t *testing.T) {
 // through the entry address loads a code pointer out of inc's first
 // instruction and branches into the instruction stream read as data. The
 // lowering of the value is what stops it, and the assertion is that the value
-// reaches the runtime allocator and holds the address of the function.
+// is the address of the function's own funcval symbol.
+//
+// The symbol is static and the value is not allocated. It used to be, and one
+// call to the heap for a word holding a constant is a difference a program can
+// see: Go's own test/closure.go reads runtime.MemStats around two calls to a
+// function returning such a value and fails when either allocated.
 func TestLowerFuncSymbolInAValuePosition(t *testing.T) {
 	for _, tc := range []struct{ row, body string }{
 		{"an argument", `func f() { useFn(none) }`},
@@ -1669,12 +1674,12 @@ func TestLowerFuncSymbolInAValuePosition(t *testing.T) {
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			fn := lowerOK(t, tc.body)
-			if !lowerCalled(fn, "runtime.newobject") {
-				t.Errorf("the func value did not reach the allocator: %v\n%s",
+			if lowerCalled(fn, "runtime.newobject") {
+				t.Errorf("the func value was allocated: %v\n%s",
 					lowerCalls(fn), buildDump(fn))
 			}
-			if !namesFuncAddress(fn, "none") {
-				t.Errorf("the funcval does not hold the address of none:\n%s", buildDump(fn))
+			if !namesFuncValue(fn, "none") {
+				t.Errorf("the value is not the address of none's funcval:\n%s", buildDump(fn))
 			}
 		})
 	}
@@ -1713,6 +1718,25 @@ func namesFuncAddress(fn *Func, name string) bool {
 				return true
 			}
 			if n.X.Obj.Class == ClassFunc && strings.HasSuffix(n.X.Obj.Name, "."+name) {
+				found = true
+			}
+			return true
+		})
+	}
+	return found
+}
+
+// namesFuncValue reports whether the tree takes the address of the static
+// funcval of the named function, which is the symbol gc writes as <fn>·f.
+func namesFuncValue(fn *Func, name string) bool {
+	found := false
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op != OAddr || n.X == nil || n.X.Op != OGlobal || n.X.Obj == nil {
+				return true
+			}
+			o := n.X.Obj
+			if o.Class == ClassGlobal && strings.HasSuffix(o.Name, "."+name+"\u00b7f") {
 				found = true
 			}
 			return true
@@ -2665,38 +2689,62 @@ func lowerOps(fn *Func, op Op) int {
 
 // TestLowerClosureWithNoCaptures checks the funcval a function literal becomes.
 //
-// One word on the heap holding the entry point, and the value is that word's
+// One static word holding the entry point, and the value is that word's
 // address read as the function type. The word is uintptr, which is what keeps
-// the collector from tracing a text address.
+// the collector from tracing a text address, and it is a symbol rather than an
+// allocation because a literal with no captures has no state of its own: one
+// symbol serves every evaluation, which is what gc's walkClosure does.
 func TestLowerClosureWithNoCaptures(t *testing.T) {
 	fn := lowerOK(t, `func f() func() int { return func() int { return 3 } }`)
-	if !lowerCalled(fn, "runtime.newobject") {
-		t.Errorf("the funcval is not allocated: %v", lowerCalls(fn))
+	if lowerCalled(fn, "runtime.newobject") {
+		t.Errorf("a literal that captures nothing allocated its funcval: %v", lowerCalls(fn))
 	}
-	// The store of the entry point: the address of a function symbol, written
-	// through the pointer the allocation returned.
+	// The value is the address of the literal's own funcval symbol, read as
+	// the function type.
 	found := false
-	for _, s := range fn.Body {
-		Walk(s, func(m *Node) bool {
-			if !IsAssign(m) || m.X == nil || m.X.Op != ODeref || m.Y == nil {
+	for _, st := range fn.Body {
+		Walk(st, func(m *Node) bool {
+			if m.Op != OAddr || m.X == nil || m.X.Op != OGlobal || m.X.Obj == nil {
 				return true
 			}
-			if m.X.Type == nil || m.X.Type.Kind != Uintptr {
-				t.Errorf("the funcval word is %v, want uintptr", m.X.Type)
+			o := m.X.Obj
+			if o.Class != ClassGlobal || !strings.HasSuffix(o.Name, "\u00b7f") {
+				return true
 			}
-			y := m.Y
-			if y.Op == OConvert {
-				y = y.X
+			if o.Type == nil || o.Type.Kind != Uintptr {
+				t.Errorf("the funcval word is %v, want uintptr", o.Type)
 			}
-			if y != nil && y.Op == OAddr && y.X != nil && y.X.Op == OGlobal &&
-				y.X.Obj != nil && y.X.Obj.Class == ClassFunc {
-				found = true
-			}
+			found = true
 			return true
 		})
 	}
 	if !found {
-		t.Errorf("the entry point is not stored into the funcval:\n%s", buildDump(fn))
+		t.Errorf("the value is not the address of the literal's funcval:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerClosureNamesItsFuncValue checks that the symbol the value points at
+// reaches the caller that defines it.
+//
+// specs/032-type-descriptors-and-itabs.md makes the set a package emits
+// exactly the set its code names. A static funcval nothing reports is a
+// relocation against a symbol no object defines, which is a link error and not
+// a wrong answer, but it is one this pass owes rather than the linker.
+func TestLowerClosureNamesItsFuncValue(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, lowerPrelude+"\nfunc f() func() int { return func() int { return 3 } }")
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	c, err := LowerAndCollect(buildFuncOf(t, out, "f"))
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	if len(c.FuncValues) != 1 {
+		t.Fatalf("the pass named %v as the func values it points at, want the one literal", c.FuncValues)
+	}
+	if !strings.HasSuffix(c.FuncValues[0], ".func1") {
+		t.Errorf("the func value names %q, and the literal's symbol ends in .func1", c.FuncValues[0])
 	}
 }
 
@@ -2726,8 +2774,10 @@ func TestLowerDeferThroughASymbol(t *testing.T) {
 	if !lowerCalled(fn, "runtime.deferproc") {
 		t.Errorf("the defer did not reach deferproc: %v", lowerCalls(fn))
 	}
-	if !lowerCalled(fn, "runtime.newobject") {
-		t.Errorf("the funcval of the deferred symbol is not allocated: %v", lowerCalls(fn))
+	if lowerCalled(fn, "runtime.newobject") {
+		// A funcval of a known function is one word holding its address, so
+		// it is a static symbol and every defer of it names the same one.
+		t.Errorf("the funcval of the deferred symbol was allocated: %v", lowerCalls(fn))
 	}
 	if n := lowerCount(fn, "runtime.deferreturn"); n != 1 {
 		t.Errorf("the function calls deferreturn %d times, want 1:\n%s", n, buildDump(fn))
@@ -2843,23 +2893,29 @@ func TestLowerGo(t *testing.T) {
 
 // TestLowerGoOfALiteral checks the shape a go statement of a function literal
 // takes: the literal is a funcval and the statement passes it.
+//
+// The literal captures nothing, so its funcval is a static symbol and the
+// statement allocates nothing. It used to allocate, and Go's own
+// test/closure.go reads runtime.MemStats around two calls to a function
+// returning such a literal and fails when either allocated.
 func TestLowerGoOfALiteral(t *testing.T) {
 	fn := lowerOK(t, `func f() { go func() { none() }() }`)
 	if !lowerCalled(fn, "runtime.newproc") {
 		t.Errorf("the go statement did not reach newproc: %v", lowerCalls(fn))
 	}
-	if !lowerCalled(fn, "runtime.newobject") {
-		t.Errorf("the literal's funcval is not allocated: %v", lowerCalls(fn))
+	if lowerCalled(fn, "runtime.newobject") {
+		t.Errorf("a literal that captures nothing allocated its funcval: %v", lowerCalls(fn))
 	}
 }
 
-// TestLowerDeferNamesTheDescriptorItAllocates checks that the funcval's type
-// reaches the caller that emits descriptors.
+// TestLowerDeferNamesTheFuncValueItPoints checks that the static funcval
+// reaches the caller that emits data symbols.
 //
 // specs/032-type-descriptors-and-itabs.md makes the set a package emits
-// exactly the set its code names, so a row that allocates and reports nothing
-// links against a symbol nothing defines.
-func TestLowerDeferNamesTheDescriptorItAllocates(t *testing.T) {
+// exactly the set its code names, so a row that names a symbol and reports
+// nothing links against a symbol nothing defines. It used to be a descriptor,
+// because the funcval was allocated; it is the func value's own symbol now.
+func TestLowerDeferNamesTheFuncValueItPoints(t *testing.T) {
 	pkg, files, info := buildTypecheck(t, lowerPrelude+"\nfunc f() { defer none() }")
 	out, err := Build(pkg, files, info)
 	if err != nil {
@@ -2869,15 +2925,13 @@ func TestLowerDeferNamesTheDescriptorItAllocates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lower: %v", err)
 	}
-	types := c.Types
-	found := false
-	for _, ty := range types {
-		if ty.Kind == Uintptr {
-			found = true
-		}
+	if len(c.FuncValues) != 1 {
+		t.Fatalf("the pass named %v as the func values it points at, want the one deferred function", c.FuncValues)
 	}
-	if !found {
-		t.Errorf("the funcval's type is not in the descriptors the pass named: %v", types)
+	for _, ty := range c.Types {
+		if ty.Kind == Uintptr {
+			t.Errorf("the pass named a descriptor for the funcval, which is a static symbol and is not allocated")
+		}
 	}
 }
 

@@ -24,8 +24,8 @@ a program.
 
 | Feature | State |
 | --- | --- |
-| a function literal that captures nothing | built; a heap-allocated one-word `funcval` holding the code pointer |
-| a **declared** function used as a func value | built; the same heap-allocated one-word `funcval` |
+| a function literal that captures nothing | built; a static one-word `funcval` holding the code pointer |
+| a **declared** function used as a func value | built; the same static one-word `funcval` |
 | a literal with a capture list | built; a heap closure object holding the code pointer and one heap cell per capture |
 | a method value | **refused**; its receiver is bound by value and only a capture through a heap cell is built |
 | a named result a literal captures | **refused**; the single exit of a function that defers already owns that storage |
@@ -268,15 +268,26 @@ site already makes, so no source is destroyed and no allocation can put the
 branch target in a register the arguments have overwritten. `ssagen` had a
 guard for the collision and it is not needed any more.
 
-**The read-only `funcval` symbol is still unbuilt, and the row above is a heap
-allocation because of it.** gc emits one word of read-only data per function
-used as a value, `dupok`, so the value is a link-time constant. That needs a
-channel from `ir.Lower` to the object writer for a data symbol, and there is
-none: `ir.LowerAndCollect` returns type descriptors and nothing else, and the
-symbol has to be defined once per package rather than once per function that
-names it, which is a place no pass owns yet. It is the same missing channel a
-string constant reaching `runtime.printstring` wants. Until it exists, every
-evaluation of `inc` as a value allocates one word, which is correct and slow.
+**The read-only `funcval` symbol is built and the row above is no longer an
+allocation.** gc emits one word of read-only data per function used as a value,
+`dupok`, named `<fn>·f`, so the value is a link-time constant; `walkClosure`
+says it in one line, "If no closure variables, don't allocate a closure object;
+use a static funcval". `ir.LowerAndCollect` reports the functions whose value
+the tree names, beside the type descriptors and itabs it already reported, and
+`driver` defines each symbol once per package.
+
+It is a non-package definition and not a package one. `obj` refuses a
+duplicate-tolerant symbol in the package index space, because `cmd/link`
+deduplicates by name in the non-package space only, and two packages do emit
+this symbol when both take the value of a function one of them declares.
+
+The allocation this replaced was correct and slow, and it was also a difference
+a program can see. Go's own `test/closure.go` reads `runtime.MemStats` around
+two calls to a function returning a literal with no captures and fails when
+either allocated, which is what it did.
+
+The same channel is what a string constant reaching `runtime.printstring`
+wants, and that one is still missing.
 
 ## Defer
 
