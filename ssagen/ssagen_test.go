@@ -2845,3 +2845,88 @@ func TestGrowstackSpillsAFloatParameter(t *testing.T) {
 		t.Errorf("an integer parameter was refused: %v", err)
 	}
 }
+
+// TestFrameAddressPastTheImmediate covers a frame object further from the
+// stack pointer than an ADD immediate reaches.
+//
+// The immediate field is twelve bits with an optional twelve-bit shift, so
+// 4136 fits neither: it is above 4095 and it is not a multiple of 4096. gc's
+// assembler expands the instruction through R27, the scratch register
+// specs/030-abi.md reserves for exactly this, and the words below are the ones
+// `go tool asm` produces for
+//
+//	ADD $4136, RSP, R0
+//
+// on arm64. rtsym.init reached this with a frame of 4136 bytes and nanogo
+// refused it.
+func TestFrameAddressPastTheImmediate(t *testing.T) {
+	// MOVD $4136, R27 followed by ADD R27, RSP, R0.
+	const wantMov, wantAdd = 0xd282051b, 0x8b3b63e0
+
+	newEmitter := func(n int) (*emitter, *ssa.Func) {
+		f := ssa.NewFunc("f")
+		a := &ssa.Alloc{
+			Target:  ssa.NewArm64Target(),
+			Home:    make([]ssa.Loc, n),
+			Fixed:   make([]ssa.Reg, n),
+			Result:  make([]ssa.Reg, n),
+			Args:    make([][]ssa.Reg, n),
+			Remat:   make([]bool, n),
+			Spilled: make([]bool, n),
+		}
+		for i := range a.Fixed {
+			a.Fixed[i] = ssa.NoReg
+			a.Result[i] = ssa.NoReg
+		}
+		e := &emitter{f: f, a: a, opt: Options{Sym: "test.f", File: "t.go"},
+			pkg: obj.NewPackage("test"), frames: map[*ir.Object]int64{}, done: map[ssa.ID]bool{}}
+		e.syms = newSymbols(e.pkg)
+		return e, f
+	}
+
+	obj4136 := &ir.Object{Name: "x", Type: typeInt, Class: ir.ClassLocal}
+
+	// The definition of the address.
+	e, f := newEmitter(8)
+	e.frames[obj4136] = 4136
+	v := f.Entry.NewValue(0, ssa.OpARM64ADDframe, typeInt)
+	v.Aux = obj4136
+	e.a.Result[v.ID] = ssa.Reg(arm64.R0)
+	e.value(v)
+	if err := e.err(); err != nil {
+		t.Fatalf("a frame address at 4136 was refused: %v", err)
+	}
+	if len(e.text) != 2 || e.text[0] != wantMov || e.text[1] != wantAdd {
+		t.Errorf("a frame address at 4136 emitted %#v, want [%#x %#x]", e.text, uint32(wantMov), uint32(wantAdd))
+	}
+
+	// The rematerialisation of the same address, which specs/026 recomputes
+	// at each use rather than keeping in the frame.
+	e, f = newEmitter(8)
+	e.frames[obj4136] = 4136
+	v = f.Entry.NewValue(0, ssa.OpARM64ADDframe, typeInt)
+	v.Aux = obj4136
+	e.remat(arm64.R0, v)
+	if err := e.err(); err != nil {
+		t.Fatalf("the rematerialisation of a frame address at 4136 was refused: %v", err)
+	}
+	if len(e.text) != 2 || e.text[0] != wantMov || e.text[1] != wantAdd {
+		t.Errorf("the rematerialisation emitted %#v, want [%#x %#x]", e.text, uint32(wantMov), uint32(wantAdd))
+	}
+
+	// An offset the immediate holds still emits the one instruction, so the
+	// expansion costs nothing where it is not needed.
+	e, f = newEmitter(8)
+	small := &ir.Object{Name: "y", Type: typeInt, Class: ir.ClassLocal}
+	e.frames[small] = 4095
+	v = f.Entry.NewValue(0, ssa.OpARM64ADDframe, typeInt)
+	v.Aux = small
+	e.a.Result[v.ID] = ssa.Reg(arm64.R0)
+	e.value(v)
+	if err := e.err(); err != nil {
+		t.Fatalf("a frame address at 4095 was refused: %v", err)
+	}
+	if len(e.text) != 1 || e.text[0] != 0x913fffe0 {
+		t.Errorf("a frame address at 4095 emitted %#v, want [%#x]", e.text, uint32(0x913fffe0))
+	}
+}

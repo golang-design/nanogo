@@ -156,6 +156,29 @@ the R27 expansion. The two thresholds, 128 and 4096, are `internal/abi`'s
 `StackSmall` and `StackBig`, and `TestStackConstantsMatchTheRuntime` reads them
 out of the runtime rather than trusting the copies here.
 
+### The frame address has the same two forms
+
+`ADDframe` is the address of a frame object, and its offset is the frame
+layout's: no pass above the code generator knows it, so no rule can choose a
+form that fits. The offset is therefore checked where the instruction is built,
+against the same 12-bit immediate with an optional 12-bit shift the prologue
+checks against. A frame object further away than that reaches uses the R27
+expansion, which is what `go tool asm` produces for
+
+```
+	ADD	$4136, RSP, R0    ->    MOVD $4136, R27
+	                              ADD  R27, RSP, R0
+```
+
+Both the definition of the address and its rematerialisation
+([026](026-register-allocation.md) recomputes one at each use) go through
+`addSP`, so the two spell the same address. The rematerialisation is then one
+or two instructions rather than one, which nothing downstream counts: a
+constant already took up to four.
+
+`rtsym.init` is the frame that found this. It builds every runtime symbol in
+one function, and its locals reach past 4096 bytes.
+
 ### The reserved words at the top of a frame
 
 The 8 or 16 bytes at the top of a frame hold the **caller's** saved frame

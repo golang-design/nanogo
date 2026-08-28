@@ -620,6 +620,11 @@ func (e *emitter) value(v *ssa.Value) {
 		// The offset is the frame layout's, which this package assigns
 		// because no pass above it does. The encoder reads AuxInt, which is
 		// still zero, so the instruction is built here.
+		//
+		// addSP and not arm64.AddRegImm, because a frame object further from
+		// the stack pointer than the twelve-bit immediate reaches needs the
+		// expansion through R27 that subSP already had. rtsym.init is such a
+		// frame.
 		off, ok := e.frameOff(v)
 		if !ok {
 			return
@@ -628,8 +633,7 @@ func (e *emitter) value(v *ssa.Value) {
 		if !dok {
 			return
 		}
-		w, wok := arm64.AddRegImm(arm64.Size64, dst, arm64.RSP, off)
-		e.wordIf(w, wok, "ADD $%d, RSP, %v", off, dst)
+		e.addSP(dst, off)
 		e.spill(v)
 		return
 	}
@@ -829,16 +833,17 @@ func (e *emitter) move(dst, src ssa.Loc, v *ssa.Value) {
 //
 // specs/026-register-allocation.md keeps a constant, a frame address and a
 // symbol address out of the frame by recomputing them at each use. Each is a
-// fixed number of instructions that depends on nothing, so the bits are the
-// ones the definition would have produced.
+// sequence that depends on nothing but the value itself, so the bits are the
+// ones the definition would have produced. The length is not fixed: a constant
+// takes up to four instructions and a frame address past the immediate takes
+// two.
 func (e *emitter) remat(dst arm64.Reg, v *ssa.Value) {
 	if v.Op == ssa.OpARM64ADDframe {
 		off, ok := e.frameOff(v)
 		if !ok {
 			return
 		}
-		w, wok := arm64.AddRegImm(arm64.Size64, dst, arm64.RSP, off)
-		e.wordIf(w, wok, "ADD $%d, RSP, %v", off, dst)
+		e.addSP(dst, off)
 		return
 	}
 	var target obj.SymRef
