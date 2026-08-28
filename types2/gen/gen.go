@@ -1180,6 +1180,8 @@ var dropped = map[string]string{}
 // not report them as stale generated output.
 var handWritten = map[string]string{
 	"position.go":         "the FileSet plumbing that nanogo's compact Pos needs",
+	"stencil.go":          "the exported door on subst.go that specs/013-generics.md's stenciler substitutes through; upstream has none, because upstream has no stenciler",
+	"stencil_test.go":     "the tests for stencil.go",
 	"testenv_test.go":     "the pieces of internal/testenv the ported tests use",
 	"e2e_test.go":         "the end-to-end gate: nanogo's parser, then this checker, judged against go/types on accept and reject",
 	"errorcheck_test.go":  "the /* ERROR */ corpus harness; upstream reads the annotations with syntax.CommentMap and nanogo's tree carries no comments",
