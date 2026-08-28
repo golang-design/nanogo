@@ -105,6 +105,8 @@ type synthetic struct {
 	ver     int
 	kind    Kind
 	size    uint32
+	align   uint32 // 0 when the symbol takes the alignment its size gives it
+	data    []byte // the bytes, for a symbol the linker fills in as it makes it
 	targets []Global
 }
 
@@ -483,6 +485,18 @@ func (l *Loader) addSynthetic(name string, ver int, kind Kind, size uint32, targ
 	if ver < len(l.byName) {
 		l.byName[ver][name] = g
 	}
+	return g
+}
+
+// addUnnamed records a symbol the linker built that has no name.
+//
+// A name is how two symbols merge, and these must not: the inline tree
+// of one function is not the inline tree of another however alike the
+// two look. cmd/link makes them with an empty name for the same reason.
+func (l *Loader) addUnnamed(kind Kind, size, align uint32, data []byte) Global {
+	g := Global(len(l.objSyms))
+	l.objSyms = append(l.objSyms, objSym{objSynthetic, uint32(len(l.synth))})
+	l.synth = append(l.synth, synthetic{kind: kind, size: size, align: align, data: data})
 	return g
 }
 

@@ -6,6 +6,7 @@ package link
 
 import (
 	"encoding/binary"
+	"sort"
 
 	"golang.design/x/nanogo/obj"
 )
@@ -48,6 +49,10 @@ type Pcln struct {
 	// deduplicated.
 	PcTab []byte
 
+	// FuncTab is the table the runtime binary-searches to turn a program
+	// counter into a function, and the records it points at.
+	FuncTab []byte
+
 	// funcName is the offset of each name in FuncNameTab. A _func record
 	// names its function by this offset.
 	funcName map[Global]uint32
@@ -67,6 +72,18 @@ type Pcln struct {
 	// table with no bytes is at zero, which the runtime reads as no
 	// table.
 	pcOffset map[Global]uint32
+	// funcdataOffset is where each funcdata symbol's bytes start in
+	// go:func.*.
+	funcdataOffset map[Global]uint32
+	// inlSym is the inline tree symbol the linker built for a function,
+	// for the functions that have one.
+	inlSym map[Global]Global
+
+	// GoFuncSize is the space go:func.* takes. The bytes are the output
+	// writer's, because a funcdata symbol may hold a relocation to an
+	// address no stage has assigned yet, and the offsets the records
+	// name are this stage's.
+	GoFuncSize uint64
 }
 
 // generatedAlign is the boundary every table the linker generates is
@@ -81,10 +98,12 @@ func (a *Layout) generatedAlign(n int64) int64 { return rndInt(n, a.target.PtrSi
 // Pclntab builds the pclntab of the program.
 func (a *Layout) Pclntab() *Pcln {
 	p := &Pcln{
-		Funcs:    a.Textp,
-		funcName: map[Global]uint32{},
-		info:     map[Global]funcInfo{},
-		pcOffset: map[Global]uint32{},
+		Funcs:          a.Textp,
+		funcName:       map[Global]uint32{},
+		info:           map[Global]funcInfo{},
+		pcOffset:       map[Global]uint32{},
+		funcdataOffset: map[Global]uint32{},
+		inlSym:         map[Global]Global{},
 	}
 	for _, g := range p.Funcs {
 		if fi, ok := a.l.funcInfo(g); ok {
@@ -94,6 +113,9 @@ func (a *Layout) Pclntab() *Pcln {
 	a.buildFuncNameTab(p)
 	a.buildFileTabs(p)
 	a.buildPctab(p)
+	a.buildInlTreeSyms(p)
+	a.buildFuncdata(p)
+	a.buildFunctab(p)
 	return p
 }
 
@@ -346,6 +368,10 @@ type funcInfo struct {
 	// correction and this field is what it means here.
 	pcsp, pcfile, pcline, pcinline Global
 	pcdata                         []Global
+
+	// funcdata is the stack maps, the stack objects and the rest, one
+	// per index the runtime reads them by.
+	funcdata []Global
 }
 
 // An inlNode is one call the compiler inlined into a function.
@@ -400,6 +426,8 @@ func (l *Loader) funcInfo(g Global) (funcInfo, bool) {
 				fi.pcinline = l.resolve(st, pc.Sym)
 			case obj.AuxPcdata:
 				fi.pcdata = append(fi.pcdata, l.resolve(st, pc.Sym))
+			case obj.AuxFuncdata:
+				fi.funcdata = append(fi.funcdata, l.resolve(st, pc.Sym))
 			}
 		}
 		return fi, true
@@ -448,4 +476,278 @@ func decodeFuncInfo(l *Loader, st *objState, b []byte) (funcInfo, bool) {
 		}
 	}
 	return fi, true
+}
+
+// The funcdata and pc-value table indexes the runtime reads by position.
+// internal/abi declares them and the compiler emits them in this order,
+// so an index that moves reads another table.
+const (
+	funcdataArgsPointerMaps = 0
+	funcdataInlTree         = 3
+	funcdataArgInfo         = 5
+
+	pcdataInlTreeIndex = 2
+)
+
+// funcRecordSize is the size of the runtime._func structure, which is
+// eleven 32 bit fields.
+const funcRecordSize = 11 * 4
+
+// inlinedCallSize is the size of one runtime.inlinedCall, the record the
+// generated inline tree symbol holds per inlined call, and inlTreeAlign
+// is the alignment the symbol asks for, because its fields are 32 bit.
+const (
+	inlinedCallSize = 16
+	inlTreeAlign    = 4
+)
+
+// buildFuncdata lays the funcdata of every function out in one symbol.
+//
+// go:func.* is the symbol, the pclntab section carries it, and a _func
+// record names each of its function's funcdata by an offset into it. The
+// symbols are laid out by decreasing alignment, so that the gaps
+// alignment forces are gathered at the front rather than spread through
+// the whole.
+//
+// The bytes are not built here and the offsets are. A funcdata symbol
+// may hold a relocation to a type descriptor, which resolves to an
+// address the output writer assigns, so the content is the next stage's
+// and the layout is this one's. What the _func records need is the
+// offsets.
+func (a *Layout) buildFuncdata(p *Pcln) {
+	l := a.l
+	var order []Global
+	seen := map[Global]bool{}
+	for _, g := range p.Funcs {
+		fi, ok := p.info[g]
+		if !ok {
+			continue
+		}
+		for j, fd := range a.funcdataOf(g, fi, p.inlSym[g]) {
+			if l.ignoreFuncdata(g, j, fd) || seen[fd] {
+				continue
+			}
+			seen[fd] = true
+			order = append(order, fd)
+		}
+	}
+	// A stable sort by decreasing alignment gathers the gaps alignment
+	// forces at the front rather than spreading them through the whole.
+	sort.SliceStable(order, func(i, j int) bool {
+		return a.dataAlign(order[i]) > a.dataAlign(order[j])
+	})
+	size := int64(0)
+	for _, fd := range order {
+		size = rndInt(size, a.dataAlign(fd))
+		p.funcdataOffset[fd] = uint32(size)
+		size += int64(a.symSize(fd))
+	}
+	p.GoFuncSize = uint64(a.generatedAlign(size))
+}
+
+// funcdataOf returns the funcdata of a function, by index.
+//
+// A function whose compiler inlined something into it carries an inline
+// tree the linker built, at the index the runtime reads it from, and the
+// list is extended to reach that index when the function has fewer
+// funcdata of its own.
+func (a *Layout) funcdataOf(g Global, fi funcInfo, inl Global) []Global {
+	fd := fi.funcdata
+	if len(fi.inlTree) > 0 {
+		for len(fd) < funcdataInlTree+1 {
+			fd = append(fd, 0)
+		}
+		fd[funcdataInlTree] = inl
+	}
+	return fd
+}
+
+// ignoreFuncdata reports whether a funcdata slot holds nothing.
+//
+// The object writer fills the argument map and the argument information
+// of an assembly function in optimistically, hoping the compiler emits
+// them from the function's Go stub declaration. When it does not, the
+// symbol is there and has no bytes, and the record says so with the
+// sentinel the runtime reads as no value.
+func (l *Loader) ignoreFuncdata(fn Global, j int, fd Global) bool {
+	if fd == 0 {
+		return true
+	}
+	if j != funcdataArgsPointerMaps && j != funcdataArgInfo {
+		return false
+	}
+	st, _ := l.def(fn)
+	if st == nil || !st.obj.FromAssembly() {
+		return false
+	}
+	s := l.Def(fd)
+	return s == nil || len(s.Data) == 0
+}
+
+// buildInlTreeSyms builds the inline tree symbol of every function whose
+// compiler inlined something into it.
+//
+// The symbol is a funcdata of the function and holds one record per
+// inlined call: the identity of the callee, the offset of its name in
+// the function name table, the program counter in the caller the call
+// was at, and the line the callee starts on. A traceback that reports an
+// inlined frame reads all four from here, because the callee has no text
+// of its own to read them from.
+func (a *Layout) buildInlTreeSyms(p *Pcln) {
+	for _, g := range p.Funcs {
+		fi, ok := p.info[g]
+		if !ok || len(fi.inlTree) == 0 {
+			continue
+		}
+		data := make([]byte, inlinedCallSize*len(fi.inlTree))
+		for j, node := range fi.inlTree {
+			callee := p.info[node.fn]
+			data[j*inlinedCallSize] = callee.funcID
+			binary.LittleEndian.PutUint32(data[j*inlinedCallSize+4:], p.funcName[node.fn])
+			binary.LittleEndian.PutUint32(data[j*inlinedCallSize+8:], uint32(node.parentPC))
+			binary.LittleEndian.PutUint32(data[j*inlinedCallSize+12:], uint32(callee.startLine))
+		}
+		p.inlSym[g] = a.l.addUnnamed(KPCLNTAB, uint32(len(data)), inlTreeAlign, data)
+	}
+}
+
+// buildFunctab writes the function table.
+//
+// It is two structures in one symbol. The first is the table the runtime
+// binary-searches to turn a program counter into a function: one pair
+// per function of the function's offset from the start of the text and
+// the offset of its record, and a last entry that is the end of the last
+// function, so that a search never runs off the end.
+//
+// The second is the records themselves, each one a runtime._func
+// followed by its pc-value table offsets and then its funcdata offsets.
+// The record is what every traceback reads.
+func (a *Layout) buildFunctab(p *Pcln) {
+	l := a.l
+	starts := make([]uint32, len(p.Funcs))
+	size := int64(len(p.Funcs))*2*4 + 4
+	for i, g := range p.Funcs {
+		size = rndInt(size, a.target.PtrSize)
+		starts[i] = uint32(size)
+		size += funcRecordSize
+		if fi, ok := p.info[g]; ok {
+			size += int64(a.numPcdata(fi)) * 4
+			size += int64(len(a.funcdataOf(g, fi, p.inlSym[g]))) * 4
+		}
+	}
+	tab := make([]byte, a.generatedAlign(size))
+	put := func(off int64, v uint32) { binary.LittleEndian.PutUint32(tab[off:], v) }
+
+	// The pc to function table.
+	for i, g := range p.Funcs {
+		put(int64(i)*2*4, a.textOff(g))
+		put(int64(i*2+1)*4, starts[i])
+	}
+	last := p.Funcs[len(p.Funcs)-1]
+	put(int64(len(p.Funcs))*2*4, a.textOff(last)+a.symSize(last))
+
+	deferReturn := l.Lookup(symDeferReturn, VerABIInternal)
+	for i, g := range p.Funcs {
+		fi, hasInfo := p.info[g]
+		off := int64(starts[i])
+		put(off, a.textOff(g))
+		put(off+4, p.funcName[g])
+		put(off+8, fi.args)
+		put(off+12, a.deferReturnOffset(g, deferReturn))
+		if hasInfo {
+			put(off+16, p.pcOffset[fi.pcsp])
+			put(off+20, p.pcOffset[fi.pcfile])
+			put(off+24, p.pcOffset[fi.pcline])
+		}
+		npc := a.numPcdata(fi)
+		put(off+28, npc)
+		// A function the linker made belongs to no compilation unit, so
+		// it names no file table.
+		cu := ^uint32(0)
+		if o, ok := l.compilationUnit(g); ok {
+			cu = p.cuOffset[p.cuIndex[o]]
+		}
+		put(off+32, cu)
+		put(off+36, uint32(fi.startLine))
+		fd := a.funcdataOf(g, fi, p.inlSym[g])
+		tab[off+40] = fi.funcID
+		tab[off+41] = fi.funcFlag
+		tab[off+43] = byte(len(fd))
+
+		// The pc-value table offsets follow the record, and the inline
+		// tree's is at the index the runtime reads it from whether or
+		// not the function has that many tables of its own.
+		if hasInfo {
+			for j, pc := range fi.pcdata {
+				put(off+funcRecordSize+int64(j)*4, p.pcOffset[pc])
+			}
+			if len(fi.inlTree) > 0 {
+				put(off+funcRecordSize+pcdataInlTreeIndex*4, p.pcOffset[fi.pcinline])
+			}
+		}
+		// The funcdata offsets follow those, and a slot with nothing in
+		// it holds the sentinel the runtime reads as no value.
+		base := off + funcRecordSize + int64(npc)*4
+		for j, s := range fd {
+			if l.ignoreFuncdata(g, j, s) {
+				put(base+int64(j)*4, ^uint32(0))
+				continue
+			}
+			put(base+int64(j)*4, p.funcdataOffset[s])
+		}
+	}
+	p.FuncTab = tab
+}
+
+// symDeferReturn is the function a deferred call returns through. A
+// function that defers holds a call to it, and the record says where,
+// because the runtime has to be able to resume there.
+const symDeferReturn = "runtime.deferreturn"
+
+// deferReturnOffset is where in a function the call to runtime.deferreturn
+// is, or zero for a function that makes none.
+//
+// It is the offset the relocation of the call sits at, and on arm64 that
+// is the offset of the instruction, because the relocation covers the
+// whole of a BL. An architecture whose call instruction is longer than
+// its relocation needs the difference subtracted, which is why cmd/link
+// has a table here and this has none.
+func (a *Layout) deferReturnOffset(g, deferReturn Global) uint32 {
+	if deferReturn == 0 {
+		return 0
+	}
+	s := a.l.Def(g)
+	if s == nil {
+		return 0
+	}
+	st, _ := a.l.def(g)
+	for _, r := range s.Relocs {
+		if !r.Type.IsDirectCall() {
+			continue
+		}
+		if a.l.resolve(st, r.Sym) == deferReturn {
+			return uint32(r.Off)
+		}
+	}
+	return 0
+}
+
+// numPcdata is how many pc-value table offsets a record holds.
+//
+// A function whose compiler inlined something into it holds the inline
+// tree's table at the index the runtime reads it from, so the count
+// reaches that index even when the function has fewer tables of its own.
+func (a *Layout) numPcdata(fi funcInfo) uint32 {
+	n := uint32(len(fi.pcdata))
+	if len(fi.inlTree) > 0 && n < pcdataInlTreeIndex+1 {
+		n = pcdataInlTreeIndex + 1
+	}
+	return n
+}
+
+// textOff is a text symbol's offset from the start of the text, which is
+// how every table here names a function. An address would need a
+// relocation and the runtime would have to apply it at startup.
+func (a *Layout) textOff(g Global) uint32 {
+	return uint32(a.addr[g] - a.TextStart)
 }

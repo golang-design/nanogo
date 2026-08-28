@@ -317,3 +317,70 @@ func TestPcTabAgreesWithTheLinker(t *testing.T) {
 		})
 	}
 }
+
+// TestFuncTabAgreesWithTheLinker compares the function table with
+// cmd/link's, byte for byte.
+//
+// This is the table every traceback reads, and it is the last of them:
+// each record names its function's name, its file, its pc-value tables
+// and its funcdata by an offset into one of the tables in front of it,
+// so a record that agrees is a record whose four other tables agree in
+// the places this function reads them.
+func TestFuncTabAgreesWithTheLinker(t *testing.T) {
+	target := TargetFor(runtime.GOOS, runtime.GOARCH)
+	if target == nil || runtime.GOOS != "darwin" {
+		t.Skipf("the section the oracle reads is Mach-O's, and this is %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	for _, b := range []*build{&hostBuild, &reflectBuild} {
+		t.Run(b.pkg, func(t *testing.T) {
+			b := b.get(t)
+			img := readPclntab(t, linkExe(t, b))
+			l, _, p := buildPcln(t, b, target)
+
+			if len(p.FuncTab) > len(img.functab) {
+				t.Fatalf("the function table is %#x bytes and everything after cmd/link's pc to function table is %#x",
+					len(p.FuncTab), len(img.functab))
+			}
+			want := img.functab[:len(p.FuncTab)]
+			if bytes.Equal(p.FuncTab, want) {
+				t.Logf("%d records in %#x bytes agree with cmd/link, and %d funcdata symbols in %#x bytes",
+					len(p.Funcs), len(p.FuncTab), len(p.funcdataOffset), p.GoFuncSize)
+				return
+			}
+			off := 0
+			for off < len(p.FuncTab) && p.FuncTab[off] == want[off] {
+				off++
+			}
+			t.Errorf("the function table differs at 0x%x, %s", off, whichRecord(l, p, off))
+		})
+	}
+}
+
+// whichRecord names the function whose record holds an offset, so that a
+// disagreement names a function rather than a number.
+func whichRecord(l *Loader, p *Pcln, off int) string {
+	head := len(p.Funcs)*2*4 + 4
+	if off < head {
+		if i := off / 8; i < len(p.Funcs) {
+			return "in the pc to function table, at the entry for " + l.Name(p.Funcs[i])
+		}
+		return "in the pc to function table, at its last entry"
+	}
+	best := ""
+	for _, g := range p.Funcs {
+		start := int(binary.LittleEndian.Uint32(p.FuncTab[8*indexOf(p.Funcs, g)+4:]))
+		if start <= off {
+			best = l.Name(g)
+		}
+	}
+	return "in the record of " + best
+}
+
+func indexOf(list []Global, g Global) int {
+	for i, x := range list {
+		if x == g {
+			return i
+		}
+	}
+	return 0
+}

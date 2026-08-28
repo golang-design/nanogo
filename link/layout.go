@@ -508,10 +508,13 @@ func (a *Layout) symSize(g Global) uint32 {
 	return 0
 }
 
-// symAlign is the alignment an object asked for, or 0 for none.
+// symAlign is the alignment a symbol asked for, or 0 for none.
 func (a *Layout) symAlign(g Global) uint32 {
 	if s := a.l.Def(g); s != nil {
 		return s.Align
+	}
+	if syn := a.l.synthetic(g); syn != nil {
+		return syn.align
 	}
 	return 0
 }
