@@ -983,6 +983,13 @@ func TestAssignABIReadsAResultTheRegistersCannotHold(t *testing.T) {
 //
 // The move needs a destination and there is none, so the pass refuses the
 // function rather than leave a value the code generator meets as a register.
+//
+// The function is wrong twice over and the pass reports the first of the two.
+// The result is also the operand of a second call, which the registers cannot
+// hold either and which names no storage to copy out of, and rewriteBoundaries
+// runs before rewriteCallResults. So the assertion is that the refusal names
+// the type: which of the two directions it names is a property of the pass
+// order and not of the program.
 func TestAssignABIRefusesAFrameResultWithNowhereToPutIt(t *testing.T) {
 	tg := NewArm64Target()
 	typ := abiStruct("s20", 20, abiTInt)
@@ -1003,8 +1010,8 @@ func TestAssignABIRefusesAFrameResultWithNowhereToPutIt(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a result with nowhere to go was accepted\n%s", f)
 	}
-	if !strings.Contains(err.Error(), "have nowhere to go") {
-		t.Errorf("the refusal is %q, and it has to say why", err)
+	if !strings.Contains(err.Error(), "s20") {
+		t.Errorf("the refusal is %q and does not name the type it could not place", err)
 	}
 }
 

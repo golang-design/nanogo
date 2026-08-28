@@ -741,7 +741,9 @@ func (a *abiPass) run() error {
 	a.f.ABI = &ABI{In: in, Out: out, ArgsSize: argsSize, Calls: make([]*ABICall, a.f.NumValues())}
 	a.rewriteArgs()
 	a.rewriteResults()
-	a.rewriteBoundaries()
+	if err := a.rewriteBoundaries(); err != nil {
+		return err
+	}
 	if err := a.rewriteCallResults(); err != nil {
 		return err
 	}
@@ -1103,7 +1105,7 @@ func (a *abiPass) copyInto(anchor *Value, b *Block, o *ir.Object, typ *ir.Type, 
 // several registers, and one value cannot be in several registers, so the
 // operand becomes one load per register. When the registers cannot hold it at
 // all, it is copied into the outgoing area instead and stops being an operand.
-func (a *abiPass) rewriteBoundaries() {
+func (a *abiPass) rewriteBoundaries() error {
 	for _, b := range a.f.Blocks {
 		for _, v := range b.Values {
 			if a.isDead(v) {
@@ -1112,9 +1114,12 @@ func (a *abiPass) rewriteBoundaries() {
 			if !v.Op.IsCall() && v.Op != OpMakeResult {
 				continue
 			}
-			a.splitOperands(v)
+			if err := a.splitOperands(v); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 // splitOperands places the operands of one call or return.
@@ -1125,7 +1130,7 @@ func (a *abiPass) rewriteBoundaries() {
 // parts do not add up to, since the value's own alignment padding is in it and
 // theirs is not. Every reader of the placement, the register allocator and the
 // code generator both, takes the record rather than walking the list again.
-func (a *abiPass) splitOperands(v *Value) {
+func (a *abiPass) splitOperands(v *Value) error {
 	lo := abiCallPrefix(v)
 	types := abiOperandTypes(v, lo)
 	var place []ABIValue
@@ -1139,7 +1144,7 @@ func (a *abiPass) splitOperands(v *Value) {
 		place, _, size, err = ABIWalk(a.t, types, abiCallResultTypes(v), nil)
 	}
 	if err != nil || len(place) != len(v.Args)-lo-a.memArgs(v) {
-		return
+		return nil
 	}
 	mem := a.memoryOf(v)
 
@@ -1177,6 +1182,19 @@ func (a *abiPass) splitOperands(v *Value) {
 		case !av.InReg && av.Type.Size > 0 && mem != nil && v.Op != OpMakeResult:
 			src := a.addressOf(v, arg)
 			if src == nil {
+				if Multiword(av.Type) {
+					// One value the machine has no move for, left as an
+					// operand for the code generator, which has no move for it
+					// either. Reporting it here names the function and the
+					// type; leaving it reached "no arm64 rule lowered this
+					// operation", which is a panic and names neither.
+					//
+					// A scalar in the stack part is the other case and is not
+					// this one: it is one machine value, the code generator
+					// stores it into the area, and there is nothing to copy.
+					return fmt.Errorf("ssa: abi: %s: v%d: an argument of %s does not fit the registers, and the value it is read from is not one this pass can copy out of",
+						a.f.Name, arg.ID, abiTypeName(av.Type))
+				}
 				args = append(args, arg)
 				rec.Vals = append(rec.Vals, *av)
 				continue
@@ -1196,7 +1214,7 @@ func (a *abiPass) splitOperands(v *Value) {
 		}
 	}
 	if !changed {
-		return
+		return nil
 	}
 	args = append(args, v.Args[lo+len(place):]...)
 	if mem != nil {
@@ -1208,6 +1226,7 @@ func (a *abiPass) splitOperands(v *Value) {
 	if int(v.ID) < len(a.f.ABI.Calls) {
 		a.f.ABI.Calls[v.ID] = rec
 	}
+	return nil
 }
 
 // memArgs counts the memory operand a value carries, which is one or none.

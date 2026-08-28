@@ -666,9 +666,31 @@ func (d *decomposer) readersOK(v *Value) bool {
 			if !d.isSplit(u) {
 				return false
 			}
-		case OpStaticCall, OpClosureCall, OpInterCall, OpMakeResult:
-			// The parts take the place of the whole in the argument list.
-			// specs/030-abi.md assigns them locations.
+		case OpStaticCall, OpClosureCall, OpInterCall:
+			// The parts take the place of the whole in the argument list and
+			// specs/030-abi.md assigns them locations, which gives the same
+			// locations as assigning the whole only while the convention lets
+			// the type travel in registers.
+			//
+			// It does not for an array of more than one element, which
+			// types.CalcArraySize refuses registers outright. The callee
+			// places one array and reads it out of the frame, and a call site
+			// that had split it into words placed four integers and passed
+			// them in R0 to R3. Both sides were self-consistent and they were
+			// not each other, so a [4]int argument arrived holding whatever
+			// the registers happened to have in them.
+			//
+			// Left whole, the argument is placed by the same walk that placed
+			// the parameter, and splitOperands turns the one operand into the
+			// stores that fill the area.
+			if !abiRegisterizable(v.Type) {
+				return false
+			}
+		case OpMakeResult:
+			// The same list, and the result direction is already the one
+			// walk on both sides: specs/030-abi.md's callResults places the
+			// call site's reads over the same list the return passes, so the
+			// parts do take the place of the whole here.
 		case OpEq, OpNeq:
 			if !d.equalityOK(u) {
 				return false

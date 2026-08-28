@@ -341,6 +341,26 @@ func trivial(x [1]int, y [0]int, n int) ([1]int, int) {
 	return [1]int{x[0] * 3}, n + 1
 }
 
+// quad is an array of words rather than of bytes, so its parts are exactly the
+// registers the convention refuses it, and a call site that split it into
+// words passed four integers where the callee reads four frame slots.
+// [16]byte does not show this: decomposition leaves it whole.
+type quad [4]int
+
+//go:noinline
+func takesQuad(q quad, n int) int { return q[0] + q[1] + q[2] + q[3] + n }
+
+//go:noinline
+func takesArray(q [4]int) int { return q[0] + q[3] }
+
+// Sum takes the same argument as a receiver, which is where it was found.
+func (q quad) Sum() int { return q[0] + q[1] + q[2] + q[3] }
+
+type summer interface{ Sum() int }
+
+//go:noinline
+func viaSummer(s summer) int { return s.Sum() }
+
 func sum(b []byte) int {
 	s := 0
 	for i, v := range b {
@@ -368,6 +388,14 @@ func main() {
 
 	r, m := trivial([1]int{7}, [0]int{}, 4)
 	fmt.Println("trivial", r[0], m)
+
+	for i := 0; i < 3; i++ {
+		q := quad{i, i + 1, i + 2, i + 3}
+		fmt.Println("takesQuad", takesQuad(q, i))
+		fmt.Println("takesArray", takesArray([4]int{i, 0, 0, i * 5}))
+		fmt.Println("receiver", q.Sum())
+		fmt.Println("viaSummer", viaSummer(q))
+	}
 }
 `
 
