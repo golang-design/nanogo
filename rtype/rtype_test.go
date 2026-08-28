@@ -598,3 +598,125 @@ func ifaceTypeWord(t *ir.Type, w int64) bool {
 	}
 	return t.Kind == ir.Interface && w == 0
 }
+
+// TestDescriptorPastThePtrmaskBoundPointsAtTheOnDemandWord covers the one type
+// whose GCData is not its pointer bitmask.
+//
+// Past internal/abi.MaxPtrmaskBytes*8 pointer words gc stops writing the mask
+// into read-only data and points GCData at one word in BSS, with
+// TFlagGCMaskOnDemand set, which the runtime fills in the first time it needs
+// the mask. reflectdata.dgcsym is that rule.
+//
+// The flag and the symbol are one decision. Set with a bitmask behind GCData,
+// the runtime writes a mask pointer over the first word of the bits. Clear
+// with the word behind it, the collector reads a zeroed word as the mask of a
+// type that holds pointers and scans nothing in it.
+func TestDescriptorPastThePtrmaskBoundPointsAtTheOnDemandWord(t *testing.T) {
+	tInt := lay(t, &ir.Type{Kind: ir.Int64, Name: "int"})
+	tPtr := lay(t, &ir.Type{Kind: ir.Ptr, Elem: tInt})
+
+	// 128 words is the bound and is still a bitmask; 129 is past it.
+	for _, tc := range []struct {
+		what     string
+		n        int64
+		onDemand bool
+	}{
+		{"at the bound", 128, false},
+		{"one word past it", 129, true},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			typ := lay(t, &ir.Type{Kind: ir.Array, Len: tc.n, Elem: tPtr})
+			set, err := rtype.Descriptor(typ)
+			if err != nil {
+				t.Fatalf("Descriptor: %v", err)
+			}
+			var target string
+			for _, r := range set[0].Relocs {
+				if r.Off == rtype.GCDataOffset {
+					target = r.Target
+				}
+			}
+			if target == "" {
+				t.Fatal("the descriptor names no GCData")
+			}
+			var gcdata *rtype.Symbol
+			for i := range set[1:] {
+				if set[1+i].Name == target {
+					gcdata = &set[1+i]
+				}
+			}
+			if gcdata == nil {
+				t.Fatalf("the descriptor names %s and the set does not define it", target)
+			}
+
+			const flagOnDemand = 1 << 4
+			flag := set[0].Data[20] & flagOnDemand // internal/abi.Type.TFlag_
+			if tc.onDemand {
+				if flag == 0 {
+					t.Error("the descriptor points at the on-demand word and does not say so in its tflag")
+				}
+				if !strings.HasPrefix(gcdata.Name, "type:.gcmask.") {
+					t.Errorf("GCData is %q, and gc names the on-demand word type:.gcmask.<type>", gcdata.Name)
+				}
+				if gcdata.Kind != obj.SNOPTRBSS {
+					t.Errorf("the on-demand word is %v, want SNOPTRBSS: it holds a pointer to a persistentalloc block the collector does not own", gcdata.Kind)
+				}
+				if gcdata.Size != 8 || len(gcdata.Data) != 0 {
+					t.Errorf("the on-demand word is %d bytes of size and %d of data, want 8 and 0", gcdata.Size, len(gcdata.Data))
+				}
+				return
+			}
+			if flag != 0 {
+				t.Error("the descriptor points at a bitmask and its tflag says the runtime fills one in")
+			}
+			if !strings.HasPrefix(gcdata.Name, "runtime.gcbits.") {
+				t.Errorf("GCData is %q, and a bitmask is named by its content", gcdata.Name)
+			}
+			if len(gcdata.Data) == 0 {
+				t.Error("the bitmask has no bytes")
+			}
+		})
+	}
+}
+
+// TestStackObjectMaskIsNeverTheOnDemandWord is the half of the rule that has
+// no second chance.
+//
+// A stack object's record holds the offset of its mask from the start of the
+// section and the runtime resolves that offset against moduledata.rodata, so a
+// word in BSS is read at an address that is not a mask and the object is
+// scanned by whatever bits are there. gc keeps the two apart by calling GCSym
+// with onDemandAllowed false from the one place that describes a stack object,
+// and the bitmask form has no upper size for exactly this reason.
+func TestStackObjectMaskIsNeverTheOnDemandWord(t *testing.T) {
+	tInt := lay(t, &ir.Type{Kind: ir.Int64, Name: "int"})
+	tPtr := lay(t, &ir.Type{Kind: ir.Ptr, Elem: tInt})
+	typ := lay(t, &ir.Type{Kind: ir.Array, Len: 300, Elem: tPtr})
+
+	sym, err := rtype.StackObjectMask(typ)
+	if err != nil {
+		t.Fatalf("StackObjectMask: %v", err)
+	}
+	if !strings.HasPrefix(sym.Name, "runtime.gcbits.") {
+		t.Errorf("the mask is %q, and a stack object needs the bitmask whatever the type's size", sym.Name)
+	}
+	if sym.Kind != obj.SRODATA {
+		t.Errorf("the mask is %v, want SRODATA: the runtime resolves a record's offset against moduledata.rodata", sym.Kind)
+	}
+	// 300 pointer words is 300 bits, which is 38 bytes rounded up to a word.
+	if want := 40; len(sym.Data) != want {
+		t.Errorf("the mask is %d bytes, want %d", len(sym.Data), want)
+	}
+	for i, b := range sym.Data {
+		want := byte(0xff)
+		switch {
+		case i >= 38:
+			want = 0
+		case i == 37:
+			want = 0x0f // 300 - 37*8 = 4 bits
+		}
+		if b != want {
+			t.Fatalf("byte %d of the mask is %#02x, want %#02x", i, b, want)
+		}
+	}
+}

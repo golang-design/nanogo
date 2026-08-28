@@ -133,9 +133,9 @@ generic function the compiling package declares, stencilled per list of type
 arguments, and a value of any concrete type goes into an interface, whatever
 its shape. What the first column still waits on is narrower than the column
 itself, and the table of blockers below names it: an instantiation of a generic
-another package declares, a descriptor whose pointer map is longer than one
-word, a generated hash function, and a closure over a named result in a
-function that defers.
+another package declares, a generated equality function for a long array, a
+generated hash function, and a closure over a named result in a function that
+defers.
 
 The standard library entries are the decisive ones. nanogo's dependency set
 reaches a large part of `fmt`, `go/types`' fork, and the `internal` packages
@@ -228,7 +228,7 @@ four below and not nineteen. `rtsym`, `types2/errors` and `obj` compile.
 | Package | What stops it |
 | --- | --- |
 | `syntax` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, reached through `FileSet`. [032](032-type-descriptors-and-itabs.md) owns the descriptor and [013](013-generics.md) the instantiation |
-| `obj/arm64` | `rtype: 129 pointer words needs the on-demand mask, which is not built`, for the package-level `regNames`. [032](032-type-descriptors-and-itabs.md) owns it |
+| `obj/arm64` | `ssagen: type:.eq.[65]string: an array of 65 elements needs a comparison loop, which is not built`. [032](032-type-descriptors-and-itabs.md) owns the generated algorithms |
 | `dist` | `rtype: dist.Producer needs a generated hash function, which specs/032 has no writer for` |
 | `export/pkgbits` | `ir: lowering DumpTo: closure: the closure captures the result err, whose storage the single exit of a function that defers owns`. [020](020-ir.md) owns the row |
 

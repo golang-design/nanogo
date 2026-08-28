@@ -791,7 +791,7 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.
 			d := &obj.Symbol{
 				Name:  s.Name,
 				Type:  s.Kind,
-				Size:  uint32(len(s.Data)),
+				Size:  rtypeSize(s),
 				Align: s.Align,
 				Data:  s.Data,
 			}
@@ -832,7 +832,7 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.
 			d := &obj.Symbol{
 				Name:  s.Name,
 				Type:  s.Kind,
-				Size:  uint32(len(s.Data)),
+				Size:  rtypeSize(s),
 				Align: s.Align,
 				Data:  s.Data,
 			}
@@ -901,7 +901,7 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.
 		d := &obj.Symbol{
 			Name:  s.Name,
 			Type:  s.Kind,
-			Size:  uint32(len(s.Data)),
+			Size:  rtypeSize(s),
 			Align: s.Align,
 			Data:  s.Data,
 		}
@@ -1186,4 +1186,17 @@ func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package, hasInit bool,
 		return fmt.Errorf("%s: %v", cfg.Package, err)
 	}
 	return f.Close()
+}
+
+// rtypeSize is the size of the object symbol a descriptor symbol defines.
+//
+// The two disagree for the zero-filled kind, which rtype.Symbol.Size states:
+// the pointer mask the runtime fills in on demand has a size and no bytes, and
+// a definition of len(Data) for it is a symbol of no space that the runtime
+// then writes a word into.
+func rtypeSize(s rtype.Symbol) uint32 {
+	if s.Size != 0 {
+		return s.Size
+	}
+	return uint32(len(s.Data))
 }

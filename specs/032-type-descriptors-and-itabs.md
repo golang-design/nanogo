@@ -196,13 +196,12 @@ fact rather than an absence. `TFlagUncommon` and the tail are one decision, beca
 tail to every type that has a name and a flag without a tail makes the runtime
 read past the end of the descriptor.
 
-Three things stop a descriptor, and each names itself in the refusal:
+Two things stop a descriptor, and each names itself in the refusal:
 
 | Stop | What is missing |
 | --- | --- |
 | a struct or an array whose parts do not compare as one region of memory | the `Equal` closure, which points at code |
 | a map whose key needs a generated hash | the *body* of that hash. `ssagen` writes one and `driver/compile.go` finds it by scanning a descriptor's own relocations for its own type's `type:.hash.` symbol, and a map's `Hasher` names the **key's**, so nothing generates it. Refusing here is what keeps that from becoming an unresolved `type:.hash.K` at link time |
-| a type holding more pointer words than the inline mask spells | the on-demand mask `gc` writes past `maxPtrmaskBytes`, which this spec does not write |
 
 A method used to be a fourth stop. It is not one now, and the three facts that
 closed it are each easy to get wrong in a way nothing reports:
@@ -482,9 +481,11 @@ Four fields are worth calling out because each has a way of being subtly wrong:
 - **`PtrBytes`** is a prefix length, not a size, as [030](030-abi.md) states. Too
   small and the collector misses pointers. Too large and it reads garbage as
   pointers.
-- **`GCData`** is the pointer bitmask. It is the same information as the IR
-  type's `PtrBits` from [020](020-ir.md) and must be computed from it, not
-  recomputed, so that the two cannot disagree.
+- **`GCData`** is the pointer bitmask, or past `MaxPtrmaskBytes*8` pointer
+  words a word the runtime fills the mask into. Either way it is the same
+  information as the IR type's `PtrBits` from [020](020-ir.md) and must be
+  computed from it, not recomputed, so that the two cannot disagree. The
+  section below says which of the two forms and where the choice is not free.
 - **`Hash`** must match **`gc`'s**, not the runtime's. `gc` computes it at
   compile time and the runtime only compares it, so the requirement is that two
   compilers agree. `gc` hashes the *link string* with `cmd/internal/hash.Sum32`,
@@ -1463,3 +1464,39 @@ started reaching [025](025-lowering-and-rules.md)'s assertion, which is a panic
 naming a `Load` no rule lowered. That class was already there, in `test/const.go`,
 and is one of the functions this spec's own count calls "still wider than a
 register".
+
+### `GCData` has two forms and only one of them is a mask
+
+Past `internal/abi.MaxPtrmaskBytes*8` pointer words, which is 128, `gc` stops
+writing the bitmask into read-only data. It points `GCData` at one word in BSS,
+named `type:.gcmask.<link string>`, and sets `TFlagGCMaskOnDemand`. The runtime
+fills the word in the first time it needs the mask, from a `persistentalloc`
+block, and the word is declared as holding no pointer because the block is not
+the collector's to follow.
+
+The flag and the symbol are one decision, the way `TFlagUncommon` and the tail
+are. Set with a bitmask behind `GCData`, the runtime writes a mask pointer over
+the first word of the bits. Clear with the word behind it, the collector reads
+a zeroed word as the mask of a type that holds pointers and scans nothing in
+it.
+
+**The bound is on the descriptor and on nothing else.** The bitmask form has no
+upper size, which is what lets a stack object of any type have one.
+`reflectdata.GCSym` takes an `onDemandAllowed` argument for this, and the one
+caller that passes false is `liveness`, which describes stack objects. A stack
+object's record holds the offset of its mask from the start of the section and
+the runtime resolves that offset against `moduledata.rodata`, so a word in BSS
+is read at an address that is not a mask and the object is scanned by whatever
+bits are there.
+
+`rtype.StackObjectMask` is the bitmask form, exported for
+[027](027-liveness-and-stackmaps.md)'s writer, and `Descriptor` is the only
+caller that may choose the other. `ssagen` used to take the mask out of the
+descriptor's own `GCData` relocation, on the reasoning that naming it twice
+could disagree. That reasoning inverts here: the descriptor's `GCData` is
+exactly what a stack object must not use, so both callers go through one
+function that returns the bits and neither reads the descriptor.
+
+`obj/arm64.regNames` is 129 pointer words and was what this closed. It did not
+start compiling: it moved to the generated equality function for `[65]string`,
+which is the row above.

@@ -370,9 +370,9 @@ func main() {
 // TestBuildRefusesAPackageLevelVariableByNameAndPosition is what is left of
 // that refusal.
 //
-// The type is an array of two hundred pointers, which is past
-// internal/abi.MaxPtrmaskBytes: gc stops writing an inline bitmask there and
-// emits a symbol the runtime fills in on demand, which rtype does not write.
+// The type is an interface with an unexported method, whose name needs the
+// package path the name encoder does not write. It was an array of two hundred
+// pointers until the on-demand mask landed and a map before that.
 // The variable is refused before any function is compiled, because a record
 // that listed an init which assigns to a symbol that does not exist would
 // produce a program that runs and is wrong. The message names the variable and
@@ -384,10 +384,10 @@ func TestBuildRefusesAPackageLevelVariableByNameAndPosition(t *testing.T) {
 
 import "os"
 
-var table [200]*int
+var table interface{ m1() }
 
 func main() {
-	if table[0] != nil {
+	if table != nil {
 		os.Exit(1)
 	}
 }

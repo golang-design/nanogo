@@ -135,6 +135,17 @@ type Symbol struct {
 	Data   []byte
 	Relocs []Reloc
 
+	// Size is the space a zero-filled symbol takes, and is zero for every
+	// symbol that carries its own bytes.
+	//
+	// obj.Symbol separates the two for the same reason and states the contract
+	// this mirrors: a BSS symbol has a size and no data, and the linker
+	// allocates the space. Only one symbol here is of that kind, the pointer
+	// mask the runtime fills in on demand, and a caller writing len(Data) for
+	// it would define a symbol of no bytes that the runtime then writes a word
+	// into.
+	Size uint32
+
 	// UsedInIface asks the caller to mark the symbol as a type that the
 	// program converts to an interface.
 	//
@@ -205,19 +216,23 @@ const (
 
 // The TFlag bits, from internal/abi.
 const (
-	tflagUncommon      = 1 << 0
-	tflagExtraStar     = 1 << 1
-	tflagNamed         = 1 << 2
-	tflagRegularMemory = 1 << 3
-	tflagDirectIface   = 1 << 5
+	tflagUncommon       = 1 << 0
+	tflagExtraStar      = 1 << 1
+	tflagNamed          = 1 << 2
+	tflagRegularMemory  = 1 << 3
+	tflagGCMaskOnDemand = 1 << 4
+	tflagDirectIface    = 1 << 5
 )
 
 // maxPtrmaskBytes is internal/abi.MaxPtrmaskBytes.
 //
-// Beyond it gc stops emitting a bitmask and writes a symbol the runtime fills
-// in on demand, which needs a BSS symbol and the runtime's cooperation. This
-// package refuses such a type rather than emitting a mask the runtime would
-// read with the wrong rule.
+// Beyond it gc stops writing a bitmask into the descriptor and points GCData
+// at a word the runtime fills in the first time it needs the mask, with
+// TFlagGCMaskOnDemand set to say so. gcMaskOnDemand is that rule and
+// onDemandMask is the symbol.
+//
+// The bound is on the descriptor and on nothing else. The bitmask form has no
+// upper size, which is why StackObjectMask can write one for any type.
 const maxPtrmaskBytes = 16
 
 // Descriptor returns the symbols that define the type descriptor of t.
@@ -348,7 +363,15 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 	// specs/032 states the reason: two computations of one fact give two
 	// answers, and the answer the collector reads has to be the one the code
 	// generator used.
+	//
+	// Past maxPtrmaskBytes*8 words the descriptor points at a word the runtime
+	// fills the mask into instead, which is the only case where GCData is not
+	// the bits. A stack object of such a type takes StackObjectMask and not
+	// this symbol.
 	bits, err := gcbits(t)
+	if gcMaskOnDemand(t) {
+		bits, err = onDemandMask(t)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -603,9 +626,6 @@ func emittable(t *ir.Type) error {
 			return err
 		}
 	}
-	if words := t.PtrBytes() / ir.PtrSize; words > maxPtrmaskBytes*8 {
-		return fmt.Errorf("rtype: %d pointer words needs the on-demand mask, which is not built", words)
-	}
 	return nil
 }
 
@@ -756,6 +776,15 @@ func tflag(t *ir.Type) (uint8, error) {
 	}
 	if un {
 		f |= tflagUncommon
+	}
+	// The flag and GCData are one decision, the way the flag above and the
+	// tail are. Set with a bitmask behind GCData, the runtime writes a mask
+	// pointer over the first word of the bits; clear with the on-demand word
+	// behind it, the collector reads a zeroed word as the mask of a type that
+	// holds pointers and scans nothing. Descriptor picks the symbol by the
+	// same predicate.
+	if gcMaskOnDemand(t) {
+		f |= tflagGCMaskOnDemand
 	}
 	name, err := ir.TypeNameString(t)
 	if err != nil {
@@ -927,11 +956,64 @@ var noTail = map[ir.Kind]bool{
 	ir.String: true, ir.UnsafePtr: true,
 }
 
+// gcMaskOnDemand reports whether t's descriptor points at a word the runtime
+// fills in rather than at a bitmask.
+//
+// It is gc's rule in reflectdata.dgcsym, and it applies to the descriptor
+// alone. A caller that needs the bits themselves asks StackObjectMask.
+func gcMaskOnDemand(t *ir.Type) bool {
+	return t != nil && t.PtrBytes()/ir.PtrSize > maxPtrmaskBytes*8
+}
+
+// onDemandMask returns the word the runtime fills the mask into.
+//
+// It is zero-filled and it holds a pointer to an allocation the runtime makes,
+// and it is still declared as holding none: gc writes it with NOPTR, because
+// the pointer is to a persistentalloc block that the collector does not own
+// and must not follow. reflectdata.dgcptrmaskOnDemand says the same thing in
+// its own comment.
+//
+// The name is the type's, not the mask's. Two types with the same pointer map
+// share one bitmask symbol because that symbol is named by its content, and
+// they cannot share this one: the runtime writes the mask of one type into it.
+func onDemandMask(t *ir.Type) (Symbol, error) {
+	link, err := ir.TypeLinkString(t)
+	if err != nil {
+		return Symbol{}, err
+	}
+	return Symbol{
+		Name:  "type:.gcmask." + link,
+		Kind:  obj.SNOPTRBSS,
+		Align: ir.PtrSize,
+		Dupok: true,
+		Local: true,
+		Size:  ir.PtrSize,
+	}, nil
+}
+
+// StackObjectMask returns the bitmask symbol a stack object of type t is
+// scanned by.
+//
+// It is never the on-demand word, whatever the type's size, and gc says the
+// same by calling GCSym with onDemandAllowed false from the one place that
+// describes a stack object. A stack object's record holds the offset of this
+// symbol from the start of its section and the runtime resolves that offset
+// against moduledata.rodata, so a word in BSS is read at an address that is
+// not a mask and the collector scans the object by whatever bits it finds.
+//
+// specs/027-liveness-and-stackmaps.md owns the record and this is the half of
+// it that lives here, because the bits come from the same walk the descriptor
+// uses and writing them twice would be two answers to one question.
+func StackObjectMask(t *ir.Type) (Symbol, error) { return gcbits(t) }
+
 // gcbits returns the symbol holding t's pointer bitmask.
 //
 // The bytes come from ir.Type.PtrBits, which ir.Layout computed once. The name
 // is the content in hexadecimal, which is gc's, so a mask nanogo emits and one
 // gc emits for the same shape are one symbol in the linked binary.
+//
+// There is no bound on the length. maxPtrmaskBytes bounds what a descriptor
+// points at and not what this writes.
 func gcbits(t *ir.Type) (Symbol, error) {
 	words := t.PtrBytes() / ir.PtrSize
 	n := (words + 7) / 8

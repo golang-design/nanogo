@@ -32,14 +32,13 @@ func TestExportedTypeRefusalNamesWhatIsMissing(t *testing.T) {
 			// field whose own descriptor cannot be written stops the package
 			// even though the struct's could be.
 			//
-			// The field was a map until the slot group gained a spelling.
-			// It is an array of two hundred pointers now: past
-			// internal/abi.MaxPtrmaskBytes gc stops writing a bitmask and
-			// emits a symbol the runtime fills in on demand, which needs the
-			// runtime's cooperation and a BSS symbol.
-			name: "a struct holding a long pointer array",
-			src:  "package lib\n\ntype Table struct{ M [200]*int }\n",
-			want: []string{"Table", "type:lib.Table", "on-demand mask"},
+			// The field was a map until the slot group gained a spelling, then
+			// an array of two hundred pointers until the on-demand mask
+			// landed. It is an interface with an unexported method now, whose
+			// name needs the package path the name encoder does not write.
+			name: "a struct holding an interface with an unexported method",
+			src:  "package lib\n\ntype Table struct{ M interface{ m1() } }\n",
+			want: []string{"Table", "type:lib.Table", "package path"},
 		},
 	}
 	for _, tt := range tests {

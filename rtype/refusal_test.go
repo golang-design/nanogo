@@ -105,16 +105,6 @@ func TestDescriptorRefusals(t *testing.T) {
 			"no canonical name",
 		},
 		{
-			// Beyond internal/abi.MaxPtrmaskBytes gc stops emitting a bitmask
-			// and writes a symbol the runtime fills in on demand, which needs
-			// a BSS symbol and the runtime's cooperation.
-			"a type past the ptrmask bound",
-			func(t *testing.T) *ir.Type {
-				return lay(t, &ir.Type{Kind: ir.Array, Len: 200, Elem: &ir.Type{Kind: ir.Ptr, Elem: intType(t)}})
-			},
-			"on-demand mask",
-		},
-		{
 			"a void",
 			func(t *testing.T) *ir.Type { return lay(t, &ir.Type{Kind: ir.Void}) },
 			"no canonical name",

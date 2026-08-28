@@ -247,3 +247,127 @@ func runUnderCollector(t *testing.T, path string) []byte {
 	}
 	return b
 }
+
+// longPointerMaskProgram holds more pointer words than a bitmask describes.
+//
+// Past internal/abi.MaxPtrmaskBytes*8 pointer words, which is 128, gc stops
+// writing the mask into the descriptor and points GCData at one word in BSS
+// with TFlagGCMaskOnDemand set. The runtime fills that word in the first time
+// it needs the mask, so the descriptor alone does not say which words of the
+// object hold pointers and nothing is scanned until it does.
+//
+// The program reaches the mask from both directions. A package-level variable
+// of such a type is a root the linker describes from the variable's own type,
+// and a heap allocation of one is where runtime.newobject reads the descriptor
+// and builds the mask. Both hold the only reference to objects with finalisers
+// on them, so a mask that describes nothing is a finaliser that runs.
+const longPointerMaskProgram = `package main
+
+import (
+	"fmt"
+	"runtime"
+)
+
+type cell struct{ n int }
+
+// wide is 200 pointer words, which is past the bound. narrow is 128, which is
+// the bound itself and still a bitmask, so the two are the pair.
+type wide [200]*cell
+type narrow [128]*cell
+
+var root wide
+var finalized int
+
+//go:noinline
+func fill(n int) *wide {
+	w := new(wide)
+	for i := range w {
+		c := &cell{n + i}
+		runtime.SetFinalizer(c, func(*cell) { finalized++ })
+		w[i] = c
+	}
+	return w
+}
+
+//go:noinline
+func fillNarrow() *narrow {
+	w := new(narrow)
+	for i := range w {
+		c := &cell{i}
+		runtime.SetFinalizer(c, func(*cell) { finalized++ })
+		w[i] = c
+	}
+	return w
+}
+
+//go:noinline
+func churn() {
+	for i := 0; i < 3000; i++ {
+		_ = make([]byte, 128)
+	}
+}
+
+func sum(w *wide) int {
+	s := 0
+	for _, c := range w {
+		s = s + c.n
+	}
+	return s
+}
+
+func main() {
+	for i := range root {
+		c := &cell{i * 2}
+		runtime.SetFinalizer(c, func(*cell) { finalized++ })
+		root[i] = c
+	}
+	heap := fill(1000)
+	small := fillNarrow()
+
+	for i := 0; i < 3; i++ {
+		churn()
+		runtime.GC()
+		runtime.GC()
+	}
+
+	rs := 0
+	for _, c := range root {
+		rs = rs + c.n
+	}
+	ns := 0
+	for _, c := range small {
+		ns = ns + c.n
+	}
+	fmt.Println("root", rs, "heap", sum(heap), "narrow", ns, "finalized", finalized)
+	runtime.KeepAlive(heap)
+	runtime.KeepAlive(small)
+}
+`
+
+// TestToolexecScansATypeWhoseMaskTheRuntimeBuilds is the evidence for the
+// on-demand pointer mask.
+//
+// The expected line is written out rather than compared against gc, because
+// what is under test is that the objects survive: a comparison would pass if
+// both compilers lost them.
+func TestToolexecScansATypeWhoseMaskTheRuntimeBuilds(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/longmask\n\ngo 1.27\n",
+		"main.go": longPointerMaskProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "longmask", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	// 200 cells at 0, 2, 4 ... is 200*199, the heap's 200 from 1000 up is
+	// 200*1000 + 199*200/2, and the narrow one's 128 from 0 is 127*128/2.
+	const want = "root 39800 heap 219900 narrow 8128 finalized 0\n"
+	got := runUnderCollector(t, filepath.Join(h.mod, "longmask"))
+	if string(got) != want {
+		t.Errorf("the program printed\n%s\nand every object a live root reaches must survive:\n%s", got, want)
+	}
+}

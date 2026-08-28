@@ -248,13 +248,14 @@ func TestCompileRefusals(t *testing.T) {
 			// The collector scans the variable and reads its pointer map
 			// through a type descriptor, so a variable whose type has none is
 			// refused. The type was a map until the slot group gained a
-			// spelling; it is an array of two hundred pointers now, which is
-			// past internal/abi.MaxPtrmaskBytes and needs the on-demand mask
-			// symbol the runtime fills in. A variable of a type with no
-			// pointers in it, and one of a type whose descriptor rtype can
-			// build, both get their symbol now.
+			// spelling, then an array of two hundred pointers until the
+			// on-demand mask landed. It is an interface with an unexported
+			// method now, whose name needs the package path the name encoder
+			// does not write. A variable of a type with no pointers in it, and
+			// one of a type whose descriptor rtype can build, both get their
+			// symbol now.
 			name: "a package-level variable is refused by name and position",
-			src:  "package main\n\nvar m [200]*int\n\nfunc f() int { return 1 }\n",
+			src:  "package main\n\nvar m interface{ m1() }\n\nfunc f() int { return 1 }\n",
 			want: []string{"package-level variable main.m", "a.go:3:5", "type descriptor"},
 		},
 		{

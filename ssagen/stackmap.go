@@ -190,12 +190,21 @@ func gclocalsName(data []byte) string {
 // gcdata returns the pointer mask symbol of a stack object's type, defining it
 // in this object the first time the type is seen.
 //
-// The name is not built here. rtype writes the descriptor of the type and the
-// descriptor points at its own mask, so the mask is found in the descriptor's
-// own words: the relocation at the GCData field names it, and the symbol it
-// names is in the same set. Deciding the name a second time here could
-// disagree with the one the descriptor carries, and then the collector would
-// read one mask for a type described by another.
+// The name is not built here and the descriptor is not read for it either.
+// rtype.StackObjectMask is the one walk that turns a type's pointer bits into
+// a symbol, so the mask a stack object names and the mask a descriptor names
+// come from the same place and cannot disagree.
+//
+// Reading it out of the descriptor's GCData relocation, which this did, is
+// wrong for one type in the language and right for every other. Past
+// internal/abi.MaxPtrmaskBytes*8 pointer words the descriptor points at a word
+// the runtime fills the mask into rather than at the mask, and that word is in
+// BSS. A record here holds the offset of its mask from the start of the
+// section and the runtime resolves it against moduledata.rodata, so the word
+// would be read at an address that is not a mask and the object scanned by
+// whatever bits are there. gc keeps the two apart the same way, by calling
+// GCSym with onDemandAllowed false from the one place that describes a stack
+// object.
 //
 // The symbol is content-addressable, as every mask rtype returns is. Two types
 // with the same pointer map are one symbol in the linked binary, and a package
@@ -204,49 +213,38 @@ func (e *emitter) gcdata(t *ir.Type) (obj.SymRef, bool) {
 	if t == nil {
 		return obj.SymRef{}, false
 	}
-	set, err := rtype.Descriptor(t)
-	if err != nil || len(set) == 0 {
+	// The descriptor still has to be writable. A record names a type this
+	// object file describes, and keepDescribableObjects drops an object whose
+	// type rtype refuses.
+	if _, err := rtype.Descriptor(t); err != nil {
 		return obj.SymRef{}, false
 	}
-	var name string
-	for _, r := range set[0].Relocs {
-		if r.Off == rtype.GCDataOffset {
-			name = r.Target
-			break
-		}
-	}
-	if name == "" {
+	sym, err := rtype.StackObjectMask(t)
+	if err != nil || sym.Name == "" {
 		return obj.SymRef{}, false
 	}
-	if r, ok := e.gcbits[name]; ok {
+	if r, ok := e.gcbits[sym.Name]; ok {
 		return r, true
 	}
-	for _, sym := range set[1:] {
-		if sym.Name != name {
-			continue
-		}
-		d := &obj.Symbol{
-			Name:   sym.Name,
-			Type:   sym.Kind,
-			Align:  sym.Align,
-			Size:   uint32(len(sym.Data)),
-			Data:   sym.Data,
-			Relocs: nil,
-		}
-		if sym.Dupok {
-			d.Flag |= obj.SymFlagDupok
-		}
-		if d.Align == 0 {
-			d.Align = 1
-		}
-		r := e.pkg.AddHashedDef(d)
-		if e.gcbits == nil {
-			e.gcbits = make(map[string]obj.SymRef)
-		}
-		e.gcbits[name] = r
-		return r, true
+	d := &obj.Symbol{
+		Name:  sym.Name,
+		Type:  sym.Kind,
+		Align: sym.Align,
+		Size:  uint32(len(sym.Data)),
+		Data:  sym.Data,
 	}
-	return obj.SymRef{}, false
+	if sym.Dupok {
+		d.Flag |= obj.SymFlagDupok
+	}
+	if d.Align == 0 {
+		d.Align = 1
+	}
+	r := e.pkg.AddHashedDef(d)
+	if e.gcbits == nil {
+		e.gcbits = make(map[string]obj.SymRef)
+	}
+	e.gcbits[sym.Name] = r
+	return r, true
 }
 
 // keepDescribableObjects drops from the stack objects table every object whose
