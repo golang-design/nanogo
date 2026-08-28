@@ -110,6 +110,14 @@ func Decompose(f *Func) {
 type partLeaf struct {
 	off int64
 	typ *ir.Type
+
+	// blank marks a part that belongs to a field named _, at any depth.
+	//
+	// The language does not compare a blank field, so its bytes are as
+	// unspecified as padding and two values that differ only there are equal.
+	// Nothing else here reads it: a blank field is stored, loaded and copied
+	// like any other, and only == and != skip it.
+	blank bool
 }
 
 type decomposer struct {
@@ -269,14 +277,14 @@ func (d *decomposer) flatten(out []partLeaf, t *ir.Type, off int64, limit int) [
 	}
 	switch t.Kind {
 	case ir.String:
-		out = append(out, partLeaf{off, d.ptrTo(d.byteType())})
-		out = append(out, partLeaf{off + ir.PtrSize, d.intType()})
+		out = append(out, partLeaf{off: off, typ: d.ptrTo(d.byteType())})
+		out = append(out, partLeaf{off: off + ir.PtrSize, typ: d.intType()})
 		return out
 
 	case ir.Slice:
-		out = append(out, partLeaf{off, d.ptrTo(t.Elem)})
-		out = append(out, partLeaf{off + ir.PtrSize, d.intType()})
-		out = append(out, partLeaf{off + 2*ir.PtrSize, d.intType()})
+		out = append(out, partLeaf{off: off, typ: d.ptrTo(t.Elem)})
+		out = append(out, partLeaf{off: off + ir.PtrSize, typ: d.intType()})
+		out = append(out, partLeaf{off: off + 2*ir.PtrSize, typ: d.intType()})
 		return out
 
 	case ir.Interface:
@@ -284,18 +292,18 @@ func (d *decomposer) flatten(out []partLeaf, t *ir.Type, off int64, limit int) [
 		// interface. A part typed as an integer here would hide one of them
 		// from the collector.
 		p := d.unsafeType()
-		out = append(out, partLeaf{off, p})
-		out = append(out, partLeaf{off + ir.PtrSize, p})
+		out = append(out, partLeaf{off: off, typ: p})
+		out = append(out, partLeaf{off: off + ir.PtrSize, typ: p})
 		return out
 
 	case ir.Complex64:
 		e := d.scalarType(ir.Float32)
-		out = append(out, partLeaf{off, e}, partLeaf{off + 4, e})
+		out = append(out, partLeaf{off: off, typ: e}, partLeaf{off: off + 4, typ: e})
 		return out
 
 	case ir.Complex128:
 		e := d.scalarType(ir.Float64)
-		out = append(out, partLeaf{off, e}, partLeaf{off + 8, e})
+		out = append(out, partLeaf{off: off, typ: e}, partLeaf{off: off + 8, typ: e})
 		return out
 
 	case ir.Struct, ir.Tuple:
@@ -304,7 +312,15 @@ func (d *decomposer) flatten(out []partLeaf, t *ir.Type, off int64, limit int) [
 				return out
 			}
 			f := &t.Fields[i]
+			was := len(out)
 			out = d.flatten(out, f.Type, off+f.Offset, limit)
+			if f.Name == "_" {
+				// Every part of a blank field is blank, however deep the
+				// field's own type goes.
+				for j := was; j < len(out); j++ {
+					out[j].blank = true
+				}
+			}
 		}
 		return out
 
@@ -327,7 +343,7 @@ func (d *decomposer) flatten(out []partLeaf, t *ir.Type, off int64, limit int) [
 	if t.Size == 0 {
 		return out
 	}
-	return append(out, partLeaf{off, t})
+	return append(out, partLeaf{off: off, typ: t})
 }
 
 // intType returns the type of a length or a capacity.
@@ -1192,7 +1208,7 @@ func (d *decomposer) partAddr(b *Block, pos syntax.Pos, ptr *Value, lf partLeaf,
 // with no parts is equal to every other value of its type, which is what an
 // empty struct is.
 func (d *decomposer) expandEqual(b *Block, v *Value, out *[]*Value) {
-	xs, ys := d.parts[v.Args[0].ID], d.parts[v.Args[1].ID]
+	xs, ys := d.comparedParts(v)
 	cmp := v.Op
 	join := OpAnd
 	if cmp == OpNeq {
@@ -1227,6 +1243,51 @@ func (d *decomposer) expandEqual(b *Block, v *Value, out *[]*Value) {
 	*out = append(*out, c)
 	v.Op = join
 	setArgs(v, acc, c)
+}
+
+// comparedParts returns the parts of the two operands that == and != read.
+//
+// It is every part but the ones that belong to a field named _. The language
+// does not compare a blank field, so two values that differ only there are
+// equal, and comparing all the parts answers unequal for a struct whose bytes
+// differ in a field no program can read.
+//
+// Go's own test/blank.go is where that shows: it builds two values of
+// struct{_, _, _ int} out of different bytes through unsafe and requires them
+// to compare equal. gc skips the fields the same way, in compare.EqStruct.
+//
+// The two operands have the same type by the time this runs, because
+// equalityOK admitted the pair only after checking that their leaves agree in
+// width and offset.
+func (d *decomposer) comparedParts(v *Value) (xs, ys []*Value) {
+	xs, ys = d.parts[v.Args[0].ID], d.parts[v.Args[1].ID]
+	leaves := d.leavesOf(v.Args[0].Type)
+	if len(leaves) != len(xs) {
+		// The parts do not line up with the walk, so nothing here can say
+		// which of them is blank. That is not a shape equalityOK admits, and
+		// comparing every part is the answer it used to give for all of them.
+		return xs, ys
+	}
+	keep := false
+	for _, l := range leaves {
+		if l.blank {
+			keep = true
+			break
+		}
+	}
+	if !keep {
+		return xs, ys
+	}
+	nx := make([]*Value, 0, len(xs))
+	ny := make([]*Value, 0, len(ys))
+	for i, l := range leaves {
+		if l.blank {
+			continue
+		}
+		nx = append(nx, xs[i])
+		ny = append(ny, ys[i])
+	}
+	return nx, ny
 }
 
 // expandSliceNil compares a slice against the literal nil.

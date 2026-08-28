@@ -458,6 +458,20 @@ func (b *builder) obj(o types2.Object) *Object {
 	case *types2.Var:
 		switch o.Kind() {
 		case types2.PackageVar:
+			if o.Name() == "_" {
+				// The blank identifier names no storage at package scope
+				// either, and the rule below is what says so: a blank local
+				// gets no frame slot and the assignment survives only for the
+				// effects of its right-hand side.
+				//
+				// A data symbol for it would be main._, which is also the
+				// symbol of a blank *function*, and Go allows both in one
+				// package. The two then collide, and cmd/link reports it as a
+				// reference to main._ for ABI0 against a definition for
+				// ABIInternal, which names neither declaration.
+				out.Class = ClassLocal
+				break
+			}
 			out.Class = ClassGlobal
 			out.Name = varSym(o)
 		case types2.ParamVar, types2.RecvVar:

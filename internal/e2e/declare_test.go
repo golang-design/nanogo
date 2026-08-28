@@ -141,3 +141,88 @@ func TestToolexecDeclarationIsFreshEveryIteration(t *testing.T) {
 		t.Fatalf("a declaration kept the previous iteration's value: %v\n%s", err, b)
 	}
 }
+
+// blankProgram declares the blank identifier in every position Go allows it.
+//
+// Two of them collide in a way nothing above the linker reports. A blank
+// package-level variable with an initialiser is an assignment the init
+// function makes, and giving it a data symbol names it main._, which is also
+// the symbol of a blank *function*. Go allows both in one package, so the
+// object then defines main._ as text and refers to it as data, and cmd/link
+// says "relocation target main._ not defined for ABI0 (but is defined for
+// ABIInternal)", which names neither declaration.
+//
+// A blank field is the other. The language does not compare one, so two values
+// of struct{_, _, _ int} built out of different bytes are equal, and a
+// comparison of every part answers unequal. Go's own test/blank.go builds
+// exactly that pair through unsafe.
+const blankProgram = `package main
+
+import (
+	"fmt"
+	"unsafe"
+)
+
+type blanked struct {
+	_, _, _ int
+}
+
+type nested struct {
+	a int
+	_ struct{ x, y int }
+	b int
+}
+
+func i() int { return 7 }
+
+var _ = i()
+var _ int = 1
+var _, _ = 3, 4
+
+const _ = 3
+
+type _ int
+
+func _() { panic("a blank function is never called") }
+
+func (blanked) _() {}
+
+func (blanked) _() {}
+
+//go:noinline
+func words(a, b, c int) blanked { return *(*blanked)(unsafe.Pointer(&[3]int{a, b, c})) }
+
+//go:noinline
+func nestedOf(a, x, y, b int) nested {
+	return *(*nested)(unsafe.Pointer(&[4]int{a, x, y, b}))
+}
+
+func main() {
+	var _ = i()
+	_, _ = i(), i()
+
+	fmt.Println("blanked equal", words(1, 2, 3) == words(4, 5, 6))
+	fmt.Println("nested equal", nestedOf(1, 2, 3, 4) == nestedOf(1, 9, 9, 4))
+	fmt.Println("nested unequal", nestedOf(1, 2, 3, 4) == nestedOf(5, 2, 3, 4))
+}
+`
+
+// TestToolexecCompilesEveryBlankDeclaration builds the program above and
+// compares every line against gc.
+func TestToolexecCompilesEveryBlankDeclaration(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/blank\n\ngo 1.27\n",
+		"main.go": blankProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "blank", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "blank"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}
