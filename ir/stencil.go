@@ -215,8 +215,12 @@ func (b *builder) instanceOf(x *syntax.Name, origin *types2.Func) *Object {
 		return have.obj
 	}
 
-	sig, _ := b.subst(inst.Type).(*types2.Signature)
-	if sig == nil {
+	// The signature is instantiated from the same list the symbol was spelled
+	// from and the body will be substituted with, so the type the function
+	// carries and the types inside it cannot come from two lists.
+	inSig, err := types2.Instantiate(b.ctxt, origin.Type(), targs, false)
+	sig, _ := inSig.(*types2.Signature)
+	if err != nil || sig == nil {
 		b.errorf("ir: the instantiation %s has no signature", sym)
 		return nil
 	}
