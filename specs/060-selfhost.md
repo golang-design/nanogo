@@ -29,8 +29,10 @@ walks a package's scope in sorted order and refuses on the first declared type
 whose descriptor `rtype` cannot write, so the message names one type per package
 and says nothing about how many are behind it: `syntax` names `ArrayType`, `ir`
 names `Class`, `obj` names `Aux`, `rtsym` names `Group`, and `driver` names
-`Allowlist`. The count of nanogo packages that nanogo compiles is zero, and no
-arithmetic over the language subset changes that.
+`Allowlist`. The count of nanogo packages that nanogo compiles is the measure,
+and no arithmetic over the language subset stands in for it. It is two of
+nineteen, and the section that measures it names the five packages that block
+the rest.
 
 What is left is [032](032-type-descriptors-and-itabs.md)'s encoder gap, which
 rows two and three above both name, [030](030-abi.md)'s wrapper, and the fourth
@@ -69,17 +71,15 @@ instantiation are both [013](013-generics.md)'s, so stage 1 needs that spec as
 well as the language rows below.
 
 The second-order measure is the language, and it says the same thing more
-slowly. The IR builder produces 39,947 functions for 536 packages of the
-distribution. SSA construction accepts 17,905 of them, two in five. 17,809 of
-those lower completely to arm64 machine operations and 17,758 carry a stack
-map, so the back half of the pipeline is in better shape than the front of it.
-The largest single refusal is the composite literal, at 4,841 functions. Most
-of the large refusals after it are rows of [020](020-ir.md)'s lowering table,
-and two are not: a conversion to an interface and a field of an interface are
-refused by `ssa.Build` itself, above any lowering row, and
-[032](032-type-descriptors-and-itabs.md) records why. About half the lowering
-rows are performed now, and with the lowering pass run first, which is what the
-driver does, 24,508 functions get past construction, three in five.
+slowly. The IR builder produces a typed tree for 536 packages of the
+distribution. SSA construction takes 20,850 of those functions on its own, and
+39,450 once the lowering pass has run first, which is what the driver does. Of
+the 20,850, all but 57 lower to arm64 machine operations and the same number
+carry a stack map, so the back half of the pipeline refuses almost nothing the
+front half hands it. Every one of those numbers is in
+`internal/hygiene/testdata/facts.json`, gated, and written out in full in the
+README and in [032](032-type-descriptors-and-itabs.md); this section names them
+rather than restating them, so that there is one place to correct.
 [020](020-ir.md)'s **State** column names the rows this gate still waits on and
 its corpus counts them.
 
@@ -125,13 +125,16 @@ and it is worth listing because it sizes M5 in [003](003-sequencing.md):
 | type switches and assertions | `//go:` directives, only as input | assembly of its own |
 
 Read the first column against what the compiler accepts today and the distance
-is the gate. Structs compile. Slices compile except `append`, and strings
-compile except `range` over one, each of which waits on a row of
-[020](020-ir.md)'s lowering table. A method compiles with a value receiver and is
-refused with a pointer receiver, because the receiver's type needs a method
-set. Interfaces, maps, a closure with a capture, a type switch and a type
-assertion are each refused outright, and a generic declaration is refused by the
-export writer, as above.
+is the gate. Every entry in it compiles now: structs and methods with either
+receiver, interfaces with their calls, conversions, assertions and type
+switches, slices with `append`, strings with `range`, maps, channels with
+`select`, closures with captures, `defer`, `go`, `panic` and `recover`, and a
+generic function the compiling package declares, stencilled per list of type
+arguments. What the first column still waits on is narrower than the column
+itself, and the table of blockers below names it: the data word of a conversion
+to an interface when the value has to be copied into the frame first, an
+instantiation of a generic another package declares, and a descriptor whose
+pointer map is longer than one word.
 
 The standard library entries are the decisive ones. nanogo's dependency set
 reaches a large part of `fmt`, `go/types`' fork, and the `internal` packages
@@ -211,24 +214,31 @@ generated equality function that spec owes, and only two want anything to do
 with a method. A reason stated once and never re-read outlives the fact it was
 taken from.
 
-## The closure measured against nanogo's own twelve packages
+## The closure measured against nanogo's own packages
 
 The count above is over the packages a `func main() {}` needs. This is the
-narrower and more useful measure: nanogo's own twelve, compiled by nanogo under
+narrower and more useful measure: nanogo's own nineteen, compiled by nanogo under
 an allowlist that names all of them.
 
-**Zero of twelve compile, and three leaf packages block every one.** The other
-nine fail on an import rather than on themselves, so the work list is three
-items and not twelve.
+**Two of nineteen compile, and five leaf packages block the rest.** The other
+twelve fail on an import rather than on themselves, so the work list is the
+five below and not nineteen. `rtsym` and `types2/errors` compile.
 
 | Package | What stops it |
 | --- | --- |
+| `obj`, `dist`, `export/pkgbits` | `a conversion to an interface, whose data word needs runtime.convT with the address of a copy in the frame is not built yet`. One gap, three packages, and it is the largest refusal class of Go's own corpus as well |
 | `syntax` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, reached through `FileSet`. [032](032-type-descriptors-and-itabs.md) owns the descriptor and [013](013-generics.md) the instantiation |
-| `obj` | `a result that arrives in the frame is not read`, in `(*Package).Bytes`. One of the three `ssagen` doors [030](030-abi.md) left for a result the sixteen result registers cannot hold |
-| `rtsym` | `ADD $4136, RSP, R0 does not encode`, in `init`. A frame past the twelve-bit immediate an `ADD` carries, which [042](042-arm64-backend.md) owns |
+| `obj/arm64` | `rtype: 129 pointer words needs the on-demand mask, which is not built`, for the package-level `regNames`. [032](032-type-descriptors-and-itabs.md) owns it |
 
-`loader`, `export` and `types2` wait on `syntax`. `link` waits on `obj`. `rtype`,
-`ir`, `ssa`, `ssagen` and `driver` wait on `rtsym`.
+`loader` and `types2` wait on `syntax`. `export` waits on `pkgbits`. `link`,
+`rtype`, `ir`, `ssa`, `ssagen` and `driver` wait on what is above them.
+
+Two of the three blockers this table used to name are closed. `rtsym` wanted a
+frame object past the twelve-bit `ADD` immediate, which is the R27 expansion
+[042](042-arm64-backend.md) already had for `subSP`. `obj` wanted a result that
+arrives in the frame to be read there, which [030](030-abi.md) now does at the
+call site as well as at the return. `obj` did not start compiling: it moved to
+the `convT` row, which is what a work list does when the item above it closes.
 
 The measurement is worth repeating rather than quoting, and it has one trap in
 it. `go build -toolexec` with no `NANOGO_ALLOWLIST` compiles **nothing** with

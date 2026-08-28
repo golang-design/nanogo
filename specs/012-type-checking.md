@@ -262,7 +262,7 @@ Built, and these numbers are measured. `types2` sits just on the 90% line and is
 excluded from the coverage gate, because it is upstream's code under upstream's
 tests and a nanogo-shaped threshold would measure the wrong thing.
 
-- 613 subtests in `types2`, which is the ported upstream suite. It comes with
+- 623 subtests in `types2`, which is the ported upstream suite. It comes with
   the fork and it is the reason the fork is safe.
 - An `errorcheck` corpus of 375 entries, of which 370 are checked and 5 are
   named as known gaps and skipped.

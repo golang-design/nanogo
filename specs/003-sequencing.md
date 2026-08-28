@@ -174,7 +174,7 @@ its gate is not met.**
 | --- | --- | --- |
 | M0 skeleton | done | a `go build -a -toolexec=nanogo` completes by delegating |
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
-| M2 types | done, less a generic declaration in export data | 613 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads and writes gc's export data |
+| M2 types | done, less a generic declaration in export data | 623 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads and writes gc's export data |
 | M3 first binary | **in progress** | a leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs; the clause "with its tests passing" is unmet, because `go test -toolexec` is not run |
 | M4 runtime interface | **in progress** | liveness, stack maps, the ABI and the stack growth check are built, and a nanogo-allocated object survives a collection. The type descriptors an allocation needs are written, and a package that declares a type whose method set the IR type does not hold is refused. `defer` and `go` of a function value run, a captureless closure runs, and a deferred call runs while the goroutine panics on a runtime-raised panic; a `panic` statement, a read of the value `recover` returns, itabs, write barriers and every capture are not built |
 | M5 to M10 | not started | |
@@ -233,20 +233,20 @@ reach for no construct nanogo refuses. [060](060-selfhost.md) owns that census
 and the refusal each of the others gives.
 
 The corpus says how much narrower. The IR builder produces a typed tree for
-536 packages of the Go distribution, 41,084 functions and 4,233,516 nodes. The
+536 packages of the Go distribution, 41,354 functions and 4,245,532 nodes. The
 reach past that point is two numbers, not one, because the driver runs
 [020](020-ir.md)'s lowering pass before SSA construction and the corpus
 measures both orders:
 
 | Measurement | Functions |
 | --- | --- |
-| reach SSA construction with no lowering pass | 20,731 |
-| get past construction once the lowering pass has run, which is what the driver does | 39,206 |
-| lower completely to arm64 machine operations | 17,809 |
-| carry a stack map | 20,668 |
+| reach SSA construction with no lowering pass | 20,850 |
+| get past construction once the lowering pass has run, which is what the driver does | 39,450 |
+| lower completely to arm64 machine operations | 20,793 |
+| carry a stack map | 20,793 |
 
-**20,731 of those functions reach SSA construction** without the pass. 20,668
-of the 20,731 carry a stack map, over 120,493 safepoints, and 10,727 of them
+**20,850 of those functions reach SSA construction** without the pass. 20,793
+of the 20,850 carry a stack map, over 120,493 safepoints, and 10,727 of them
 have a pointer bit set. 162 have a stack object.
 
 Construction refuses the rest by name. The causes below are measured without
@@ -380,8 +380,8 @@ the remainder is values wider than a machine register, went with it.
 **Then construction learned the assignment statement and both numbers moved
 again.** `ssa/build.go` had no case for `ir.OAssign`, none for `ir.OCase`, and
 read a `for` statement's post list out of `Else` rather than `Post`. The three
-were 25,036 refusals and one miscompile. The corpus now reports 20,731 reaching
-SSA and 17,809 lowering, so the identity that held while the accepted set was
+were 25,036 refusals and one miscompile. The corpus now reports 20,850 reaching
+SSA and 20,793 lowering, so the identity that held while the accepted set was
 small is gone: what is left undecomposed is 87 functions holding a wide
 `SelectN`, 12 holding an array and 93 holding a struct, and 96 of them do not
 lower.

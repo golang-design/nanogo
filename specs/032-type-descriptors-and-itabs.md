@@ -949,8 +949,8 @@ reader who follows the same reasoning again makes the same two mistakes.
    `compileFunc`'s pass list, ahead of `ssa.Build`, and it is named `ir.Lower`
    rather than "lowering" because `ssa.Lower` is in the same list and the two
    are different decks. The corpus now measures what the pass buys rather than
-   what it would buy: 39,206 of 41,084 distribution functions get past
-   construction with the pass, and 20,731 without it.
+   what it would buy: 39,450 of 41,354 distribution functions get past
+   construction with the pass, and 20,850 without it.
 2. `emitPackage` collects `ir.LowerAndCollect`'s per function lists, unions
    them in first-use order, calls `rtype.Descriptor` on each, and resolves each
    `rtype.Reloc` target by name. **The descriptor itself is `AddNonPkgDef`, not
