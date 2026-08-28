@@ -191,21 +191,20 @@ func TestToolexecPassthrough(t *testing.T) {
 // package, so a construct nanogo cannot compile is an error and never a silent
 // hand back to gc.
 //
-// The construct is a conversion of a bool to an interface, which ssa.Build
-// refuses: the data word is the address of a copy in the frame, which
-// runtime.convT takes and construction cannot address, because it has already
-// decided which objects live in the frame by the time an expression is built.
-// It has been five constructs before: the string constant Message returns,
-// which needed a data symbol nothing wrote, a floating-point constant, which
-// specs/042-arm64-backend.md group 6 had no encoder for, a slice of a type
-// with a method, whose descriptor needed a Method array, a conversion to an
-// interface with methods, whose type word needed the itab of the pair, and an
-// assertion whose target is an interface, which needed the *abi.TypeAssert
-// cache runtime.typeAssert reads. All five gaps are closed. What this test
-// asserts is where the build stops and what the message names, so the
-// construct is whichever one is open and never the point. It is taken as deep
-// in the pipeline as one is open, so that the build exercises the passes above
-// it on the way.
+// The construct is a conversion of a slice to a pointer to an array, which
+// ssa.Build has no case for. It has been six constructs before: the string
+// constant Message returns, which needed a data symbol nothing wrote, a
+// floating-point constant, which specs/042-arm64-backend.md group 6 had no
+// encoder for, a slice of a type with a method, whose descriptor needed a
+// Method array, a conversion to an interface with methods, whose type word
+// needed the itab of the pair, an assertion whose target is an interface,
+// which needed the *abi.TypeAssert cache runtime.typeAssert reads, and a
+// conversion of a bool to an interface, whose data word is the address of a
+// copy that only the lowering pass can make. All six gaps are closed. What
+// this test asserts is where the build stops and what the message names, so
+// the construct is whichever one is open and never the point. It is taken as
+// deep in the pipeline as one is open, so that the build exercises the passes
+// above it on the way.
 func TestToolexecAllowlisted(t *testing.T) {
 	goBin := needGo(t)
 	dir := t.TempDir()
@@ -214,7 +213,7 @@ func TestToolexecAllowlisted(t *testing.T) {
 	mod := filepath.Join(dir, "mod")
 	writeModule(t, mod)
 	if err := os.WriteFile(filepath.Join(mod, "greet", "refuse.go"),
-		[]byte("package greet\n\nfunc boxed(b bool) any {\n\treturn b\n}\n"), 0o644); err != nil {
+		[]byte("package greet\n\nfunc arrayptr(b []byte) *[9]byte {\n\treturn (*[9]byte)(b)\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
