@@ -30,8 +30,8 @@ whose descriptor `rtype` cannot write, so the message names one type per package
 and says nothing about how many are behind it: `syntax` names `ArrayType`, `ir`
 names `Class`, `obj` names `Aux`, `rtsym` names `Group`, and `driver` names
 `Allowlist`. The count of nanogo packages that nanogo compiles is the measure,
-and no arithmetic over the language subset stands in for it. It is three of
-nineteen, and the section that measures it names the four packages that block
+and no arithmetic over the language subset stands in for it. It is four of
+nineteen, and the section that measures it names the three packages that block
 the rest.
 
 What is left is [032](032-type-descriptors-and-itabs.md)'s encoder gap, which
@@ -133,9 +133,8 @@ generic function the compiling package declares, stencilled per list of type
 arguments, and a value of any concrete type goes into an interface, whatever
 its shape. What the first column still waits on is narrower than the column
 itself, and the table of blockers below names it: an instantiation of a generic
-another package declares, a generated equality function for a long array, a
-generated hash function, and a closure over a named result in a function that
-defers.
+another package declares, a generated hash function, and a closure over a named
+result in a function that defers.
 
 The standard library entries are the decisive ones. nanogo's dependency set
 reaches a large part of `fmt`, `go/types`' fork, and the `internal` packages
@@ -221,14 +220,14 @@ The count above is over the packages a `func main() {}` needs. This is the
 narrower and more useful measure: nanogo's own nineteen, compiled by nanogo under
 an allowlist that names all of them.
 
-**Three of nineteen compile, and four leaf packages block the rest.** The other
+**Four of nineteen compile, and three leaf packages block the rest.** The other
 twelve fail on an import rather than on themselves, so the work list is the
-four below and not nineteen. `rtsym`, `types2/errors` and `obj` compile.
+three below and not nineteen. `rtsym`, `types2/errors`, `obj` and `obj/arm64`
+compile.
 
 | Package | What stops it |
 | --- | --- |
 | `syntax` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, reached through `FileSet`. [032](032-type-descriptors-and-itabs.md) owns the descriptor and [013](013-generics.md) the instantiation |
-| `obj/arm64` | `ssagen: type:.eq.[65]string: an array of 65 elements needs a comparison loop, which is not built`. [032](032-type-descriptors-and-itabs.md) owns the generated algorithms |
 | `dist` | `rtype: dist.Producer needs a generated hash function, which specs/032 has no writer for` |
 | `export/pkgbits` | `ir: lowering DumpTo: closure: the closure captures the result err, whose storage the single exit of a function that defers owns`. [020](020-ir.md) owns the row |
 
