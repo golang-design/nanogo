@@ -156,6 +156,26 @@ convention says travels in registers, and `TestABILeavesMatchesDecomposition`
 pins that its walk and this one produce identical offsets and widths for the
 types the language builds.
 
+The bound runs the other way as well, and that direction was found by a wrong
+answer rather than by reading. **A value the convention refuses registers is
+not split for a call.** The rule that the parts take the place of the whole in
+an argument list gives the locations that assigning the whole gives only while
+the convention lets the type travel in registers, and it does not for an array
+of more than one element: `types.CalcArraySize` refuses those registers
+outright. The callee placed one `[4]int` and read four frame slots while the
+call site placed four integers and passed them in R0 to R3, both sides
+self-consistent and neither one the other, so the argument arrived holding
+whatever the registers had in them. Left whole, the value is placed by the same
+walk on both sides and [030](030-abi.md)'s `splitOperands` copies it into the
+area.
+
+A value that reaches the code generator still whole is a compiler bug and this
+spec requires the crash for it. What must not reach the code generator is a
+value this pass could have reported: the ABI pass now refuses a multi-word
+operand it cannot copy into the area, naming the function and the type, rather
+than leaving it for the assertion, which names an operation and a value number
+and neither of those.
+
 ### A call result is named by the word it starts at
 
 `SelectN` has an index and the index means two different things on the two
@@ -371,3 +391,14 @@ Accurate and left alone: the pseudo-operation table, which matches
 `ssa.isPseudo` operation for operation including the exclusion of `MakeResult`;
 the shift-mask derivation, which matches `lowerShift` arithmetically; and the
 requirement that constant and address forms be rematerialisable.
+
+### The bound at a call boundary was written in one direction only
+
+This spec said the bound is not a bound at a call boundary, meaning a value
+this pass leaves whole may still be split by the ABI pass. That is true and it
+is half of the rule. The other half is that a value this pass splits may not be
+placeable as parts at all, because the convention refuses the type registers
+whatever its width. An array of more than one element is that case, and
+`[4]int` was passed in R0 to R3 by the caller and read out of four frame slots
+by the callee for as long as both rules were written down separately. The
+section above now states both directions.

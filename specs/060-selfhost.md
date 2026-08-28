@@ -220,25 +220,31 @@ The count above is over the packages a `func main() {}` needs. This is the
 narrower and more useful measure: nanogo's own nineteen, compiled by nanogo under
 an allowlist that names all of them.
 
-**Two of nineteen compile, and five leaf packages block the rest.** The other
+**Three of nineteen compile, and four leaf packages block the rest.** The other
 twelve fail on an import rather than on themselves, so the work list is the
-five below and not nineteen. `rtsym` and `types2/errors` compile.
+four below and not nineteen. `rtsym`, `types2/errors` and `obj` compile.
 
 | Package | What stops it |
 | --- | --- |
-| `obj`, `dist`, `export/pkgbits` | `a conversion to an interface, whose data word needs runtime.convT with the address of a copy in the frame is not built yet`. One gap, three packages, and it is the largest refusal class of Go's own corpus as well |
 | `syntax` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, reached through `FileSet`. [032](032-type-descriptors-and-itabs.md) owns the descriptor and [013](013-generics.md) the instantiation |
 | `obj/arm64` | `rtype: 129 pointer words needs the on-demand mask, which is not built`, for the package-level `regNames`. [032](032-type-descriptors-and-itabs.md) owns it |
+| `dist` | `rtype: dist.Producer needs a generated hash function, which specs/032 has no writer for` |
+| `export/pkgbits` | `ir: lowering DumpTo: closure: the closure captures the result err, whose storage the single exit of a function that defers owns`. [020](020-ir.md) owns the row |
 
 `loader` and `types2` wait on `syntax`. `export` waits on `pkgbits`. `link`,
 `rtype`, `ir`, `ssa`, `ssagen` and `driver` wait on what is above them.
 
-Two of the three blockers this table used to name are closed. `rtsym` wanted a
+Every blocker this table has named so far is closed, and each time the package
+moved to the next reason rather than to the compiling column. `rtsym` wanted a
 frame object past the twelve-bit `ADD` immediate, which is the R27 expansion
 [042](042-arm64-backend.md) already had for `subSP`. `obj` wanted a result that
 arrives in the frame to be read there, which [030](030-abi.md) now does at the
-call site as well as at the return. `obj` did not start compiling: it moved to
-the `convT` row, which is what a work list does when the item above it closes.
+call site as well as at the return, and then a data word that is the address of
+a copy, which [032](032-type-descriptors-and-itabs.md) now writes; `obj`
+compiles. `dist` and `export/pkgbits` wanted the same data word and are now on
+their own next reason. A work list that shortens by one item per fix is not
+what this measurement shows: it shows how deep each package's stack of reasons
+is, and only the count of compiling packages moves.
 
 The measurement is worth repeating rather than quoting, and it has one trap in
 it. `go build -toolexec` with no `NANOGO_ALLOWLIST` compiles **nothing** with
