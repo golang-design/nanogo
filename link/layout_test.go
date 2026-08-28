@@ -112,6 +112,8 @@ func TestDataSectionSizesAgreeWithTheLinker(t *testing.T) {
 	// replaced and the leading one doubled.
 	machoName := map[string]string{
 		".go.module": "__go_module",
+		".noptrdata": "__noptrdata",
+		".data":      "__data",
 		".bss":       "__bss",
 		".noptrbss":  "__noptrbss",
 		".go.type":   "__go_type",

@@ -121,6 +121,23 @@ const (
 // a bracket is for.
 const fipsBracketSize = 1
 
+// The FIPS brackets of the data sections. Each pair brackets the part of
+// its section that the FIPS module contributed, so that the module can
+// checksum itself at startup, and the linker makes all eight whether or
+// not a FIPS module is linked. cmd/link's fips140.go names them and
+// [Layout.assignText] makes the two text ones.
+var dataFIPSBrackets = []struct {
+	name string
+	kind Kind
+}{
+	{"go:rodatafipsstart", KRODATAFIPSSTART},
+	{"go:rodatafipsend", KRODATAFIPSEND},
+	{"go:noptrdatafipsstart", KNOPTRDATAFIPSSTART},
+	{"go:noptrdatafipsend", KNOPTRDATAFIPSEND},
+	{"go:datafipsstart", KDATAFIPSSTART},
+	{"go:datafipsend", KDATAFIPSEND},
+}
+
 // A library is one package as the layout sees it: the objects of one
 // archive, and the packages its objects name in their Autolib lists.
 type library struct {
@@ -205,6 +222,7 @@ func (l *Loader) Layout(r *Reachability, t *Target) *Layout {
 		}
 	}
 	a.applyInitTasks(r)
+	a.applyRuntimeVars(r)
 	a.applyStringVars(r)
 	a.assignData(r)
 	return a
@@ -229,6 +247,43 @@ func (a *Layout) define(name string, kind Kind, size uint32) Global {
 	a.setKind(g, kind)
 	return g
 }
+
+// applyRuntimeVars moves the two runtime variables the linker writes a
+// value into out of the zero filled data.
+//
+// runtime.lastmoduledatap is the head of the module list and the linker
+// points it at the module descriptor. It is one pointer either way, so
+// what the write changes is the section and not the size.
+//
+// runtime.disableMemoryProfiling is written only when the program does
+// not reach runtime.memProfileInternal. cmd/link makes that test and no
+// other, so a linker that always wrote the byte would put it in a
+// section no profiling binary has it in.
+func (a *Layout) applyRuntimeVars(r *Reachability) {
+	l := a.l
+	names := []string{symLastModuleData}
+	if p := l.Lookup(symMemProfileInternal, VerABIInternal); p == 0 || !r.Reachable(p) {
+		names = append(names, symDisableMemoryProfiling)
+	}
+	for _, name := range names {
+		g := l.Lookup(name, VerABI0)
+		if g == 0 || !a.reachable(r, g) {
+			continue
+		}
+		switch a.kind[g] {
+		case KBSS, KNOPTRBSS:
+			a.kind[g] = KNOPTRDATA
+		}
+	}
+}
+
+// The runtime variables the linker writes a value into. Each one is
+// declared by the runtime and left zero filled by the compiler.
+const (
+	symLastModuleData         = "runtime.lastmoduledatap"
+	symDisableMemoryProfiling = "runtime.disableMemoryProfiling"
+	symMemProfileInternal     = "runtime.memProfileInternal"
+)
 
 // setKind records the kind of a symbol this stage built, growing the
 // tables when the symbol is one the loader added after they were sized.
@@ -563,6 +618,9 @@ func (a *Layout) dataAlign(g Global) int64 {
 // sizes are equal, but it does change an address.
 // specs/045-linker.md records the boundary.
 func (a *Layout) assignData(r *Reachability) {
+	for _, br := range dataFIPSBrackets {
+		a.define(br.name, br.kind, fipsBracketSize)
+	}
 	buckets := make([][]Global, numKind)
 	for g := Global(1); g < Global(len(a.kind)); g++ {
 		k := a.kind[g]
@@ -585,6 +643,10 @@ func (a *Layout) assignData(r *Reachability) {
 			Syms:   []Global{g},
 		})
 	}
+	a.addSection(a.dataSection(".noptrdata", 0, buckets,
+		KNOPTRDATA, KNOPTRDATAFIPSSTART, KNOPTRDATAFIPS, KNOPTRDATAFIPSEND, KNOPTRDATAEND))
+	a.addSection(a.dataSection(".data", 0, buckets,
+		KDATA, KDATAFIPSSTART, KDATAFIPS, KDATAFIPSEND, KDATAEND, KXCOFFTOC))
 	a.addSection(a.dataSection(".bss", 0, buckets, KBSS))
 	a.addSection(a.dataSection(".noptrbss", 0, buckets, KNOPTRBSS, KGCMASK, KCOVERAGE_COUNTER))
 	// The type descriptors start one pointer into their section, so that
