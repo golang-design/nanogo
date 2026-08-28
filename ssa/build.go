@@ -1479,8 +1479,18 @@ func (b *builder) shortCircuit(n ir.Expr) *Value {
 }
 
 func (b *builder) convert(n ir.Expr) *Value {
-	x := b.expr(n.X)
 	from, to := n.X.Type, n.Type
+	if from != nil && to != nil && to.Kind == ir.Interface && from.Kind != ir.Interface &&
+		ir.IfaceDataWordOf(from) == ir.IfaceDataAddress {
+		// The data word is the address of the operand's own storage, so the
+		// operand's value is never read. Building it anyway is a second
+		// evaluation of the expression the address comes from, and an index or
+		// a dereference carries a check: a slice element boxed this way got
+		// two bounds checks where gc emits one, and nothing removes the second
+		// because specs/022-optimization-passes.md is not written.
+		return b.concreteToInterface(n, nil, from, to)
+	}
+	x := b.expr(n.X)
 	if from == nil || to == nil {
 		b.errorf(InvNone, "a conversion with no type")
 		return x

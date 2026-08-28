@@ -3003,3 +3003,37 @@ func TestBuildConstantIsAValueAndNotItsPrintedForm(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildBoxesWithoutEvaluatingTheOperandTwice checks that a conversion
+// whose data word is the address of its operand reads the operand's storage
+// once.
+//
+// The data word is the address, so the operand's value is never used. Building
+// it anyway is a second evaluation of the expression the address comes from,
+// and an index carries a bounds check: a slice element boxed this way got two
+// bounds checks where gc emits one. Nothing removes the second, because
+// specs/022-optimization-passes.md is not written, so the duplicate is what
+// the machine runs.
+func TestBuildBoxesWithoutEvaluatingTheOperandTwice(t *testing.T) {
+	tSliceOfStruct := mkType(&ir.Type{Kind: ir.Slice, Elem: tStruct})
+	xs := obj("xs", tSliceOfStruct, ir.ClassLocal)
+	i := obj("i", tInt, ir.ClassLocal)
+	dst := obj("dst", tEface, ir.ClassLocal)
+	elem := &ir.Node{Op: ir.OIndex, X: local(xs), Y: local(i), Type: tStruct}
+	fn := fun("box", []*ir.Object{xs, i, dst},
+		asn(local(dst), &ir.Node{Op: ir.OConvert, X: elem, Type: tEface}),
+	)
+	f := build(t, fn)
+
+	checks := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpBoundsCheck {
+				checks++
+			}
+		}
+	}
+	if checks != 1 {
+		t.Errorf("the index is checked %d times, want once\n%s", checks, f)
+	}
+}
