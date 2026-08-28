@@ -109,15 +109,18 @@ func TestDataSectionSizesAgreeWithTheLinker(t *testing.T) {
 		t.Skipf("the section names this reads are Mach-O's, and this is %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	// The Mach-O name of a section is the linker's own with the dots
-	// replaced and the leading one doubled.
+	// replaced and the leading one doubled, in the Mach-O name of the
+	// segment the section is written in. Two segments hold a .rodata, so
+	// the segment is part of the key.
 	machoName := map[string]string{
-		".go.module": "__go_module",
-		".noptrdata": "__noptrdata",
-		".data":      "__data",
-		".bss":       "__bss",
-		".noptrbss":  "__noptrbss",
-		".go.type":   "__go_type",
-		".go.func":   "__go_func",
+		SegRelro + " .rodata":   "__DATA_CONST,__rodata",
+		SegRelro + " .go.type":  "__DATA_CONST,__go_type",
+		SegRelro + " .go.func":  "__DATA_CONST,__go_func",
+		SegData + " .go.module": "__DATA,__go_module",
+		SegData + " .noptrdata": "__DATA,__noptrdata",
+		SegData + " .data":      "__DATA,__data",
+		SegData + " .bss":       "__DATA,__bss",
+		SegData + " .noptrbss":  "__DATA,__noptrbss",
 	}
 	for _, b := range []*build{&hostBuild, &reflectBuild} {
 		t.Run(b.pkg, func(t *testing.T) {
@@ -134,7 +137,7 @@ func TestDataSectionSizesAgreeWithTheLinker(t *testing.T) {
 				t.Fatalf("the layout built %d sections and this compares %d", len(a.Sections), len(machoName))
 			}
 			for _, sect := range a.Sections {
-				name, ok := machoName[sect.Name]
+				name, ok := machoName[sect.Seg+" "+sect.Name]
 				if !ok {
 					t.Errorf("the layout built a section %s this test does not know", sect.Name)
 					continue
@@ -144,9 +147,9 @@ func TestDataSectionSizesAgreeWithTheLinker(t *testing.T) {
 					t.Errorf("the executable has no %s section", name)
 					continue
 				}
-				t.Logf("%-11s %5d symbols, 0x%x bytes", sect.Name, len(sect.Syms), sect.Length)
+				t.Logf("%-10s %-11s %5d symbols, 0x%x bytes", sect.Seg, sect.Name, len(sect.Syms), sect.Length)
 				if sect.Length != size {
-					t.Errorf("%s is 0x%x bytes for cmd/link and 0x%x for nanogo", sect.Name, size, sect.Length)
+					t.Errorf("%s %s is 0x%x bytes for cmd/link and 0x%x for nanogo", sect.Seg, sect.Name, size, sect.Length)
 				}
 			}
 		})

@@ -4,7 +4,11 @@
 
 package link
 
-import "sort"
+import (
+	"sort"
+
+	"golang.design/x/nanogo/obj"
+)
 
 // runtimePkgs is the set of packages the runtime itself depends on.
 //
@@ -79,6 +83,11 @@ type Target struct {
 	TextAddr uint64
 	// PtrSize is the width of a pointer.
 	PtrSize int64
+	// Relro reports whether read-only data that holds a relocation is
+	// laid out in a segment of its own, which the loader may write to
+	// while it relocates and protects afterwards. Everything on
+	// darwin/arm64 is position independent, so it is always true there.
+	Relro bool
 }
 
 // TargetFor returns the layout arithmetic of a target, or nil for one
@@ -92,6 +101,7 @@ func TargetFor(goos, goarch string) *Target {
 			Minalign: 1, Maxalign: 32,
 			TextAddr: textAddr(goos, goarch),
 			PtrSize:  8,
+			Relro:    goos == "darwin",
 		}
 	}
 	return nil
@@ -176,6 +186,9 @@ type Layout struct {
 	// program as well as reading from it, and a symbol the reachability
 	// pass never saw is reachable because the linker made it.
 	made map[Global]bool
+	// funcdata is the read-only symbols the pclntab carries rather than
+	// the data sections.
+	funcdata map[Global]bool
 }
 
 // Addr returns the address a symbol was given, and whether it has one.
@@ -216,6 +229,7 @@ func (l *Loader) Layout(r *Reachability, t *Target) *Layout {
 	}
 	a.buildLibraries()
 	a.assignText(r)
+	a.funcdata = a.funcdataSyms(r)
 	for g := Global(1); g < Global(l.NSym()); g++ {
 		if s := l.Def(g); s != nil && r.Reachable(g) && !s.Type.IsText() {
 			a.kind[g] = a.group(g, s)
@@ -226,6 +240,36 @@ func (l *Loader) Layout(r *Reachability, t *Target) *Layout {
 	a.applyStringVars(r)
 	a.assignData(r)
 	return a
+}
+
+// funcdataSyms returns the read-only symbols the pclntab carries.
+//
+// A function names its funcdata in AuxFuncdata entries, and the linker
+// copies every one of them into the single go:func.* symbol the pclntab
+// section holds. Each is therefore a payload another symbol carries in
+// the output rather than a member of the read-only data, which is the
+// rule [topLevel] applies to an anonymous payload. cmd/link says the
+// same thing by marking each one special, which is what makes its data
+// sections skip them.
+func (a *Layout) funcdataSyms(r *Reachability) map[Global]bool {
+	l := a.l
+	out := map[Global]bool{}
+	for _, st := range l.objs {
+		for li, s := range allDefs(st.obj) {
+			if !r.Reachable(st.syms[li]) || !s.Type.IsText() {
+				continue
+			}
+			for _, au := range s.Aux {
+				if au.Type != obj.AuxFuncdata {
+					continue
+				}
+				if t := l.resolve(st, au.Sym); t != 0 {
+					out[t] = true
+				}
+			}
+		}
+	}
+	return out
 }
 
 // reachable reports whether a symbol takes space in the output.
@@ -296,10 +340,10 @@ func (a *Layout) setKind(g Global, kind Kind) {
 	a.made[g] = true
 }
 
-// Section returns the output section of a name, or nil.
-func (a *Layout) Section(name string) *Section {
+// Section returns the output section of a segment and a name, or nil.
+func (a *Layout) Section(seg, name string) *Section {
 	for _, s := range a.Sections {
-		if s.Name == name {
+		if s.Seg == seg && s.Name == name {
 			return s
 		}
 	}
@@ -484,11 +528,28 @@ func rnd(v uint64, align int64) uint64 {
 // A Section is one output section: the symbols in it, in order, and the
 // space they take.
 type Section struct {
+	// Seg is the segment the section is written in. Two segments hold a
+	// section named .rodata, so a caller that looks a section up needs
+	// both names.
+	Seg    string
 	Name   string
 	Align  int64
 	Length uint64
 	Syms   []Global
 }
+
+// The segments the output is written in.
+//
+// A read-only section lands in the text segment on a target with no
+// separate read-only segment, which is every target nanogo describes.
+// The relocated read-only segment is separate wherever the layout is
+// position independent, because the loader writes to it once and then
+// takes the write permission away.
+const (
+	SegText  = "text"
+	SegRelro = "relrodata"
+	SegData  = "data"
+)
 
 // The names the linker groups read-only symbols by. A symbol whose name
 // carries one of these prefixes is laid out with its group and not with
@@ -512,11 +573,12 @@ const (
 // section a symbol lands in.
 func (a *Layout) group(g Global, s *Sym) Kind {
 	k := ObjKind(s.Type)
-	if !topLevel(s.Name, k) {
+	if !topLevel(s.Name, k) || a.funcdata[g] {
 		// A symbol with no name is a payload another symbol carries, and
 		// the carrier is what the section holds. Only the debugging
 		// kinds and the function descriptors have anonymous symbols the
-		// linker lays out on their own.
+		// linker lays out on their own. A funcdata symbol is a named
+		// payload, and go:func.* is what carries it.
 		return Kxxx
 	}
 	if s.Name == symModuleData {
@@ -542,13 +604,38 @@ func (a *Layout) group(g Global, s *Sym) Kind {
 	case hasPrefix(s.Name, prefixType), s.Itab():
 		return KTYPE
 	}
+	if a.target.Relro && len(s.Relocs) > 0 {
+		return KRODATARELRO
+	}
 	return k
+}
+
+// relroKind is the kind read-only data that holds an address is laid out
+// as.
+//
+// A relocation in read-only data is written once, when the program is
+// loaded at the address it was relocated for, so on a position
+// independent target that data lives in a segment the loader may write
+// to and protects afterwards. The rest of the read-only data is
+// protected from the start. cmd/link's makeRelroForSharedLib is the same
+// test, applied to the same symbols.
+func (a *Layout) relroKind() Kind {
+	if a.target.Relro {
+		return KRODATARELRO
+	}
+	return KRODATA
 }
 
 func hasSuffix(s, p string) bool { return len(s) >= len(p) && s[len(s)-len(p):] == p }
 
 // symModuleData is the module descriptor of the program.
 const symModuleData = "runtime.firstmoduledata"
+
+// The read-only symbols the linker makes that hold an address.
+const (
+	symBuildInfoRef   = "go:buildinfo.ref"
+	symTextSectionMap = "runtime.textsectionmap"
+)
 
 // topLevel reports whether a symbol is laid out on its own.
 //
@@ -621,6 +708,13 @@ func (a *Layout) assignData(r *Reachability) {
 	for _, br := range dataFIPSBrackets {
 		a.define(br.name, br.kind, fipsBracketSize)
 	}
+	// go:buildinfo.ref is a reference to the build information, held in
+	// the read-only data so that an external linker's section collector
+	// keeps it. runtime.textsectionmap describes the text sections to the
+	// runtime, three words each, and an internal link has one of them.
+	// Both hold an address, so both are relocated read-only data.
+	a.define(symBuildInfoRef, a.relroKind(), uint32(a.target.PtrSize))
+	a.define(symTextSectionMap, a.relroKind(), uint32(3*a.target.PtrSize))
 	buckets := make([][]Global, numKind)
 	for g := Global(1); g < Global(len(a.kind)); g++ {
 		k := a.kind[g]
@@ -633,26 +727,30 @@ func (a *Layout) assignData(r *Reachability) {
 		a.sortData(Kind(k), buckets[k])
 	}
 
+	// The relocated read-only data comes first in its own segment, then
+	// the type descriptors, which start one pointer into their section so
+	// that no type reference has offset zero.
+	a.addSection(a.dataSection(SegRelro, ".rodata", 0, buckets, KRODATARELRO))
+	a.addSection(a.dataSection(SegRelro, ".go.type", a.target.PtrSize, buckets, KTYPE))
+	a.addSection(a.dataSection(SegRelro, ".go.func", 0, buckets, KGOFUNC))
+
 	// The module descriptor is one symbol in a section of its own, which
 	// is why it is not part of the zero filled data it was compiled as.
 	for _, g := range buckets[KMODULEDATA] {
 		a.addSection(&Section{
+			Seg:    SegData,
 			Name:   ".go.module",
 			Align:  a.dataAlign(g),
 			Length: uint64(a.symSize(g)),
 			Syms:   []Global{g},
 		})
 	}
-	a.addSection(a.dataSection(".noptrdata", 0, buckets,
+	a.addSection(a.dataSection(SegData, ".noptrdata", 0, buckets,
 		KNOPTRDATA, KNOPTRDATAFIPSSTART, KNOPTRDATAFIPS, KNOPTRDATAFIPSEND, KNOPTRDATAEND))
-	a.addSection(a.dataSection(".data", 0, buckets,
+	a.addSection(a.dataSection(SegData, ".data", 0, buckets,
 		KDATA, KDATAFIPSSTART, KDATAFIPS, KDATAFIPSEND, KDATAEND, KXCOFFTOC))
-	a.addSection(a.dataSection(".bss", 0, buckets, KBSS))
-	a.addSection(a.dataSection(".noptrbss", 0, buckets, KNOPTRBSS, KGCMASK, KCOVERAGE_COUNTER))
-	// The type descriptors start one pointer into their section, so that
-	// no type reference has offset zero.
-	a.addSection(a.dataSection(".go.type", a.target.PtrSize, buckets, KTYPE))
-	a.addSection(a.dataSection(".go.func", 0, buckets, KGOFUNC))
+	a.addSection(a.dataSection(SegData, ".bss", 0, buckets, KBSS))
+	a.addSection(a.dataSection(SegData, ".noptrbss", 0, buckets, KNOPTRBSS, KGCMASK, KCOVERAGE_COUNTER))
 }
 
 func (a *Layout) addSection(s *Section) {
@@ -667,8 +765,8 @@ func (a *Layout) addSection(s *Section) {
 // for, so the offsets it computes are the addresses modulo that multiple
 // and its length does not depend on what the segment holds in front of
 // it. skip is the space the linker leaves before the first symbol.
-func (a *Layout) dataSection(name string, skip int64, buckets [][]Global, kinds ...Kind) *Section {
-	sect := &Section{Name: name, Align: a.target.Minalign}
+func (a *Layout) dataSection(seg, name string, skip int64, buckets [][]Global, kinds ...Kind) *Section {
+	sect := &Section{Seg: seg, Name: name, Align: a.target.Minalign}
 	for _, g := range buckets[kinds[0]] {
 		if al := a.dataAlign(g); al > sect.Align {
 			sect.Align = al
