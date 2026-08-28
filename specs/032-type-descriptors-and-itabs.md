@@ -1500,3 +1500,36 @@ function that returns the bits and neither reads the descriptor.
 `obj/arm64.regNames` is 129 pointer words and was what this closed. It did not
 start compiling: it moved to the generated equality function for `[65]string`,
 which is the row above.
+
+### The generated walk of a long array is a loop
+
+`ssagen`'s equality and hash generators walk a type's structure: a struct is
+its fields, an array is its elements, and everything else is one comparison or
+one call to a runtime hasher. Both refused an array longer than sixteen, on the
+reasoning that a second shape above a threshold would be a code path nothing
+exercised.
+
+Both shapes are written now and both are tested. Past the bound the walk is
+
+```go
+for .i := 0; .i < n; .i++ {
+	<the element's own walk, spelled with x[.i]>
+}
+```
+
+with one index local per array, so a long array of long arrays is a loop inside
+a loop with two counters rather than one walking two lengths.
+
+`gc` bounds by bytes rather than by elements: `reflectdata`'s `unrollSize` is
+32, so it compares about that many bytes per iteration and runs the remainder
+directly. One element per iteration is the same answer with more branches, and
+the bound is in elements here because this generator walks a type and not a
+size.
+
+`obj/arm64.regNames` is `[65]string` and this is what let it compile. In Go's
+own corpus it took `closure.go`, `gc2.go` and `init1.go` from refused to
+running, and the first of the three then failed: it reads `runtime.MemStats`
+around two calls to a function returning a literal with no captures, and nanogo
+allocated a `funcval` where `gc` uses a static symbol.
+[033](033-closures-defer-panic.md) records that fix. A refusal removed is a
+refusal that stops hiding whatever is behind it.

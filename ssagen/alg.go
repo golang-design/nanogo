@@ -97,14 +97,72 @@ func algSymbol(prefix string, t *ir.Type) (string, error) {
 }
 
 // maxUnrolledElements bounds how many elements of an array this generator
-// compares in a straight line.
+// walks in a straight line. Past it the walk is a counted loop over one
+// element.
 //
-// gc emits a loop for a long array and unrolls a short one. The loop is the
-// piece that is not built here, so the bound is a refusal rather than a
-// silent fall back to something slower: a generated function that took a
-// different shape above a threshold would be a second code path with no test
-// exercising it.
+// gc does the same and chooses the bound by bytes rather than by elements:
+// reflectdata's unrollSize is 32, so it unrolls 32/elemsize elements per
+// iteration and runs the loop for the rest. The shape here is one element per
+// iteration, which is the same answer computed with more branches, and the
+// bound is in elements because this generator walks a type and not a size.
+//
+// Both shapes are tested. A generated function that took a different shape
+// above a threshold with nothing exercising it would be a second code path
+// nobody reads, which is what this constant used to be the refusal for.
 const maxUnrolledElements = 16
+
+// arrayLoop appends a counted loop over the elements of an array.
+//
+//	for .i := 0; .i < n; .i++ {
+//		<body(.i)>
+//	}
+//
+// The index is a local of the function being generated, because a loop needs
+// storage the passes below can spill. Every array in one function gets its own
+// index, so a nested array is a nested loop with two variables rather than one
+// shared counter walking two lengths.
+//
+// body builds the statements for one element and is given the index to spell
+// x[.i] with. It is called once, which is what makes this a loop rather than
+// an unrolling.
+func arrayLoop(fn *ir.Func, out []ir.Stmt, n int64, body func(idx ir.Expr) ([]ir.Stmt, error)) ([]ir.Stmt, error) {
+	i := &ir.Object{
+		Name:      fmt.Sprintf(".i%d", len(fn.Locals)),
+		Type:      intType(),
+		Class:     ir.ClassLocal,
+		Pos:       wrapperPos,
+		Addrtaken: false,
+	}
+	fn.Locals = append(fn.Locals, i)
+	idx := func() ir.Expr {
+		return &ir.Node{Op: ir.OLocal, Pos: wrapperPos, Type: intType(), Obj: i}
+	}
+	inner, err := body(idx())
+	if err != nil {
+		return nil, err
+	}
+	return append(out, &ir.Node{
+		Op:  ir.OFor,
+		Pos: wrapperPos,
+		Init: []ir.Stmt{{
+			Op: ir.OAssign, Pos: wrapperPos, Type: voidType(),
+			X: idx(), Y: intConst(0),
+		}},
+		X: &ir.Node{
+			Op: ir.OCompare, Op1: syntax.Lss, Pos: wrapperPos,
+			Type: boolType(), X: idx(), Y: intConst(n),
+		},
+		Body: inner,
+		Post: []ir.Stmt{{
+			Op: ir.OAssign, Pos: wrapperPos, Type: voidType(),
+			X: idx(),
+			Y: &ir.Node{
+				Op: ir.OBinary, Op1: syntax.Add, Pos: wrapperPos,
+				Type: intType(), X: idx(), Y: intConst(1),
+			},
+		}},
+	}), nil
+}
 
 // EqualFunc returns the generated equality function of t.
 //
@@ -137,7 +195,7 @@ func EqualFunc(t *ir.Type) (*ir.Func, error) {
 		Wrapper: true,
 	}
 	var body []ir.Stmt
-	body, err = appendEqual(body, deref(p, t), deref(q, t), t)
+	body, err = appendEqual(fn, body, deref(p, t), deref(q, t), t)
 	if err != nil {
 		return nil, fmt.Errorf("ssagen: %s: %w", sym, err)
 	}
@@ -156,7 +214,7 @@ func EqualFunc(t *ir.Type) (*ir.Func, error) {
 // know how to build. A string, a float and an interface each reach that last
 // case, because specs/025-lowering-and-rules.md already expands == on them
 // into the runtime call the language requires.
-func appendEqual(out []ir.Stmt, x, y ir.Expr, t *ir.Type) ([]ir.Stmt, error) {
+func appendEqual(fn *ir.Func, out []ir.Stmt, x, y ir.Expr, t *ir.Type) ([]ir.Stmt, error) {
 	switch t.Kind {
 	case ir.Struct, ir.Tuple:
 		for i, f := range t.Fields {
@@ -166,7 +224,7 @@ func appendEqual(out []ir.Stmt, x, y ir.Expr, t *ir.Type) ([]ir.Stmt, error) {
 				continue
 			}
 			var err error
-			out, err = appendEqual(out, field(x, i, f.Type), field(y, i, f.Type), f.Type)
+			out, err = appendEqual(fn, out, field(x, i, f.Type), field(y, i, f.Type), f.Type)
 			if err != nil {
 				return nil, err
 			}
@@ -174,11 +232,13 @@ func appendEqual(out []ir.Stmt, x, y ir.Expr, t *ir.Type) ([]ir.Stmt, error) {
 		return out, nil
 	case ir.Array:
 		if t.Len > maxUnrolledElements {
-			return nil, fmt.Errorf("an array of %d elements needs a comparison loop, which is not built", t.Len)
+			return arrayLoop(fn, out, t.Len, func(i ir.Expr) ([]ir.Stmt, error) {
+				return appendEqual(fn, nil, indexBy(x, i, t.Elem), indexBy(y, i, t.Elem), t.Elem)
+			})
 		}
 		for i := int64(0); i < t.Len; i++ {
 			var err error
-			out, err = appendEqual(out, index(x, i, t.Elem), index(y, i, t.Elem), t.Elem)
+			out, err = appendEqual(fn, out, index(x, i, t.Elem), index(y, i, t.Elem), t.Elem)
 			if err != nil {
 				return nil, err
 			}
@@ -219,12 +279,20 @@ func field(x ir.Expr, i int, t *ir.Type) ir.Expr {
 
 // index spells x[i] for a constant index into an array.
 func index(x ir.Expr, i int64, t *ir.Type) ir.Expr {
+	return indexBy(x, intConst(i), t)
+}
+
+// indexBy spells x[i] for an index this generator computes, which is the loop
+// variable of arrayLoop.
+func indexBy(x ir.Expr, i ir.Expr, t *ir.Type) ir.Expr {
+	return &ir.Node{Op: ir.OIndex, Pos: wrapperPos, Type: t, X: x, Y: i}
+}
+
+// intConst spells an int constant.
+func intConst(i int64) ir.Expr {
 	return &ir.Node{
-		Op: ir.OIndex, Pos: wrapperPos, Type: t, X: x,
-		Y: &ir.Node{
-			Op: ir.OConst, Pos: wrapperPos, Type: intType(),
-			Val: ir.Const{Val: constant.MakeInt64(i)},
-		},
+		Op: ir.OConst, Pos: wrapperPos, Type: intType(),
+		Val: ir.Const{Val: constant.MakeInt64(i)},
 	}
 }
 
@@ -313,7 +381,7 @@ func HashFunc(t *ir.Type) (*ir.Func, error) {
 		Results: []*ir.Object{{Name: ".r", Type: uintptrType(), Class: ir.ClassResult, Pos: wrapperPos}},
 		Wrapper: true,
 	}
-	body, err := appendHash(nil, h, deref(p, t), t)
+	body, err := appendHash(fn, nil, h, deref(p, t), t)
 	if err != nil {
 		return nil, fmt.Errorf("ssagen: %s: %w", sym, err)
 	}
@@ -325,7 +393,7 @@ func HashFunc(t *ir.Type) (*ir.Func, error) {
 }
 
 // appendHash appends the statements that fold x into h.
-func appendHash(out []ir.Stmt, h *ir.Object, x ir.Expr, t *ir.Type) ([]ir.Stmt, error) {
+func appendHash(fn *ir.Func, out []ir.Stmt, h *ir.Object, x ir.Expr, t *ir.Type) ([]ir.Stmt, error) {
 	switch t.Kind {
 	case ir.Struct, ir.Tuple:
 		for i, f := range t.Fields {
@@ -333,18 +401,20 @@ func appendHash(out []ir.Stmt, h *ir.Object, x ir.Expr, t *ir.Type) ([]ir.Stmt, 
 				continue
 			}
 			var err error
-			if out, err = appendHash(out, h, field(x, i, f.Type), f.Type); err != nil {
+			if out, err = appendHash(fn, out, h, field(x, i, f.Type), f.Type); err != nil {
 				return nil, err
 			}
 		}
 		return out, nil
 	case ir.Array:
 		if t.Len > maxUnrolledElements {
-			return nil, fmt.Errorf("an array of %d elements needs a hashing loop, which is not built", t.Len)
+			return arrayLoop(fn, out, t.Len, func(i ir.Expr) ([]ir.Stmt, error) {
+				return appendHash(fn, nil, h, indexBy(x, i, t.Elem), t.Elem)
+			})
 		}
 		for i := int64(0); i < t.Len; i++ {
 			var err error
-			if out, err = appendHash(out, h, index(x, i, t.Elem), t.Elem); err != nil {
+			if out, err = appendHash(fn, out, h, index(x, i, t.Elem), t.Elem); err != nil {
 				return nil, err
 			}
 		}

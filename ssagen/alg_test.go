@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/obj"
 )
 
@@ -33,16 +34,59 @@ func TestEqualFuncRefusesTheUncomparable(t *testing.T) {
 	}
 }
 
-// TestEqualFuncRefusesALongArray checks that the case that needs a loop says
-// so rather than emitting a function of a different shape.
-func TestEqualFuncRefusesALongArray(t *testing.T) {
+// TestEqualFuncLoopsOverALongArray checks the shape past the unroll bound.
+//
+// The two shapes answer the same question and the corpus test below is what
+// proves they answer it the same way. This one is that the long shape is a
+// loop at all: an unrolling of sixty-four string comparisons would pass every
+// behavioural test and be the code path this generator refused to write.
+func TestEqualFuncLoopsOverALongArray(t *testing.T) {
 	c := check(t, "package main\n\ntype many [64]string\n")
-	_, err := EqualFunc(c.namedType(t, "many"))
-	if err == nil {
-		t.Fatal("an array of 64 strings was unrolled")
+	fn, err := EqualFunc(c.namedType(t, "many"))
+	if err != nil {
+		t.Fatalf("EqualFunc: %v", err)
 	}
-	if !strings.Contains(err.Error(), "loop") {
-		t.Errorf("the refusal is %q and does not name the missing loop", err)
+	if len(fn.Locals) != 1 {
+		t.Fatalf("the function declares %d locals, want the one loop index", len(fn.Locals))
+	}
+	var fors, compares int
+	var walk func(ss []ir.Stmt)
+	walk = func(ss []ir.Stmt) {
+		for _, s := range ss {
+			switch s.Op {
+			case ir.OFor:
+				fors++
+				walk(s.Body)
+			case ir.OIf:
+				compares++
+			}
+		}
+	}
+	walk(fn.Body)
+	if fors != 1 {
+		t.Errorf("the body holds %d loops, want one", fors)
+	}
+	if compares != 1 {
+		t.Errorf("the loop body holds %d comparisons, want the one element", compares)
+	}
+}
+
+// TestEqualFuncUnrollsAShortArray is the other shape, so that a change that
+// made everything a loop is caught here rather than in a benchmark nobody
+// runs.
+func TestEqualFuncUnrollsAShortArray(t *testing.T) {
+	c := check(t, "package main\n\ntype few [4]string\n")
+	fn, err := EqualFunc(c.namedType(t, "few"))
+	if err != nil {
+		t.Fatalf("EqualFunc: %v", err)
+	}
+	if len(fn.Locals) != 0 {
+		t.Errorf("the function declares %d locals, and an unrolled walk needs none", len(fn.Locals))
+	}
+	for _, s := range fn.Body {
+		if s.Op == ir.OFor {
+			t.Fatalf("an array of four was compared with a loop:\n%v", fn.Body)
+		}
 	}
 }
 
@@ -94,6 +138,21 @@ func TestGeneratedEqualAgreesWithGc(t *testing.T) {
 		// An array of strings: every element compares by its contents.
 		{"array of strings", "[2]string", `pair{"a", "b"}`, `pair{"a", string([]byte{98})}`, true},
 		{"array of strings, unequal", "[2]string", `pair{"a", "b"}`, `pair{"a", "c"}`, false},
+		// Past the unroll bound the walk is a loop, which is the second shape
+		// this generator writes and the one nothing above the corpus reaches.
+		// The unequal element is the last, so a loop that ran one iteration
+		// short would answer equal.
+		{"long array of strings", "[64]string", "pair(long(1))", "pair(long(1))", true},
+		{"long array of strings, unequal", "[64]string", "pair(long(1))", "pair(long(2))", false},
+		// The bound is on elements and not on bytes, so an array of a
+		// composite past it walks a nested type once per iteration.
+		{"long array of structs", "[20]inner", "pair(longInner(1))", "pair(longInner(1))", true},
+		{"long array of structs, unequal", "[20]inner", "pair(longInner(1))", "pair(longInner(2))", false},
+		// A short array of an array is two unrolled walks, and a long one of a
+		// long one is a loop inside a loop, which is what gives each its own
+		// index.
+		{"array of long arrays", "[2][20]string", "pair(nested(1))", "pair(nested(1))", true},
+		{"array of long arrays, unequal", "[2][20]string", "pair(nested(1))", "pair(nested(2))", false},
 		// An interface compares its descriptor and then its value through the
 		// runtime. A comparison of the two words would answer on the data
 		// pointer, which is a boxed value with an address of its own.
@@ -123,6 +182,11 @@ func TestGeneratedEqualAgreesWithGc(t *testing.T) {
 			// -importcfg and cannot find package math.
 			defs := src[len("package main\n\n"):] +
 				"\nvar zero float64\nvar nan = zero / zero\nvar negZero = zero * -1\n" +
+				// The last element is the one that differs, so a loop that
+				// stopped one short of the length would answer equal.
+				"\nfunc long(k int) (a [64]string) {\n\tfor i := range a {\n\t\ta[i] = \"x\"\n\t}\n\ta[63] = string([]byte{byte(96 + k)})\n\treturn\n}\n" +
+				"\nfunc longInner(k int) (a [20]inner) {\n\tfor i := range a {\n\t\ta[i] = inner{a: 1, b: 2}\n\t}\n\ta[19].b = int64(k)\n\treturn\n}\n" +
+				"\nfunc nested(k int) (a [2][20]string) {\n\tfor i := range a {\n\t\tfor j := range a[i] {\n\t\t\ta[i][j] = \"y\"\n\t\t}\n\t}\n\ta[1][19] = string([]byte{byte(96 + k)})\n\treturn\n}\n" +
 				"\nfunc b2i(b bool) int {\n\tif b {\n\t\treturn 1\n\t}\n\treturn 0\n}\n" +
 				"\nvar x = " + tc2.x + "\nvar y = " + tc2.y + "\n"
 			caller := exitWrapper(t, goCmd, "main.eq", "b2i(eq(&x, &y))*10+b2i(x == y)",
@@ -191,6 +255,11 @@ func TestGeneratedHashAgreesWithEquality(t *testing.T) {
 		{"negative zero", "struct {\n\tf float64\n\tn int32\n}", "pair{f: 0.0, n: 1}", "pair{f: negZero, n: 1}"},
 		{"nested", "struct {\n\tin inner\n\tn int32\n}", "pair{in: inner{a: 1, b: 2}, n: 3}", "pair{in: inner{a: 1, b: 2}, n: 3}"},
 		{"array of strings", "[2]string", `pair{"a", "b"}`, `pair{"a", string([]byte{98})}`},
+		// Past the unroll bound the fold is a loop, which is the other shape
+		// this generator writes. Two values that are equal and hold no
+		// identical bytes are what says the loop folded every element and not
+		// the header.
+		{"long array of strings", "[64]string", "pair(long(0))", "pair(longCopy(0))"},
 		{"empty interface", "struct {\n\tv any\n\tn int32\n}", "pair{v: 7, n: 1}", "pair{v: 7, n: 1}"},
 		{"complex", "struct {\n\tc complex128\n\tn int32\n}", "pair{c: complex(1, 0), n: 1}", "pair{c: complex(1, negZero), n: 1}"},
 	}
@@ -208,6 +277,11 @@ func TestGeneratedHashAgreesWithEquality(t *testing.T) {
 
 			defs := src[len("package main\n\n"):] +
 				"\nvar zero float64\nvar negZero = zero * -1\n" +
+				// Two arrays of equal strings whose bytes are separately
+				// built, so no element shares a data pointer with its
+				// counterpart.
+				"\nfunc long(k int) (a [64]string) {\n\tfor i := range a {\n\t\ta[i] = \"x\"\n\t}\n\ta[63] = string([]byte{byte(96 + k)})\n\treturn\n}\n" +
+				"\nfunc longCopy(k int) (a [64]string) {\n\tfor i := range a {\n\t\ta[i] = string([]byte{120})\n\t}\n\ta[63] = string([]byte{byte(96 + k)})\n\treturn\n}\n" +
 				"\nfunc b2i(b bool) int {\n\tif b {\n\t\treturn 1\n\t}\n\treturn 0\n}\n" +
 				"\nvar x = " + tc2.x + "\nvar y = " + tc2.y + "\n"
 			// The seed is the same for both, so a difference is the value and
