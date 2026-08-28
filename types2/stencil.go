@@ -26,8 +26,9 @@ package types2
 // equal types for List[int], which is what a consumer that caches by type
 // pointer needs.
 type Substitution struct {
-	smap substMap
-	ctxt *Context
+	smap    substMap
+	tparams []*TypeParam
+	ctxt    *Context
 }
 
 // NewSubstitution returns the substitution that replaces tparams[i] by
@@ -46,7 +47,7 @@ func NewSubstitution(ctxt *Context, tparams []*TypeParam, targs []Type) *Substit
 	if ctxt == nil {
 		ctxt = NewContext()
 	}
-	return &Substitution{smap: makeSubstMap(tparams, targs), ctxt: ctxt}
+	return &Substitution{smap: makeSubstMap(tparams, targs), tparams: tparams, ctxt: ctxt}
 }
 
 // TypeParamsOf returns the type parameters of a generic declaration's type as
@@ -90,6 +91,26 @@ func (s *Substitution) Type(t Type) Type {
 
 // Empty reports whether the substitution replaces nothing.
 func (s *Substitution) Empty() bool { return s == nil || s.smap.empty() }
+
+// Substitutes reports whether t holds a type parameter this substitution
+// replaces.
+//
+// It is the question a caller asks about the result of Type, because
+// substitution is not total: it rebuilds a type literal and it stops at a
+// name. A defined type with no type parameters of its own is returned
+// unchanged, so "type S []T" declared inside a generic function still holds T
+// afterwards.
+//
+// A defined type is its name here, as it is everywhere in the type language:
+// the answer is about the type arguments a name carries and not about what the
+// name was declared as. A caller asking about a declaration passes its
+// underlying type.
+func (s *Substitution) Substitutes(t Type) bool {
+	if s == nil || t == nil || len(s.tparams) == 0 {
+		return false
+	}
+	return isParameterized(s.tparams, t)
+}
 
 // Canonical returns t with every alias resolved.
 //

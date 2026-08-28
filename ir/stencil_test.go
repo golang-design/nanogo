@@ -293,6 +293,18 @@ func TestStencilRefusesWhatItDoesNotBuild(t *testing.T) {
 			"an instantiation of a generic type is not built",
 		},
 		{
+			"a type declared inside a generic body",
+			"func z[T any](x T) int { type S []T; return len(S{x}) }\n\n" +
+				"func user() { sink(z(1)); sink(z(\"s\")) }\n",
+			"a type declared inside a generic function is not instantiated",
+		},
+		{
+			"a struct type declared inside a generic body",
+			"func z[T any](x T) int { type S struct{ v T }; _ = S{x}; return 1 }\n\n" +
+				"func user() { sink(z(1)) }\n",
+			"a type declared inside a generic function is not instantiated",
+		},
+		{
 			"a method with type parameters of its own",
 			"type H struct{}\n\nfunc (H) Do[T any](x T) T { return x }\n\n" +
 				"func user() { sink(H{}.Do(1)) }\n",
@@ -375,5 +387,51 @@ func TestInstanceSymSpellsTheTypeArgumentsWithTheirImportPaths(t *testing.T) {
 		if got := instanceSym(origin, tt.targs); got != tt.want {
 			t.Errorf("instanceSym is %s, want %s", got, tt.want)
 		}
+	}
+}
+
+// TestStencilBuildsTheShapesASubstitutionRebuilds is the other side of the
+// refusal above.
+//
+// The checker's substituter rebuilds a type literal and stops at a name, so
+// every shape that is a literal comes through concrete. These are the ones the
+// refusal must not catch. Where the shape can hold a type parameter in more
+// than one place it is instantiated at two type argument lists, so that a body
+// sharing a type with the other would show.
+func TestStencilBuildsTheShapesASubstitutionRebuilds(t *testing.T) {
+	p := buildSource(t, "type St interface{ M() int }\n\n"+
+		"func conv[T ~int](x T) int { return int(x) }\n\n"+
+		"func keys[K comparable, V any](m map[K]V) int {\n"+
+		"\tn := 0\n\tfor k := range m {\n\t\t_ = k\n\t\tn++\n\t}\n\treturn n\n}\n\n"+
+		"func held[T any](x T) T { defer func() {}(); return x }\n\n"+
+		"func bound[T St](x T) func() int { return x.M }\n\n"+
+		"type A struct{}\n\nfunc (A) M() int { return 1 }\n\n"+
+		"func user() {\n"+
+		"\tsink(conv(1))\n"+
+		"\tsink(keys(map[string]int{}))\n"+
+		"\tsink(keys(map[int]string{}))\n"+
+		"\tsink(held(1))\n"+
+		"\tsink(held(\"s\"))\n"+
+		"\tsink(bound(A{})())\n"+
+		"}\n")
+
+	for _, want := range []string{
+		"p.conv[int]", "p.keys[string,int]", "p.keys[int,string]",
+		"p.held[int]", "p.held[string]", "p.bound[p.A]",
+	} {
+		buildFuncOf(t, p, want[len("p."):])
+	}
+
+	// The range variable of keys is a local whose type is the map's key type,
+	// so the two instantiations must not share it.
+	a, b := buildFuncOf(t, p, "keys[string,int]"), buildFuncOf(t, p, "keys[int,string]")
+	if len(a.Locals) != 2 || len(b.Locals) != 2 {
+		t.Fatalf("keys declares %v and %v", a.Locals, b.Locals)
+	}
+	if got, want := a.Locals[1].Type.String(), "string"; got != want {
+		t.Errorf("the range variable of keys[string,int] is %s, want %s", got, want)
+	}
+	if got, want := b.Locals[1].Type.String(), "int"; got != want {
+		t.Errorf("the range variable of keys[int,string] is %s, want %s", got, want)
 	}
 }

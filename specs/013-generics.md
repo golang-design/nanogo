@@ -83,6 +83,32 @@ replaces an undefined symbol carrying no source position.
 | a method of a generic type | The stenciler instantiates a generic function and not a generic type, so nothing produces the body of `L[int].Get`. `funcSym` also spells `L[int].Get` and `L[string].Get` alike, so the two would be one symbol and two functions. A generic type used for its fields alone compiles and is correct. |
 | a method with type parameters of its own | The third place the language binds a type parameter. Instantiating the receiver does not instantiate the method, so the key of the instantiation is not the list on the selector alone. The Methods section below states the question and does not close it. |
 | an instantiation of a generic another package declared | The body is in that package's archive. [015](015-export-data.md) reads one and [020](020-ir.md) has no entry point that takes one, so there is no tree here to substitute through. |
+| a type declared inside a generic body that holds a type parameter | Substitution rebuilds a type literal and stops at a name, so `type S []T` inside `f[T any]` comes back unchanged and every instantiation of `f` would share one `S`. Instantiating `S` is instantiating a generic type. The export writer refuses the same declaration for the same reason. |
+
+Substitution stopping at a name is the one place the substitution is not total,
+and it is why the refusal is checked rather than assumed:
+`Substitution.Substitutes` answers whether a type still holds a type parameter
+the substitution replaces, and the type declaration is the one construct that
+can reach the IR still holding one.
+
+### What is built, measured rather than imagined
+
+These shapes are compiled and covered in `ir/stencil_test.go` and
+`internal/e2e/generic_test.go`:
+
+a value, a parameter and a result of the type parameter's type; an operation
+whose instruction depends on the type argument; a local, including one a range
+statement declares; `make`, `new` and a composite literal of a type built out of
+the type parameter; a conversion; a comparison; a method reached through the
+constraint, on a concrete type argument and on an interface one; a method
+*value* reached through the constraint; a function literal, which becomes a
+function of the package named after the instantiation; `defer`; a call to
+another generic at the enclosing instantiation's type argument; and a generic
+that calls itself.
+
+Most are exercised at two type argument lists, so a body that shared a type
+with the other body would show. The two that showed a wrong answer this way are
+below.
 
 ### Two wrong answers the stenciler surfaced
 

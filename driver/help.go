@@ -168,6 +168,10 @@ What nanogo refuses, by name, with the reason:
 	body is in that package's archive, and nanogo has no path from a
 	decoded body to its own tree yet.
 
+	A type declared inside a generic function that holds a type
+	parameter, such as type S []T. Substitution stops at a name, so every
+	instantiation would share one S.
+
 	A package with assembly in it. An assembly definition uses ABI0 and a
 	Go call uses ABIInternal, and nanogo generates no wrapper between them.
 

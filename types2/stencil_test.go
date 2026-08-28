@@ -301,3 +301,51 @@ func TestCanonicalGivesOneNamedForOneInstantiation(t *testing.T) {
 		t.Error("List[Alias] and List[int] canonicalise to types that are not identical")
 	}
 }
+
+// TestSubstitutesSaysWhereSubstitutionStops is why the method exists.
+//
+// Substitution rebuilds a type literal and stops at a name, so a defined type
+// with no type parameters of its own comes back unchanged with the type
+// parameter still inside it. A consumer that assumed substitution is total
+// would give two instantiations one type.
+func TestSubstitutesSaysWhereSubstitutionStops(t *testing.T) {
+	pkg := substFixture(t)
+	sig := lookupSig(t, pkg, "F")
+	tparams := TypeParamsOf(sig)
+	s := NewSubstitution(nil, tparams, []Type{Typ[String], Typ[Int]})
+
+	// The parameter types hold the type parameters, and their substituted
+	// forms do not.
+	for i := 0; i < sig.Params().Len(); i++ {
+		have := sig.Params().At(i).Type()
+		if !s.Substitutes(have) {
+			t.Errorf("parameter %d holds no type parameter of the substitution", i)
+		}
+		if s.Substitutes(s.Type(have)) {
+			t.Errorf("parameter %d still holds one after the substitution", i)
+		}
+	}
+
+	// A defined type is its name, so the answer for List[V] is about the type
+	// argument it carries. The declaration's own body is reached through its
+	// underlying type, which is what a caller asking about a declaration
+	// passes.
+	list := sig.Params().At(2).Type().(*Named)
+	if !s.Substitutes(list) {
+		t.Error("List[V] holds no type parameter of the substitution")
+	}
+	if s.Substitutes(list.Origin()) {
+		t.Error("List, with no type arguments, was reported as holding one")
+	}
+	if !s.Substitutes(list.Origin().Underlying()) {
+		t.Error("the underlying type of List holds no type parameter")
+	}
+
+	var none *Substitution
+	if none.Substitutes(sig.Params().At(0).Type()) {
+		t.Error("a nil Substitution substitutes something")
+	}
+	if s.Substitutes(nil) {
+		t.Error("no type holds a type parameter")
+	}
+}

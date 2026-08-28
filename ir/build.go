@@ -1644,6 +1644,13 @@ func (b *builder) selectStmt(s *syntax.SelectStmt) {
 // fresh variable, so "var n int" in a loop body is zero on every iteration and
 // not the value the previous one left.
 func (b *builder) localDecl(d syntax.Decl) {
+	if td, ok := d.(*syntax.TypeDecl); ok {
+		// A type declaration produces no code. It is read here only so that
+		// one the stenciler cannot instantiate is named
+		// (specs/013-generics.md).
+		b.checkLocalType(td)
+		return
+	}
 	vd, ok := d.(*syntax.VarDecl)
 	if !ok {
 		return

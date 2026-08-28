@@ -210,6 +210,17 @@ func (b *builder) instanceOf(x *syntax.Name, origin *types2.Func) *Object {
 		targs[i] = types2.Canonical(b.ctxt, b.subst(inst.TypeArgs.At(i)))
 	}
 
+	if tparams := types2.TypeParamsOf(origin.Type()); len(tparams) != len(targs) {
+		// Instantiate panics on a count mismatch rather than returning an
+		// error, and so does NewSubstitution. The checker cannot record one,
+		// so this is a guard against a broken Info and not against a program:
+		// a compiler that crashes has replaced a diagnostic with a stack
+		// trace.
+		b.errorf("ir: %s has %d type parameters and an instantiation of it names %d",
+			funcSym(origin), len(tparams), len(targs))
+		return nil
+	}
+
 	sym := instanceSym(origin, targs)
 	if have, ok := b.instances[sym]; ok {
 		return have.obj
@@ -506,4 +517,38 @@ func (b *builder) checkMethodIsBuilt(fn *types2.Func) {
 	}
 	b.errorf("ir: %s is a method of %s and an instantiation of a generic type is not built",
 		funcSym(fn), types2.TypeString(named, nil))
+}
+
+// checkLocalType reports a type declared inside a generic body that the
+// substitution does not reach.
+//
+// Substitution rebuilds a type literal and stops at a name. A defined type
+// with no type parameters of its own is returned unchanged, and
+//
+//	func f[T any]() { type S []T; ... }
+//
+// declares exactly that, so S still holds T after the substitution and every
+// instantiation of f would share one S. The IR type boundary sees the type
+// parameter and refuses, which is the honest failure, and this says which
+// declaration it is about.
+//
+// Instantiating S is instantiating a generic type, which this pass does not
+// do. The export writer refuses the same declaration for the same reason: every
+// use of S carries the enclosing type parameters implicitly
+// (specs/013-generics.md).
+func (b *builder) checkLocalType(d *syntax.TypeDecl) {
+	if b.stencil == nil || d.Name == nil {
+		return
+	}
+	o := b.info.Defs[d.Name]
+	if o == nil || o.Type() == nil {
+		return
+	}
+	// The underlying type, because a defined type is its name: the question is
+	// what the declaration is made of and not what it is called.
+	if !b.stencil.subst.Substitutes(o.Type().Underlying()) {
+		return
+	}
+	b.errorf("ir: %s declares the type %s, which holds a type parameter, and a type declared inside a generic function is not instantiated",
+		b.stencil.sym, d.Name.Value)
 }
