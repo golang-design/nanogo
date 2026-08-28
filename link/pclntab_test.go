@@ -19,6 +19,7 @@ import (
 	"debug/macho"
 	"encoding/binary"
 	"runtime"
+	"strconv"
 	"testing"
 )
 
@@ -170,4 +171,69 @@ func TestPclntabOracleReadsTheLinkersTable(t *testing.T) {
 				len(img.filetab), len(img.pctab), len(img.functab))
 		})
 	}
+}
+
+// buildPcln lays a program out and builds its pclntab.
+func buildPcln(t *testing.T, b *build, target *Target) (*Loader, *Layout, *Pcln) {
+	t.Helper()
+	l := loadProgram(t, b)
+	setStringVars(t, l, b)
+	l.InitTasks()
+	r := l.Deadcode(runtime.GOOS, runtime.GOARCH)
+	a := l.Layout(r, target)
+	return l, a, a.Pclntab()
+}
+
+// TestFuncNameTabAgreesWithTheLinker compares the function name table
+// with cmd/link's, byte for byte.
+//
+// A name table that holds the same names in another order is a table
+// every _func record indexes wrongly, and every offset in it would then
+// name the wrong function in a traceback. So the comparison is over the
+// bytes and not over the set of names, and the first byte that differs
+// names the function the two orders part company at.
+func TestFuncNameTabAgreesWithTheLinker(t *testing.T) {
+	target := TargetFor(runtime.GOOS, runtime.GOARCH)
+	if target == nil || runtime.GOOS != "darwin" {
+		t.Skipf("the section the oracle reads is Mach-O's, and this is %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	for _, b := range []*build{&hostBuild, &reflectBuild} {
+		t.Run(b.pkg, func(t *testing.T) {
+			b := b.get(t)
+			img := readPclntab(t, linkExe(t, b))
+			_, _, p := buildPcln(t, b, target)
+
+			if got, want := uint64(len(p.Funcs)), img.nfunc; got != want {
+				t.Errorf("the table describes %d functions and cmd/link's describes %d", got, want)
+			}
+			if bytes.Equal(p.FuncNameTab, img.funcnametab) {
+				t.Logf("%d names in %#x bytes agree with cmd/link", len(p.funcName), len(p.FuncNameTab))
+				return
+			}
+			t.Errorf("the function name table is %#x bytes and cmd/link's is %#x: %s",
+				len(p.FuncNameTab), len(img.funcnametab), firstNameDiff(p.FuncNameTab, img.funcnametab))
+		})
+	}
+}
+
+// firstNameDiff describes where two null terminated name tables part
+// company, in the names they hold rather than in the bytes.
+func firstNameDiff(mine, theirs []byte) string {
+	off := 0
+	for off < len(mine) && off < len(theirs) && mine[off] == theirs[off] {
+		off++
+	}
+	start := bytes.LastIndexByte(mine[:off], 0) + 1
+	name := func(b []byte) string {
+		if start >= len(b) {
+			return "(past the end)"
+		}
+		b = b[start:]
+		if i := bytes.IndexByte(b, 0); i >= 0 {
+			b = b[:i]
+		}
+		return string(b)
+	}
+	return "at 0x" + strconv.FormatInt(int64(start), 16) + " nanogo has " +
+		strconv.Quote(name(mine)) + " and cmd/link has " + strconv.Quote(name(theirs))
 }
