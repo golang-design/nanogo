@@ -178,11 +178,29 @@ The two spellings differ here more than anywhere else, and both halves are
 A **defined** type is exempt from every row, because its name is its identity:
 `type S func(int)` is `type:p.S` and no signature is needed to say so.
 
-One case is refused by neither and is wrong: a **generic instantiation**.
-`ir/convert.go` names `atomic.Pointer[os.dirInfo]` as `sync/atomic.Pointer`,
-dropping the type arguments, so two instantiations of one generic type share
-one name. Nothing in an `ir.Type` can detect it. The fix is in `convert.go`'s
-`namedString`, not here.
+A **generic instantiation** is the one defined type whose name is not its
+identity, and it was refused by neither half. `ir/convert.go` names
+`atomic.Pointer[os.dirInfo]` as `sync/atomic.Pointer`, dropping the type
+arguments, so two instantiations of one generic type shared one name and the
+linker merged their descriptors.
+
+`ir.Type.TypeArgs` carries the arguments beside the name now, and both
+spellings write them exactly as `gc` does: the qualified name, a bracket, each
+argument by the rule of the string it is in, a comma with no space between
+them, and a closing bracket. `main.pair[string,int]` and
+`main.box[main.box[int]]`, in the link string and in the name string alike,
+because `reflect` prints the second. A type declared inside a function carries
+the arguments *before* the number that separates two declarations of one name,
+which is `type:main.L[int]·1`.
+
+A method of an instantiation is spelled the same way, by the same function:
+`ir.MethodSymbol` writes `xpkg/lib.(*Box[int]).Get`, with the arguments inside
+the parentheses. One naming function, so the symbol the descriptor's `Tfn`
+names and the symbol the stenciler defines cannot disagree.
+
+An `ir.Type` that says it is an instantiation and carries no arguments is one
+built by hand below the type boundary, because `Converter` fills the flag and
+the slice together. It is refused rather than shortened.
 
 ### What `rtype` can fill in
 

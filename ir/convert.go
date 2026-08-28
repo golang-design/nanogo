@@ -224,8 +224,24 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 			out.Gen = c.gens[obj]
 		}
 		// The name above is the generic type's, without the arguments, so an
-		// instantiation has to be marked as one. See the field's comment.
-		out.Instantiated = t.TypeArgs().Len() > 0
+		// instantiation carries them beside it. See the field's comment.
+		//
+		// The arguments are converted before the underlying type is filled in
+		// below, and that is not an ordering preference: a recursive
+		// instantiation reaches this type again through its own argument, and
+		// the cache entry is already installed, so the recursion stops on the
+		// entry rather than on a name that is not spelled yet.
+		if n := t.TypeArgs(); n.Len() > 0 {
+			out.Instantiated = true
+			out.TypeArgs = make([]*Type, 0, n.Len())
+			for i := 0; i < n.Len(); i++ {
+				a, err := c.convert(n.At(i))
+				if err != nil {
+					return fmt.Errorf("ir: %s: type argument %d: %w", out.Name, i+1, err)
+				}
+				out.TypeArgs = append(out.TypeArgs, a)
+			}
+		}
 		ms, err := c.methodSet(t)
 		if err != nil {
 			return err

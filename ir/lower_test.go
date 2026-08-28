@@ -1764,13 +1764,6 @@ func TestLowerRefusals(t *testing.T) {
 		// specs/020-ir.md's type boundary drops, so that a count by cause says
 		// which field is holding the row back rather than only that a name was
 		// wanted.
-		// A literal struct is spelled now, so the type an allocation still
-		// refuses is the generic instantiation: Converter's name drops the type
-		// arguments, so G[int] and G[string] would be one descriptor.
-		{"new of a generic instantiation", `
-type G[X any] struct{ V X }
-
-func f() *G[int] { return new(G[int]) }`, ONew, "generic instantiation"},
 		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
 		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
 		{"defer of a builtin", `func f(c chan int) { defer close(c) }`, ODefer, "holds a close and not a call"},

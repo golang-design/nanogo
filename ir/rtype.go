@@ -196,6 +196,36 @@ func TypeNameString(t *Type) (string, error) {
 	return b.String(), nil
 }
 
+// typeArgs writes the type arguments of an instantiation, and nothing for
+// every other type.
+//
+// gc spells them as the qualified name, a bracket, each argument by the same
+// rule as the type it is an argument of, separated by a comma with no space,
+// and a closing bracket: main.pair[string,int] and main.box[main.box[int]].
+// Both strings take them, because reflect prints main.pair[string,int] as
+// well and a name without them is one name for every instantiation.
+//
+// The depth is the enclosing type's and not one more. An argument is a peer of
+// the name rather than a part nested inside it, and the bound exists to stop a
+// walk that recurses forever through Elem: an argument list is finite and its
+// own arguments are counted by their own recursion.
+func typeArgs(b *strings.Builder, t *Type, link bool, depth int) error {
+	if len(t.TypeArgs) == 0 {
+		return nil
+	}
+	b.WriteString("[")
+	for i, a := range t.TypeArgs {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if err := typeName(b, a, link, depth+1); err != nil {
+			return err
+		}
+	}
+	b.WriteString("]")
+	return nil
+}
+
 // definedName returns the name of a defined type, and reports whether t is one.
 //
 // A basic type is a defined type for this purpose: gc writes int as "int", with
@@ -373,15 +403,27 @@ func MethodSymbol(t *Type, m Method, ptrRecv bool) (string, error) {
 }
 
 // receiverName returns the identifier a method symbol spells the receiver
-// with: the defined type's name with its import path taken off.
+// with: the defined type's name with its import path taken off, and the type
+// arguments of an instantiation after it.
 //
 // Type.Name is qualified by the import path and Type.PkgPath holds that path,
 // so the identifier is what is left. The last dot is not the separator (an
-// instantiation's name holds the dots of its type arguments), which is why the
+// instantiation's argument list holds dots of its own), which is why the
 // prefix is taken off rather than searched for.
+//
+// The arguments are part of the identifier because gc puts them there:
+// xpkg/lib.(*Box[int]).Get, with each argument written by the link string's
+// rule. A method of every instantiation spelled with the origin's name alone
+// would be one symbol and one body for every type argument list.
 func receiverName(t *Type) (string, error) {
 	if t == nil || t.Name == "" {
 		return "", fmt.Errorf("ir: a method symbol needs a defined receiver type")
+	}
+	if t.Instantiated && len(t.TypeArgs) == 0 {
+		// The refusal typeName makes, for the reason it makes it: the name of
+		// an instantiation is not the generic type's, and a method spelled
+		// with the generic type's name is one symbol for two functions.
+		return "", fmt.Errorf("ir: %s is a generic instantiation and its type arguments are not in the IR type", t.Name)
 	}
 	name := t.Name
 	if t.PkgPath != "" {
@@ -390,13 +432,15 @@ func receiverName(t *Type) (string, error) {
 		}
 		name = name[len(t.PkgPath)+1:]
 	}
-	if i := strings.IndexByte(name, '['); i >= 0 {
-		// A generic instantiation. funcSym spells the method of every
-		// instantiation with the origin's name, so the wrapper is spelled the
-		// same way and reaches the same symbol.
-		name = name[:i]
+	if len(t.TypeArgs) == 0 {
+		return name, nil
 	}
-	return name, nil
+	var b strings.Builder
+	b.WriteString(name)
+	if err := typeArgs(&b, t, true, 0); err != nil {
+		return "", err
+	}
+	return b.String(), nil
 }
 
 // MethodOrder returns ms in the order gc writes a method array, which is a
@@ -520,17 +564,26 @@ func typeName(b *strings.Builder, t *Type, link bool, depth int) error {
 		return fmt.Errorf("ir: the name of %s nests deeper than %d", t.Kind, maxNameDepth)
 	}
 	if name, ok := definedName(t); ok {
-		if t.Instantiated {
+		if t.Instantiated && len(t.TypeArgs) == 0 {
 			// Two instantiations of one generic type would share this name,
-			// and the linker deduplicates by name.
+			// and the linker deduplicates by name. A type that says it is an
+			// instantiation and carries no arguments is one built by hand
+			// below the type boundary, because Converter fills both together.
 			return fmt.Errorf("ir: %s is a generic instantiation and its type arguments are not in the IR type", name)
 		}
 		if !link {
 			name = shortenPath(name)
 			b.WriteString(name)
-			return nil
+			return typeArgs(b, t, link, depth)
 		}
 		b.WriteString(name)
+		// The arguments come before the number and not after it. gc writes a
+		// generic type declared inside a function as type:main.L[int]·1, so a
+		// number written first would be a second symbol for a type that
+		// already has one.
+		if err := typeArgs(b, t, link, depth); err != nil {
+			return err
+		}
 		if t.Gen != 0 {
 			// A type declared inside a function. Two functions of one package
 			// may each declare a T, and without this the two share a symbol

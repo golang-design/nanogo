@@ -343,17 +343,24 @@ type Type struct {
 	ChanDir ChanDir
 
 	// Instantiated reports whether the type is an instantiation of a generic
-	// type.
+	// type, and TypeArgs are the arguments it was instantiated with.
 	//
-	// Name drops the type arguments: atomic.Pointer[int] and
-	// atomic.Pointer[string] both come out as sync/atomic.Pointer, and nothing
-	// else in an ir.Type tells the two apart. gc spells the arguments, so a
-	// descriptor written under the shortened name would be one symbol for two
-	// different types, and the linker would merge them.
+	// Name drops them: atomic.Pointer[int] and atomic.Pointer[string] both
+	// come out as sync/atomic.Pointer, and without the arguments nothing else
+	// in an ir.Type tells the two apart. gc spells them, so a descriptor
+	// written under the shortened name would be one symbol for two different
+	// types and the linker would merge them.
 	// specs/032-type-descriptors-and-itabs.md records the case as the one that
-	// neither the name nor the encoder refused. The naming function refuses it
-	// now, and this is the field it reads.
+	// neither the name nor the encoder refused.
+	//
+	// The two fields are one fact and are still two, because an instantiation
+	// by no arguments does not exist and an empty slice is what a type built
+	// by hand carries. The naming function reads the flag to know that the
+	// name is incomplete and reads the slice to complete it, and it refuses a
+	// type whose flag is set and whose slice is empty rather than writing the
+	// shortened name.
 	Instantiated bool
+	TypeArgs     []*Type
 
 	// MapGroup is the map whose slot group this struct is, for a group and for
 	// nothing else.
