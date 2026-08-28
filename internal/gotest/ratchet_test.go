@@ -121,6 +121,19 @@ func TestRatchetSeesWhatWentBackwards(t *testing.T) {
 		t.Errorf("a pass that weakened was not reported: %v", g)
 	}
 
+	// An oracle failure is not a regression. gc could not build or run the
+	// file, so the sweep has no expectation to compare nanogo against and
+	// measured nothing. Under the coverage pass, which runs every package of
+	// this repository at once, a corpus program's own build has run past its
+	// budget, and reporting that as a file that stopped passing puts a red
+	// gate on machine load.
+	noOracle := fakeReport()
+	noOracle.Verdicts[0] = Verdict{File: "a.go", Kind: "run", Class: ClassOracleFailed,
+		Reason: "gc's build of the program did not finish"}
+	if g := rt.Regressions(noOracle); len(g) != 0 {
+		t.Errorf("a file gc could not build was reported as a regression: %v", g)
+	}
+
 	if g := rt.Regressions(fakeReport()); len(g) != 0 {
 		t.Errorf("an unchanged run reported regressions: %v", g)
 	}

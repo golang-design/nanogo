@@ -153,6 +153,19 @@ func (rt *Ratchet) Regressions(r *Report) []string {
 		if string(v.Class) == was {
 			continue
 		}
+		if v.Class == ClassOracleFailed {
+			// gc could not build or run the file, so this sweep has no
+			// expectation to compare nanogo against and made no measurement of
+			// it. The class says so in its own words, and a file that was not
+			// measured is not a file that stopped passing.
+			//
+			// It is not hypothetical and it is not nanogo's doing either: the
+			// oracle builds the original file with the go command, and under
+			// the coverage pass, which runs every package of this repository
+			// at once, linkmain_run.go's build ran past its budget. Reporting
+			// that as a regression puts a red gate on machine load.
+			continue
+		}
 		msg := file + ": the ratchet records it as " + was + " and it is now " + string(v.Class)
 		if v.Reason != "" {
 			msg += " (" + v.Reason + ")"

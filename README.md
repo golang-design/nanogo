@@ -361,10 +361,10 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | [`ssa/rules`](ssa/rules/) | 97% | the arm64 rule set, checked by lowering the corpus and by a verifier after every rule |
 | [`export`](export/) | 91% | reads gc's export data for all 375 packages of the standard library, 13,518 declarations, and for a fixture carrying every encoding the format has, checked declaration by declaration |
 | [`export/pkgbits`](export/pkgbits/) | 93% | the container, ported from `internal/pkgbits` and exercised by every archive the reader above reads |
-| [`ssagen`](ssagen/) | 90% | emits machine code that **links and runs**, and stack maps a real collector honours |
+| [`ssagen`](ssagen/) | 91% | emits machine code that **links and runs**, and stack maps a real collector honours |
 | [`rtsym`](rtsym/) | 100% | 121 runtime signatures checked against the runtime's own source |
 | [`rtype`](rtype/) | 91% | type descriptors whose every field agrees, byte for byte, with the descriptor `gc` emitted for the same type |
-| [`driver`](driver/) | 95% | a real `go build -toolexec` completes |
+| [`driver`](driver/) | 94% | a real `go build -toolexec` completes |
 
 `types2` is excluded from the coverage gate, with the reason recorded in
 [`internal/covercheck/exclusions.txt`](internal/covercheck/exclusions.txt): it

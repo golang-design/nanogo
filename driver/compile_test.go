@@ -1439,3 +1439,27 @@ func archiveBodies(t *testing.T, path, file string) []string {
 	}
 	return names
 }
+
+// TestRtypeSizeHonoursTheZeroFilledKind covers the one symbol whose size and
+// data disagree.
+//
+// obj.Symbol separates the two because a BSS symbol has a size and no data and
+// the linker allocates the space. Only one symbol rtype returns is of that
+// kind, the pointer mask the runtime fills in on demand, and writing len(Data)
+// for it defines a symbol of no space that the runtime then writes a word
+// into. The e2e programs reach it and this pins the rule where it is written.
+func TestRtypeSizeHonoursTheZeroFilledKind(t *testing.T) {
+	for _, tc := range []struct {
+		what string
+		sym  rtype.Symbol
+		want uint32
+	}{
+		{"a symbol carrying its own bytes", rtype.Symbol{Data: make([]byte, 24)}, 24},
+		{"a symbol carrying none", rtype.Symbol{}, 0},
+		{"the zero-filled kind", rtype.Symbol{Kind: obj.SNOPTRBSS, Size: 8}, 8},
+	} {
+		if got := rtypeSize(tc.sym); got != tc.want {
+			t.Errorf("%s is %d bytes, want %d", tc.what, got, tc.want)
+		}
+	}
+}
