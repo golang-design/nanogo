@@ -71,6 +71,17 @@ type Value struct {
 	AuxInt int64
 	Aux    any
 
+	// Sig is the signature of the function a call value calls, and is nil for
+	// every other value and for a call built by hand.
+	//
+	// A call's Type is memory, so the signature is not recoverable from it,
+	// and the outgoing argument area is a function of the signature and of
+	// nothing else: the callee writes a result the registers cannot hold into
+	// that area whether or not the call site reads it. Sizing the area from
+	// what the call site reads gives a call whose result is discarded no area
+	// at all, and the callee then writes over its caller's frame.
+	Sig *ir.Type
+
 	Block *Block
 	Pos   syntax.Pos
 

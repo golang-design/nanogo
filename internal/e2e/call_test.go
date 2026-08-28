@@ -390,3 +390,137 @@ func TestToolexecPassesAnArrayThroughTheFrame(t *testing.T) {
 		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
 	}
 }
+
+// discardedResultProgram calls functions whose results it throws away.
+//
+// A result the registers cannot hold is written into the outgoing argument
+// area by the callee, and the area is the caller's frame. The callee writes it
+// whether or not the call site reads it, so a discarded result takes the same
+// space as an assigned one and `f1()` needs the same frame as `x := f1()`.
+//
+// nanogo sized the area from what the call site read, so a statement call to a
+// function returning [3000]byte was given no area at all: gc gives such a
+// caller a frame of 3024 bytes and nanogo gave it 16, and the callee wrote
+// three thousand bytes over its caller's frame and everything above it.
+//
+// Go's own test/stack.go is where this surfaced. Its f0 calls f1, which
+// returns [3000]byte and is called for its stack depth alone, and the
+// corrupted frame turned the next panic into "traceback did not unwind
+// completely".
+//
+// The program calls in every direction the frame is written from: a result
+// discarded, a result assigned, a result discarded from a method and from a
+// value of an interface, and a caller that has stack arguments of its own so
+// that the area starts above them.
+const framedResultAreaProgram = `package main
+
+import "fmt"
+
+type box struct{ n int }
+
+//go:noinline
+func (b *box) wide() [3000]byte {
+	var a [3000]byte
+	a[0], a[2999] = byte(b.n), byte(b.n+1)
+	return a
+}
+
+type wider interface{ wide() [3000]byte }
+
+//go:noinline
+func makeWide(n int) [3000]byte {
+	var a [3000]byte
+	a[0], a[1499], a[2999] = byte(n), byte(n+1), byte(n+2)
+	return a
+}
+
+//go:noinline
+func pairing(n int) ([24]byte, int) {
+	var a [24]byte
+	a[0], a[23] = byte(n), byte(n+1)
+	return a, n * 3
+}
+
+// discard calls for the call's effect and throws every result away. Its own
+// frame has to hold each callee's result area even so.
+//
+//go:noinline
+func discard(n int) int {
+	makeWide(n)
+	bb := box{n}
+	bb.wide()
+	var w wider = &box{n + 1}
+	w.wide()
+	pairing(n)
+	return n + 1
+}
+
+// viaIface makes one call and makes it through an interface, so no other call
+// in the function can hold the area open for it. discard cannot check this:
+// its area is the largest any of its calls needs, and the static call to
+// makeWide alone is three thousand bytes, so an interface call given no area
+// at all would leave the frame the right size and the program would pass.
+//
+// The signature reaches an interface call through the method the selection
+// names, which is the third of the three forms and the one that carries the
+// signature nowhere else: the call's first operand is the method table and its
+// second is the receiver, and neither is a function value.
+//
+//go:noinline
+func viaIface(w wider) { w.wide() }
+
+// deep is discard with a caller that has stack arguments, so the results are
+// placed above them rather than at the start of the area.
+//
+//go:noinline
+func deep(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17 int) int {
+	makeWide(a16)
+	pairing(a17)
+	return a0 + a17
+}
+
+func sum(b []byte) int {
+	s := 0
+	for i, v := range b {
+		s = s + int(v)*(i+1)
+	}
+	return s
+}
+
+func main() {
+	for i := 0; i < 4; i++ {
+		fmt.Println("discard", discard(i))
+		a := makeWide(i)
+		fmt.Println("wide", sum(a[:]))
+		p, q := pairing(i)
+		fmt.Println("pairing", sum(p[:]), q)
+	}
+	fmt.Println("deep", deep(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
+	for i := 0; i < 4; i++ {
+		viaIface(&box{i})
+	}
+	fmt.Println("viaIface returned four times")
+	defer fmt.Println("the frame survived the calls above")
+	discard(9)
+}
+`
+
+// TestToolexecGivesADiscardedResultItsSpaceInTheFrame builds the program above
+// and compares every line against gc.
+func TestToolexecGivesADiscardedResultItsSpaceInTheFrame(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/discarded\n\ngo 1.27\n",
+		"main.go": framedResultAreaProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "discarded", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "discarded"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

@@ -1500,3 +1500,58 @@ func TestArrayRegistersMatchTheConvention(t *testing.T) {
 		t.Errorf("the result area is %d bytes, want 16", size)
 	}
 }
+
+// TestABIAreaHoldsAResultTheCallSiteDiscards checks that the outgoing argument
+// area is sized from the callee's signature.
+//
+// A result the registers cannot hold is written into the area by the callee,
+// and the area belongs to the caller's frame. The callee writes it whether or
+// not the call site reads it, so the two calls below need the same area. The
+// area was sized from the reads instead, and a statement call to a function
+// returning [3000]byte was given none: gc gives such a caller 3024 bytes of
+// frame and nanogo gave it 16, so the callee wrote over its caller.
+func TestABIAreaHoldsAResultTheCallSiteDiscards(t *testing.T) {
+	wide := mkType(&ir.Type{Kind: ir.Array, Len: 3000, Elem: mkType(&ir.Type{Kind: ir.Uint8})})
+	sig := mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{wide}})
+
+	// One function reads the result and one throws it away. Both call the same
+	// callee, so both need the same area.
+	area := func(t *testing.T, fn *ir.Func) int64 {
+		t.Helper()
+		f := build(t, fn)
+		if err := AssignABI(f, NewArm64Target()); err != nil {
+			t.Fatalf("AssignABI(%s): %v", fn.Name, err)
+		}
+		for _, b := range f.Blocks {
+			for _, v := range b.Values {
+				if v.Op != OpStaticCall {
+					continue
+				}
+				_, _, size, err := ABICallArgs(NewArm64Target(), v)
+				if err != nil {
+					t.Fatalf("ABICallArgs(%s): %v", fn.Name, err)
+				}
+				return size
+			}
+		}
+		t.Fatalf("%s holds no call:\n%s", fn.Name, f)
+		return 0
+	}
+
+	callee := obj("callee", sig, ir.ClassFunc)
+	x := obj("x", wide, ir.ClassLocal)
+	read := area(t, fun("read", []*ir.Object{x},
+		asn(local(x), &ir.Node{Op: ir.OCall, X: local(callee), Type: wide}),
+		ret()))
+	dropped := area(t, fun("dropped", nil,
+		&ir.Node{Op: ir.OCall, X: local(callee), Type: wide},
+		ret()))
+
+	if read < wide.Size {
+		t.Fatalf("the area of a call whose result is read is %d bytes, and the result alone is %d", read, wide.Size)
+	}
+	if dropped != read {
+		t.Errorf("the area is %d bytes when the result is discarded and %d when it is read; the callee writes it either way",
+			dropped, read)
+	}
+}

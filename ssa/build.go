@@ -1930,6 +1930,13 @@ func (b *builder) callValue(n ir.Expr) *Value {
 	c := b.value(op, MemType, n.Pos, args...)
 	c.Aux = callee
 	c.AuxInt = auxInt
+	// The callee's signature, which is what the outgoing argument area is a
+	// function of. fun is the function being called in all three forms: a
+	// declared function, a closure, and the method a selection on an interface
+	// names, and each carries the signature as its own type.
+	if fun.Type != nil && fun.Type.Kind == ir.FuncKind {
+		c.Sig = fun.Type
+	}
 	b.setMemory(c)
 	return c
 }

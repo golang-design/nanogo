@@ -1805,15 +1805,38 @@ func ABICallArgs(t *Target, v *Value) (out []ABIValue, lo int, size int64, err e
 	return out, lo, size, err
 }
 
-// abiCallResultTypes returns the types a call's results are read as, in the
-// order the result area holds them, or nil when the reads are not one per
-// result.
+// abiCallResultTypes returns the types the call's results occupy the outgoing
+// area as, in the order the area holds them, or nil when neither source has
+// them.
 //
-// The walk is over the call's own block, which is where the code generator
-// looks for them: a result read anywhere else is one it cannot place.
+// The callee's signature answers this and the call site does not. A result the
+// registers cannot hold is written into the area by the callee whether or not
+// the call site reads it, so a discarded result takes the same space as one
+// that is assigned, and `f()` as a statement needs the same area as `x := f()`.
+// nanogo sized the area from the reads, so a statement call to a function
+// returning [3000]byte was given no area at all and the callee wrote three
+// thousand bytes over its caller's frame. Go's own test/stack.go is where that
+// surfaced, and the frame gc gives such a caller is 3024 bytes where nanogo
+// gave it 16.
+//
+// The reads are the fallback, for a call built by hand rather than by
+// ssa.Build: the passes below are tested on functions assembled value by
+// value, and those carry no signature. The walk is over the call's own block,
+// which is where the code generator looks for a result: one read anywhere else
+// is one it cannot place.
 func abiCallResultTypes(call *Value) []*ir.Type {
 	if call == nil || call.Block == nil {
 		return nil
+	}
+	if sig := call.Sig; sig != nil && sig.Kind == ir.FuncKind && sig.Results != nil {
+		out := make([]*ir.Type, 0, len(sig.Results))
+		for _, t := range sig.Results {
+			if t == nil {
+				return nil
+			}
+			out = append(out, t)
+		}
+		return out
 	}
 	var out []*ir.Type
 	for _, v := range call.Block.Values {
