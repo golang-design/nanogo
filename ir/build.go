@@ -2494,8 +2494,18 @@ func (b *builder) call(x *syntax.CallExpr) Expr {
 		}
 	}
 	if sel, ok := fun.(*syntax.SelectorExpr); ok {
-		if s := b.info.Selections[sel]; s != nil && s.Kind() == types2.MethodVal {
-			return b.methodCall(x, sel, s)
+		if s := b.info.Selections[sel]; s != nil {
+			switch s.Kind() {
+			case types2.MethodVal:
+				b.noteReflectMethod(sel, s)
+				return b.methodCall(x, sel, s)
+			case types2.MethodExpr:
+				// The same question of a called method expression, because
+				// reflect.Value.MethodByName(v, name) reaches the entry point
+				// v.MethodByName(name) reaches. gc's typecheck rewrites the
+				// second into the first before it asks.
+				b.noteReflectMethod(sel, s)
+			}
 		}
 	}
 	sig, _ := coreType(b.typeOf(fun)).(*types2.Signature)
@@ -2548,6 +2558,85 @@ func (b *builder) methodCall(x *syntax.CallExpr, sel *syntax.SelectorExpr, s *ty
 	n.X = &Node{Op: OGlobal, Pos: sel.Pos(), Type: io.Type, Obj: io}
 	n.Args = append([]Expr{b.recvArg(recv, recvType, fn)}, b.callArgs(x, fsig)...)
 	return n
+}
+
+// reflectLookups are the functions of package reflect whose own body asks for
+// a method by name, and which must not mark themselves.
+//
+// The four are alive through an itab whoever calls them, so marking them would
+// keep every method of every type in every program that links reflect. gc
+// names the same four in walk.usemethod, by the name the symbol carries in
+// that package.
+var reflectLookups = map[string]bool{
+	"reflect.(*rtype).Method":               true,
+	"reflect.(*rtype).MethodByName":         true,
+	"reflect.(*interfaceType).Method":       true,
+	"reflect.(*interfaceType).MethodByName": true,
+	"reflect.Value.Method":                  true,
+	"reflect.Value.MethodByName":            true,
+}
+
+// noteReflectMethod records that the function being built asks reflect for a
+// method by a name no relocation carries.
+//
+// It is gc's walk.usemethod, and it is the same four entry points read the
+// same way: the selector is Method or MethodByName, it takes one argument of
+// the kind that name implies, it returns one or two values, and the first of
+// them is reflect.Method or reflect.Value. The receiver is not part of the
+// test, because reflect.Type.MethodByName and reflect.Value.MethodByName are
+// two entry points to one lookup and gc marks a caller of either, through an
+// interface, on a concrete value, or as a method expression that is called.
+//
+// Func.ReflectMethod says what the mark costs and what its absence costs.
+//
+// One case of gc's is not reproduced. MethodByName with a constant argument
+// gets an R_USENAMEDMETHOD relocation naming that one method, and only a
+// non-constant argument sets the flag. This always sets the flag, which keeps
+// more methods alive and never keeps fewer.
+func (b *builder) noteReflectMethod(sel *syntax.SelectorExpr, s *types2.Selection) {
+	if b.fn == nil || b.fn.ReflectMethod {
+		return
+	}
+	name := sel.Sel.Value
+	want := types2.String
+	switch name {
+	case "Method":
+		want = types2.Int
+	case "MethodByName":
+	default:
+		return
+	}
+	fn, _ := s.Obj().(*types2.Func)
+	if fn == nil {
+		return
+	}
+	// The method's own signature and not the selection's type: the selection
+	// of a method expression carries the receiver as its first parameter, and
+	// the shape gc tests is the one without it.
+	sig, _ := fn.Type().(*types2.Signature)
+	if sig == nil || sig.Params().Len() != 1 {
+		return
+	}
+	if n := sig.Results().Len(); n != 1 && n != 2 {
+		return
+	}
+	arg, _ := unalias(sig.Params().At(0).Type()).(*types2.Basic)
+	if arg == nil || arg.Kind() != want {
+		return
+	}
+	res, _ := unalias(sig.Results().At(0).Type()).(*types2.Named)
+	if res == nil || res.Obj() == nil || res.Obj().Pkg() == nil || res.Obj().Pkg().Path() != "reflect" {
+		return
+	}
+	switch res.Obj().Name() {
+	case "Method", "Value":
+	default:
+		return
+	}
+	if reflectLookups[b.fn.Sym] {
+		return
+	}
+	b.fn.ReflectMethod = true
 }
 
 // resultType is the type of the value a call produces.

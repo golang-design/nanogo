@@ -453,6 +453,24 @@ type Func struct {
 	// The sense is negative so that a Func built by hand, which always has a
 	// body, needs no field set.
 	Bodyless bool
+
+	// ReflectMethod records that the body asks reflect for a method by a name
+	// no relocation carries.
+	//
+	// A method reached that way is reached by no call, so cmd/link cannot
+	// decide it is live: it resolves the entry to the sentinel -1 and the
+	// runtime installs runtime.unreachableMethod in its place, which is a
+	// program that links and then dies. obj.SymFlagReflectMethod on this
+	// function is what makes the linker stop deciding and keep every method
+	// of every type used in an interface.
+	//
+	// The question is asked here, over the selection, and not further down
+	// over the symbols a function references. gc asks it in walk.usemethod
+	// for the same reason: reflect.Type.Method is an interface method and an
+	// interface call names no symbol at all, so a rule that reads the
+	// reference list cannot see it. specs/032-type-descriptors-and-itabs.md
+	// records the one case gc has that this does not.
+	ReflectMethod bool
 }
 
 // Package is one compiled package.

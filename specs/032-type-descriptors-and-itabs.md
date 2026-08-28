@@ -245,11 +245,27 @@ is a method of a type nothing converts staying in the binary.
 **A function that asks `reflect` for a method says so.** A method found by
 `reflect.Value.Method` is reached by no call, so `cmd/link` cannot decide it is
 live. `SymFlagReflectMethod` is what tells the linker to stop deciding and keep
-every exported method of every type used in an interface, and `ssagen/reloc.go`
-sets it where every symbol a function references is resolved. `gc` asks the same
-question of the syntax tree in `walk.usemethod`, and it has one case this does
-not: `MethodByName` with a constant argument gets an `R_USENAMEDMETHOD`
-relocation naming the one method instead of the flag.
+every exported method of every type used in an interface.
+
+The question is asked in `ir/build.go`, over the selection, and the answer is
+`ir.Func.ReflectMethod`. `gc` asks it in the same place, `walk.usemethod`, and
+by the same test: the selector is `Method` or `MethodByName`, it takes one
+argument of the kind that name implies, it returns one or two values, and the
+first of them is `reflect.Method` or `reflect.Value`. The three call shapes
+`gc` covers are covered: through an interface, on a concrete value, and as a
+method expression that is called.
+
+It was asked one level down before, over the symbols a compiled function
+references, and that rule could not see the case that matters most.
+`reflect.Type.MethodByName` is an interface method and an interface call names
+no symbol at all, so `test/reflectmethod7.go` linked and then jumped into
+`runtime.unreachableMethod`. A rule that reads a reference list cannot answer a
+question about a selection.
+
+One case of `gc`'s is still not reproduced: `MethodByName` with a constant
+argument gets an `R_USENAMEDMETHOD` relocation naming the one method, and only
+a non-constant argument sets the flag. nanogo always sets the flag, which keeps
+more methods alive and never keeps fewer.
 
 A struct with an unexported field is **not** a stop, and it is worth saying
 because the shape looks like one. `gc` puts the declaring package's path in the

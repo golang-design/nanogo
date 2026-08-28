@@ -1054,11 +1054,12 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 		{"ssagen.Emit", func() (err error) {
 			file, line := fileAndLine(cfg, fset, fn.Pos)
 			r, err = ssagen.Emit(f, a, out, ssagen.Options{
-				Sym:  fn.Sym,
-				ABI:  obj.ABIInternal,
-				File: file,
-				Line: line,
-				Fset: fset,
+				Sym:           fn.Sym,
+				ABI:           obj.ABIInternal,
+				File:          file,
+				Line:          line,
+				Fset:          fset,
+				ReflectMethod: fn.ReflectMethod,
 			})
 			return err
 		}},

@@ -2245,6 +2245,78 @@ func buildTypecheckWithImports(t *testing.T, src string) (*types2.Package, []*sy
 	return pkg, files, info
 }
 
+// TestReflectMethodLookupMarksTheFunction is the question gc asks in
+// walk.usemethod, asked here for the same reason.
+//
+// A method reflect finds by name is reached by no call, so cmd/link resolves
+// its entry to the sentinel -1 and the runtime installs
+// runtime.unreachableMethod. Go's own test/reflectmethod7.go is that program:
+// it asks reflect.Type.MethodByName for a method and jumps into the sentinel.
+//
+// reflect.Type is an interface, so the call names no symbol and the rule that
+// read the reference list of the compiled function could not see it. That is
+// why the answer is decided over the selection and carried on ir.Func.
+func TestReflectMethodLookupMarksTheFunction(t *testing.T) {
+	pkg, files, info := buildTypecheckWithImports(t, `package q
+
+import "reflect"
+
+type byName interface {
+	MethodByName(string) (reflect.Method, bool)
+}
+
+func viaInterface(t reflect.Type) {
+	t.MethodByName("M")
+}
+
+func viaOtherInterface(b byName) {
+	b.MethodByName("M")
+}
+
+func viaIndex(t reflect.Type) {
+	t.Method(0)
+}
+
+func viaValue(v reflect.Value) {
+	v.MethodByName("M")
+}
+
+func viaMethodExpr(v reflect.Value) {
+	reflect.Value.MethodByName(v, "M")
+}
+
+func plain(t reflect.Type) {
+	t.NumMethod()
+	t.Name()
+}
+
+func alsoPlain(m map[string]int) {
+	_ = m["M"]
+}
+`)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"viaInterface", true},
+		{"viaOtherInterface", true},
+		{"viaIndex", true},
+		{"viaValue", true},
+		{"viaMethodExpr", true},
+		{"plain", false},
+		{"alsoPlain", false},
+	} {
+		fn := buildFuncOf(t, out, tc.name)
+		if fn.ReflectMethod != tc.want {
+			t.Errorf("%s is marked %v, want %v", tc.name, fn.ReflectMethod, tc.want)
+		}
+	}
+}
+
 // TestBuildQualifiedIdentifiers checks the names that live in another package.
 // A qualified identifier is a name, not a selection, and the object it
 // resolves to is the other package's.
