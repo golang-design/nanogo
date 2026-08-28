@@ -42,6 +42,7 @@ census skip 5
 
 pass matched 235.go
 pass rejected alias.go
+pass matched alias1.go
 pass rejected alias2.go
 pass matched align.go
 pass matched append.go
@@ -83,6 +84,7 @@ pass rejected convert2.go
 pass rejected convert3.go
 pass rejected convlit.go
 pass rejected convlit1.go
+pass matched copy.go
 pass rejected copy1.go
 pass rejected ddd1.go
 pass matched decl.go
@@ -93,6 +95,7 @@ pass matched defernil.go
 pass matched devirtualization_nil_panics.go
 pass rejected directive.go
 pass rejected directive2.go
+pass matched divide.go
 pass matched divmod.go
 pass rejected embedfunc.go
 pass compiled empty.go
@@ -131,6 +134,7 @@ pass rejected indirect1.go
 pass rejected init.go
 pass matched initcomma.go
 pass rejected initexp.go
+pass matched initialize.go
 pass rejected initializerr.go
 pass rejected initloop.go
 pass matched inline_literal.go
@@ -143,6 +147,7 @@ pass matched linkmain_run.go
 pass matched linkobj.go
 pass matched linkx_run.go
 pass matched literal.go
+pass matched literal2.go
 pass rejected mainsig.go
 pass rejected makechan.go
 pass rejected makemap.go
@@ -155,8 +160,10 @@ pass rejected method1.go
 pass rejected method2.go
 pass matched method3.go
 pass rejected method6.go
+pass matched named.go
 pass rejected named1.go
 pass matched newexpr.go
+pass matched nil.go
 pass matched peano.go
 pass matched printbig.go
 pass matched range.go
@@ -167,6 +174,7 @@ pass matched reflectmethod4.go
 pass compiled reflectmethod8.go
 pass matched rename.go
 pass rejected rename1.go
+pass matched reorder.go
 pass matched reorder2.go
 pass rejected return.go
 pass compiled rune.go
@@ -196,6 +204,7 @@ pass matched tinyfin.go
 pass compiled torture.go
 pass rejected typecheck.go
 pass rejected typecheckloop.go
+pass matched typeswitch.go
 pass matched typeswitch1.go
 pass rejected typeswitch2.go
 pass rejected typeswitch2b.go
