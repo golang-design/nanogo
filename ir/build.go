@@ -2149,6 +2149,18 @@ func (b *builder) selector(x *syntax.SelectorExpr) Expr {
 			b.errorf("ir: the method %s has no object", x.Sel.Value)
 			return b.badExpr(x.Pos())
 		}
+		if fsig, _ := fn.Type().(*types2.Signature); fsig != nil && fsig.Recv() != nil && isInterface(fsig.Recv().Type()) {
+			// An interface method is declared by nobody, so there is no
+			// symbol to name. gc generates a wrapper of its own, which takes
+			// the interface value and calls the method through the itab, and
+			// this pass generates none. funcSym says the same thing from the
+			// naming side: the receiver of an interface method is not a
+			// defined type, so it spells reflect.?.Method, and nothing
+			// defines that.
+			b.errorf("ir: %s.%s is a method expression on an interface, and the wrapper that calls the method through the itab is not generated",
+				types2.TypeString(sel.Recv(), nil), x.Sel.Value)
+			return b.badExpr(x.Pos())
+		}
 		io := b.obj(fn)
 		return &Node{Op: OGlobal, Pos: x.Pos(), Type: b.irType(sel.Type()), Obj: io}
 	}
@@ -2505,6 +2517,9 @@ func (b *builder) call(x *syntax.CallExpr) Expr {
 				// v.MethodByName(name) reaches. gc's typecheck rewrites the
 				// second into the first before it asks.
 				b.noteReflectMethod(sel, s)
+				if isInterface(s.Recv()) {
+					return b.interfaceMethodExprCall(x, sel, s)
+				}
 			}
 		}
 	}
@@ -2514,6 +2529,56 @@ func (b *builder) call(x *syntax.CallExpr) Expr {
 	if x.HasDots {
 		n.Index = spread
 	}
+	return n
+}
+
+// interfaceMethodExprCall builds I.M(x, args...), where I is an interface.
+//
+// The expression names a function whose first parameter is the interface
+// value, and calling it is calling the method on that value. So it is built as
+// the interface call it is: the receiver is the first argument and the callee
+// is read out of the itab, which is what methodCall does for x.M(args...).
+//
+// gc reaches the same place by another road. It generates a wrapper named
+// after the interface, p.I.M, which takes the interface value and makes the
+// indirect call, and it calls the wrapper. The wrapper exists because a method
+// expression is a function value in general, and a value needs a symbol. A
+// call site needs none, so none is generated here.
+//
+// The method expression that is not called is refused in selector, because a
+// value of it does need that symbol.
+func (b *builder) interfaceMethodExprCall(x *syntax.CallExpr, sel *syntax.SelectorExpr, s *types2.Selection) Expr {
+	rs := b.resolveSelection(sel, s)
+	fn, _ := rs.obj.(*types2.Func)
+	if fn == nil {
+		b.errorf("ir: the method %s has no object", sel.Sel.Value)
+		return b.badExpr(x.Pos())
+	}
+	// The selection's own type carries the receiver as the first parameter, so
+	// one walk over the argument list converts the receiver and the arguments
+	// against the parameters they are assigned to, in the order they are
+	// written.
+	esig, _ := s.Type().(*types2.Signature)
+	args := b.callArgs(x, esig)
+	if len(args) == 0 {
+		b.errorf("ir: the method expression %s.%s is called with no receiver",
+			types2.TypeString(s.Recv(), nil), sel.Sel.Value)
+		return b.badExpr(x.Pos())
+	}
+	fsig, _ := fn.Type().(*types2.Signature)
+	n := &Node{Op: OCall, Pos: x.Pos(), Type: b.resultType(fsig)}
+	if x.HasDots {
+		n.Index = spread
+	}
+	n.X = &Node{
+		Op:    OField,
+		Pos:   sel.Pos(),
+		Type:  b.irType(fsig),
+		X:     b.ordered(args[0]),
+		Index: rs.methodIndex(),
+		Obj:   b.obj(fn),
+	}
+	n.Args = args[1:]
 	return n
 }
 

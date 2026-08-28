@@ -2245,6 +2245,115 @@ func buildTypecheckWithImports(t *testing.T, src string) (*types2.Package, []*sy
 	return pkg, files, info
 }
 
+// TestBuildRefusesAMethodExpressionOnAnInterface names the symbol that was
+// emitted and never defined.
+//
+// An interface method is declared by nobody, so funcSym has no defined
+// receiver type to spell and writes a question mark: "reflect.?.Method". The
+// reference reached the linker, which reported a relocation target with no
+// source position on it. gc generates a wrapper that takes the interface value
+// and calls the method through the itab, and this pass generates none, so the
+// construct is refused by name.
+//
+// Go's own test/reflectmethod5.go and reflectmethod6.go are the two programs
+// that showed it, both through "var h = reflect.Type.Method".
+func TestBuildRefusesAMethodExpressionOnAnInterface(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, `package p
+
+type I interface{ M(int) int }
+
+type S struct{}
+
+func (S) M(i int) int { return i }
+
+var f = I.M
+
+func ok() int { return S.M(S{}, 1) }
+`)
+	_, err := Build(pkg, files, info)
+	if err == nil {
+		t.Fatal("a method expression on an interface was accepted")
+	}
+	if !strings.Contains(err.Error(), "method expression on an interface") {
+		t.Errorf("the refusal is %q", err)
+	}
+	if !strings.Contains(err.Error(), "p.I.M") {
+		t.Errorf("the refusal does not name the expression: %q", err)
+	}
+}
+
+// TestBuildCallsAnInterfaceMethodExpressionThroughTheItab covers the shape the
+// refusal above leaves standing.
+//
+// I.M(x, args) names a function whose first parameter is the interface value,
+// and calling it is calling the method on that value, so it is built as the
+// interface call it is. It used to be built as a reference to the method's
+// symbol, which for an interface method is p.?.M and which nothing defines.
+//
+// Go's own test/reflectmethod8.go is the file that showed it. Its recipe is
+// "compile", so the undefined symbol never reached a linker there.
+func TestBuildCallsAnInterfaceMethodExpressionThroughTheItab(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, `package p
+
+type I interface {
+	M(int) int
+	N()
+}
+
+type S struct{}
+
+func (S) M(i int) int { return i }
+func (S) N()          {}
+
+func use(s S) int {
+	I.N(s)
+	return I.M(s, 3)
+}
+`)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	fn := buildFuncOf(t, out, "use")
+	var seen []int
+	for _, call := range buildFind(fn, OCall) {
+		if call.X.Op != OField {
+			t.Fatalf("the callee is %v and not a read out of the itab", call.X.Op)
+		}
+		if len(call.Args) != len(call.X.Type.Params) {
+			t.Errorf("the call passes %d arguments to a signature of %d parameters",
+				len(call.Args), len(call.X.Type.Params))
+		}
+		seen = append(seen, call.X.Index)
+	}
+	// MethodOrder puts M before N, so the two calls read slot 0 and slot 1.
+	if len(seen) != 2 || seen[0] != 1 || seen[1] != 0 {
+		t.Errorf("the itab slots read are %v, want [1 0]", seen)
+	}
+}
+
+// TestBuildAcceptsAMethodExpressionOnAConcreteType is the other half: the
+// refusal above is about an interface receiver and not about the construct.
+func TestBuildAcceptsAMethodExpressionOnAConcreteType(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, `package p
+
+type S struct{}
+
+func (S) M(i int) int { return i }
+
+func use() int { return S.M(S{}, 1) }
+`)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	fn := buildFuncOf(t, out, "use")
+	calls := buildFind(fn, OCall)
+	if len(calls) != 1 || calls[0].X.Op != OGlobal || calls[0].X.Obj.Name != "p.S.M" {
+		t.Errorf("the method expression did not name p.S.M: %v", calls)
+	}
+}
+
 // TestReflectMethodLookupMarksTheFunction is the question gc asks in
 // walk.usemethod, asked here for the same reason.
 //
