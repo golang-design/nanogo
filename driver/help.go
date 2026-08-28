@@ -134,6 +134,11 @@ What nanogo compiles:
 	an empty interface leads with the dynamic type's descriptor and one
 	with methods leads with the itab of that pair (specs/032).
 
+	Every concrete type goes in, whatever its shape. A value that is not
+	already one pointer is copied into the heap and the interface holds
+	the address of the copy, which is one allocation for a struct, an
+	array, or a scalar no runtime helper takes by value.
+
 	Which itab implements an interface is not known until the value is,
 	so an assertion to one, a type switch case that names one, and a
 	conversion between two of them are a call to runtime.typeAssert or

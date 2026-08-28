@@ -32,7 +32,12 @@ var refusalPins = []struct {
 	probe  string // the probe in internal/audit/testdata/probes that shows it
 }{
 	{"print or println", "defer-builtin"},
-	{"generic function", "generic-func"},
+	// A method of a generic type, and not "generic function": the help says
+	// both and a generic function this package declares compiles now. That pin
+	// read "generic function", which is a substring of the sentence describing
+	// what works, so it went on passing while the probe beside it rose. A pin
+	// has to name the phrase that describes the refusal and nothing wider.
+	{"A method of a generic type", "generic-method"},
 	{`imports "C"`, "cgo-import"},
 	{"assembly", "asm-package"},
 	{"go:embed", "embed-directive"},

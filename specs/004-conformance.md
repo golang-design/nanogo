@@ -262,7 +262,7 @@ levels above it are the ones that find that bug.
 
 ### The probe corpus, which the four levels do not cover
 
-`internal/audit` holds 95 probes, one Go construct each. Every probe is
+`internal/audit` holds 96 probes, one Go construct each. Every probe is
 compiled and run twice, once by nanogo and once by `gc`, and the two are
 compared, so no probe carries a written expected value. `gc` is the oracle by
 decision 6, which is L3's method applied to one construct rather than to one

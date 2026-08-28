@@ -68,7 +68,7 @@
 # Sorted, so a refresh produces a diff and not a reshuffle
 # (specs/053-determinism.md).
 
-probes 95
+probes 96
 
 probe ok append-int
 probe ok append-slice
@@ -101,7 +101,8 @@ probe refused embed-directive
 probe ok empty-body
 probe ok float-arith
 probe ok float-param
-probe refused generic-func
+probe ok generic-func
+probe refused generic-method
 probe ok go-arg
 probe ok go-stmt-closure
 probe ok go-stmt-nochan
