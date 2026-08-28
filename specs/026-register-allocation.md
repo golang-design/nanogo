@@ -240,9 +240,10 @@ is required later should not be absent now.
 - Spill-slot reuse checked for correctness rather than for size. The rule is in
   the section above.
 - The distribution corpus, which is [027](027-liveness-and-stackmaps.md)'s and
-  runs this pass on the way through. Of the 17,809 functions that reach SSA
-  construction and lower completely, the allocator places all but 51. Those
-  refusals are why 17,758 functions carry a stack map and not 17,809.
+  runs this pass on the way through. Of the 20,793 functions that reach SSA
+  construction and lower completely, the allocator places every one, so 20,793
+  carry a stack map and not one fewer. The 51 refusals this line used to record
+  are gone.
 
 ## What was wrong
 

@@ -43,7 +43,7 @@ Go's distribution, and that is untouched.
 
 The distribution is nevertheless the corpus the front end is already measured
 against, so the distance to this gate is measured rather than guessed. The IR
-builder walks 536 packages of 663, producing 39,947 functions and 4,188,075
+builder walks 536 packages of 663, producing 41,354 functions and 4,245,532
 nodes, with 126 packages skipped (31 for `cgo`, 94 with no Go files, 1 with a
 type error) and 72 built partially. [004](004-conformance.md) has the rest of
 the corpus counts. What none of that says is that a package compiles: three

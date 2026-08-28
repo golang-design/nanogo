@@ -47,11 +47,11 @@ is scanned with the pointer mask nanogo emitted.
 
 What that build compiles is small, and the size is set above the driver.
 `driver.Compile` refuses by name whatever any pass in the list refuses, and
-every pass narrows the set. Of the Go distribution's 39,947 functions, 24,508
+every pass narrows the set. Of the Go distribution's 41,354 functions, 39,450
 get past SSA construction once [020](020-ir.md)'s lowering pass has run
 ([003](003-sequencing.md) counts them). Getting past construction is not
 compiling, but lowering is not where the rest goes: on the corpus measured
-without that pass, 17,809 of the 17,905 functions that reach construction lower
+without that pass, 20,793 of the 20,850 functions that reach construction lower
 completely to arm64 operations. The two places that refuse are construction and
 code generation, and no corpus counts the second. A function holding a
 `float64` parameter, local or constant is no longer among them: `ssagen` emits

@@ -62,7 +62,7 @@ the front end is now measured against it:
 | Parse accept and reject | 16,293 files, 14 documented exceptions | `go/parser` |
 | Build-constraint selection | 6,821 files per platform, 0 mismatches | `go/build` |
 | Package and file lists | 536 packages, the distribution and nanogo's own tree, 0 mismatches | `go list` |
-| IR construction | 536 packages of 663, 39,947 functions | none; it is a build, not a comparison |
+| IR construction | 536 packages of 663, 41,354 functions | none; it is a build, not a comparison |
 
 The type checker is the half that does not meet this level's bar. It agrees with
 `go/types` on 14 standard-library packages ([012](012-type-checking.md)), not on
@@ -304,7 +304,7 @@ produce correct output with all three broken and fail a week later.
 
 | Property | How it is checked | State |
 | --- | --- | --- |
-| GC stack maps | Allocation stress with `GOGC=1`, plus `GODEBUG=gccheckmark=1` which makes the collector verify its own marking. The [`stackmap` spike](../spikes/stackmap) is the shape of the test. | built, `ssagen/gc_test.go`, under `gccheckmark=1,clobberfree=1` and `GOGC=1`; the corpus maps 17,758 of the 17,809 functions it lowers |
+| GC stack maps | Allocation stress with `GOGC=1`, plus `GODEBUG=gccheckmark=1` which makes the collector verify its own marking. The [`stackmap` spike](../spikes/stackmap) is the shape of the test. | built, `ssagen/gc_test.go`, under `gccheckmark=1,clobberfree=1` and `GOGC=1`; the corpus maps every one of the 20,793 functions it lowers |
 | Write barriers | `GODEBUG=gccheckmark=1` under concurrent mutation, and a targeted corpus of the elision cases [034](034-write-barriers.md) allows. | not built; nanogo emits no write barrier, so there is nothing to check |
 | Stack growth | Deep recursion with large frames, forcing `morestack` at every frame size class, with pointers live across the growth. | built for one shape, a 200,000 frame recursion in `ssagen/ssagen_test.go`; the frame size classes are not swept |
 

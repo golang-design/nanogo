@@ -382,8 +382,8 @@ again.** `ssa/build.go` had no case for `ir.OAssign`, none for `ir.OCase`, and
 read a `for` statement's post list out of `Else` rather than `Post`. The three
 were 25,036 refusals and one miscompile. The corpus now reports 20,850 reaching
 SSA and 20,793 lowering, so the identity that held while the accepted set was
-small is gone: what is left undecomposed is 87 functions holding a wide
-`SelectN`, 12 holding an array and 93 holding a struct, and 96 of them do not
+small is gone: what is left undecomposed is 14 functions holding a wide
+`SelectN`, 6 holding an array and 31 holding a struct, and 57 of them do not
 lower.
 
 **The end-to-end test could not have caught the miscompile, and the reason

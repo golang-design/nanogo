@@ -167,17 +167,17 @@ would be the memory corruption this spec warns about further up.
 The three together are the shape of the middle end today, and the number is the
 one fact this spec most needs to carry:
 
-**SSA construction accepts 17,905 of the 39,947 functions the IR builder
-produces for the Go distribution, which is 44.8%.** 17,809 of those lower
+**SSA construction accepts 20,850 of the 41,354 functions the IR builder
+produces for the Go distribution, which is 50.4%.** 20,793 of those lower
 completely to arm64 machine operations, so the older claim that *what
-construction accepts, the back end finishes* is now 99.5% true rather than
-100% true. The 96 exceptions are characterised below; the corpus test is what
+construction accepts, the back end finishes* is now 99.7% true rather than
+100% true. The 57 exceptions are characterised below; the corpus test is what
 lists them.
 
 That figure measures construction alone, on a tree straight out of `ir.Build`,
 and it is not what the compiler reaches. The driver runs [020](020-ir.md)'s
 lowering pass first, which removes most of the Go-specific nodes in the table
-below, and 24,508 functions then get past construction. Both numbers are
+below, and 39,450 functions then get past construction. Both numbers are
 measured over the same corpus and each answers a different question: this one
 says what construction itself accepts, and the other says how far a real
 compile gets.
@@ -355,7 +355,7 @@ the pass that caused it rather than in the register allocator.
 
 - The verifier, on every function of every package in [004](004-conformance.md)
   L1's corpus. Built. `ssa/build_test.go`'s `TestBuildCorpus` walks 536
-  packages, builds all 39,947 functions, verifies every one it accepts and
+  packages, builds all 41,354 functions, verifies every one it accepts and
   counts every one it refuses by cause. The table above is that test's output.
   `ssa/decompose_test.go` and `ssa/stackmap_test.go` count the refusals too,
   which they did not before: both returned silently on the error, so both
@@ -379,7 +379,7 @@ Go-specific operation remains by the end. Construction refuses one instead:
 that is not is an error naming InvGoSpecific". Nothing makes them gone. This
 was found by reading the two `IsGoSpecific` guards and the twelve
 `b.unsupported` call sites in `ssa/build.go`, then counting the errors over the
-IR corpus, which is where 8,238 of 39,947 came from. It is 17,905 of 39,947
+IR corpus, which is where 8,238 of 39,947 came from. It is 20,850 of 41,354
 now, and construction still refuses rather than lowers.
 
 **Three of the refusals were stale conventions in this pass, not gaps in the
@@ -402,12 +402,12 @@ constructs its end-to-end tests cannot use. `internal/e2e`'s first program is a
 counted loop, which is the rule that came out of it: widening what is accepted
 is followed by widening what is run.
 
-**The claim that what construction accepts the back end finishes is now 99.5%
+**The claim that what construction accepts the back end finishes is now 99.7%
 rather than 100%.** `reached == lowered == 8,238` held because the accepted set
-was small enough to be uniform. It is 17,809 of 17,905 now. Most of the 96
-exceptions hold an array or a struct that decomposition leaves whole and the
-rest name no operation the corpus test can resolve. They were always
-going to appear as the accepted set widened.
+was small enough to be uniform. It is 20,793 of 20,850 now. The exceptions hold
+an array or a struct that decomposition leaves whole, or name no operation the
+corpus test can resolve. They were always going to appear as the accepted set
+widened, and the corpus test is what lists them.
 
 **A multi-value assignment was bounded by a pass below this one, and is not
 any more.** Construction refused one whose call has any result wider than a
@@ -434,7 +434,7 @@ performed anywhere until both exist.
 the same.** That is correct and it reads as though something was missed, so it
 is written down. This spec measures construction on an unlowered tree, which is
 what says how much of the language construction itself handles. What the
-compiler reaches is the other measurement, 24,508 of 39,947 with the pass run
+compiler reaches is the other measurement, 39,450 of 41,354 with the pass run
 first, and [020](020-ir.md) owns it.
 
 **The refusal table's tail understated how far the tail runs.** The row read
@@ -453,7 +453,7 @@ the smallest row of the table, which is why it was read as absent.
 prose above said thirteen and the note below said twelve. `ssa/build.go` has
 twelve, and this section now says so once.
 
-**The 96 functions that construction accepts and lowering does not finish were
+**The 57 functions that construction accepts and lowering does not finish were
 promised by name.** They are characterised, not listed. The list is the corpus
 test's output and nothing here should copy it, for the reason
 [020](020-ir.md) gives about a per-row count in prose.

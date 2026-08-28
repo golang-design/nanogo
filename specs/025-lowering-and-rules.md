@@ -27,11 +27,11 @@ operation has neither a rule nor a stated reason to be deferred; one operation
 is deferred and none is missing.
 
 What lowering sees is narrower than the language, and the narrowing happens
-above it. SSA construction accepts 17,905 of the 39,947 functions the IR
+above it. SSA construction accepts 20,850 of the 41,354 functions the IR
 builder produces for the Go distribution, and [021](021-ssa-construction.md)
-counts the refusals. **17,809 of the 17,905 lower completely.** Read the two
-numbers together: this pass finishes all but 96 of what reaches it, and what
-reaches it is under half of the distribution. The gap between the two numbers
+counts the refusals. **20,793 of the 20,850 lower completely.** Read the two
+numbers together: this pass finishes all but 57 of what reaches it, and what
+reaches it is half of the distribution. The gap between the two numbers
 is where a contributor's work is, and it is above this pass rather than in it.
 What remains is a `Load` or a `Store` of an array or a struct that
 decomposition leaves whole.
@@ -124,7 +124,7 @@ a problem for this pass. These five counts are the test's own report and are
 not in `internal/hygiene/testdata/facts.json`, so nothing fails when they
 drift. Re-run the test rather than trusting them.
 
-The 96 that do not lower are a different tally and the two must not be added
+The 57 that do not lower are a different tally and the two must not be added
 up. What stops them is a `Load` or a `Store` of an array or a struct that
 decomposition leaves whole, which is a value a rule would have to select and
 cannot.
@@ -305,13 +305,13 @@ for the ones a test happens to try.
 The spec did not say anywhere that splitting wide values belongs to this pass.
 When that was found, splitting was the largest single reason a function failed
 to lower, at 3,164 of 3,483 refusals over the distribution corpus. The pass was
-then written and that reason went to zero. The 96 that remain today are a
+then written and that reason went to zero. The 57 that remain today are a
 different shape: SSA construction learned the assignment statement, and the
 shapes that arrived with it include an array and a struct that decomposition
 leaves whole. The claim the correction made, that the split belongs above
 selection and while the value is still a value, is what the pass then proved.
 The corpus measured 4,755 of 8,238 functions lowering when the pass landed and
-17,809 of 17,905 now; the denominator moved because construction learned more
+20,793 of 20,850 now; the denominator moved because construction learned more
 Go, not because this pass did.
 
 The spec's pseudo-operation table omitted `SelectN` and `InitMem`. Both survive
@@ -344,8 +344,8 @@ encoders. `ssa/macharm64.go` holds the machine operation set and
 for the target. What is confined to this pass is the choice of machine
 operation.
 
-The spec said the pass finishes "two fifths of the distribution". 17,809 of
-39,947 is closer to a half, and the fraction was doing work the two counts
+The spec said the pass finishes "two fifths of the distribution". 20,793 of
+41,354 is closer to a half, and the fraction was doing work the two counts
 already do. The counts stay and the fraction is gone.
 
 The spec said lowering runs a decomposition step. Decomposition is its own
