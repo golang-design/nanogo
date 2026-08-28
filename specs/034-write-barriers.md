@@ -21,10 +21,22 @@ concurrent marking, some of the time.
 ## Nothing here is built, and the absence is a defect
 
 **nanogo emits no write barrier.** Not one, anywhere, under any condition. No
-pass reads `runtime.writeBarrier`, no lowering rule builds the diamond, and
-`runtime.gcWriteBarrier` is not in `rtsym`, which is the table
-[031](031-runtime-lowering.md) requires every generated call to come from.
-`rtsym` has a write barrier group and the group has no members.
+pass reads `runtime.writeBarrier` and no rule builds the diamond.
+
+Two of the pieces exist. `rtsym` carries all eight `runtime.gcWriteBarrier`
+entry points and the flag, each checked against the runtime's own source, and
+`ssa.OpARM64LoweredWB` is the operation with its encoder. What is missing is
+the pass: the walk that decides which stores need a barrier, and the block
+surgery that turns one store into the diamond above. `ssa.Edit.Guard` is the
+primitive for the cut, and the join needs a memory phi, which is the part no
+existing pass in this compiler builds.
+
+Go's own `test/chanlinear.go` samples the gap. Under `GOGC=1` with the
+collector concurrent it deadlocks in about one run of two; under
+`GODEBUG=gcstoptheworld=2` it never does; and `gccheckmark=1` names the object
+it loses, a capture of a two-capture closure whose descriptor and pointer mask
+are both correct. The mask being right and the object still being lost is the
+whole of this spec in one measurement.
 
 The three directives reach no check. `driver/pragma.go` recognises
 `//go:nowritebarrier`, `//go:nowritebarrierrec` and `//go:yeswritebarrierrec`
@@ -78,18 +90,58 @@ purely insertion-based barrier would not need one.
 
 ## The generated code
 
-A barrier is a conditional call, not an unconditional one:
+A barrier records a pair and does not perform the store. The store is
+unconditional and happens on both paths:
 
 ```
 if runtime.writeBarrier.enabled {
-    runtime.gcWriteBarrier(dst, val)
-} else {
-    *dst = val
+    buf := runtime.gcWriteBarrier2()   // two slots, returned in R25
+    buf[0] = val                       // the value being written
+    buf[1] = *dst                      // the value being overwritten
 }
+*dst = val
 ```
 
-The flag is a byte in a runtime global, read on every pointer store. The branch is
-predictable and cheap; the call happens only during a collection's mark phase.
+This is `gc`'s **buffered** barrier and the shape is taken from what `gc`
+emits, not from a description of it. For `func set(p *node, v *node) { p.next
+= v }`, with `p` in R0 and `v` in R1:
+
+```
+MOVB  (R0), R27                  // the nil check of p
+ADRP  <runtime.writeBarrier>, R27
+MOVWU 2096(R27), R2              // enabled, read as a 32-bit word
+CBZW  R2, +4(PC)                 // not marking: straight to the store
+MOVD  (R0), R2                   // R2 = the old value
+CALL  runtime.gcWriteBarrier2(SB)
+STP   (R1, R2), (R25)            // buf[0] = new, buf[1] = old
+MOVD  R1, (R0)                   // the store, on both paths
+```
+
+An earlier draft of this section had the older form, a call that performs the
+store and an else that performs it instead. Building that would store twice on
+one path or not at all on the other. The flag is a byte at offset zero of the
+`runtime.writeBarrier` variable and the compiler reads it as a 32-bit word,
+which is what the three bytes of padding beside it are declared for.
+
+### The operation
+
+`runtime.gcWriteBarrier2` does not follow the Go ABI. It takes nothing, returns
+the buffer pointer in R25, and clobbers R27 and the link register and no other
+general register.
+
+`ssa.OpARM64LoweredWB` is the call and the read of R25 as **one** operation.
+They cannot be two, because R25 is also the third reload register
+[026](026-register-allocation.md) reserves, and a spill placed between a call
+and a read of R25 would destroy the pointer the barrier just returned. The
+operation is a call by the allocator's reckoning, so everything live across it
+is spilled. That is more than `gcWriteBarrier2` clobbers, and the difference is
+instructions rather than correctness.
+
+The eight entry points are declared `<ABIInternal>` in the runtime's assembly
+and `rtsym.Internal` records it. An assembly symbol has no Go declaration, so
+nothing else says which ABI it is: the two morestack entry points are ABI0 and
+these eight are not, and a caller that inferred ABI0 from "written in assembly"
+would name a symbol nothing defines.
 
 Two consequences for the earlier passes:
 
