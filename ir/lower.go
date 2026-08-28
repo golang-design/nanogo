@@ -4189,9 +4189,10 @@ func (l *lowerer) exitReturn(s Stmt) []Stmt {
 // compiler to the object writer for data symbols, which is the same thing the
 // funcval of a closure that captures nothing wants.
 //
-// An interface, a slice and a complex number are refused. Each needs a symbol
-// chosen by the operand's own type, which gc instantiates per type, and this
-// pass has no instantiation.
+// An operand whose type is a struct or an array is refused, and so is a
+// pointer whose element is //go:notinheap. gc reports the first as a type
+// print cannot take, and reaches runtime.printuintptr for the second, which
+// only the runtime's own source declares such a type in.
 
 // printSym returns the runtime symbol that prints a value of t, and the type
 // the operand is converted to first.
@@ -4199,6 +4200,14 @@ func (l *lowerer) exitReturn(s Stmt) []Stmt {
 // One symbol per width class rather than one per type, which is what gc does:
 // every signed kind widens to int64 and every unsigned kind to uint64, so a
 // program that prints an int8 and one that prints an int64 call one function.
+//
+// A slice and an interface look like the exception and are not one. gc writes
+// LookupRuntime("printslice", n.Type()) and the substitution replaces the
+// declaration's "any" placeholder while keeping the symbol, so the call is
+// runtime.printslice for every element type. The substitution serves gc's own
+// conversion at the end of walkPrint; here the call is built from the
+// operand's IR type, so the operand is passed unchanged and the returned type
+// is t itself.
 func printSym(t *Type) (string, *Type) {
 	switch t.Kind {
 	case Bool:
@@ -4218,6 +4227,25 @@ func printSym(t *Type) (string, *Type) {
 	case Ptr, UnsafePtr, Map, Chan, FuncKind:
 		// All one word, and the runtime prints the word.
 		return "runtime.printpointer", lowerUnsafePtr
+	case Slice:
+		// One symbol for every element type. The operand keeps its own type,
+		// so no conversion is built: a slice of any element is the same three
+		// words the runtime reads, and runtime.printslice declares []byte only
+		// because a signature has to name something.
+		return "runtime.printslice", t
+	case Interface:
+		// The first word of an interface with no methods is a descriptor and
+		// the first word of one with methods is an itab. The two functions
+		// read the two fields, so the shape of the operand picks the symbol
+		// and a wrong pick prints the wrong word.
+		if t.EmptyIface {
+			return "runtime.printeface", t
+		}
+		return "runtime.printiface", t
+	case Complex64:
+		return "runtime.printcomplex64", t
+	case Complex128:
+		return "runtime.printcomplex128", t
 	}
 	return "", nil
 }

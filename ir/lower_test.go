@@ -1783,9 +1783,11 @@ type W struct{ P *int }
 func f(v any) W { return v.(W) }`, OTypeAssert, "its own data word"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},
 		{"range over a function", `func f(it func(func(int) bool)) { for v := range it { use(v) } }`, ORange, "range over func"},
-		{"println of an interface", `func f(v any) { println(v) }`, OPrintln, "an operand of interface"},
-		{"print of a slice", `func f(s []int) { print(s) }`, OPrint, "an operand of slice"},
-		{"println of a complex number", `func f(c complex128) { println(c) }`, OPrintln, "an operand of complex128"},
+		{"println of a struct", `
+type S struct{ A, B int }
+
+func f(s S) { println(s) }`, OPrintln, "an operand of struct"},
+		{"print of an array", `func f(a [2]int) { print(a) }`, OPrint, "an operand of array"},
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			fn, err := lowerFunc(t, tc.body, "f")
@@ -3009,6 +3011,15 @@ func TestLowerPrintWidensItsOperands(t *testing.T) {
 		{"a *int", "runtime.printpointer"},
 		{"a map[int]int", "runtime.printpointer"},
 		{"a func()", "runtime.printpointer"},
+		// One symbol for every element type and for every dynamic type. The
+		// three below carry no per-type instantiation, and the two interface
+		// rows differ only in which word the runtime reads first.
+		{"a []int", "runtime.printslice"},
+		{"a []string", "runtime.printslice"},
+		{"a any", "runtime.printeface"},
+		{"a interface{ M() }", "runtime.printiface"},
+		{"a complex64", "runtime.printcomplex64"},
+		{"a complex128", "runtime.printcomplex128"},
 	} {
 		fn := lowerOK(t, "func f("+tc.decl+") { print(a) }")
 		if !lowerCalled(fn, tc.want) {

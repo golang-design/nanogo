@@ -52,6 +52,7 @@ pass matched armimm.go
 pass rejected assign.go
 pass rejected assign1.go
 pass matched atomicload.go
+pass matched bigalg.go
 pass matched blank.go
 pass rejected blank1.go
 pass rejected bombad.go
@@ -168,11 +169,14 @@ pass matched named.go
 pass rejected named1.go
 pass matched newexpr.go
 pass matched nil.go
+pass matched nilptr2.go
 pass matched peano.go
 pass matched printbig.go
 pass matched range.go
 pass rejected range2.go
 pass matched range3.go
+pass matched recover2.go
+pass matched recover3.go
 pass rejected recover5.go
 pass matched reflectmethod4.go
 pass compiled reflectmethod8.go

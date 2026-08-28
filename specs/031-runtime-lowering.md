@@ -76,6 +76,7 @@ other row of the tables further down names a call nothing produces yet:
 | `chanlen`, `chancap` | `len` and `cap` of a channel | IR lowering |
 | `selectgo` | `select` with at least one communication clause | IR lowering |
 | `printlock`, `printunlock`, `printsp`, `printnl` and the `print*` family | `print` and `println` | IR lowering |
+| `printslice`, `printeface`, `printiface` | the same two builtins, one symbol per shape. `gc` calls `LookupRuntime` with the operand's type, which substitutes the declaration's `any` placeholder and keeps the symbol, so nothing is instantiated per element or per dynamic type. The signature spelled here is the runtime's own: `[]byte`, `eface` and `iface` | IR lowering |
 | the fourteen equality algorithms | a type descriptor's `Equal` field | descriptor encoding |
 
 The **Where** column is four passes and not one. The earliest is SSA
