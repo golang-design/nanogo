@@ -40,9 +40,15 @@
 // arguments, print and println, a closure with or without captures, and a
 // declared function used as a value all compile.
 //
-// Defer of a builtin, generics, a package with assembly in it, and a package
-// with a go:embed directive in it are refused, each with a message that names
-// the function, the position and the construct.
+// A generic function the compiling package declares is stencilled fully: one
+// compiled body per distinct list of type arguments, named pkg.F[int], with no
+// dictionary and no run-time indirection.
+//
+// Defer of a builtin, a method of a generic type, a method with type
+// parameters of its own, an instantiation of a generic another package
+// declared, a package with assembly in it, and a package with a go:embed
+// directive in it are refused, each with a message that names the function,
+// the position and the construct.
 //
 // No program the probe corpus reaches behaves differently from the one gc
 // builds. That is a measurement over 95 programs compiled twice and run

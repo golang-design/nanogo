@@ -184,7 +184,12 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
 
 - `defer println(x)`. A builtin is not a function value, so there is nothing
   to hand the runtime.
-- Generics.
+- A method of a generic type, such as `L[int].Get`, and a method with type
+  parameters of its own. nanogo instantiates a generic function and not a
+  generic type, so nothing produces the body. A generic type used for its
+  fields alone compiles.
+- An instantiation of a generic function another package declared. The body is
+  in that package's archive and nanogo has no path from a call site to it yet.
 - Taking the address of a variable the compiler keeps in a register.
 - A package with assembly in it, and a package that imports `"C"`.
 - A package with a `//go:embed` directive in it, naming the patterns the
@@ -282,8 +287,11 @@ decision below.
   job, and every spec states what its design gives up as well as what it buys.
   [`specs/002`](specs/002-architecture.md)
 
-Generics will be fully stenciled rather than passed a dictionary. The language
-guarantees that terminates. [`specs/013`](specs/013-generics.md)
+Generics are fully stencilled rather than passed a dictionary, for a generic
+function the compiling package declares: one compiled body per distinct list of
+type arguments, named `pkg.F[int]`. The language guarantees that terminates.
+A generic type, and an instantiation of a generic another package declared, are
+refused by name. [`specs/013`](specs/013-generics.md)
 
 ## The measure of the project
 

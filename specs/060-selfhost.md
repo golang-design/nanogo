@@ -210,3 +210,29 @@ because the count did. Three of the seven packages it still holds want the
 generated equality function that spec owes, and only two want anything to do
 with a method. A reason stated once and never re-read outlives the fact it was
 taken from.
+
+## The closure measured against nanogo's own twelve packages
+
+The count above is over the packages a `func main() {}` needs. This is the
+narrower and more useful measure: nanogo's own twelve, compiled by nanogo under
+an allowlist that names all of them.
+
+**Zero of twelve compile, and three leaf packages block every one.** The other
+nine fail on an import rather than on themselves, so the work list is three
+items and not twelve.
+
+| Package | What stops it |
+| --- | --- |
+| `syntax` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, reached through `FileSet`. [032](032-type-descriptors-and-itabs.md) owns the descriptor and [013](013-generics.md) the instantiation |
+| `obj` | `a result that arrives in the frame is not read`, in `(*Package).Bytes`. One of the three `ssagen` doors [030](030-abi.md) left for a result the sixteen result registers cannot hold |
+| `rtsym` | `ADD $4136, RSP, R0 does not encode`, in `init`. A frame past the twelve-bit immediate an `ADD` carries, which [042](042-arm64-backend.md) owns |
+
+`loader`, `export` and `types2` wait on `syntax`. `link` waits on `obj`. `rtype`,
+`ir`, `ssa`, `ssagen` and `driver` wait on `rtsym`.
+
+The measurement is worth repeating rather than quoting, and it has one trap in
+it. `go build -toolexec` with no `NANOGO_ALLOWLIST` compiles **nothing** with
+nanogo: an unset variable is an empty list and every package goes to `gc`, so
+the build succeeds and proves only that `gc` works. The allowlist must name the
+packages, and the first attempt at this measurement reported twelve of twelve
+for exactly that reason.
