@@ -33,7 +33,10 @@ func TestHelpStatesTheLimits(t *testing.T) {
 		"assembly",         // the ABI wrapper that is not generated
 		"an interface",     // an assertion or a switch case naming one, which needs an itab
 		"print or println", // probes/defer-builtin
-		"generic function",
+		// specs/013-generics.md's stenciler compiles an instantiation of a
+		// generic this package declares, so the phrase pinned here names
+		// what is still refused rather than the whole feature.
+		"generic type",
 		`imports "C"`,
 		"-race",
 		AllowlistEnv,

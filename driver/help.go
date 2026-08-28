@@ -147,14 +147,26 @@ What nanogo compiles:
 	compiled can be imported: gc compiles a package that imports it and
 	the program runs (specs/015-export-data.md).
 
+	A generic function this package declares, called at any list of type
+	arguments. nanogo stencils fully: one compiled body per distinct list,
+	named pkg.F[int] and pkg.F[string], with no dictionary and no run-time
+	indirection (specs/013-generics.md).
+
 What nanogo refuses, by name, with the reason:
 
 	defer of print or println. A builtin is not a function value, so there
 	is nothing to hand the runtime.
 
-	A generic function.
-
 	Taking the address of a variable the compiler keeps in a register.
+
+	A method of a generic type, and a method with type parameters of its
+	own. nanogo instantiates a generic function and it does not
+	instantiate a generic type, so nothing produces the body of
+	L[int].Get. A generic type used for its fields alone compiles.
+
+	An instantiation of a generic function another package declared. The
+	body is in that package's archive, and nanogo has no path from a
+	decoded body to its own tree yet.
 
 	A package with assembly in it. An assembly definition uses ABI0 and a
 	Go call uses ABIInternal, and nanogo generates no wrapper between them.

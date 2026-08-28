@@ -1829,7 +1829,7 @@ func F() {}
 	// are checked here directly.
 	b := &builder{
 		conv: NewConverter(), info: info, tpkg: pkg,
-		objs: make(map[types2.Object]*Object), owner: make(map[*Object]*Func),
+		objs: make(map[objKey]*Object), owner: make(map[*Object]*Func),
 		ptrs: make(map[types2.Type]*Type), out: out,
 	}
 	for _, tc := range []struct {
@@ -2213,24 +2213,6 @@ func TestBuildErrors(t *testing.T) {
 	if _, err := Build(nil, nil, nil); err == nil {
 		t.Error("Build with no package returned no error")
 	}
-	pkg, files, info := buildTypecheck(t, `package p
-
-func G[T any](x T) T { return x }
-
-func f() int { return G(1) }
-`)
-	out, err := Build(pkg, files, info)
-	if err == nil {
-		t.Error("a generic function built without an error")
-	}
-	if out == nil {
-		t.Fatal("a generic function stopped the package")
-	}
-	// The rest of the package is built. A partial IR is what the diagnostic
-	// for the skipped declaration is written against.
-	if len(out.Funcs) != 1 || out.Funcs[0].Name != "f" {
-		t.Errorf("the functions are %v", out.Funcs)
-	}
 }
 
 // buildTypecheckWithImports type-checks a snippet that imports real packages,
@@ -2525,7 +2507,7 @@ var p8 *int
 `)
 	b := &builder{
 		conv: NewConverter(), info: info, tpkg: pkg,
-		objs: make(map[types2.Object]*Object), owner: make(map[*Object]*Func),
+		objs: make(map[objKey]*Object), owner: make(map[*Object]*Func),
 		ptrs: make(map[types2.Type]*Type), out: &Package{Path: "p"},
 	}
 	iface := pkg.Scope().Lookup("i").Type()

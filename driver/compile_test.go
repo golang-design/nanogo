@@ -894,39 +894,70 @@ func TestFileAndLineOfAnUnknownOffset(t *testing.T) {
 	}
 }
 
-// TestCompileRefusesAGenericFunction covers the report ir.Build makes, and
-// which half of the work is still missing.
+// TestCompileStencilsAGenericInstantiation is what this test used to refuse.
 //
-// The declaration itself is no longer refused. It is skipped, because a body
-// with type parameters in it has no run-time representation in the package
-// that declares it and gc emits none either. That changed when the export
-// writer learned to carry one: while ir.Build reported an error, no package
-// holding a generic function reached the writer at all, so the export data was
-// ready and nothing could use it.
+// The declaration is skipped, because a body with type parameters in it has no
+// run-time representation in the package that declares it and gc emits none
+// either. The instantiation is compiled, as one monomorphic function per
+// distinct type argument list (specs/013-generics.md). So a package that
+// declares a generic and calls it at two types compiles, and the two bodies
+// are in the archive under the names specs/013 chose.
 //
-// What is still refused is the instantiation. specs/013-generics.md stencils,
-// the stenciler is not written, and the type parameter reaches the IR type
-// boundary instead. So the message names the type parameter rather than the
-// declaration, and this test says so rather than accepting either.
-func TestCompileRefusesAGenericInstantiation(t *testing.T) {
-	_, err := compileSource(t, "package main\n\nfunc f[T any](x T) T { return x }\n\nfunc g() int { return f(1) }\n", nil)
-	if err == nil {
-		t.Fatal("Compile accepted a call to a generic function, and no stenciler is built")
-	}
-	for _, want := range []string{"main", "type parameter"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the message does not carry %q:\n%v", want, err)
-		}
+// The message this used to pin was "type parameter has no run-time
+// representation", which came from the IR type boundary and said nothing about
+// generics. That boundary still holds and it is still the honest failure for a
+// type parameter that reaches it. It stopped firing here because the bodies
+// are instantiated, which is what specs/013 asked for.
+func TestCompileStencilsAGenericInstantiation(t *testing.T) {
+	arm64Only(t)
+	if _, err := compileSource(t, "package main\n\n"+
+		"func f[T any](x T) T { return x }\n\n"+
+		"func main() { println(f(1)); println(f(\"s\")) }\n", nil); err != nil {
+		t.Fatalf("a generic instantiation was refused: %v", err)
 	}
 }
 
 // TestCompileSkipsAGenericDeclaration is the other half: a package whose
-// generic declaration nothing instantiates compiles, because the declaration
-// is skipped rather than refused.
+// generic declaration nothing instantiates compiles, and produces no body for
+// it.
 func TestCompileSkipsAGenericDeclaration(t *testing.T) {
 	arm64Only(t)
 	if _, err := compileSource(t, "package main\n\nfunc f[T any](x T) T { return x }\n\nfunc main() {}\n", nil); err != nil {
 		t.Fatalf("a generic declaration nothing instantiates was refused: %v", err)
+	}
+}
+
+// TestCompileRefusesWhatTheStencilerDoesNotBuild names the line
+// specs/013-generics.md stops at, from the driver's side, so that a diagnostic
+// naming the construct cannot silently become an undefined symbol with no
+// source position on it.
+//
+// The other line, a generic another package declared, needs an importcfg and
+// is pinned in ir where the importer is
+// (TestStencilRefusesAGenericOfAnotherPackage).
+func TestCompileRefusesWhatTheStencilerDoesNotBuild(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			"a method of a generic type",
+			"package main\n\ntype L[T any] struct{ v T }\n\n" +
+				"func (l L[T]) Get() T { return l.v }\n\n" +
+				"func main() { println(L[int]{1}.Get()) }\n",
+			"an instantiation of a generic type is not built",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := compileSource(t, tt.src, nil)
+			if err == nil {
+				t.Fatal("the package was accepted")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("the message does not carry %q:\n%v", tt.want, err)
+			}
+		})
 	}
 }
 

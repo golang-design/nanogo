@@ -262,9 +262,13 @@ func Build(pkg *types2.Package, files []*syntax.File, info *types2.Info) (*Packa
 		conv:  NewConverter(),
 		info:  info,
 		tpkg:  pkg,
-		objs:  make(map[types2.Object]*Object),
+		objs:  make(map[objKey]*Object),
 		owner: make(map[*Object]*Func),
 		ptrs:  make(map[types2.Type]*Type),
+
+		generic:   make(map[*types2.Func]*syntax.FuncDecl),
+		instances: make(map[string]*instance),
+		ctxt:      types2.NewContext(),
 
 		closgen:   make(map[*Func]int),
 		isLiteral: make(map[*Func]bool),
@@ -291,9 +295,22 @@ type builder struct {
 	// objs maps one checker object to one IR object. It is a lookup table and
 	// it is never ranged over: every list this package produces is built in
 	// declaration order instead (specs/053-determinism.md).
-	objs  map[types2.Object]*Object
+	objs  map[objKey]*Object
 	owner map[*Object]*Func
 	ptrs  map[types2.Type]*Type
+
+	// The stenciler of specs/013-generics.md. generic holds the source of
+	// every generic function this package declares, instances holds the
+	// instantiations discovered so far keyed by their symbol, and todo is the
+	// worklist in discovery order. stencil is the instantiation being built,
+	// and is nil while an ordinary declaration is. ctxt is the one context
+	// every substitution shares, so that two instantiations producing
+	// List[int] produce one checker type and so one IR type.
+	generic   map[*types2.Func]*syntax.FuncDecl
+	instances map[string]*instance
+	todo      []*instance
+	stencil   *stencil
+	ctxt      *types2.Context
 
 	// fn is the function being built, and sinks is the stack of statement
 	// lists it is being built into. An expression that needs a temporary
@@ -340,6 +357,9 @@ func (b *builder) irType(t types2.Type) *Type {
 	if t == nil {
 		return voidType
 	}
+	// The one door every type comes through, so the stenciler of
+	// specs/013-generics.md substitutes here rather than at every reader.
+	t = b.subst(t)
 	if basic, ok := unalias(t).(*types2.Basic); ok && basic.Kind() == types2.UntypedNil {
 		// An untyped nil that reaches here has no destination to take its type
 		// from. It is one word and it holds no pointer worth scanning.
@@ -388,15 +408,18 @@ func (b *builder) typeOf(x syntax.Expr) types2.Type {
 	if x == nil {
 		return nil
 	}
+	// Every answer is substituted on the way out. The checker recorded the
+	// type the generic body has, and the type this build wants is that one
+	// with the instantiation's type arguments in it (specs/013-generics.md).
 	if tv, ok := b.info.Types[x]; ok && tv.Type != nil {
-		return tv.Type
+		return b.subst(tv.Type)
 	}
 	if n, ok := syntax.Unparen(x).(*syntax.Name); ok {
 		if o := b.info.Uses[n]; o != nil {
-			return o.Type()
+			return b.subst(o.Type())
 		}
 		if o := b.info.Defs[n]; o != nil {
-			return o.Type()
+			return b.subst(o.Type())
 		}
 	}
 	return nil
@@ -410,9 +433,16 @@ func (b *builder) obj(o types2.Object) *Object {
 	if o == nil {
 		return nil
 	}
-	if have, ok := b.objs[o]; ok {
+	key := b.key(o)
+	if have, ok := b.objs[key]; ok {
 		b.noteUse(have)
 		return have
+	}
+	if fn, ok := o.(*types2.Func); ok {
+		// Ahead of the type below, so that a method this pass produces no body
+		// for is reported by name rather than by the type parameter its
+		// signature still holds (specs/013-generics.md).
+		b.checkMethodIsBuilt(fn)
 	}
 	out := &Object{
 		Name: o.Name(),
@@ -444,7 +474,7 @@ func (b *builder) obj(o types2.Object) *Object {
 	default:
 		out.Class = ClassLocal
 	}
-	b.objs[o] = out
+	b.objs[key] = out
 	// A local of the function being built gets a frame slot. The blank
 	// identifier does not: it names no storage, and an assignment to it is
 	// kept only for the effects of its right-hand side.
@@ -804,6 +834,7 @@ func (b *builder) zeroValue(pos syntax.Pos, t *Type) Expr {
 // come first so that Package.Globals is in declaration order whatever order
 // the function bodies happen to refer to them in.
 func (b *builder) buildPackage(files []*syntax.File) {
+	b.collectGenericDecls(files)
 	for _, f := range files {
 		for _, d := range f.DeclList {
 			vd, ok := d.(*syntax.VarDecl)
@@ -839,6 +870,10 @@ func (b *builder) buildPackage(files []*syntax.File) {
 	}
 
 	b.buildInit(inits)
+
+	// Last, because an instantiation is discovered while a body that calls it
+	// is built and the initialisation function is a body like any other.
+	b.drainInstances()
 }
 
 // buildFunc builds one declared function or method.
@@ -1404,7 +1439,7 @@ func (b *builder) initDecls(init syntax.SimpleStmt) []*Object {
 			continue
 		}
 		if o := b.info.Defs[name]; o != nil {
-			out = append(out, b.objs[o])
+			out = append(out, b.objs[b.key(o)])
 		}
 	}
 	return out
@@ -1998,6 +2033,13 @@ func (b *builder) name(x *syntax.Name) Expr {
 		b.errorf("ir: the builtin %s is not a value", o.Name())
 		return b.badExpr(x.Pos())
 	case *types2.Func:
+		// The one place both spellings of a call to a generic function reach.
+		// F[int] puts the type arguments on the F inside the index expression
+		// and F(1) puts the inferred ones on the F itself, and the checker
+		// records both on this identifier (specs/013-generics.md).
+		if io := b.instanceOf(x, o); io != nil {
+			return &Node{Op: OGlobal, Pos: x.Pos(), Type: io.Type, Obj: io}
+		}
 		io := b.obj(o)
 		return &Node{Op: OGlobal, Pos: x.Pos(), Type: io.Type, Obj: io}
 	case *types2.Var:
@@ -2019,6 +2061,10 @@ func (b *builder) name(x *syntax.Name) Expr {
 // OGlobal whose object has class ClassType, so that the walkers do not need a
 // node kind of their own for it.
 func (b *builder) typeNode(pos syntax.Pos, t types2.Type) Expr {
+	// t is read straight off an object here rather than through typeOf, so
+	// the substitution of specs/013-generics.md is applied before the name is
+	// taken off it.
+	t = b.subst(t)
 	irt := b.irType(t)
 	if named, ok := unalias(t).(*types2.Named); ok && named.Obj() != nil {
 		o := b.obj(named.Obj())
@@ -2043,18 +2089,20 @@ func (b *builder) selector(x *syntax.SelectorExpr) Expr {
 	}
 	switch sel.Kind() {
 	case types2.FieldVal:
-		base, _ := b.fieldPath(b.expr(x.X), b.typeOf(x.X), sel.Index())
+		rs := b.resolveSelection(x, sel)
+		base, _ := b.fieldPath(b.expr(x.X), b.typeOf(x.X), rs.index)
 		return base
 
 	case types2.MethodVal:
 		// A method value is a closure holding the receiver, which is the row
 		// specs/020-ir.md's lowering table gives it.
-		fn, _ := sel.Obj().(*types2.Func)
+		rs := b.resolveSelection(x, sel)
+		fn, _ := rs.obj.(*types2.Func)
 		if fn == nil {
 			b.errorf("ir: the method %s has no object", x.Sel.Value)
 			return b.badExpr(x.Pos())
 		}
-		recv, recvType := b.fieldPath(b.expr(x.X), b.typeOf(x.X), sel.Index()[:len(sel.Index())-1])
+		recv, recvType := b.fieldPath(b.expr(x.X), b.typeOf(x.X), rs.index[:len(rs.index)-1])
 		recv = b.recvArg(recv, recvType, fn)
 		io := b.obj(fn)
 		return &Node{
@@ -2063,13 +2111,14 @@ func (b *builder) selector(x *syntax.SelectorExpr) Expr {
 			Type:  b.irType(sel.Type()),
 			Obj:   io,
 			Args:  []Expr{recv},
-			Index: b.methodIndex(sel),
+			Index: rs.methodIndex(),
 		}
 
 	case types2.MethodExpr:
 		// A method expression is the method's function symbol. Its first
 		// parameter is the receiver.
-		fn, _ := sel.Obj().(*types2.Func)
+		rs := b.resolveSelection(x, sel)
+		fn, _ := rs.obj.(*types2.Func)
 		if fn == nil {
 			b.errorf("ir: the method %s has no object", x.Sel.Value)
 			return b.badExpr(x.Pos())
@@ -2079,16 +2128,6 @@ func (b *builder) selector(x *syntax.SelectorExpr) Expr {
 	}
 	b.errorf("ir: unknown selection kind %d", sel.Kind())
 	return b.badExpr(x.Pos())
-}
-
-// methodIndex is the position of a method in the method set of the interface
-// it is selected from, which is what an itab is indexed by.
-func (b *builder) methodIndex(sel *types2.Selection) int {
-	idx := sel.Index()
-	if len(idx) == 0 {
-		return 0
-	}
-	return idx[len(idx)-1]
 }
 
 // fieldPath follows a selection's index path, making the implicit
@@ -2450,7 +2489,8 @@ func (b *builder) call(x *syntax.CallExpr) Expr {
 // itab, so the callee is the selection itself and the receiver stays inside
 // it.
 func (b *builder) methodCall(x *syntax.CallExpr, sel *syntax.SelectorExpr, s *types2.Selection) Expr {
-	fn, _ := s.Obj().(*types2.Func)
+	rs := b.resolveSelection(sel, s)
+	fn, _ := rs.obj.(*types2.Func)
 	if fn == nil {
 		b.errorf("ir: the method %s has no object", sel.Sel.Value)
 		return b.badExpr(x.Pos())
@@ -2461,7 +2501,7 @@ func (b *builder) methodCall(x *syntax.CallExpr, sel *syntax.SelectorExpr, s *ty
 	// stands. Without it "t.a(1).a(t.b(2))" calls b before a, because the
 	// argument's own temporary is emitted first and the receiver's call is
 	// left in the tree.
-	recv, recvType := b.fieldPath(b.operand(sel.X), b.typeOf(sel.X), s.Index()[:len(s.Index())-1])
+	recv, recvType := b.fieldPath(b.operand(sel.X), b.typeOf(sel.X), rs.index[:len(rs.index)-1])
 	n := &Node{Op: OCall, Pos: x.Pos(), Type: b.resultType(fsig)}
 	if x.HasDots {
 		n.Index = spread
@@ -2473,7 +2513,7 @@ func (b *builder) methodCall(x *syntax.CallExpr, sel *syntax.SelectorExpr, s *ty
 			Pos:   sel.Pos(),
 			Type:  b.irType(s.Type()),
 			X:     b.ordered(recv),
-			Index: b.methodIndex(s),
+			Index: rs.methodIndex(),
 			Obj:   io,
 		}
 		n.Args = b.callArgs(x, fsig)
