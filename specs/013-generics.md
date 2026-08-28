@@ -21,83 +21,122 @@ be reached without this.
 
 ## What is built, and what is not
 
-**Instantiation is not built.** There is no stenciler. Nothing in `ir`, `ssa`,
-`ssagen` or `driver` substitutes a type argument through a body, and there is no
-worklist, no naming function for an instantiated symbol, and no deduplication.
-Everything under "Mechanics" below describes work that has not started.
+**The stenciler is built for a generic this package declares.** `ir/stencil.go`
+compiles one monomorphic function per distinct list of type arguments, and the
+declaration itself produces nothing, because a body with type parameters in it
+has no run-time representation in the package that declares it and `gc` emits
+none either.
 
-What is built is the half that arrives with the fork in
-[012](012-type-checking.md): inference, constraint satisfaction, core types,
-instantiation of *types*, and the `mono` check that this spec's first argument
-rests on. That half is under test and is part of the 613 subtests
-[012](012-type-checking.md) counts.
+`internal/audit/testdata/probes/generic-func` was the corpus's one refused
+generic program and it is compiled and run now: the probe corpus is 91 ok, 4
+refused and 0 wrong. `internal/e2e/generic_test.go` links a program holding
+five generics at two type argument lists each and runs it, and reads the
+symbols back out with `go tool nm`.
 
-In place of a stenciler the IR builder holds a refusal. `ir/build.go` skips a
-generic function or method, and `ir/convert.go` treats a type parameter reaching
-the type converter as a bug, because a type parameter there can only mean an
-uninstantiated body arrived. The property this spec claims at the end therefore
-holds today, that nothing below [020](020-ir.md) sees a type parameter, but it
-holds because the bodies are dropped and not because they were instantiated.
+### How a body is instantiated
 
-**What a stenciler will need from `ir` is not there either.** `ir.Build` takes
-a package, its files and the checker's `Info`, and one decoded body is none of
-the three. A per-function entry point is the thing the reader cannot supply
-from its side, and it is what this spec asks [020](020-ir.md) for.
+The IR builder already walks a syntax tree and asks the checker for the type of
+every expression and the object of every name. A generic body is the same walk
+with one difference: the checker's answers hold type parameters, and the answer
+the stenciler wants is that answer with the type arguments in place of them. So
+the substitution is applied at the doors every type comes through, `irType` and
+`typeOf`, and no case of the walk is duplicated.
 
-**The body reader is built, and the writer carries a generic declaration.** [015](015-export-data.md) reads the body of a generic another
-package declares: every body element of all 375 standard library packages
-decodes, 820 of them through the path a generic takes, into a tree
-`export/body.go` owns. So the stenciler has its input now, and what it takes
-is not `syntax` and not `ir` but the format's own statement and expression
-codes, with the types resolved and the local variables numbered.
+```mermaid
+flowchart LR
+  S["syntax tree of f[T any]"] --> W["the IR builder's walk"]
+  I["types2.Info<br/>types holding T"] --> D["irType / typeOf"]
+  D -->|"Substitution.Type"| C["types holding int"]
+  C --> W
+  W --> O["ir.Func p.f[int]"]
+```
 
-**The builder is built too, and it builds a generic body now.**
-`export/bodybuild.go` turns `syntax` plus the checker's record into the same
-tree, and 6,150 body elements of 371 standard library packages come out as
-`gc`'s own tree for the same function, none differing
-([015](015-export-data.md) has the oracle). 182 of them are generic bodies. So
-both directions exist: a body can be read out of an archive and a body can be
-built out of source.
+`types2.Substitution` is the door on the checker's own `subst.go`
+(`types2/stencil.go`). Nothing re-derives substitution: it calls the method
+`Instantiate` calls, with a nil `*Checker`, which is the mode `subst.go` is
+already written for. `Instantiate` alone cannot serve, because it takes a
+generic `*Alias`, `*Named` or `*Signature` and a body is made of `[]T`,
+`map[K]V`, `*T` and `func(T)`.
 
-**A body reaches a file now, on the other of the two paths.** nanogo writes
-the bodies an importer can inline and `gc` reads one and inlines it into
-another package ([015](015-export-data.md) has the measurement). That path
-carries no dictionary, which is why it went first: the private root's list
-names an ordinary declaration and every reference in the body is to an element
-the writer allocated.
+An object declared inside the body is keyed by the instantiation as well as by
+the checker object, because a local of type `T` holds an `int` in one
+instantiation and a `string` in another, and one IR object cannot have two
+types. An object declared at package scope keeps the one identity it had.
+
+### Discovery
+
+A call to a generic is discovered where the callee's name is resolved, which is
+the one place both spellings reach: the explicit `F[int]` and the inferred
+`F(1)` put the type arguments on the same `*syntax.Name`, in `Info.Instances`.
+Discovery appends to a slice in walk order and never ranges over the map
+([053](053-determinism.md)). The worklist is drained after the declared
+functions, so an instantiation found inside an instantiated body is built too.
+
+### What is refused, by name
+
+Each of these produces no body, so accepting it would emit a call to a symbol
+nothing defines. Each is reported with the declaration's name, which is what
+replaces an undefined symbol carrying no source position.
+
+| Refused | Why |
+| --- | --- |
+| a method of a generic type | The stenciler instantiates a generic function and not a generic type, so nothing produces the body of `L[int].Get`. `funcSym` also spells `L[int].Get` and `L[string].Get` alike, so the two would be one symbol and two functions. A generic type used for its fields alone compiles and is correct. |
+| a method with type parameters of its own | The third place the language binds a type parameter. Instantiating the receiver does not instantiate the method, so the key of the instantiation is not the list on the selector alone. The Methods section below states the question and does not close it. |
+| an instantiation of a generic another package declared | The body is in that package's archive. [015](015-export-data.md) reads one and [020](020-ir.md) has no entry point that takes one, so there is no tree here to substitute through. |
+
+### Two wrong answers the stenciler surfaced
+
+Both were silent, and both were found by lifting the refusal rather than by
+reading the code.
+
+1. **A method reached through a constraint called the constraint's method.**
+   `x.M()` on a value whose type is a type parameter resolves, in the checker's
+   record, to the method of the *constraint*. Building that selection unchanged
+   emitted a direct call to the interface's symbol, which nothing defines. The
+   selection is looked up again against the substituted receiver now, so each
+   instantiation calls its own concrete method.
+2. **An unnamed result was shared between two instantiations.** An unnamed
+   result variable is in no scope at all, so a rule that keyed an object by its
+   parent scope gave `work[int]` and `work[string]` one result object, and the
+   second body returned `[]int`. The kind of the object decides now, and the
+   scope settles only where a name may be declared at package scope as well as
+   inside a function.
+
+A third was found in the naming. `type Alias = int` makes `Alias` and `int`
+identical, so `id[Alias]` and `id[int]` are one instantiation, and a symbol
+spelled from the source's word gave one body two symbols. `types2.Canonical`
+resolves an alias at every depth, so the symbol is a function of the type's
+identity.
+
+**The type parameter guard still holds, and it stopped firing for the right
+reason.** `ir/convert.go` rejects a type parameter outright and the test that
+asserts it is unchanged. It no longer fires on an instantiation, because the
+bodies are instantiated and not because they are skipped, which is what the
+rule at the end of this file asked for.
+
+**The reader and the builder are both built.** `export/body.go` decodes the
+body of a generic another package declares, exactly, over every body element of
+375 standard library packages, and `export/bodybuild.go` builds the same tree
+out of `syntax`. So the input for the cross-package half exists. What does not
+exist is the path from that tree to `ir`: `ir.Build` takes a package, its files
+and an `Info`, and one decoded body is none of the three. That request stays
+open on [020](020-ir.md).
 
 **A generic function reaches a file, and `gc` instantiates it.**
 `export/bodydict.go` numbers the slots a generic body names, and it is one
 allocator: the builder fills the dictionary while it builds the body and
 `objDict` writes the same lists out, so the slot the body names and the entry
-the dictionary holds cannot disagree. The writer carries a generic function
-with its dictionary and its body, because the format has no shape for a
-generic declaration that does not name a body. `gc` reads a library of generic
-functions nanogo wrote, stencils each at two concrete type arguments, and the
-program links and runs ([015](015-export-data.md) has the measurement).
+the dictionary holds cannot disagree. `gc` reads a library of generic functions
+nanogo wrote, stencils each at two concrete type arguments, and the program
+links and runs ([015](015-export-data.md) has the measurement).
 
-Four generic shapes are refused by name, each because its dictionary is not
-the one a body carries: a generic type declaration and a method of one, whose
-dictionary spans the type and every method it declares; a method with type
-parameters of its own, whose dictionary holds the receiver's ahead of them; a
-generic declaration of another package, whose body and dictionary live in that
-package's archive; and a type declared inside a generic declaration, whose
-every use carries the enclosing type parameters implicitly.
-
-**What is left of [003](003-sequencing.md)'s M2 gate is `ir`, not the format.**
-`ir/build.go` reports a generic function declaration as an error rather than
-skipping it, so a package that declares one is a package nanogo refuses to
-compile, and the writer never sees it. A generic declaration has no run-time
-representation in the package that declares it: `gc` emits nothing for one
-either, and every instantiation is code the importing package generates. So
-what the builder owes is to skip the declaration rather than to fail on it,
-and the export data is already there when it does.
-
-The encoder is also what the stenciler will write through, when an
-instantiated body has to reach a file rather than only `ir`.
-
-This note is at the top rather than at the end because a reader who takes the
-design below for a description of the code will be wrong about the whole file.
+Four generic shapes are refused by the *writer*, each because its dictionary is
+not the one a body carries: a generic type declaration and a method of one,
+whose dictionary spans the type and every method it declares; a method with
+type parameters of its own, whose dictionary holds the receiver's ahead of
+them; a generic declaration of another package, whose body and dictionary live
+in that package's archive; and a type declared inside a generic declaration,
+whose every use carries the enclosing type parameters implicitly.
 
 ## The three strategies
 
@@ -191,15 +230,24 @@ trade and it is accepted.
 A worklist over the package being compiled:
 
 1. Seed with every explicit or inferred instantiation the type checker recorded.
-2. Take an instantiation, substitute the type arguments through the generic
-   body, and type-check the result.
+2. Take an instantiation and build its body, substituting the type arguments
+   through every type the checker recorded for it.
 3. Any instantiation appearing in that body that is not already in the set is
    added.
 4. Repeat until the set is stable. Termination is guaranteed by the mono check.
 
-Substitution operates on the checked tree, not on source text. The type checker's
-`subst.go` already performs it for types and comes with the fork; nanogo extends
-it to function bodies.
+Step 2 says "build" and not "type-check the result", which is the one place the
+built stenciler differs from what this section first said. There is no second
+type check. The checker already resolved the instantiation, and what the
+substitution supplies is the concrete type in place of each type parameter in
+an answer the checker already gave. Re-checking would be a second answer to a
+question that is answered, and the two would differ on exactly the bodies that
+are hard to write.
+
+Substitution operates on the checked tree, not on source text. The type
+checker's `subst.go` performs it for types and comes with the fork.
+`types2.Substitution` is the exported door on it, and `ir/stencil.go` applies it
+where the builder reads a type.
 
 ### Identity and naming
 
@@ -220,6 +268,43 @@ This is the same requirement [032](032-type-descriptors-and-itabs.md) places on
 type descriptor names, and it is met the same way: one naming function, used
 everywhere, deterministic by [053](053-determinism.md).
 
+Canonical means under the type's identity and not under the source's word for
+it. `type Alias = int` makes `Alias` and `int` identical, so a symbol spelled
+from the source gives one instantiation two names. `types2.Canonical` resolves
+an alias at every depth before the name is written.
+
+### Why this name cannot collide with one gc wrote
+
+Both compilers put functions into one binary, so the question is not whether
+the spelling is reasonable but whether `gc` ever produces it. It does not, and
+the evidence is `go tool nm` rather than a source file. For
+
+```go
+func pick[T any](a, b T, f bool) T
+```
+
+instantiated at `int`, at `string` and at two distinct one-pointer structs, the
+symbols in the linked binary are
+
+```
+main.pick[go.shape.int]
+main.pick[go.shape.string]
+main.pick[go.shape.struct { main.p *int }]
+main..dict.pick[int]
+main..dict.pick[string]
+main..dict.pick[main.S]
+```
+
+A body of `gc`'s carries `go.shape.` inside the brackets, because `gc` stencils
+by GC shape. A dictionary of `gc`'s carries `..dict.` before the name. A full
+stencil carries neither, so `main.pick[int]` is a name `gc` has no way to write.
+`internal/e2e/generic_test.go` reads the symbol table of a linked program and
+asserts it, on the symbols of the package nanogo compiled.
+
+The two agree on how a type argument is spelled: `gc` writes its dictionary
+through `types.LinkString` and nanogo writes `types2.TypeString` with no
+qualifier, and both give every defined type its import path.
+
 ### Where the instantiation is compiled
 
 In the package that triggers it, marked as a deduplicable definition. The linker
@@ -235,6 +320,14 @@ a defined type, gets a descriptor like any other, and satisfies interfaces by
 the same rules, so that half of the language reaches
 [032](032-type-descriptors-and-itabs.md) as no special case at all.
 
+A method on a generic *type* is instantiated with the type in the design above,
+and the built stenciler does not instantiate a generic type, so it refuses one.
+The reason is in the refusal table: nothing produces the body of `L[int].Get`,
+and `funcSym` spells `L[int].Get` and `L[string].Get` alike, so the two would be
+one symbol and two functions. Lifting that refusal is instantiating a generic
+type, which is naming the type, converting it, giving it a descriptor and
+building each of its methods, and it is the next piece of this spec.
+
 A method may also declare its own type parameters. `types2/resolver.go` gates
 the declaration on `go1_27` and names the feature "generic method",
 `export/pkgbits`'s version `V4` encodes one as a standalone function object,
@@ -242,10 +335,10 @@ and `export/reader.go` reads one. So a method is a third place a type parameter
 is bound, beside a function and a type, and instantiating the receiver does not
 instantiate the method.
 
-What that costs is not settled here, and it should be settled before a
-stenciler is written. The discovery rule and the identity rule above are both
-stated over functions and types, and neither says what the key of an
-instantiated generic method is when the receiver is already concrete.
+What that costs is still not settled. The discovery rule and the identity rule
+above are both stated over functions and types, and neither says what the key of
+an instantiated generic method is when the receiver is already concrete. The
+stenciler refuses one by name rather than guessing the key.
 
 ## What the rest of the compiler sees
 
@@ -258,39 +351,81 @@ This is the property that pays for the binary size, and it is worth stating as a
 rule: **no spec numbered 020 or above may mention a type parameter.** If one
 needs to, this decision was wrong.
 
-The rule holds today and the enforcement is real, but it sits one level lower
-than the sentence suggests. `ir.Convert` rejects a type parameter outright and a
-test asserts the rejection. That guard is what a stenciler will be measured
-against on the day one is written: it must stop firing because the bodies were
-instantiated, not because they were skipped.
+The rule holds and the enforcement is real, but it sits one level lower than the
+sentence suggests. `ir.Convert` rejects a type parameter outright and a test
+asserts the rejection. That guard was the measure a stenciler had to meet, and
+it is met for a generic function this package declares: the guard stopped firing
+on an instantiation because the body was instantiated and not because it was
+skipped.
 
-Two specs above 020 name a type parameter today, and they name the guard rather
-than the language: [032](032-type-descriptors-and-itabs.md) records that the
-refusal of a descriptor for one comes from `ir/convert.go` and not from
-`rtype`, and [060](060-selfhost.md) counts the one bootstrap package the guard
-refuses. Both are readings of the guard, and both go when the stenciler lands,
-which is the outcome the rule is asking for.
+It still fires on the two shapes the stenciler refuses, and that is the honest
+outcome rather than a gap papered over. A type parameter reaching the IR still
+means an uninstantiated body arrived.
+
+Two specs above 020 name a type parameter, and they name the guard rather than
+the language: [032](032-type-descriptors-and-itabs.md) records that the refusal
+of a descriptor for one comes from `ir/convert.go` and not from `rtype`, and
+[060](060-selfhost.md) counts the bootstrap packages the guard refuses. Both are
+readings of the guard. Neither is this spec's to rewrite, and both should be
+re-read now that a generic function of the package being compiled no longer
+reaches the guard.
 
 ## Testing
 
-Only the last of these is built. It arrives with the fork: `mono_test.go` is one
-of the ported upstream test files and it runs. The other three wait on a
-stenciler and cannot be written before one exists.
+What is built:
+
+- **A program that runs.** `internal/e2e/generic_test.go` builds a module with
+  `nanogo build`, links it and runs it. The program holds five generics at two
+  type argument lists each: a value of the type parameter's type, an operation
+  whose instruction depends on the type argument, a local of a composite type
+  built out of it, a method reached through the constraint on two types whose
+  bodies differ, and a call to another generic. The exit status is the
+  assertion, so a wrong value kills the process.
+- **The naming, read out of the linked binary.** The same test runs
+  `go tool nm` and asserts every expected symbol is there, and that no symbol of
+  the package nanogo compiled carries `go.shape.` or `..dict.`.
+- **The probe corpus.** `probes/generic-func` compiles, links, runs, and is
+  compared against the same program compiled by `gc`. It was the corpus's one
+  refused generic program.
+- **Instantiation set closure**, in `ir/stencil_test.go`: the discovered set is
+  compared against a hand-computed expected list, in order, for a nested chain
+  of three generics at two type arguments and for a generic that calls itself.
+- **Deduplication**, in the same file: two call sites at one type argument list
+  are one body, and `id[Alias]` and `id[int]` are one body.
+- **Determinism**: the same source is built nine times and the symbol list is
+  compared, which [053](053-determinism.md) requires.
+- **Rejection**: the `mono` corpus arrives with the fork and `mono_test.go`
+  runs.
+
+What is not:
 
 - Go's `test/typeparam` corpus, which is the reference implementation's own
-  generics suite, run under [004](004-conformance.md) L2. It is not vendored
-  yet: `internal/gotest/testdata/go/test` holds the 356 top-level files of
-  `test/` and none of its subdirectories, so a stenciler brings the corpus with
-  it.
-- Instantiation set closure: for a corpus of generic programs, assert the
-  discovered set matches a hand-computed expected set. This is the part that
-  fails silently by being too small.
-- Cross-package deduplication: two packages instantiating the same generic must
-  yield one symbol in the linked binary.
-- Rejection: the `mono` corpus, asserting nanogo rejects unbounded recursive
-  instantiation at the right position rather than looping.
+  generics suite, run under [004](004-conformance.md) L2. It is not vendored:
+  `internal/gotest/testdata/go/test` holds the 356 top-level files of `test/`
+  and none of its subdirectories. It is the next test to add, and it is what
+  will find the shapes the list above was written by imagining rather than by
+  measuring.
+- Cross-package deduplication, which needs the cross-package half of the
+  stenciler first.
 
 ## What was wrong
+
+**The spec said a stenciler needs a per-function entry point on `ir`.** It
+asked [020](020-ir.md) for one, on the ground that "`ir.Build` takes a package,
+its files and an `Info`, and one decoded body is none of the three". That is
+true for the cross-package half and it was stated as though it were true for
+all of it. It is not: a generic this package declares has a syntax tree here
+already, and the walk that builds it is the one that builds every other
+function. So the stenciler for the same package needed nothing new from
+[020](020-ir.md), and the request stands only for the half that reads a body out
+of an archive.
+
+**The spec planned a second type check per instantiation.** Step 2 of the
+worklist said "substitute the type arguments through the generic body, and
+type-check the result". The built stenciler does not type-check anything. The
+checker resolved the instantiation before the IR is built, and what the
+substitution supplies is the concrete type in place of each type parameter in
+an answer the checker already gave.
 
 **The spec said Go has no generic methods.** The sentence was "a method may not
 declare its own type parameters", and it carried the conclusion that generics

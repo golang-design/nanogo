@@ -87,7 +87,7 @@ believed.
 | [010](010-scanner-and-positions.md) | Positions and scanner | `complete` | `Pos`, `//line`, semicolon insertion |
 | [011](011-parser-and-ast.md) | Parser and syntax tree | `complete` | the two grammar ambiguities |
 | [012](012-type-checking.md) | Type checking | `complete` | forking `types2` |
-| [013](013-generics.md) | Generics | `draft` | full stenciling; the stenciler is not written |
+| [013](013-generics.md) | Generics | `draft` | full stenciling; built for a generic the package declares, refused for a generic type and for another package's |
 | [014](014-package-loader.md) | Package loader | `in progress` | `go list` at G1, direct resolution at G2 |
 | [015](015-export-data.md) | Export data | `in progress` | `gc`-compatible; both directions work and `gc` inlines a body nanogo wrote, a generic declaration is refused |
 | [016](016-directives-and-pragmas.md) | Directives and pragmas | `in progress` | the complete `//go:` table; fourteen verbs are recorded and no pass reads one |

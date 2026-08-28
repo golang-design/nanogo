@@ -310,8 +310,14 @@ order of weight.
    from this package would put a second IR builder beside the one
    [020](020-ir.md) owns.
 
-So the tree is the format, named. Its consumer is
-[013](013-generics.md)'s stenciler, which substitutes the type arguments
+So the tree is the format, named. Its consumer is [013](013-generics.md)'s
+stenciler, and the stenciler is built for the half that does not read it: a
+generic the package being compiled declares has a syntax tree already, and it is
+instantiated by the IR builder's own walk with the checker's answers
+substituted. What is left for this tree is the other half, an instantiation of a
+generic another package declared, which the stenciler refuses by name today.
+That is the reading of the request on [020](020-ir.md): the door is needed for
+one path and not for both. The stenciler substitutes the type arguments
 through it and lowers the result. What the stenciler needs from the tree is
 what the format already carries, because it is what `gc`'s own stenciler reads
 out of the same bytes.
