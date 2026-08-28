@@ -399,10 +399,27 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 	out = append(out, nd)
 	relocs = append(relocs, Reloc{Off: offStr, Size: 4, Type: obj.R_ADDROFF, Target: nd.Name})
 
-	// PtrToThis is left zero. The field is documented as optional, and the
-	// alternative is a weak offset relocation, which obj does not declare
-	// (specs/041 stops at the arm64 group). The cost is that reflect.PointerTo
-	// builds a descriptor at run time rather than finding the linked one.
+	// PtrToThis names the descriptor of *T, which is how reflect.PointerTo
+	// finds the linked one instead of building a descriptor of its own. A
+	// built one carries no method set, so reflect.PointerTo(T).NumMethod()
+	// answered zero for a T with methods, and Go's own test/reflectmethod7.go
+	// is the program that showed it.
+	//
+	// gc writes the field for every type and makes the reference weak unless
+	// the type has a name or *T has methods. This writes it only in the case
+	// gc makes strong, because a weak reference does not keep its target
+	// alive: the linker would drop the descriptor this object emits and the
+	// field would be zero again. What is left out is the weak half, where a
+	// dropped reference and no reference are the same zero.
+	if pt, err := PointerToThis(t); err != nil {
+		return nil, err
+	} else if pt != nil {
+		sym, err := ir.TypeSymbol(pt)
+		if err != nil {
+			return nil, err
+		}
+		relocs = append(relocs, Reloc{Off: offPtrToThis, Size: 4, Type: obj.R_ADDROFF, Target: sym})
+	}
 	out[0] = Symbol{
 		Name:        name,
 		Kind:        obj.SRODATA,
@@ -448,7 +465,46 @@ func Referenced(t *ir.Type) ([]*ir.Type, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(out, more...), nil
+	out = append(out, more...)
+	// The descriptor of *T, which this type's PtrToThis names. It is a
+	// reference and not a root: whoever writes T's descriptor owes the symbol
+	// the field points at.
+	pt, err := PointerToThis(t)
+	if err != nil {
+		return nil, err
+	}
+	if pt != nil {
+		out = append(out, pt)
+	}
+	return out, nil
+}
+
+// PointerToThis returns the type a descriptor's PtrToThis names, and nil for a
+// type whose field is left zero.
+//
+// The rule is gc's dcommontype, restricted to the half gc makes a strong
+// reference. gc writes *T for every type that is not a pointer, weakly unless
+// T has a name or *T has methods, and a weak reference does not keep its
+// target alive. So the weak half would be a symbol this object emits, the
+// linker drops, and the field then reads as zero, which is where the field
+// started.
+//
+// A pointer is left out because gc leaves it out: **T is a type nothing asks
+// reflect for, and writing it would make the closure of one descriptor grow
+// without end.
+//
+// A type the runtime owns is left out too. Its descriptor is the runtime's and
+// so is its PtrToThis, so a second answer here would be a reference to a
+// symbol nobody in this link is obliged to define.
+func PointerToThis(t *ir.Type) (*ir.Type, error) {
+	if t == nil || t.Kind == ir.Ptr || t.Name == "" || RuntimeOwned(t) {
+		return nil, nil
+	}
+	pt := &ir.Type{Kind: ir.Ptr, Elem: t}
+	if err := ir.Layout(pt); err != nil {
+		return nil, err
+	}
+	return pt, nil
 }
 
 // kindDataOffset is where the kind-specific data of a descriptor starts, which

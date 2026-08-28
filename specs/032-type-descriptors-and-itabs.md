@@ -518,12 +518,25 @@ Four fields are worth calling out because each has a way of being subtly wrong:
   at the code: pointing it at the function makes the runtime call whatever the
   first instruction encodes.
 
-`PtrToThis` is left zero, which the field permits. The cost is that
-`reflect.PointerTo` builds a descriptor at run time instead of finding the
-linked one. Emitting it is open work rather than a blocked one: `obj` declares
-`R_WEAKADDROFF`, the weak offset relocation `gc` uses for this field, so what
-is missing is a writer that names the descriptor of `*T` and a decision about
-which package owes it.
+`PtrToThis` names the descriptor of `*T` for a defined type this package owns,
+and is zero for everything else. `rtype.PointerToThis` is the one rule and
+`rtype.Referenced` reads it as well, so the symbol the field points at is in
+the closure and the object that writes `T` writes `*T` too.
+
+The field is what `reflect.PointerTo` reads. Without it `reflect` builds a
+descriptor for `*T` at run time, and a built one carries no method set, so
+`reflect.PointerTo(T).NumMethod()` answered zero for a `T` that has methods.
+Go's own `test/reflectmethod7.go` is that program.
+
+Half of `gc`'s rule is left out on purpose. `gc` writes the field for every
+type that is not a pointer and makes the reference *weak* unless the type has a
+name or `*T` has methods. A weak reference does not keep its target alive, so
+the weak half would be a descriptor this object emits, the linker drops, and a
+field that reads as zero again, which is where the field started. A pointer is
+left out because `gc` leaves it out: `**T` is a type nothing asks `reflect`
+for, and writing it would make the closure of one descriptor grow without end.
+A type the runtime owns is left out because its descriptor is the runtime's and
+so is its `PtrToThis`.
 
 **Where `GCData` diverges from `gc`.** `ir.scalarPtrBits` marks both words
 of an interface as pointers and `cmd/compile/internal/typebits` marks only the
@@ -1424,14 +1437,16 @@ differ, so a row built for that name would write past the end of the frame slot.
 contradicted it. [020](020-ir.md)'s row table still names `mapiterinit` and
 `mapiternext` and is not corrected here.
 
-### `PtrToThis` was blamed on a relocation that exists
+### `PtrToThis` was blamed on a relocation that exists, and then written
 
 This spec said the field is left zero because "the alternative is a weak offset
 relocation, and `obj` declares no weak type". `obj/obj.go` declares `R_WEAK`,
-`R_WEAKADDR` and `R_WEAKADDROFF`. Zero is still what the field carries and the
-cost is unchanged, but the reason above is a writer that does not exist, not a
-relocation type that does not exist. `rtype/rtype.go`'s comment on the same
-line repeats the old reason and has not been corrected.
+`R_WEAKADDR` and `R_WEAKADDROFF`, so the reason was a writer that does not
+exist and not a relocation type that does not exist.
+
+The writer exists now, and it needs no weak relocation at all: the half of
+`gc`'s rule that a weak reference serves is the half where a dropped reference
+and no reference are the same zero. The section above states the rule.
 
 ### One spelling was two
 

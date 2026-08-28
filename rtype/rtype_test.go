@@ -408,10 +408,79 @@ func TestStrIsAnOffset(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: name data holds %q, want %q", c.src, got, want)
 		}
-		// PtrToThis is deliberately zero, so nothing may relocate it.
+		// PtrToThis is zero for a type with no name, which every type in this
+		// corpus is. TestPtrToThisNamesThePointerDescriptor has the other half.
 		if _, ok := reloc(syms[0], 44); ok {
-			t.Errorf("%s: PtrToThis is relocated and the package leaves it zero", c.src)
+			t.Errorf("%s: PtrToThis is relocated and a type with no name leaves it zero", c.src)
 		}
+	}
+}
+
+// TestPtrToThisNamesThePointerDescriptor is what reflect.PointerTo reads.
+//
+// Without it reflect builds a descriptor for *T at run time, and a built one
+// carries no method set, so reflect.PointerTo(T).NumMethod() answers zero for
+// a T that has methods. Go's own test/reflectmethod7.go is that program: it
+// asks reflect.PointerTo(T).MethodByName for a method the type has and gets
+// nothing back.
+func TestPtrToThisNamesThePointerDescriptor(t *testing.T) {
+	named := &ir.Type{
+		Kind:    ir.Int64,
+		Name:    "p.S",
+		PkgPath: "p",
+		Basic:   "int",
+		Methods: []ir.Method{},
+	}
+	if err := ir.Layout(named); err != nil {
+		t.Fatal(err)
+	}
+	syms, err := rtype.Descriptor(named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := reloc(syms[0], 44)
+	if !ok {
+		t.Fatal("a defined type leaves PtrToThis unrelocated")
+	}
+	if r.Type != obj.R_ADDROFF || r.Size != 4 {
+		t.Errorf("PtrToThis relocation is %v/%d, want R_ADDROFF/4", r.Type, r.Size)
+	}
+	if r.Target != "type:*p.S" {
+		t.Errorf("PtrToThis names %q, want type:*p.S", r.Target)
+	}
+
+	// The symbol it names is owed by whoever writes this descriptor, so it is
+	// in the reference set and the closure emits it.
+	refs, err := rtype.Referenced(named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) == 0 {
+		t.Fatal("a defined type reaches nothing and owes the descriptor of a pointer to it")
+	}
+	last := refs[len(refs)-1]
+	if last.Kind != ir.Ptr || last.Elem != named {
+		t.Fatalf("the last type reached is %s, want a pointer to p.S", last)
+	}
+
+	// A pointer has no PtrToThis of its own, which is what stops the closure
+	// of one descriptor from growing without end.
+	pt, err := rtype.PointerToThis(last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt != nil {
+		t.Errorf("a pointer reaches %s through PtrToThis", pt)
+	}
+
+	// A type the runtime owns has the runtime's PtrToThis, and a second answer
+	// here would name a symbol nobody in the link is obliged to define.
+	owned := &ir.Type{Kind: ir.Int64, Name: "int", Basic: "int"}
+	if err := ir.Layout(owned); err != nil {
+		t.Fatal(err)
+	}
+	if pt, err := rtype.PointerToThis(owned); err != nil || pt != nil {
+		t.Errorf("int reaches %v through PtrToThis (%v)", pt, err)
 	}
 }
 
