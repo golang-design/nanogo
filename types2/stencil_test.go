@@ -192,3 +192,112 @@ func TestTypeParamsOfReadsEveryGenericDeclaration(t *testing.T) {
 		t.Errorf("[]int has type parameters %v", got)
 	}
 }
+
+// canonSrc names one alias and the shapes a type argument can be built out of,
+// so that a test can ask for a type holding an alias below the top level.
+const canonSrc = `package q
+
+type Alias = int
+
+type List[T any] struct{ v T }
+
+type Str struct {
+	F Alias
+	G string
+}
+
+type Iface interface{ M(Alias) Alias }
+
+var (
+	A  Alias
+	P  *Alias
+	S  []Alias
+	R  [3]Alias
+	C  chan Alias
+	M  map[Alias][]*Alias
+	F  func(Alias) (Alias, error)
+	L  List[Alias]
+	L2 List[int]
+	N  List[[]Alias]
+	St Str
+	I  interface{ M(Alias) Alias }
+	D  struct{ X Alias }
+)
+`
+
+// canonType returns the type of the package-level variable named name.
+func canonType(t *testing.T, pkg *Package, name string) Type {
+	t.Helper()
+	obj := pkg.Scope().Lookup(name)
+	if obj == nil {
+		t.Fatalf("%s is not declared", name)
+	}
+	return obj.Type()
+}
+
+// TestCanonicalResolvesAnAliasAtEveryDepth is the property a linker symbol
+// rests on.
+//
+// "type Alias = int" makes Alias and int identical, so an instantiation
+// written at Alias and one written at int are one instantiation. A name
+// derived from the spelling rather than from the identity would give one body
+// two symbols and put two copies of it in the program.
+func TestCanonicalResolvesAnAliasAtEveryDepth(t *testing.T) {
+	pkg := mustTypecheck(canonSrc, nil, &Info{})
+	ctxt := NewContext()
+	for _, tt := range []struct{ name, want string }{
+		{"A", "int"},
+		{"P", "*int"},
+		{"S", "[]int"},
+		{"R", "[3]int"},
+		{"C", "chan int"},
+		{"M", "map[int][]*int"},
+		{"F", "func(int) (int, error)"},
+		{"L", "q.List[int]"},
+		{"N", "q.List[[]int]"},
+		{"D", "struct{X int}"},
+		{"I", "interface{M(int) int}"},
+	} {
+		got := TypeString(Canonical(ctxt, canonType(t, pkg, tt.name)), nil)
+		if got != tt.want {
+			t.Errorf("%s canonicalises to %s, want %s", tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestCanonicalIsTheIdentityOnATypeWithNoAlias pins that a type holding no
+// alias is returned and not rebuilt, because the naming function calls this on
+// every type argument and almost none of them holds one. An instantiated
+// defined type is the exception, and the test below says why.
+func TestCanonicalIsTheIdentityOnATypeWithNoAlias(t *testing.T) {
+	pkg := mustTypecheck(canonSrc, nil, &Info{})
+	ctxt := NewContext()
+	for _, name := range []string{"St"} {
+		have := canonType(t, pkg, name)
+		if got := Canonical(ctxt, have); got != have {
+			t.Errorf("%s was rebuilt: %s", name, TypeString(got, nil))
+		}
+	}
+	if Canonical(ctxt, nil) != nil {
+		t.Error("Canonical of no type returned a type")
+	}
+	if got := Canonical(nil, Typ[Int]); got != Typ[Int] {
+		t.Errorf("Canonical with no Context returned %s", TypeString(got, nil))
+	}
+}
+
+// TestCanonicalGivesOneNamedForOneInstantiation is why the Context is a
+// parameter: List[Alias] and List[int] are one type, and a caller that keys an
+// IR type by the checker type's pointer must get one answer for both.
+func TestCanonicalGivesOneNamedForOneInstantiation(t *testing.T) {
+	pkg := mustTypecheck(canonSrc, nil, &Info{})
+	ctxt := NewContext()
+	aliased := Canonical(ctxt, canonType(t, pkg, "L"))
+	plain := Canonical(ctxt, canonType(t, pkg, "L2"))
+	if aliased != plain {
+		t.Errorf("List[Alias] canonicalises to %p and List[int] to %p", aliased, plain)
+	}
+	if !Identical(aliased, plain) {
+		t.Error("List[Alias] and List[int] canonicalise to types that are not identical")
+	}
+}
