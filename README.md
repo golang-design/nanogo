@@ -386,13 +386,13 @@ The Go distribution is the measure of reach. The `ir` row above builds a typed
 tree from all of it, 41,354 functions. How much of that tree the middle end
 accepts is the number below.
 
-**20,850 of those functions reach SSA construction** from a tree the lowering
-pass has not touched, and 20,793 of them lower completely to arm64 machine
-operations. 20,793 of the 20,850 carry a stack map.
+**20,871 of those functions reach SSA construction** from a tree the lowering
+pass has not touched, and 20,812 of them lower completely to arm64 machine
+operations. 20,812 of the 20,871 carry a stack map.
 
 The lowering pass builds part of [`specs/020`](specs/020-ir.md)'s table, and
 the driver runs it before construction, so a real compile reaches further:
-**39,450 of them get past construction once the lowering pass has run**. A
+**40,385 of them get past construction once the lowering pass has run**. A
 composite literal, `len`, a slice expression, `new`, and `make` of a slice are
 lowered and no longer refused.
 

@@ -346,7 +346,7 @@ What this section asked for and does not have:
   proves code generation: nanogo compiled the program, it ran, and its output
   and exit status are `gc`'s. 3 more are compiled without being run, and 74 are
   rejected, which exercises the checker and not the back end. The blocker is
-  above this spec: the compiler refuses the rest, and 39,450 of the
+  above this spec: the compiler refuses the rest, and 40,385 of the
   distribution's 41,354 functions get past SSA construction once the lowering
   pass has run, which is what the driver does. The 10/3/74 split lives in
   `internal/gotest/testdata/ratchet.txt`, not in

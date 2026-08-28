@@ -30,8 +30,8 @@ whose descriptor `rtype` cannot write, so the message names one type per package
 and says nothing about how many are behind it: `syntax` names `ArrayType`, `ir`
 names `Class`, `obj` names `Aux`, `rtsym` names `Group`, and `driver` names
 `Allowlist`. The count of nanogo packages that nanogo compiles is the measure,
-and no arithmetic over the language subset stands in for it. It is two of
-nineteen, and the section that measures it names the five packages that block
+and no arithmetic over the language subset stands in for it. It is three of
+nineteen, and the section that measures it names the four packages that block
 the rest.
 
 What is left is [032](032-type-descriptors-and-itabs.md)'s encoder gap, which
@@ -72,9 +72,9 @@ well as the language rows below.
 
 The second-order measure is the language, and it says the same thing more
 slowly. The IR builder produces a typed tree for 536 packages of the
-distribution. SSA construction takes 20,850 of those functions on its own, and
-39,450 once the lowering pass has run first, which is what the driver does. Of
-the 20,850, all but 57 lower to arm64 machine operations and the same number
+distribution. SSA construction takes 20,871 of those functions on its own, and
+40,385 once the lowering pass has run first, which is what the driver does. Of
+the 20,871, all but 59 lower to arm64 machine operations and the same number
 carry a stack map, so the back half of the pipeline refuses almost nothing the
 front half hands it. Every one of those numbers is in
 `internal/hygiene/testdata/facts.json`, gated, and written out in full in the
@@ -130,11 +130,12 @@ receiver, interfaces with their calls, conversions, assertions and type
 switches, slices with `append`, strings with `range`, maps, channels with
 `select`, closures with captures, `defer`, `go`, `panic` and `recover`, and a
 generic function the compiling package declares, stencilled per list of type
-arguments. What the first column still waits on is narrower than the column
-itself, and the table of blockers below names it: the data word of a conversion
-to an interface when the value has to be copied into the frame first, an
-instantiation of a generic another package declares, and a descriptor whose
-pointer map is longer than one word.
+arguments, and a value of any concrete type goes into an interface, whatever
+its shape. What the first column still waits on is narrower than the column
+itself, and the table of blockers below names it: an instantiation of a generic
+another package declares, a descriptor whose pointer map is longer than one
+word, a generated hash function, and a closure over a named result in a
+function that defers.
 
 The standard library entries are the decisive ones. nanogo's dependency set
 reaches a large part of `fmt`, `go/types`' fork, and the `internal` packages
