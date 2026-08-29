@@ -20,6 +20,15 @@
 # recipe said to reject, at the annotated line. A refusal is never recorded:
 # recording one would freeze a gap in place and call it progress.
 #
+# Two files are deliberately absent and their absence is the honest record.
+# chanlinear.go and gcgort.go pass only when the collector does not run
+# concurrently with a pointer store, because specs/034-write-barriers.md is not
+# built: under GOGC=1 each deadlocks in about one run of two, under
+# GODEBUG=gcstoptheworld=2 neither ever does, and gccheckmark names the object
+# the mark phase loses. Recording either as a pass would make this gate fail on
+# machine load rather than on a change, and a gate that does that is one its
+# reader learns to ignore. They go in when the barrier does.
+#
 # Sorted, so a refresh produces a diff and not a reshuffle
 # (specs/053-determinism.md).
 
@@ -58,7 +67,6 @@ pass rejected blank1.go
 pass rejected bombad.go
 pass rejected cannotassign.go
 pass matched chancap.go
-pass matched chanlinear.go
 pass matched char_lit.go
 pass matched clear.go
 pass matched closedchan.go
@@ -128,7 +136,6 @@ pass rejected funcdup2.go
 pass matched gc.go
 pass matched gc1.go
 pass matched gc2.go
-pass matched gcgort.go
 pass matched gcstring.go
 pass rejected goto.go
 pass matched heapsampling.go

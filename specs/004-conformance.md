@@ -180,9 +180,18 @@ structural numbers this document does state are gated against that file by
 `TestTheSpecStatesWhatTheRatchetRecords`, so they cannot rot in silence:
 
 - the corpus is **356** files.
-- **198** of them pass.
+- **196** of them pass.
 
-The remaining 158 are not failures. They are refusals with a reason, kinds this
+Two more compile and run and are still not recorded. `chanlinear.go` and
+`gcgort.go` pass only when the collector does not run concurrently with a
+pointer store, because [034](034-write-barriers.md) is not built: under
+`GOGC=1` each deadlocks in about one run of two, under
+`GODEBUG=gcstoptheworld=2` neither ever does, and `gccheckmark=1` names the
+object the mark phase loses. A ratchet entry for either would make this gate
+fail on machine load rather than on a change, and the ratchet's own header says
+why that is refused. They go in when the barrier does.
+
+The remaining 160 are not failures. They are refusals with a reason, kinds this
 harness does not carry out, recipes whose compiler flags nanogo has no
 equivalent of, and files this platform excludes. Every one of them is counted
 and named in the report.
