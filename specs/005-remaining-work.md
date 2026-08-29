@@ -281,19 +281,19 @@ measured this way.
 
 **Twelve compile**: the root package, `dist`, `driver`, `export/pkgbits`,
 `link`, `loader`, `obj`, `obj/arm64`, `rtsym`, `rtype`, `ssa` and `ssa/rules`.
-Two are commands the harness delegates. Five fail, on two blockers:
+Two are commands the harness delegates. Five fail, on one blocker:
 
 | Blocker | Packages | Owner |
 | --- | --- | --- |
-| a generic declaration another package owns, whose body lives only in that package's archive and is never read back | 4: `export`, `ir`, `ssagen`, `syntax` | [015](015-export-data.md), [013](013-generics.md) |
-| a type parameter has no run-time representation | 1: `types2` | [032](032-type-descriptors-and-itabs.md) |
+| a generic declaration another package owns, whose body lives only in that package's archive and is never read back | 5: `export`, `ir`, `ssagen`, `syntax`, `types2` | [015](015-export-data.md), [013](013-generics.md) |
 
-One subsystem gates four of the five, and it is the export-data body
-**reader**. All four reach it through `sync/atomic.Pointer[T]`: three of them
-have to re-export the declaration and cannot, because gc's format writes a
-generic declaration as a body reference and that body is in `sync/atomic`'s
-archive; `syntax` has to stencil `Pointer[[]*SrcFile].Store` and needs the same
-body for the same reason. nanogo writes bodies and does not read them.
+One subsystem gates all five, and it is the export-data body **reader**. Four
+reach it through `sync/atomic.Pointer[T]`: three have to re-export the
+declaration and cannot, because gc's format writes a generic declaration as a
+body reference and that body is in `sync/atomic`'s archive, and `syntax` has to
+stencil `Pointer[[]*SrcFile].Store` and needs the same body for the same
+reason. `types2` reaches it through `slices.Contains` instantiated at a type of
+its own. nanogo writes bodies and does not read them.
 
 An earlier version of this table said a *method of a generic type* owned three
 of these. That was wrong, and the way it was wrong is worth keeping. The
