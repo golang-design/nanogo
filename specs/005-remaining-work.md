@@ -286,47 +286,15 @@ delegates. One fails:
 
 | Blocker | Packages | Owner |
 | --- | --- | --- |
-| a range over a function, at six call sites of `types2`'s own `typeset` | 1: `types2` | [021](021-ssa-construction.md) |
+| a method value of an interface, which reads its function out of the itab | 1: `types2` | [033](033-closures-defer-panic.md) |
 
-A generic another package declares is stencilled now. The body is read out of
-that package's archive with the dictionary its slots were numbered against, and
-`ir/foreign.go` substitutes the type arguments through it, which is the entry
-point both refusals in `ir/stencil.go` used to name as missing. Four end-to-end
-tests build with nanogo, run, and compare against an all-gc build, at element
-types of one word, two words with a runtime comparison, and a three-word struct
-with a pointer, so a wrong substitution is a wrong answer and not a link that
-happened to succeed.
-
-**The foreign stencil no longer stops `types2`.** `ir.Build` accepts every
-instantiation the package reaches: `slices.Sort`, `slices.SortFunc`,
-`slices.IsSortedFunc`, `slices.EqualFunc`, `slices.Contains`, `slices.Index`
-and `cmp.Compare`, and the whole of pdqsort behind the two sorts. The walk gained
-the assignment in all its forms, the three-clause `for`, `break` and `continue`,
-the operation assignment, `++` and `--`, the expression switch, `len` and `cap`,
-a call of a method of a concrete type, and the function literal with its capture
-list. The capture list is taken from the format rather than recovered from the
-objects the literal names, because every object of a foreign body takes the
-unknown position and a list recovered here would have to be sorted by something
-that does not order them ([053](053-determinism.md)).
-
-What stops `types2` now is a different mechanism. `types2`'s own `typeset`
-returns an `iter.Seq2` and six loops range over it, and `ir.Lower` refuses a
-range over a function. That is [021](021-ssa-construction.md)'s row and not the
-stenciler's: `gc` rewrites such a loop into a call taking a `yield` closure,
-with `break`, `continue` and `return` carried out through a state variable and
-`runtime.panicrangeexit`, and nothing here builds any of it.
-
-The refusal names what stops first, so nothing behind that loop has been
-measured. The claim that holds is the one above: `ir.Build` accepts all of
-`types2`'s foreign instantiations, which is a package-wide stage, and the
-failure that follows is per function.
-
-Every kind the mapping still does not cover is refused by name, and the list is
-read off the refusals: a composite literal, a slice expression, a map index, a
-type assertion, a type switch, `make`, `new`, the typed `nil`, every builtin
-that needs a run-time descriptor, `go` and `defer`, a channel send, a `select`,
-a label and the three branches that jump to one, a method reached through a
-dictionary, and a method of an interface.
+`types2` has cleared two blockers and stopped on a third, which is the shape
+this section keeps recording. The foreign walk carries the statement forms its
+instantiations reach, and a range over a function is built, so neither is what
+stops it now. What does is a row that was already in the table for a different
+reason: a method value whose receiver is an interface has no symbol to name,
+because the function is read out of the itab at run time, and it is the same
+row `defer i.M()` and Go's own `recover.go` wait on.
 
 An earlier version of this table said a *method of a generic type* owned three
 of these. That was wrong, and the way it was wrong is worth keeping. The
