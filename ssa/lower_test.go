@@ -136,6 +136,40 @@ func TestLowerFlagsType(t *testing.T) {
 	}
 }
 
+// TestLowerDoesNotSwallowADefectInARule checks the half of the recover that
+// lets a panic through.
+//
+// Lower turns its own LowerError into a result so that a construct with no
+// rule is a refusal and not a stack trace. Recovering anything else would turn
+// a defect in this pass, a nil dereference in a rule, into a report that the
+// operation has no rule, which sends whoever reads it looking for a rule that
+// is already there.
+func TestLowerDoesNotSwallowADefectInARule(t *testing.T) {
+	const boom = "a rule dereferenced nothing"
+	p := lowNew()
+	f := p.ret(p.b.NewValue(0, OpAdd, lowI64, p.b.NewValue(0, OpArg, lowI64), p.b.NewValue(0, OpArg, lowI64)))
+	rs := lowRules(map[Op]ValueRule{
+		OpMakeResult: retRule,
+		OpAdd:        func(v *Value, e *Edit) bool { panic(boom) },
+	})
+
+	defer func() {
+		switch e := recover().(type) {
+		case nil:
+			t.Error("Lower returned rather than letting a rule's own panic through")
+		case string:
+			if e != boom {
+				t.Errorf("Lower re-panicked with %q, want the rule's own %q", e, boom)
+			}
+		default:
+			t.Errorf("Lower turned a rule's panic into %T: %v", e, e)
+		}
+	}()
+	if err := Lower(f, rs); err != nil {
+		t.Errorf("Lower reported %v as a missing rule, and it is a defect in a rule", err)
+	}
+}
+
 // TestLowerMissingRule is the crash specs/025 requires. A silent fallback here
 // produces a function that is missing an operation.
 func TestLowerMissingRule(t *testing.T) {
