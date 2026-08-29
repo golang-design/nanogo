@@ -9,7 +9,7 @@
   "cover.obj/arm64": 99,
   "cover.rtsym": 100,
   "cover.rtype": 91.2,
-  "cover.ssa": 95.5,
+  "cover.ssa": 95.6,
   "cover.ssa/rules": 97.4,
   "cover.ssagen": 90.5,
   "cover.syntax": 99.2,
