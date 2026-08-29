@@ -53,6 +53,7 @@ pass rejected assign.go
 pass rejected assign1.go
 pass matched atomicload.go
 pass matched bigalg.go
+pass matched bigmap.go
 pass matched blank.go
 pass rejected blank1.go
 pass rejected bombad.go
