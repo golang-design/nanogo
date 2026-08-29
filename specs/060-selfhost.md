@@ -220,16 +220,15 @@ The count above is over the packages a `func main() {}` needs. This is the
 narrower and more useful measure: nanogo's own nineteen, compiled by nanogo under
 an allowlist that names all of them.
 
-**Four of nineteen compile, and three leaf packages block the rest.** The other
-twelve fail on an import rather than on themselves, so the work list is the
-three below and not nineteen. `rtsym`, `types2/errors`, `obj` and `obj/arm64`
-compile.
+**Five of nineteen compile, and one reason blocks the rest.** The other
+fourteen fail on an import rather than on themselves, so the work list is the
+two rows below, and the two rows are one reason. `rtsym`, `types2/errors`,
+`obj`, `obj/arm64` and `export/pkgbits` compile.
 
 | Package | What stops it |
 | --- | --- |
 | `syntax` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, reached through `FileSet`. [032](032-type-descriptors-and-itabs.md) owns the descriptor and [013](013-generics.md) the instantiation |
-| `dist` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, the same reason `syntax` stops on and reached here through `Producer`'s map. The generated hash it used to stop on is written now |
-| `export/pkgbits` | `ir: lowering DumpTo: closure: the closure captures the result err, whose storage the single exit of a function that defers owns`. [020](020-ir.md) owns the row |
+| `dist` | the same message, reached through the map keyed by `Producer`. The generated hash it used to stop on is written now |
 
 `loader` and `types2` wait on `syntax`. `export` waits on `pkgbits`. `link`,
 `rtype`, `ir`, `ssa`, `ssagen` and `driver` wait on what is above them.
@@ -245,7 +244,8 @@ compiles. `dist` and `export/pkgbits` wanted the same data word and are now on
 their own next reason. `dist` then wanted the body of the hash its
 `map[Producer]int` names, which [032](032-type-descriptors-and-itabs.md) now
 generates, and moved to the generic instantiation `syntax` waits on: two of
-the three rows are one row. A work list that shortens by one item per fix is not
+the three rows are one row. `export/pkgbits` wanted a named result its `DumpTo`
+captures, which [033](033-closures-defer-panic.md) now builds, and it compiles. A work list that shortens by one item per fix is not
 what this measurement shows: it shows how deep each package's stack of reasons
 is, and only the count of compiling packages moves.
 

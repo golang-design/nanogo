@@ -104,6 +104,7 @@ pass compiled empty.go
 pass matched env.go
 pass compiled eof.go
 pass compiled eof1.go
+pass matched escape.go
 pass matched escape3.go
 pass matched finprofiled.go
 pass matched float_lit.go
@@ -173,6 +174,7 @@ pass matched printbig.go
 pass matched range.go
 pass rejected range2.go
 pass matched range3.go
+pass matched recover4.go
 pass rejected recover5.go
 pass matched reflectmethod4.go
 pass compiled reflectmethod8.go
