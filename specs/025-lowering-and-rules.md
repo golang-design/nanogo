@@ -402,3 +402,26 @@ whatever its width. An array of more than one element is that case, and
 `[4]int` was passed in R0 to R3 by the caller and read out of four frame slots
 by the callee for as long as both rules were written down separately. The
 section above now states both directions.
+
+### `Edit.Replace` is quadratic, and one corpus file times out on it
+
+`Edit.Replace` walks every value of every block to find the uses of the value
+it is replacing. `Edit.cut` calls it once per check it inserts, so a function
+with many nil checks costs values times checks.
+
+Go's own `test/cmplxdivide.go` is that function. It holds a table of 4,114
+entries, and lowering it takes 106 seconds against the corpus budget of 60, so
+the file is `timed-out` where it used to be `refused`. The growth is measured
+rather than argued: 500 entries take 1.5 seconds, 1,000 take 6.8, and 4,114
+take 106.
+
+The fix is a use index and not a better search. `Value.uses` cannot serve:
+`ssa/build.go` clears it at the end of construction on purpose, and
+`ssa/decompose.go` states that it is stale by the time that pass runs and
+builds an index of its own. This pass would do the same, and the cost of doing
+it is keeping the index right through every rewrite a rule makes.
+
+Two other things stop the same file and neither is this one. Its frame is
+393 KB, which is past the offset an `ADD` immediate reaches, and it needs the
+generated hash function [032](032-type-descriptors-and-itabs.md) owes. So
+closing this alone would not make the file pass.
