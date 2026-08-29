@@ -700,7 +700,10 @@ func (e *emitter) argSpill(p place, store bool) {
 		e.fail("argument of type %v has no load or store", p.typ)
 		return
 	}
-	e.memIf(arm64.MemUnsignedOffset, op, p.reg, arm64.RSP, 8+p.off)
+	// mem and not memIf, because the argument area of a function with a long
+	// parameter list runs past the unsigned-offset form just as a spill slot
+	// does, and mem is where that expansion lives.
+	e.mem(op, p.reg, arm64.RSP, 8+p.off)
 }
 
 // memOpFor returns the load or store of a value of type t.

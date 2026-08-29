@@ -406,3 +406,85 @@ func TestToolexecScansATypeWhoseMaskTheRuntimeBuilds(t *testing.T) {
 		t.Errorf("the program printed\n%s\nand every object a live root reaches must survive:\n%s", got, want)
 	}
 }
+
+// directIfaceProgram boxes a value that is already one pointer.
+//
+// An interface holds a value of one pointer-shaped word directly: the data
+// word is the value and there is no heap copy, which is the case
+// boxingProgram above does not reach because every shape in it is copied. The
+// conversion is then a copy of the struct into a word typed as a pointer, and
+// that copy is the only reader of the load that produced the struct. The
+// decomposition pass of specs/025-lowering-and-rules.md has no per-part form
+// for such a reader, so it leaves the struct whole and one MOVD moves it.
+//
+// While ssa.ClassOfType answered by the kind alone it called that struct too
+// wide for a register, and the code generator refused the function with
+//
+//	v37: ARM64MOVDload produces a value and the allocation gives it no register
+//
+// which is what test/ddd.go and test/method.go of Go's own corpus were refused
+// for.
+//
+// The method is what makes the value reach an interface as itself rather than
+// through fmt's own reflection: a Stringer is called through the itab and the
+// receiver it is called with is the data word.
+const directIfaceProgram = `package main
+
+import "fmt"
+
+type cell struct{ n int }
+
+type box struct{ p *cell }
+
+func (b box) String() string { return fmt.Sprintf("box(%d)", b.p.n) }
+
+// wrapped is the same shape behind a named pointer type, so the conversion is
+// not special to a field whose type is spelled with a star.
+type ptr *cell
+
+type wrapped struct{ p ptr }
+
+func (w wrapped) String() string { return fmt.Sprintf("wrapped(%d)", w.p.n) }
+
+// one is the array of the same shape, which is one element and one word.
+type one [1]*cell
+
+func (o one) String() string { return fmt.Sprintf("one(%d)", o[0].n) }
+
+//go:noinline
+func boxDirect(i int) []fmt.Stringer {
+	return []fmt.Stringer{
+		box{&cell{i}},
+		wrapped{&cell{i * 2}},
+		one{&cell{i * 3}},
+	}
+}
+
+func main() {
+	for i := 1; i < 4; i++ {
+		for _, s := range boxDirect(i) {
+			fmt.Println(s.String())
+		}
+	}
+}
+`
+
+// TestToolexecBoxesAPointerShapedValueDirectly builds the program above and
+// compares every line against gc.
+func TestToolexecBoxesAPointerShapedValueDirectly(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/directiface\n\ngo 1.27\n",
+		"main.go": directIfaceProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "directiface", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "directiface"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

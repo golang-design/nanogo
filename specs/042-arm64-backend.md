@@ -179,6 +179,34 @@ constant already took up to four.
 `rtsym.init` is the frame that found this. It builds every runtime symbol in
 one function, and its locals reach past 4096 bytes.
 
+### A frame slot has the same problem and a different range
+
+A spill, a reload and a write into the argument area are a load or a store at a
+frame offset, and the offset is the layout's for the same reason: it does not
+exist until the code generator has run. The range is not the address form's. A
+load or a store holds twelve bits scaled by the access size, so it reaches
+32760 bytes for eight bytes and 4095 for one, and the two limits are four
+bytes apart in a byte-addressed frame.
+
+`mem` therefore expands the same way `addSP` does. The offset goes into R27 and
+the access takes the register-offset form:
+
+```
+	MOVD	R0, 39136(RSP)    ->    MOVD $39136, R27
+	                                MOVD R0, (RSP)(R27)
+```
+
+`go tool asm` splits the same line into a shifted add and a scaled remainder,
+which is two instructions as well and a different pair of them. Either is
+correct and the register-offset form reaches every offset a frame can hold,
+where the assembler's split stops at 24 bits.
+
+The layout is what makes this reachable rather than exotic. The pointer-free
+items of a frame are placed first, so a spill slot that holds a pointer sits
+above every array in the function, and one array of five thousand words puts it
+past the eight-byte form. `test/bigmap.go` of Go's own corpus is the program
+that found it, refused with `StoreX R0, 39136(RSP) does not encode`.
+
 ### The reserved words at the top of a frame
 
 The 8 or 16 bytes at the top of a frame hold the **caller's** saved frame
@@ -329,7 +357,7 @@ What is gated today:
   count, printed by its `TestMain`, and never a sum of the per-test log lines.
 - **Source text to a running process.** `ssagen`'s `TestLinkAndRun` compiles a
   function with nanogo, links it against the real Go runtime with
-  `go tool link`, and runs it. 25 cases, seven of them in floating point.
+  `go tool link`, and runs it. 30 cases, seven of them in floating point.
 - **The prologue against the assembler.** `TestPrologueMatchesTheAssembler`,
   above.
 - **Stack growth.** `TestStackGrowthCopiesNanogoFrames` recurses 200,000 frames
@@ -405,3 +433,9 @@ The `rtsym` count was 45 and the table holds 70
 The encoding total was described as a sum over 43 tests. It is the encoder
 package's own count and a sum of the log lines is a different, smaller number,
 which [041](041-instruction-encoding.md) records.
+
+**The spec gave the frame address an expansion and gave the frame slot none.**
+A load and a store reach a shorter distance than the address form does and
+their limit depends on the access width, so a frame the address form still
+reaches can hold a slot the store does not. `test/bigmap.go` of Go's own corpus
+was refused for it. The section above this one is the answer.

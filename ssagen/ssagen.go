@@ -377,12 +377,42 @@ func (e *emitter) wordIf(w uint32, ok bool, format string, args ...any) {
 	e.word(w)
 }
 
-// mem appends a load or store with an offset the caller knows fits.
+// mem appends a load or store at an offset from a base register.
+//
+// The unsigned-offset form holds twelve bits scaled by the access size, so it
+// reaches 32760 bytes for an eight-byte access and 4095 for a byte. A frame
+// larger than that is an ordinary program and not one to refuse, so the offset
+// goes into a register first and the access takes the register-offset form.
+// That is the expansion subSP and addSP already make for a frame address that
+// does not fit.
+//
+// go tool asm expands the same line into a shifted add and a scaled remainder,
+// which is a different pair of instructions and is also correct. The
+// register-offset form is the one here because it reaches every offset a frame
+// can hold, where the assembler's split stops at twenty-four bits.
+//
+// The register is R27, which specs/030-abi.md reserves as the assembler's
+// scratch for exactly this and which the allocator never chooses, so the
+// expansion destroys nothing the surrounding code is holding.
+//
+// No pass above the code generator can choose a form that fits, because the
+// frame layout is this package's and the offsets do not exist until it runs.
+// That is why the check is here and not a condition in a lowering rule, which
+// is the division specs/041-instruction-encoding.md draws everywhere else.
+// test/bigmap.go of Go's own corpus is the frame that found it: a spill slot
+// at 39136 bytes refused to encode and the function was refused with it.
 func (e *emitter) mem(op arm64.MemOp, rt, base arm64.Reg, off int64) {
 	if !e.memClass(op, rt) {
 		return
 	}
-	w, ok := arm64.MemUnsignedOffset(op, rt, base, off)
+	if w, ok := arm64.MemUnsignedOffset(op, rt, base, off); ok {
+		e.word(w)
+		return
+	}
+	e.constInto(arm64.RegAsmScratch, off)
+	// LSLX and not a scaled index. The register holds a byte offset, so the
+	// hardware must add it as it stands.
+	w, ok := arm64.MemRegOffset(op, rt, base, arm64.RegAsmScratch, arm64.LSLX, false)
 	e.wordIf(w, ok, "%v %v, %d(%v)", op, rt, off, base)
 }
 

@@ -512,6 +512,11 @@ const bigType = "type Big struct{ A, B, C, D, E int }\n\n"
 // convention sends it to the argument area whole.
 const big20Type = "type Big20 struct{ A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T int }\n\n"
 
+// wordStructType is one machine word holding one pointer, which is the shape
+// an interface holds directly and the shape ssa.ClassOfType called too wide
+// for a register until test/ddd.go of Go's own corpus said otherwise.
+const wordStructType = "type W struct{ n *int }\n\n"
+
 // TestLinkAndRun is the milestone of this package.
 //
 // A Go function goes through parse, check, ir.Build, ssa.Build, lower,
@@ -654,6 +659,33 @@ func TestLinkAndRun(t *testing.T) {
 		{"a string between a pointer and an integer",
 			"func run(p *int, s string, n int) int { return n * 3 }",
 			`run(new(int), "abcd", 7)`, "", "func run(p *int, s string, n int) int", 21},
+
+		// A one-word struct across the toolchain boundary, in both
+		// directions. specs/030-abi.md's walk flattens an aggregate to its
+		// leaves before it asks for a class, so widening ssa.ClassOfType to
+		// call such a struct one register did not move the parameter, and
+		// this is what says so rather than the reading of the walk that
+		// concluded it. gc places the pointer in R0 and reads the result out
+		// of R0, so a disagreement is a wrong number and not a refusal.
+		{"a one-word struct through the convention",
+			wordStructType + "func run(w W, n int) int { return *w.n + n }",
+			"run(W{&v}, 2)", wordStructType + "var v = 40", "func run(w W, n int) int", 42},
+		{"a one-word struct returned",
+			wordStructType + "func mk(n int) W\n\nfunc run(a, b int) int { w := mk(a); return *w.n }",
+			"run(9, 0)", wordStructType + "func mk(n int) W { m := n; return W{&m} }", "", 9},
+
+		// A frame past the reach of the unsigned-offset form. The layout puts
+		// the spill slot of a pointer above every pointer-free local, so an
+		// array of five thousand words leaves it beyond 32760 bytes and its
+		// store and its reload take the expansion through R27 that mem makes.
+		// test/bigmap.go of Go's own corpus is the program that found this,
+		// and it was refused with "StoreX R0, 39136(RSP) does not encode".
+		{"a spill slot past the immediate form",
+			"func get() *int\n\nfunc twice(n int) int\n\n" +
+				"func run(a, b int) int {\n\tvar x [5000]int\n\tx[a] = a\n\tp := get()\n\ts := twice(a)\n\treturn s + *p + x[a]\n}",
+			"run(3, 0)",
+			"var cell = 5\n\nfunc get() *int { return &cell }\n\nfunc twice(n int) int { return n * 2 }",
+			"", 14},
 
 		// The floating-point file, which no program reached before: the
 		// allocator handed out F0 to F29 and this package copied with an
@@ -2397,6 +2429,87 @@ func TestRematerialisationIntoASlotStoresIt(t *testing.T) {
 		t.Fatal("a floating-point store into a slot does not encode")
 	}
 	mustEmit(t, e, imm, store)
+}
+
+// TestAFrameOffsetPastTheImmediateFormExpands compares the expansion against
+// the assembler.
+//
+// The unsigned-offset form holds twelve bits scaled by the access size, so it
+// reaches 32760 bytes for an eight-byte access and 4095 for a byte. A frame
+// larger than that is an ordinary program and not one to refuse, and no pass
+// above this one can pick a form that fits, because the offsets do not exist
+// until this package lays the frame out. While mem had only the one form,
+// test/bigmap.go of Go's own corpus was refused with
+//
+//	StoreX R0, 39136(RSP) does not encode
+//
+// The oracle is go tool asm on the two instructions the expansion emits, which
+// is how specs/041-instruction-encoding.md checks every other encoding here.
+// The assembler splits the same line differently, into a shifted add and a
+// scaled offset, so the comparison is against what nanogo emits and not
+// against the assembler's own expansion of the single line.
+func TestAFrameOffsetPastTheImmediateFormExpands(t *testing.T) {
+	f64 := &ir.Type{Kind: ir.Float64, Size: 8, Align: 8, Name: "float64"}
+	cases := []struct {
+		what  string
+		op    arm64.MemOp
+		rt    arm64.Reg
+		off   int64
+		lines []string
+	}{
+		// The offset bigmap.go's spill slot lands at.
+		{"a spill store past the scaled form", arm64.StoreX, arm64.R0, 39136,
+			[]string{"MOVD $39136, R27", "MOVD R0, (RSP)(R27)"}},
+		{"the reload of the same slot", arm64.LoadX, arm64.R1, 39136,
+			[]string{"MOVD $39136, R27", "MOVD (RSP)(R27), R1"}},
+		// A byte access scales by one, so it runs out four bytes into a
+		// frame the eight-byte form still reaches.
+		{"a byte store past its own shorter reach", arm64.StoreB, arm64.R0, 5000,
+			[]string{"MOVD $5000, R27", "MOVB R0, (RSP)(R27)"}},
+		// The other register file. The offset is the same question and the
+		// transferred register is not.
+		{"a float spill past the scaled form", arm64.StoreF64, arm64.F0, 39136,
+			[]string{"MOVD $39136, R27", "FMOVD F0, (RSP)(R27)"}},
+	}
+	n := 0
+	for _, c := range cases {
+		t.Run(c.what, func(t *testing.T) {
+			e := slotMoveEmitter(t, ssa.NewFunc("f"), 4, []int64{c.off})
+			e.mem(c.op, c.rt, arm64.RSP, c.off)
+			if err := e.err(); err != nil {
+				t.Fatalf("%s: %v", c.what, err)
+			}
+			want := asmText(t, c.lines)
+			if len(want) < len(e.text) {
+				t.Fatalf("%d instructions and the assembler produced %d", len(e.text), len(want))
+			}
+			if len(e.text) != len(c.lines) {
+				t.Fatalf("%d instructions, want the constant and the access", len(e.text))
+			}
+			for i := range e.text {
+				if e.text[i] != want[i] {
+					t.Errorf("instruction %d is %#08x and the assembler produced %#08x", i, e.text[i], want[i])
+				}
+				n++
+			}
+		})
+	}
+	// The form that fits is still one instruction. An expansion taken
+	// unconditionally would cost every spill in every function a second one.
+	t.Run("an offset that fits is one instruction", func(t *testing.T) {
+		e := slotMoveEmitter(t, ssa.NewFunc("f"), 4, []int64{8})
+		e.store(arm64.F0, 0, f64)
+		if err := e.err(); err != nil {
+			t.Fatalf("a store at offset eight gave %v", err)
+		}
+		if len(e.text) != 1 {
+			t.Fatalf("%d instructions at offset eight, want one", len(e.text))
+		}
+	})
+	if n == 0 {
+		t.Fatal("no instruction was compared")
+	}
+	comparisons += n
 }
 
 // slotMoveEmitter builds an emitter with n values and the given slot offsets.

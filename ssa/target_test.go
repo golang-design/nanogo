@@ -239,6 +239,15 @@ func TestClassOfType(t *testing.T) {
 		{tSlice, ClassInt, false},
 		{tStruct, ClassInt, false},
 		{tArr4, ClassInt, false},
+		// An aggregate of one machine word is not a multi-word type, whatever
+		// it holds. TestAOneWordAggregateIsOneIntegerRegister below is why the
+		// float field is in the integer class.
+		{tWordStruct, ClassInt, true},
+		{tWordArr, ClassInt, true},
+		{tByteStruct, ClassInt, true},
+		{tFloatStruct, ClassInt, true},
+		// Three bytes is no load and no store, so it is no register either.
+		{tOddStruct, ClassInt, false},
 		{mkType(&ir.Type{Kind: ir.Complex128}), ClassFloat, false},
 		{tVoid, ClassInt, false},
 		{MemType, ClassInt, false},
@@ -249,6 +258,71 @@ func TestClassOfType(t *testing.T) {
 		if c != tc.class || ok != tc.ok {
 			t.Errorf("%v is class %v ok=%v, want %v ok=%v", tc.t, c, ok, tc.class, tc.ok)
 		}
+	}
+}
+
+// The aggregates the case above names. They are here rather than in
+// build_test.go's list because nothing else builds a value of one.
+var (
+	tWordStruct = mkType(&ir.Type{Kind: ir.Struct, Name: "u", Fields: []ir.Field{
+		{Name: "p", Type: tIntPtr},
+	}})
+	tWordArr     = mkType(&ir.Type{Kind: ir.Array, Elem: tInt, Len: 1})
+	tByteStruct  = mkType(&ir.Type{Kind: ir.Struct, Name: "b1", Fields: []ir.Field{{Name: "a", Type: tByte}}})
+	tFloatStruct = mkType(&ir.Type{Kind: ir.Struct, Name: "f1", Fields: []ir.Field{{Name: "f", Type: tFloat}}})
+	tOddStruct   = mkType(&ir.Type{Kind: ir.Struct, Name: "b3", Fields: []ir.Field{
+		{Name: "a", Type: tByte}, {Name: "b", Type: tByte}, {Name: "c", Type: tByte},
+	}})
+)
+
+// TestAOneWordAggregateIsOneIntegerRegister holds ClassOfType against the load
+// and the store the rules select for the same type.
+//
+// The two decide the same question from different sides. ARM64LoadOp and
+// ARM64StoreOpForType answer by the width and by the integer file, and
+// ClassOfType answers whether one register holds the value. While ClassOfType
+// answered by the kind alone the two disagreed: lowering selected
+// ARM64MOVDload for a value of type struct{*T}, the allocator called the type
+// too wide for a register, and the code generator refused the function because
+// a value with a width had been given nowhere to go. test/ddd.go and
+// test/method.go of Go's own corpus are the two programs that found it.
+//
+// The invariant is one direction. Every type the load takes has a class, and a
+// type with no class is a type no single load reaches. A complex is the one
+// type this table does not name, because the rules refuse a complex before
+// ARM64LoadOp is asked: specs/042-arm64-backend.md group 6 says a complex is
+// two floating-point registers and the decomposition pass splits it.
+func TestAOneWordAggregateIsOneIntegerRegister(t *testing.T) {
+	types := []*ir.Type{
+		tInt, tBool, tByte, tIntPtr, tFunc, tFloat,
+		tWordStruct, tWordArr, tByteStruct, tFloatStruct,
+		tOddStruct, tStruct, tArr4, tString, tSlice, tVoid,
+	}
+	n := 0
+	for _, typ := range types {
+		ld, hasLoad := ARM64LoadOp(typ)
+		st, hasStore := ARM64StoreOpForType(typ)
+		c, hasClass := ClassOfType(typ)
+		if hasLoad != hasStore {
+			t.Errorf("%v has a load=%v and a store=%v; one instruction moves it or neither does", typ, hasLoad, hasStore)
+		}
+		if hasLoad && !hasClass {
+			t.Errorf("%v is loaded by %v and has no register class, so the allocation gives the load nowhere to go", typ, ld)
+		}
+		n++
+		switch typ.Kind {
+		case ir.Struct, ir.Array:
+			// The integer file, whatever the fields are. The load and the
+			// store an aggregate takes are the integer ones, so a
+			// floating-point class here would name a register no instruction
+			// of the pair writes.
+			if hasClass && c != ClassInt {
+				t.Errorf("%v is in class %v, and %v and %v are integer instructions", typ, c, ld, st)
+			}
+		}
+	}
+	if n != len(types) {
+		t.Fatalf("%d types were checked, want %d", n, len(types))
 	}
 }
 

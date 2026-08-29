@@ -619,7 +619,7 @@ func lowerCompare(v *ssa.Value, e *ssa.Edit) bool {
 	// String and interface equality are not per-part comparisons either, so
 	// the decomposition pass leaves them whole on purpose. They become runtime
 	// calls, per specs/020-ir.md's lowering table.
-	if _, ok := ssa.ClassOfType(x.Type); !ok {
+	if !comparableInOneRegister(x.Type) {
 		return false
 	}
 	cond := condOf(v.Op, signed(x.Type))
@@ -1405,6 +1405,30 @@ func lowerCvtFloatToFloat(v *ssa.Value, e *ssa.Edit) bool {
 func isIntClass(t *ir.Type) bool {
 	c, ok := ssa.ClassOfType(t)
 	return ok && c == ssa.ClassInt
+}
+
+// comparableInOneRegister reports whether the machine's compare of two values
+// of type t is the comparison Go defines for them.
+//
+// It is narrower than ssa.ClassOfType and the difference is the point. That
+// predicate answers where a value is held, and an aggregate of one machine
+// word is held in one integer register. Equality of an aggregate is not the
+// compare of that register: the language leaves the bytes between two fields
+// undefined, so a whole-word compare reads bytes no assignment wrote, and a
+// float field would make the machine answer that a NaN equals itself. The
+// decomposition pass of specs/025-lowering-and-rules.md compares such a value
+// field by field, and one it left whole is refused here rather than compared
+// by an instruction that answers a different question.
+func comparableInOneRegister(t *ir.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Kind {
+	case ir.Struct, ir.Array, ir.Tuple:
+		return false
+	}
+	_, ok := ssa.ClassOfType(t)
+	return ok
 }
 
 // rtObjs names each runtime symbol once, so that two calls to one symbol are

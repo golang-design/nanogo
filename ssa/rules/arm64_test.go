@@ -1947,6 +1947,65 @@ func TestCompareRefusesWideOperands(t *testing.T) {
 	}
 }
 
+// TestCompareRefusesAWholeAggregate is the case the width test above does not
+// cover.
+//
+// An aggregate of one machine word does fit one register, and ssa.ClassOfType
+// says so, because the load and the store that move it are one instruction
+// each. Its equality is still not the compare of that register. Go leaves the
+// bytes between two fields undefined, so a whole-word compare reads bytes no
+// assignment wrote, and a float field makes the machine answer that a NaN
+// equals itself, which the language does not.
+//
+// Both types below hold more fields than MaxDecomposeParts, so the
+// decomposition pass of specs/025-lowering-and-rules.md leaves them whole and
+// the comparison arrives here as one value. Refusing it is the answer: a
+// comparison the rules cannot make is a named failure, and one they make
+// wrongly is a program that runs and disagrees with the language.
+func TestCompareRefusesAWholeAggregate(t *testing.T) {
+	mk := func(ty *ir.Type) *ir.Type {
+		t.Helper()
+		if err := ir.Layout(ty); err != nil {
+			t.Fatal(err)
+		}
+		return ty
+	}
+	types := []*ir.Type{
+		// Eight bytes with one of padding: the int16 is aligned to two, so
+		// byte one is a byte no assignment writes.
+		mk(&ir.Type{Kind: ir.Struct, Name: "padded", Fields: []ir.Field{
+			{Name: "a", Type: tI8}, {Name: "b", Type: tI16}, {Name: "c", Type: tI8},
+			{Name: "d", Type: tI8}, {Name: "e", Type: tI8}, {Name: "f", Type: tI8},
+		}}),
+		// Eight bytes holding a float, where the bit compare and the float
+		// compare disagree on a NaN.
+		mk(&ir.Type{Kind: ir.Struct, Name: "floaty", Fields: []ir.Field{
+			{Name: "f", Type: tF32}, {Name: "a", Type: tI8}, {Name: "b", Type: tI8},
+			{Name: "c", Type: tI8}, {Name: "d", Type: tI8},
+		}}),
+	}
+	for _, ty := range types {
+		if ty.Size != 8 {
+			t.Fatalf("%s is %d bytes, and this test means a type of one machine word", ty.Name, ty.Size)
+		}
+		if _, ok := ssa.ClassOfType(ty); !ok {
+			t.Fatalf("%s does not fit a register, so this test is not the case it means to be", ty.Name)
+		}
+		p := newBuilder()
+		cmp := p.val(ssa.OpEq, tBool, p.arg(ty), p.arg(ty))
+		f := p.ret(cmp)
+		msg := lowerPanic(t, f)
+		if msg == "" {
+			t.Errorf("%s: the comparison of a whole aggregate lowered to %v, which compares its bytes and not its fields",
+				ty.Name, cmp.Op)
+			continue
+		}
+		if !strings.Contains(msg, "Eq") {
+			t.Errorf("%s: the refusal does not name the operation: %s", ty.Name, msg)
+		}
+	}
+}
+
 // lowerPanic runs the pass and returns the panic message, or "" if it did not
 // panic.
 func lowerPanic(t *testing.T, f *ssa.Func) (msg string) {

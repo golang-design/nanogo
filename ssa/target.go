@@ -560,6 +560,15 @@ func NewArm64Target() *Target {
 // slice and an interface into their words before allocation; one that arrives
 // whole gets a stack slot, which is correct and slow, rather than the first
 // word of a register, which is neither.
+//
+// An aggregate of one machine word is not one of those cases. ARM64LoadOp and
+// ARM64StoreOpForType answer by the width and by the integer file, so a struct
+// or an array of one, two, four or eight bytes already moves as one integer
+// load and one integer store, and this has to say the same. While it did not,
+// lowering selected ARM64MOVDload for a value of type struct{*T} and the
+// allocator then gave that load no register, which specs/026-register-allocation.md
+// has no place for. test/ddd.go and test/method.go of Go's own corpus are the
+// two programs that found it.
 func ClassOfType(t *ir.Type) (RegClass, bool) {
 	if t == nil || t == MemType {
 		return ClassInt, false
@@ -577,6 +586,23 @@ func ClassOfType(t *ir.Type) (RegClass, bool) {
 		ir.Uint8, ir.Uint16, ir.Uint32, ir.Uint64, ir.Uintptr,
 		ir.Ptr, ir.UnsafePtr, ir.Map, ir.Chan, ir.FuncKind:
 		return ClassInt, true
+	case ir.Struct, ir.Array:
+		// The integer file and not the field's, because the load and the store
+		// the rules select for an aggregate are the integer ones however the
+		// bytes are read: a struct{float64} is moved by MOVD and not by FMOVD,
+		// so a floating-point class here would send the value to a register no
+		// instruction of its own writes.
+		//
+		// Multiword still calls such a type multi-word, and the two answers do
+		// not contradict each other. That predicate asks whether the
+		// decomposition pass of specs/025-lowering-and-rules.md has parts to
+		// make, and it has: one. This asks where the value goes when the pass
+		// declined to make them, which happens whenever a reader of the value
+		// has no per-part form.
+		switch t.Size {
+		case 1, 2, 4, 8:
+			return ClassInt, true
+		}
 	}
 	return ClassInt, false
 }

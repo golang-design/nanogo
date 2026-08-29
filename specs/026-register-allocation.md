@@ -77,6 +77,23 @@ Integer and floating point are separate classes with separate free lists. A valu
 belongs to a class by its type. There is no case in Go where a value can go in
 either.
 
+The class also answers whether one register holds the value at all, and that
+half has to agree with the load and the store the target selects for the same
+type. An aggregate of one machine word is where the two came apart. A `struct`
+holding one pointer is moved by one `MOVD` and is one register, and while the
+class was read off the type's kind alone it was called too wide for one, so
+lowering emitted the load and the allocator gave it nowhere to go. The
+aggregate goes in the integer class whatever its fields are, because the pair
+of instructions that moves it is the integer pair: a `struct{float64}` is
+stored by `MOVD` and not by `FMOVD`.
+
+Fitting one register is not the same question as being compared in one, and
+[042](042-arm64-backend.md)'s rules ask them separately. Go leaves the bytes
+between two fields undefined, so a whole-word compare of an aggregate reads
+bytes no assignment wrote, and a float field would make the machine answer that
+a NaN equals itself. Equality of an aggregate is the decomposition pass's
+field-by-field comparison, and one that pass left whole is refused.
+
 ## Phi resolution
 
 A phi is not an instruction. It means "the value arriving on this edge". After
@@ -280,6 +297,14 @@ table.
 **The spec's list of what constitutes a use left out a block's control
 value.** Two live branch conditions were then given one register.
 `TestABlockControlValueIsAUse` pins the answer.
+
+**The spec said a value belongs to a class by its type and left the second
+half of that answer unstated.** The predicate also says whether one register
+holds the value, and it read the type's kind where the target's load and store
+read the width. A one-word aggregate then had a load and no class, and
+`test/ddd.go` and `test/method.go` of Go's own corpus were refused with
+`ARM64MOVDload produces a value and the allocation gives it no register`.
+`TestAOneWordAggregateIsOneIntegerRegister` holds the two against each other.
 
 **The spec's spill-slot rule was disjoint live ranges and the pointer clause,
 and nothing about the shape of the slot.** Size, alignment and pointer map have
