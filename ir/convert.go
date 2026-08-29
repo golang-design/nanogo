@@ -65,9 +65,9 @@ type Converter struct {
 	// notice. The queue then never empties.
 	//
 	// So the notice is sent after the fill and only when it succeeded, and the
-	// set makes it at most one notice per type. It is never ranged over; the
-	// order the stenciler sees is the order of the calls
-	// (specs/053-determinism.md).
+	// set makes it at most one notice per type. The set is never ranged over.
+	// The order the stenciler sees is the order of the calls, which is the
+	// order the type graph unwinds (specs/053-determinism.md).
 	instance func(*types2.Named)
 	notified map[*types2.Named]bool
 }
@@ -98,8 +98,8 @@ func NewConverter() *Converter {
 func (c *Converter) Locals(gens map[*types2.TypeName]int) { c.gens = gens }
 
 // Instances asks to be told about every instantiation of a generic defined
-// type this converter meets, in the order the type graph is walked and once
-// per type.
+// type this converter converts, once per type, in the order the type graph
+// unwinds.
 //
 // It is the stenciler's door. A converter that is never told notices nothing,
 // which is what every caller outside ir.Build wants: driver converts the types

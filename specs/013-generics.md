@@ -98,8 +98,8 @@ functions, and `ir.MethodSymbol` does that now
 ([032](032-type-descriptors-and-itabs.md)) for the stenciler and for the
 descriptor row alike, so the two cannot disagree. And the substitution had to
 be built from the *method's own copy* of the receiver's type parameters,
-`Signature.RecvTypeParams`, which is the list the body's recorded types name;
-the type's own list is a different set of `*TypeParam` values spelled the same
+`Signature.RecvTypeParams`, which is the list the body's recorded types name.
+The type's own list is a different set of `*TypeParam` values spelled the same
 way.
 
 Substitution stopping at a name is the one place the substitution is not total,
