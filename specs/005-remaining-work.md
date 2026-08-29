@@ -281,33 +281,30 @@ measured this way.
 
 **Twelve compile**: the root package, `dist`, `driver`, `export/pkgbits`,
 `link`, `loader`, `obj`, `obj/arm64`, `rtsym`, `rtype`, `ssa` and `ssa/rules`.
-Two are commands the harness delegates. Five fail, on two blockers:
+Two are commands the harness delegates. Five fail, on three blockers:
 
 | Blocker | Packages | Owner |
 | --- | --- | --- |
-| a generic type's method, an instantiation across packages, and a type parameter with no run-time representation | 4: `ir`, `ssagen`, `syntax`, `types2` | [013](013-generics.md), [015](015-export-data.md) |
-| a wide `Load` reaches lowering with no rule | 1: `export` | [025](025-lowering-and-rules.md) |
+| a method of a generic type: its body's slots are numbered against the type's dictionary and the writer has no access to the type's element | 3: `export`, `ir`, `ssagen` | [013](013-generics.md), [015](015-export-data.md) |
+| an instantiation of a generic type another package declares | 1: `syntax` | [013](013-generics.md), [015](015-export-data.md) |
+| a type parameter has no run-time representation | 1: `types2` | [032](032-type-descriptors-and-itabs.md) |
 
-The last row was the worst failure mode in the table until the failure and the
-gap were separated. `ssa.Lower` used to panic where every other stage refuses,
-so a construct it had no rule for took the compiler down rather than reporting
-one; it now recovers its own error and reports it, and Go's corpus went from
-two files in the `crashed` class to none with the passing count unchanged. What
-remains on this row is the missing rule itself: equality over a struct with a
-string field is not decomposed, because string equality is `runtime.memequal`
-and not a word compare, so the whole load reaches selection whole.
+All three rows are generics and the first owns three of the five. It is not
+the deepest of them: the slots of a method's body have to be numbered against
+the dictionary of its receiver's type, continuing after the underlying type and
+after every method declared before it, and nothing in the body builder has the
+type's element to number against. That is an ordering problem with a stated
+shape. The second row is the deep one, because stencilling an instantiation an
+importing package made needs the function bodies read back out of the
+*declaring* package's export data, which nanogo writes but does not read.
 
-Five packages, two blockers, and the first owns four of the five. Everything
-[030](030-abi.md) owned is closed: `driver` and `rtype` compile, `ir` moved
-onto generics, and the defect behind them was not a gap but a wrong answer, a
-call's results placed over the post-decomposition word list rather than the
-declared one.
+`export` reached this row rather than compiling. Its lowering blocker closed
+and it stopped here, alongside `ir` and `ssagen`, which is the fourth time this
+table has collapsed onto one row after a different one closed.
 
-The generics row is now both the most behind and the most in it. Stenciling an
-instantiation in an importing package needs the function bodies
-[015](015-export-data.md)'s body reader would carry, and nanogo writes
-declarations only, so it is two subsystems and not one. G1 does not close until
-they exist.
+G1 does not close until the export data carries bodies in both directions:
+written for a generic declaration this package owns, and read back for one
+another package owns. Those are two subsystems and the second has not started.
 
 A closed blocker is not a compiled package, and the table reshapes every time
 one closes. Closing the method-value receiver moved `link` and `loader` to
