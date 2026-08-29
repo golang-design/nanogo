@@ -90,7 +90,7 @@ probe ok closure-returned
 probe ok const-decl
 probe ok control-flow
 probe ok defer-arg-eval
-probe refused defer-builtin
+probe ok defer-builtin
 probe ok defer-closure
 probe ok defer-func
 probe ok defer-in-loop
@@ -102,7 +102,7 @@ probe ok empty-body
 probe ok float-arith
 probe ok float-param
 probe ok generic-func
-probe refused generic-method
+probe ok generic-method
 probe ok go-arg
 probe ok go-stmt-closure
 probe ok go-stmt-nochan

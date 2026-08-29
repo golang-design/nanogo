@@ -281,30 +281,34 @@ measured this way.
 
 **Twelve compile**: the root package, `dist`, `driver`, `export/pkgbits`,
 `link`, `loader`, `obj`, `obj/arm64`, `rtsym`, `rtype`, `ssa` and `ssa/rules`.
-Two are commands the harness delegates. Five fail, on three blockers:
+Two are commands the harness delegates. Five fail, on two blockers:
 
 | Blocker | Packages | Owner |
 | --- | --- | --- |
-| a method of a generic type: its body's slots are numbered against the type's dictionary and the writer has no access to the type's element | 3: `export`, `ir`, `ssagen` | [013](013-generics.md), [015](015-export-data.md) |
-| an instantiation of a generic type another package declares | 1: `syntax` | [013](013-generics.md), [015](015-export-data.md) |
+| a generic declaration another package owns, whose body lives only in that package's archive and is never read back | 4: `export`, `ir`, `ssagen`, `syntax` | [015](015-export-data.md), [013](013-generics.md) |
 | a type parameter has no run-time representation | 1: `types2` | [032](032-type-descriptors-and-itabs.md) |
 
-All three rows are generics and the first owns three of the five. It is not
-the deepest of them: the slots of a method's body have to be numbered against
-the dictionary of its receiver's type, continuing after the underlying type and
-after every method declared before it, and nothing in the body builder has the
-type's element to number against. That is an ordering problem with a stated
-shape. The second row is the deep one, because stencilling an instantiation an
-importing package made needs the function bodies read back out of the
-*declaring* package's export data, which nanogo writes but does not read.
+One subsystem gates four of the five, and it is the export-data body
+**reader**. All four reach it through `sync/atomic.Pointer[T]`: three of them
+have to re-export the declaration and cannot, because gc's format writes a
+generic declaration as a body reference and that body is in `sync/atomic`'s
+archive; `syntax` has to stencil `Pointer[[]*SrcFile].Store` and needs the same
+body for the same reason. nanogo writes bodies and does not read them.
 
-`export` reached this row rather than compiling. Its lowering blocker closed
-and it stopped here, alongside `ir` and `ssagen`, which is the fourth time this
-table has collapsed onto one row after a different one closed.
+An earlier version of this table said a *method of a generic type* owned three
+of these. That was wrong, and the way it was wrong is worth keeping. The
+refusal named `sync/atomic.Load`, which reads like a local declaration, but
+`objName` is the package path joined to the object's name, so it was always a
+foreign object. The local half is built now, and closing it moved nothing:
+`export`, `ir` and `ssagen` moved from one message to another and `syntax` did
+not move at all. A refusal names what stopped first, not what a package needs,
+and a message that names a foreign object does not say so.
 
-G1 does not close until the export data carries bodies in both directions:
-written for a generic declaration this package owns, and read back for one
-another package owns. Those are two subsystems and the second has not started.
+G1 does not close until the reader exists. The writing half is done: a generic
+type this package declares is written with its methods numbered against one
+dictionary in gc's own order, and gc reads it back, instantiates it and runs it
+(`export`'s `TestGcInstantiatesAGenericTypeNanogoWrote`). The reading half has
+not started, and it is what all four packages above wait on.
 
 A closed blocker is not a compiled package, and the table reshapes every time
 one closes. Closing the method-value receiver moved `link` and `loader` to
