@@ -137,6 +137,44 @@ candidate that [023](023-escape-analysis.md) may force to the heap.
 
 Being conservative here is safe and expensive. Being wrong is memory corruption.
 
+### An operand that names no storage
+
+Some of what construction reads through an address is not a variable at all. A
+field of a struct, an element of an array and the header of a slice or a string
+are read by address, because nothing in this pass takes a part out of a
+composite value. Go does not require the operand of any of the three to name
+storage: `hex[i]` indexes a constant and `f().x` selects a field of a call
+result.
+
+**Such an operand gets storage: a frame temporary holding a copy of its value.**
+It is the answer `cmd/compile`'s walk gives, and the copy is what the language
+already says, because an operand that names no place cannot be written through.
+A slice element assigned through a copied header still writes the one array the
+header points at.
+
+The temporary is a frame object like every other, so it is laid out with them
+and [027](027-liveness-and-stackmaps.md) describes it. It is also cleared at the
+entry with them, and for the same reason: the analysis of
+[027](027-liveness-and-stackmaps.md) has no definition point for a frame object,
+so the object is live from the entry, and the words the collector reads before
+the copy must be a zero rather than what the last call left in the slot. Only a
+temporary whose type holds a pointer is cleared, which is the same question that
+analysis asks to decide what it tracks.
+
+The clear goes after the arguments and before the body, where the clear of a
+local goes. Ahead of the arguments it would be a program: clearing a type that
+holds a pointer is a call to `runtime.memclrHasPointers`, Go's convention leaves
+no register standing across a call, and each argument would look dead until
+after it, so a parameter still in its incoming register would be read back after
+the call had overwritten it.
+
+The spill is reached only where this pass needs an address to read a part of a
+value. An address the program itself asks for is a different question. Go gives
+`&x` only to what names storage, so `&f()` reaching construction is a tree
+[020](020-ir.md)'s lowering did not finish, and it is still refused: a copy
+there would answer with the address of storage nothing else knows the program
+wrote to.
+
 ## What construction also does
 
 **Bounds and nil checks are inserted.** Every index and every dereference whose
@@ -221,6 +259,13 @@ address rows, which are an address of a call result, of a constant, of a type
 assertion and of a `make`, plus the separate refusal of an address taken of a
 name that construction placed in a value.
 
+Two of the address rows are gone. An operand that names no storage is now given
+some, which is the rule above, and the address of a call result and the address
+of a constant are what that rule is about. The two counts in the table are the
+measurement that named them and predate the rule. The type assertion and the
+`make` are Go-specific nodes, so each is refused by its own row before an
+address of it is asked for.
+
 The three multi-value rows left are a two-value type assertion, a two-value map
 read and a two-value channel receive, and each is the corresponding
 single-value form's refusal: none of the three forms is built.
@@ -266,7 +311,7 @@ clauses with `fallthrough`, return, label, goto, break, continue, call, and
 assignment. Expressions: constant, local, global, field, index, deref,
 address-of, unary, binary including short-circuit and string concatenation,
 compare, convert, and a direct call. Addresses: local, global, deref, field,
-index.
+index, and an operand that names no storage, through the frame temporary above.
 
 That set is what two functions in five of the distribution are written in.
 

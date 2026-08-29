@@ -1906,6 +1906,197 @@ func TestBuildStringConcatEvaluationOrder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// An operand that names no storage
+
+// spillOf returns the one frame temporary construction made, and fails when
+// there is not exactly one.
+func spillOf(t *testing.T, f *Func) *ir.Object {
+	t.Helper()
+	var out []*ir.Object
+	for _, o := range f.Frame {
+		if strings.HasPrefix(o.Name, ".ssatmp_") {
+			out = append(out, o)
+		}
+	}
+	if len(out) != 1 {
+		t.Fatalf("got %d temporaries in the frame, want 1: %v\n%s", len(out), f.Frame, f)
+	}
+	return out[0]
+}
+
+// opIndex returns the position of the first value with op in b, or -1.
+func opIndex(b *Block, op Op) int {
+	for i, v := range b.Values {
+		if v.Op == op {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestBuildIndexOfAConstantString builds the address of a constant.
+//
+// specs/021-ssa-construction.md lists the address of a constant among the gaps
+// in construction itself. It is reached by indexing one, which is what
+// "const hex = "0123456789abcdef"; hex[i]" is: the header the index reads has
+// to be somewhere, and a constant is nowhere.
+func TestBuildIndexOfAConstantString(t *testing.T) {
+	c := obj("c", tByte, ir.ClassLocal)
+	fn := fun("f", []*ir.Object{c},
+		asn(local(c), index(cst(tString, `"abc"`), cint("1"), tByte)))
+	f := build(t, fn)
+
+	o := spillOf(t, f)
+	if o.Type != tString {
+		t.Errorf("the temporary is of type %v, want string", o.Type)
+	}
+	if !o.Addrtaken {
+		t.Errorf("the temporary does not say its address is taken")
+	}
+	// The constant is copied into the temporary once and the two words of the
+	// header are read back out of it.
+	if n := countOp(f, OpConstString); n != 1 {
+		t.Errorf("got %d string constants, want 1\n%s", n, f)
+	}
+	if n := countOp(f, OpStore); n != 1 {
+		t.Errorf("got %d stores, want 1, the copy into the temporary\n%s", n, f)
+	}
+	if n := countOp(f, OpBoundsCheck); n != 1 {
+		t.Errorf("got %d bounds checks, want 1\n%s", n, f)
+	}
+}
+
+// TestBuildFieldOfACallResult builds the address of a call result.
+//
+// The other of specs/021-ssa-construction.md's two address gaps this closes.
+// "f().x" selects a field of a value that names no place, and the selection is
+// an offset from an address.
+//
+// The struct here holds no pointer, which is the second half of the test: a
+// temporary the collector never reads is not cleared at the entry.
+func TestBuildFieldOfACallResult(t *testing.T) {
+	x := obj("x", tInt, ir.ClassLocal)
+	g := obj("g", tFunc, ir.ClassFunc)
+	fn := fun("f", []*ir.Object{x},
+		asn(local(x), field(call(g, tStruct), 1, tInt)),
+		ret(local(x)))
+	f := build(t, fn)
+
+	o := spillOf(t, f)
+	if o.Type != tStruct {
+		t.Errorf("the temporary is of type %v, want the struct the call returns", o.Type)
+	}
+	if n := countOp(f, OpStaticCall); n != 1 {
+		t.Errorf("got %d calls, want 1: the operand is evaluated once\n%s", n, f)
+	}
+	if n := countOp(f, OpOffPtr); n != 1 {
+		t.Errorf("got %d offsets, want 1, the field's\n%s", n, f)
+	}
+	if n := countOp(f, OpZero); n != 0 {
+		t.Errorf("got %d clears, want 0: the temporary holds no pointer\n%s", n, f)
+	}
+}
+
+// TestBuildSpillIsClearedAtTheEntry asserts where the clear goes.
+//
+// A temporary holding a pointer is a frame object with no definition point, so
+// specs/027-liveness-and-stackmaps.md has it live from the entry, and the words
+// the collector reads before the copy must be a zero rather than what the last
+// call left there. That is why the clear is at the entry and not at the copy.
+//
+// It is after the arguments, which is the second assertion and the one that
+// costs a program when it is wrong. The clear of a pointer type is a call to
+// runtime.memclrHasPointers, and Go's convention leaves no register standing
+// across a call: a clear placed ahead of the arguments makes each of them look
+// dead until after it, and a parameter still in its incoming register is then
+// read back after the call has overwritten it.
+func TestBuildSpillIsClearedAtTheEntry(t *testing.T) {
+	dir := obj("dir", tInt, ir.ClassParam)
+	c := obj("c", tByte, ir.ClassLocal)
+	fn := fun("f", []*ir.Object{c},
+		asn(local(c), index(cst(tString, `"abc"`), local(dir), tByte)))
+	fn.Params = []*ir.Object{dir}
+	f := build(t, fn)
+
+	o := spillOf(t, f)
+	e := f.Entry
+	zero := opIndex(e, OpZero)
+	if zero < 0 {
+		t.Fatalf("the entry block clears nothing, and the temporary holds a pointer\n%s", f)
+	}
+	if e.Values[zero].AuxInt != o.Type.Size {
+		t.Errorf("the clear covers %d bytes, want %d\n%s", e.Values[zero].AuxInt, o.Type.Size, f)
+	}
+	if a := e.Values[zero].Args[0]; a.Op != OpLocalAddr || a.Aux != o {
+		t.Errorf("the clear is of %v, want the address of %s\n%s", a, o.Name, f)
+	}
+	for i, v := range e.Values {
+		if v.Op == OpArg && i > zero {
+			t.Errorf("%v is at %d and the clear is at %d, so the clear is ahead of an argument\n%s", v, i, zero, f)
+		}
+	}
+	// Nothing outside the entry is cleared, and the body is what the memory
+	// after the clear belongs to.
+	if n := countOp(f, OpZero); n != 1 {
+		t.Errorf("got %d clears, want 1\n%s", n, f)
+	}
+}
+
+// TestBuildIndexEvaluatesTheOperandBeforeTheIndex asserts the order of the two.
+//
+// The specification evaluates the operand of an index before the index, and
+// both can be a call. Construction built the index first while an operand that
+// names no storage was refused here, so the inversion was invisible.
+func TestBuildIndexEvaluatesTheOperandBeforeTheIndex(t *testing.T) {
+	x := obj("x", tInt, ir.ClassLocal)
+	f1 := obj("f1", tFunc, ir.ClassFunc)
+	f2 := obj("f2", tFunc, ir.ClassFunc)
+	fn := fun("f", []*ir.Object{x},
+		asn(local(x), index(call(f1, tArr4), call(f2, tInt), tInt)),
+		ret(local(x)))
+	f := build(t, fn)
+
+	var order []string
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpStaticCall {
+				continue
+			}
+			if o, _ := v.Aux.(*ir.Object); o != nil {
+				order = append(order, o.Name)
+			}
+		}
+	}
+	want := "f1 f2"
+	if got := strings.Join(order, " "); got != want {
+		t.Errorf("call order\ngot:  %s\nwant: %s\n%s", got, want, f)
+	}
+}
+
+// TestBuildAddressOfAValueIsStillRefused holds the line the spill does not
+// cross.
+//
+// storageAddr gives storage to an operand that names none, and it is reached
+// only where this pass needs an address to read a part of a value. The address
+// of an expression the program itself asks for is a different question: Go
+// gives it only to what names storage, so "&f()" reaching construction is a
+// tree the lowering pass did not finish, and a copy here would answer it with
+// the address of storage nothing else knows the program wrote to.
+func TestBuildAddressOfAValueIsStillRefused(t *testing.T) {
+	p := obj("p", tIntPtr, ir.ClassLocal)
+	g := obj("g", tFunc, ir.ClassFunc)
+	fn := fun("f", []*ir.Object{p},
+		asn(local(p), addrOf(call(g, tInt))))
+	_, err := Build(fn)
+	if err == nil {
+		t.Fatalf("Build accepted the address of a call result")
+	}
+	if got := err.Error(); !strings.Contains(got, "an address is not built yet") {
+		t.Errorf("error is %q, want the refusal of an address", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // The corpus
 
 // The corpus test of construction itself.

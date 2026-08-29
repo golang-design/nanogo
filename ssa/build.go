@@ -95,6 +95,16 @@ type builder struct {
 	memVar  *ir.Object
 	initMem *Value
 
+	// entryMem is the memory the entry block leaves with and entryEnd is the
+	// last value it holds, both recorded once the entry is complete. spills
+	// are the frame temporaries storageAddr made, in creation order, and
+	// zeroSpills clears them at the entry by chaining onto the two.
+	// specs/053-determinism.md forbids a map here.
+	entryMem *Value
+	entryEnd *Value
+	spills   []*ir.Object
+	nspill   int
+
 	labels       map[string]*Block
 	labelOrder   []string
 	labelDefined map[string]bool
@@ -267,6 +277,18 @@ func (b *builder) entry() {
 	for _, o := range append(append([]*ir.Object{}, b.fn.Results...), b.fn.Locals...) {
 		b.zeroLocal(o, o.Pos)
 	}
+
+	// Where the entry ends. zeroSpills puts the clear of a temporary
+	// storageAddr made here, which is where the clear of a local goes, and a
+	// temporary is only discovered while the body is built. The body is built
+	// into this block until it branches, so the values after this point are
+	// the body's and the clear belongs in front of them.
+	//
+	// The two are the memory to chain onto and the value to insert after. They
+	// are recorded rather than computed at the end, because by then the body
+	// has added both memory and values of its own.
+	b.entryMem = b.memory()
+	b.entryEnd = e.Values[len(e.Values)-1]
 }
 
 // finish closes the last block, seals what is still open, and removes what
@@ -292,6 +314,7 @@ func (b *builder) finish() {
 	b.resolveAll()
 	b.removeUnreachable()
 	b.resolveAll()
+	b.zeroSpills()
 
 	// Drop the construction bookkeeping. A pass that runs later must not see
 	// a use list that construction stopped maintaining.
@@ -390,6 +413,102 @@ func (b *builder) removeUnreachable() {
 			b.tryRemoveTrivialPhi(phi)
 		}
 	}
+}
+
+// zeroSpills clears the frame temporaries storageAddr made, at the entry.
+//
+// specs/021-ssa-construction.md: a frame slot holds whatever the last call
+// left in it, and a stack map describes the slot from the entry onwards. That
+// is why entry clears every result and local, and a temporary storageAddr made
+// is a frame object like any other: ssa/liveness.go has no definition point
+// for it, so it is live from the entry to the point its address is taken, and
+// the words the collector reads before the store must be a zero and not a
+// stale pointer.
+//
+// Only a temporary whose type holds a pointer is cleared. That is the same
+// question ssa/liveness.go asks to decide what it tracks, and a slot with no
+// pointer in it is in no bitmap, so nothing reads it before the store.
+//
+// The clear goes at the entry rather than at the spill, because the spill is
+// inside the body and the words before it are exactly the ones at risk. It is
+// emitted here rather than when the temporary is made, because mid-way through
+// construction the memory the entry leaves with is also held by the variable
+// map of every block that has read it, and by the phi arguments of every block
+// already built. After resolveAll every reference to it is an argument, so
+// rewriting the arguments is rewriting all of them.
+//
+// Where in the entry is the second half of the answer, and it costs a program
+// when it is wrong. The clear of a type that holds a pointer becomes a call to
+// runtime.memclrHasPointers, and Go's convention leaves no register standing
+// across a call, so a clear placed ahead of the arguments makes each of them
+// look dead until after it: a parameter still in its incoming register is then
+// read back after the call has overwritten it. entryEnd is where the entry's
+// own values end, which is after the arguments and before the body.
+//
+// A function with no spill gets no value: the walk below returns before it
+// makes one.
+func (b *builder) zeroSpills() {
+	if b.err != nil || len(b.spills) == 0 {
+		return
+	}
+	mem := b.entryMem
+	if mem == nil || mem.Block != b.f.Entry {
+		// entry records the memory it leaves with, and the entry block is
+		// never removed, so this cannot happen. Naming it is cheaper than a
+		// clear spliced into a block it does not belong to.
+		b.errorf(InvNone, "the entry block leaves with no memory")
+		return
+	}
+	e := b.f.Entry
+	idx := valueIndex(e, b.entryEnd)
+	if idx < 0 {
+		b.errorf(InvNone, "the value the entry block ended with is not in it")
+		return
+	}
+	at := len(e.Values)
+	last := mem
+	for _, o := range b.spills {
+		if o.Type == nil || o.Type.Size == 0 || !o.Type.HasPointers() {
+			continue
+		}
+		addr := e.NewValue(o.Pos, OpLocalAddr, b.ptrTo(o.Type), last)
+		addr.Aux = o
+		z := e.NewValue(o.Pos, OpZero, MemType, addr, last)
+		z.AuxInt = o.Type.Size
+		last = z
+	}
+	if last == mem {
+		return
+	}
+	chain := append([]*Value{}, e.Values[at:]...)
+	// Everything that read the entry's memory now reads the last clear, so
+	// the clears are first in the memory order and nothing else moves. The
+	// chain itself is what the entry held from at onwards, so walking the
+	// entry only up to at is what leaves the chain's own arguments alone.
+	for _, blk := range b.f.Blocks {
+		if blk.Control == mem {
+			blk.Control = last
+		}
+		vals := blk.Values
+		if blk == e {
+			vals = vals[:at]
+		}
+		for _, v := range vals {
+			for i, a := range v.Args {
+				if a == mem {
+					v.Args[i] = last
+				}
+			}
+		}
+	}
+	// The chain is appended and then moved to sit right after the value the
+	// entry ended with, because a block lists its values in an order every
+	// later pass reads as the order they run in.
+	vals := make([]*Value, 0, len(e.Values))
+	vals = append(vals, e.Values[:idx+1]...)
+	vals = append(vals, chain...)
+	vals = append(vals, e.Values[idx+1:at]...)
+	e.Values = vals
 }
 
 // The variable map of Braun et al. (2013).
@@ -1292,9 +1411,88 @@ func (b *builder) addr(n ir.Expr) *Value {
 	return b.zeroValue(b.intType)
 }
 
-// addressable reports whether addr builds an address for n without reporting.
+// storageAddr returns the address of storage holding n's value, giving n
+// storage when it names none.
 //
-// It is the set of forms the switch above accepts, asked before the fact
+// A field of a struct, an element of an array, and the header of a slice or a
+// string are read here through an address, because nothing in this pass takes
+// a part out of a composite value. The operand those three read from is an
+// expression, and Go does not require it to name storage: "hex[i]" indexes a
+// constant and "f().x" selects a field of a call result. Neither names a place,
+// so addr has nothing to return and refused, which is
+// specs/021-ssa-construction.md's row for the address of a constant and of a
+// call result.
+//
+// The answer is the one cmd/compile's walk gives: an operand that names no
+// storage gets storage, a frame temporary holding a copy of its value. The
+// copy is what the language already says, because an operand that names no
+// place cannot be written through: a slice element assigned through a copied
+// header still writes the one array the header points at.
+//
+// The temporary is a frame object like every other, so ssa/frame.go lays it
+// out and specs/027-liveness-and-stackmaps.md describes it. zeroSpills clears
+// it at the entry for the reason entry clears every local.
+//
+// An operand this pass cannot evaluate is left to b.expr to report, which
+// names the construct rather than the address it was asked for.
+func (b *builder) storageAddr(n ir.Expr) *Value {
+	if b.err != nil || n == nil {
+		return b.zeroValue(b.intType)
+	}
+	if b.addressable(n) {
+		return b.addr(n)
+	}
+	if n.Type == nil || n.Type.Kind == ir.Void {
+		// A call of a function that returns nothing has no value to copy, so
+		// there is nothing a slot could hold. The tree that selects a field of
+		// one is wrong rather than unbuilt.
+		b.errorf(InvNone, "%s: an address of an expression with no value", n.Op)
+		return b.zeroValue(b.intType)
+	}
+	v := b.expr(n)
+	if b.err != nil {
+		return b.zeroValue(b.intType)
+	}
+	o := b.spillObj(n.Type, n.Pos)
+	if n.Type.Size > 0 {
+		// A type of no size occupies no slot, so a store of it would write no
+		// bytes and every read of it reads none either.
+		b.store(b.localAddr(o, n.Pos), v, n.Type, n.Pos)
+	}
+	// The address is taken after the store rather than before it, so that the
+	// memory it takes is the memory the value is in. ssa/liveness.go reads the
+	// point an address is taken as the last use of the object.
+	return b.localAddr(o, n.Pos)
+}
+
+// spillObj declares the frame temporary storageAddr copies an operand into.
+//
+// The name says which pass made the storage. Two objects with one name would
+// read as shadowing, which this is not, and ir.Lower's own temporaries are
+// .lowertmp_ for the same reason.
+//
+// Addrtaken is set because it is: the object exists to have its address taken.
+// classify has already run, so the flag changes nothing here, and a pass that
+// reads it later would otherwise see a frame object that says its address is
+// never taken.
+func (b *builder) spillObj(t *ir.Type, pos syntax.Pos) *ir.Object {
+	o := &ir.Object{
+		Name:      fmt.Sprintf(".ssatmp_%d", b.nspill),
+		Type:      t,
+		Pos:       pos,
+		Class:     ir.ClassLocal,
+		Addrtaken: true,
+	}
+	b.nspill++
+	b.frame[o] = true
+	b.f.Frame = append(b.f.Frame, o)
+	b.spills = append(b.spills, o)
+	return o
+}
+
+// addressable reports whether n names storage this pass can address.
+//
+// It is the set of forms addr's switch accepts, asked before the fact
 // rather than after it, because a caller that needs an address has an
 // alternative only while it still has the choice. ir.Lower asks the same
 // question with its own addressable, and the two lists are the same list: a
@@ -1331,7 +1529,7 @@ func (b *builder) fieldBase(x ir.Expr) (*Value, *ir.Type) {
 	if x.Type.Kind == ir.Ptr {
 		return b.nilCheck(b.expr(x), x.Pos), x.Type.Elem
 	}
-	return b.addr(x), x.Type
+	return b.storageAddr(x), x.Type
 }
 
 // indexAddr returns the address of an element, with the bounds check that
@@ -1346,14 +1544,17 @@ func (b *builder) indexAddr(n ir.Expr) *Value {
 		b.errorf(InvNone, "an index with no index expression")
 		return b.zeroValue(b.intType)
 	}
-	idx := b.expr(n.Y)
-
+	// The operand before the index, which is the order the specification
+	// gives them. It matters because the operand can be a call: an index built
+	// first would call g before f in "f()[g()]". An earlier version of this
+	// function built the index first, which was invisible while an operand
+	// that names no storage was refused here.
 	var base, length *Value
 	var elem *ir.Type
 	switch x.Type.Kind {
 	case ir.Array:
 		elem = x.Type.Elem
-		base = b.addr(x)
+		base = b.storageAddr(x)
 		length = b.constInt(x.Type.Len, n.Pos)
 
 	case ir.Ptr:
@@ -1367,9 +1568,10 @@ func (b *builder) indexAddr(n ir.Expr) *Value {
 
 	case ir.Slice, ir.String:
 		// A slice header is a pointer, a length and a capacity, and a string
-		// header is a pointer and a length. Both live in the frame here, so
-		// both are read through memory.
-		hdr := b.addr(x)
+		// header is a pointer and a length. Nothing here takes a word out of
+		// either, so both are read through an address, which storageAddr gives
+		// an operand that names no storage of its own.
+		hdr := b.storageAddr(x)
 		elem = x.Type.Elem
 		if x.Type.Kind == ir.String {
 			elem = &ir.Type{Kind: ir.Uint8, Size: 1, Align: 1, Name: "byte"}
@@ -1383,6 +1585,7 @@ func (b *builder) indexAddr(n ir.Expr) *Value {
 		b.unsupported(n, "an index of "+x.Type.Kind.String())
 		return b.zeroValue(b.intType)
 	}
+	idx := b.expr(n.Y)
 	if b.err != nil {
 		return b.zeroValue(b.intType)
 	}
