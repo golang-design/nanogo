@@ -31,7 +31,11 @@ var refusalPins = []struct {
 	phrase string // what the help says
 	probe  string // the probe in internal/audit/testdata/probes that shows it
 }{
-	{"print or println", "defer-builtin"},
+	// probes/defer-builtin was pinned here. A deferred or started builtin
+	// compiles: ir.Build wraps it in the marked literal it already wrapped a
+	// call with operands in, so the runtime is handed a function value like
+	// any other. The sentence the pin guarded is gone and the pin with it.
+	//
 	// probes/generic-method was pinned here. A method of a generic type
 	// compiles, and its export data carries it against the dictionary the
 	// type shares with every method it declares, so the sentence the pin

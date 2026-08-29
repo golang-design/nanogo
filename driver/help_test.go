@@ -25,14 +25,19 @@ import (
 // internal/audit/testdata/probes shows the behaviour it describes.
 func TestHelpStatesTheLimits(t *testing.T) {
 	for _, want := range []string{
-		"arm64",            // the one architecture
-		"darwin/arm64",     // the target the tests run on
-		"allowlist",        // how a package is selected
-		"gc",               // what happens to everything else
-		"export data",      // the archive carries it, so it can be imported
-		"assembly",         // the ABI wrapper that is not generated
-		"an interface",     // an assertion or a switch case naming one, which needs an itab
-		"print or println", // probes/defer-builtin
+		"arm64",        // the one architecture
+		"darwin/arm64", // the target the tests run on
+		"allowlist",    // how a package is selected
+		"gc",           // what happens to everything else
+		"export data",  // the archive carries it, so it can be imported
+		"assembly",     // the ABI wrapper that is not generated
+		"an interface", // an assertion or a switch case naming one, which needs an itab
+		// "print or println" was required here for probes/defer-builtin,
+		// which guarded the sentence saying a deferred builtin is refused.
+		// ir.Build wraps one in the marked literal now, so the sentence is
+		// gone and the requirement with it. The help still names print and
+		// println under what nanogo compiles, which is a different claim
+		// and has its own probe.
 		// specs/013-generics.md's stenciler compiles an instantiation of a
 		// generic this package declares, so the phrase pinned here names
 		// what is still refused rather than the whole feature.

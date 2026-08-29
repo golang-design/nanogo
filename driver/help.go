@@ -165,9 +165,6 @@ What nanogo compiles:
 
 What nanogo refuses, by name, with the reason:
 
-	defer of print or println. A builtin is not a function value, so there
-	is nothing to hand the runtime.
-
 	Taking the address of a variable the compiler keeps in a register.
 
 	A method with type parameters of its own, such as (T).M[X any].
