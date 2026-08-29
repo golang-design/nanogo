@@ -1516,6 +1516,13 @@ func TestLowerRuntimeRows(t *testing.T) {
 		{"copy from a string", `func f(d []byte, s string) { copy(d, s) }`, "runtime.memmove"},
 		{"clear of a slice", `func f(s []int) { clear(s) }`, "runtime.memclrNoHeapPointers"},
 		{"clear of a slice of pointers", `func f(s []*int) { clear(s) }`, "runtime.memclrHasPointers"},
+		// specs/034: runtime.memmove writes the words and records nothing, so
+		// a copy of pointers between two slices in the heap is invisible to a
+		// collector that is marking. typedslicecopy is memmove with
+		// bulkBarrierPreWrite in front of it.
+		{"copy of pointers", `func f(d, s []*int) int { return copy(d, s) }`, "runtime.typedslicecopy"},
+		{"copy of a struct holding a pointer", `type p struct{ a *int; n int }
+func f(d, s []p) int { return copy(d, s) }`, "runtime.typedslicecopy"},
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			fn := lowerOK(t, tc.body)
@@ -3571,6 +3578,10 @@ func TestLowerAppendRows(t *testing.T) {
 			[]string{"runtime.growslice", "runtime.memmove"}},
 		{"a string spread", `func f(s []byte, t string) []byte { return append(s, t...) }`,
 			[]string{"runtime.growslice", "runtime.memmove"}},
+		// The same rule as copy, and for the same reason: a spread of pointer
+		// elements moves pointers into the destination's storage.
+		{"a spread of pointers", `func f(s, t []*int) []*int { return append(s, t...) }`,
+			[]string{"runtime.growslice", "runtime.typedslicecopy"}},
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			fn := lowerOK(t, tc.body)

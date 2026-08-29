@@ -1098,6 +1098,15 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 		{"decomposition", func() error { ssa.Decompose(f); return nil }},
 		{"the ABI assignment", func() error { return ssa.AssignABI(f, target) }},
 		{"verification after the ABI assignment", func() error { return verify(f) }},
+		// The bulk half of the write barrier decides which copies need one,
+		// before lowering turns a copy into a call and the moved type is gone.
+		// The descriptors it names are symbols this object owes, so they join
+		// the ones ir.Lower collected.
+		{"bulk write barriers", func() error {
+			ts, err := ssa.BulkBarriers(f)
+			c.Types = append(c.Types, ts...)
+			return err
+		}},
 		{"lowering", func() error { ssa.Lower(f, rules.ARM64); return nil }},
 		{"verification after lowering", func() error { return verify(f) }},
 		// The barrier is inserted after selection, because the values it

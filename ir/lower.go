@@ -630,6 +630,22 @@ var rtypeType = func() *Type {
 	return t
 }()
 
+// DescriptorObject returns the object that names t's type descriptor.
+//
+// The name comes from TypeSymbol and the type from rtypeType, and both are
+// here rather than at a call site for the reason descriptor gives: the linker
+// resolves a descriptor by name, and two spellings of one type are two
+// descriptors. ssa/bulkbarrier.go needs the same object for the argument
+// runtime.typedmemmove takes, and it is a different package, so the rule is
+// exported rather than repeated.
+func DescriptorObject(t *Type) (*Object, error) {
+	name, err := TypeSymbol(t)
+	if err != nil {
+		return nil, err
+	}
+	return &Object{Name: name, Type: rtypeType, Class: ClassGlobal}, nil
+}
+
 // Itab names one (concrete type, interface) pair whose itab a package owes.
 //
 // It is a pair and not a type, because an itab holds the concrete type's
@@ -681,14 +697,14 @@ var itabType = func() *Type {
 //
 // The second result is the reason there is no name, for a caller to report.
 func (l *lowerer) descriptor(t *Type, pos syntax.Pos) (Expr, string) {
-	name, err := TypeSymbol(t)
+	o, err := DescriptorObject(t)
 	if err != nil {
 		return nil, err.Error()
 	}
-	o, ok := l.descs[name]
-	if !ok {
-		o = &Object{Name: name, Type: rtypeType, Class: ClassGlobal}
-		l.descs[name] = o
+	if have, ok := l.descs[o.Name]; ok {
+		o = have
+	} else {
+		l.descs[o.Name] = o
 		l.needed = append(l.needed, t)
 	}
 	return &Node{
@@ -887,6 +903,51 @@ func (l *lowerer) sliceHeader(t *Type, ptr, length, capacity Expr, pos syntax.Po
 	l.emit(Assign(pos, l.headerField(ref(o, pos), hdrLen, lowerInt), length))
 	l.emit(Assign(pos, l.headerField(ref(o, pos), hdrCap, lowerInt), capacity))
 	return ref(o, pos)
+}
+
+// sliceCopy emits the copy of count elements of type elem from src to dst.
+//
+// The symbol is chosen by whether the element holds a pointer, and
+// specs/034-write-barriers.md makes that a correctness rule rather than a
+// performance one. runtime.memmove writes the words and records nothing, so a
+// copy of pointers between two slices in the heap is invisible to a collector
+// that is marking, and the objects only the destination now references are
+// freed. runtime.typedslicecopy is memmove with bulkBarrierPreWrite in front
+// of it.
+//
+// The count is in elements and not in bytes, because typedslicecopy reads the
+// element size out of the descriptor. Passing it as both lengths is the same
+// count either way: the runtime copies the smaller of the two.
+//
+// It arrives as a factory and not as an expression because it is read twice
+// there. A factory is what the rest of this file uses for a value read more
+// than once (l.hold), and it reads one temporary each time rather than putting
+// one node in the tree twice.
+//
+// The second result is false when elem has pointers and has no descriptor, so
+// that the caller refuses rather than emitting a copy with no barrier.
+func (l *lowerer) sliceCopy(n Expr, elem *Type, dst, src Expr, count func() Expr, pos syntax.Pos) bool {
+	if elem == nil || !elem.HasPointers() {
+		size := count()
+		if elem != nil && elem.Size != 1 {
+			size = &Node{Op: OBinary, Op1: syntax.Mul, Pos: pos, Type: lowerInt,
+				X: size, Y: intConst(pos, lowerInt, elem.Size)}
+		}
+		l.emit(runtimeCall(pos, "runtime.memmove",
+			&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: dst},
+			&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: src},
+			&Node{Op: OConvert, Pos: pos, Type: lowerUintptr, X: size}))
+		return true
+	}
+	desc, why := l.descriptor(elem, pos)
+	if desc == nil {
+		l.refuse(n, "a copy of "+elem.String()+", whose elements hold a pointer and whose descriptor the write barrier needs: "+why)
+		return false
+	}
+	l.emit(runtimeCall(pos, "runtime.typedslicecopy", desc,
+		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: dst}, count(),
+		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: src}, count()))
+	return true
 }
 
 // memclr zeroes the storage a pointer names.
@@ -1789,16 +1850,10 @@ func (l *lowerer) appendSpread(n Expr, t *Type, pos syntax.Pos) Expr {
 	}
 	dst := &Node{Op: OBinary, Op1: syntax.Add, Pos: pos, Type: l.ptrTo(t.Elem),
 		X: l.headerField(ref(s, pos), hdrPtr, l.ptrTo(t.Elem)), Y: off}
-	size := Expr(num())
-	if t.Elem.Size != 1 {
-		size = &Node{Op: OBinary, Op1: syntax.Mul, Pos: pos, Type: lowerInt,
-			X: size, Y: intConst(pos, lowerInt, t.Elem.Size)}
+	if !l.sliceCopy(n, t.Elem, dst, l.headerField(from, hdrPtr, l.ptrTo(lowerByte)), num, pos) {
+		l.pop()
+		return n
 	}
-	l.emit(runtimeCall(pos, "runtime.memmove",
-		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: dst},
-		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr,
-			X: l.headerField(from, hdrPtr, l.ptrTo(lowerByte))},
-		&Node{Op: OConvert, Pos: pos, Type: lowerUintptr, X: size}))
 	l.emit(&Node{
 		Op: OIf, Pos: pos, Type: voidType,
 		X: &Node{Op: OCompare, Op1: syntax.Neq, Pos: pos, Type: lowerBool,
@@ -3838,15 +3893,9 @@ func (l *lowerer) copyExpr(n Expr) Expr {
 		Body: []Stmt{Assign(pos, ref(o, pos), shorter())},
 	})
 
-	size := Expr(ref(o, pos))
-	if elem != nil && elem.Size != 1 {
-		size = &Node{Op: OBinary, Op1: syntax.Mul, Pos: pos, Type: lowerInt,
-			X: size, Y: intConst(pos, lowerInt, elem.Size)}
+	if !l.sliceCopy(n, elem, dp(), sp(), func() Expr { return ref(o, pos) }, pos) {
+		return n
 	}
-	l.emit(runtimeCall(pos, "runtime.memmove",
-		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: dp()},
-		&Node{Op: OConvert, Pos: pos, Type: lowerUnsafePtr, X: sp()},
-		&Node{Op: OConvert, Pos: pos, Type: lowerUintptr, X: size}))
 	return ref(o, pos)
 }
 

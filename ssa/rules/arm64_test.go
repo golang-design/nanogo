@@ -1429,6 +1429,29 @@ b0:
   t5 = ARM64RET <mem> t4
   Ret t5
 `},
+		{"a copy of pointers is a call to typedmemmove", func() *ssa.Func {
+			// ssa/bulkbarrier.go marks a copy whose value holds pointers with
+			// the type's descriptor, and the mark is what says the copy needs
+			// the write barrier runtime.memmove does not carry. The count
+			// argument goes away with it: typedmemmove reads the size out of
+			// the descriptor, so one operand decides how many bytes move and
+			// how many words of pointer map are read.
+			p := newBuilder()
+			c := aux(p.val(ssa.OpMove, ssa.MemType, p.arg(tPtr), p.arg(tPtr), p.mem), 48, nil)
+			c.Aux = &ir.Object{Name: "type:main.wide", Class: ir.ClassGlobal}
+			p.setMem(c)
+			return p.ret()
+		}, `
+b0:
+  t0 = SB <unsafe.Pointer>
+  t1 = InitMem <mem>
+  t2 = Arg <*int>
+  t3 = Arg <*int>
+  t4 = ARM64MOVDaddr <unsafe.Pointer> [0] {type:main.wide} t0
+  t5 = ARM64CALLstatic <mem> {runtime.typedmemmove} t4 t2 t3 t1
+  t6 = ARM64RET <mem> t5
+  Ret t6
+`},
 		{"a clear of pointer-free memory calls memclrNoHeapPointers", func() *ssa.Func {
 			p := newBuilder()
 			c := aux(p.val(ssa.OpZero, ssa.MemType, p.arg(tPtr3), p.mem), 3, nil)

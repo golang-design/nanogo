@@ -808,8 +808,24 @@ func lowerStore(v *ssa.Value, e *ssa.Edit) bool {
 // lowering introduces a call into a block that had none, which is why liveness
 // runs after this pass.
 func lowerMove(v *ssa.Value, e *ssa.Edit) bool {
-	n := constInto(v, e, v.AuxInt, typeU64)
 	dst, src, mem := v.Args[0], v.Args[1], v.Args[2]
+	// A copy of a value holding pointers is runtime.typedmemmove, which is
+	// memmove with the write barrier in front of it. ssa/bulkbarrier.go
+	// decided that and left the descriptor here, because the type is known
+	// before lowering and a call carries a callee and not a value type.
+	//
+	// typedmemmove takes the type and reads the size out of it, so there is no
+	// count argument. That is also what makes the pair safe: one operand
+	// decides how many bytes move and how many words of pointer map are read,
+	// and they cannot disagree.
+	if desc := ssa.BulkBarrierDescriptor(v); desc != nil {
+		d := e.Insert(v.Pos, ssa.OpARM64MOVDaddr, e.PtrType(), e.SB())
+		d.Aux = desc
+		e.Set(v, ssa.OpARM64CALLstatic, d, dst, src, mem)
+		v.Aux = rtObj("runtime.typedmemmove")
+		return true
+	}
+	n := constInto(v, e, v.AuxInt, typeU64)
 	e.Set(v, ssa.OpARM64CALLstatic, dst, src, n, mem)
 	v.Aux = rtObj("runtime.memmove")
 	return true

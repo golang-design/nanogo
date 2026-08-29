@@ -62,6 +62,55 @@ quiet one, with and without the barrier. A file that only fails under load is
 evidence when it fails and is not evidence when it passes, which is why the
 table above is `gcgort.go`.
 
+## The bulk half
+
+A copy of a value that holds several pointers is not a pointer store and the
+pass above never sees it. `ssa/bulkbarrier.go` and `ir.sliceCopy` are what
+cover it, and Go's own runtime draws the line for them.
+
+| What the program writes | What is emitted | Who carries the barrier |
+| --- | --- | --- |
+| a clear of a region that may hold pointers | `runtime.memclrHasPointers` | the runtime; it calls `bulkBarrierPreWrite` before it writes |
+| a copy of a value that holds pointers | `runtime.typedmemmove` | the runtime, given the type descriptor |
+| `copy` or `append(a, b...)` of pointer elements | `runtime.typedslicecopy` | the same |
+| any of the three over pointer-free memory | `memclrNoHeapPointers`, `memmove` | nothing needs one |
+
+The clear was already right. `ssa/rules/arm64.go`'s `lowerZero` picks
+`memclrHasPointers` whenever the region can hold a pointer, and that function
+is `bulkBarrierPreWrite` followed by `memclrNoHeapPointers`. The copy had no
+such form: `runtime.memmove` writes the words and records nothing.
+
+### Why the decision and the call are in different places
+
+`ssa/bulkbarrier.go` runs before lowering and decides only which copies need a
+barrier, recording the answer in the operation's `Aux`. `lowerMove` emits the
+call.
+
+The split is forced by what each stage knows. The moved type is known before
+lowering and gone after it, because a call carries a callee and not a value
+type. The descriptor is also a symbol the object must define, and the driver
+collects those from the list the pass returns, which a rule inside the target's
+package cannot reach.
+
+`copy` and `append` need no such split. Both are lowered in `ir`, where the
+element type and `l.descriptor` are both to hand.
+
+### How the gap was measured
+
+A struct of twelve pointers copied between two heap banks, and the same shape
+through `copy`, each lost objects on **every run of ten** under `GOGC=1` with
+`GODEBUG=gccheckmark=1`. Both pass with the typed forms.
+`internal/e2e/bulkbarrier_test.go` holds both programs and records the three
+properties a probe of this kind needs, because the first draft of each was a
+program that passed with the barrier missing:
+
+- The objects must be allocated **before** the shuffling starts. An object
+  allocated while the collector marks is allocated black and cannot be lost.
+- The source must be cleared **by a copy** and never field by field. A nil
+  store through a field carries the deletion half of the scalar barrier, which
+  shades the very object being moved.
+- The only reference to each object must be the one being copied.
+
 ### The defect this pass introduced, and what now catches it
 
 The first version of the pass made its own `OpSB` rather than reusing the one
