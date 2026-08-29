@@ -2244,7 +2244,13 @@ func (b *builder) typeNode(pos syntax.Pos, t types2.Type) Expr {
 	// taken off it.
 	t = b.subst(t)
 	irt := b.irType(t)
-	if named, ok := unalias(t).(*types2.Named); ok && named.Obj() != nil {
+	if named, ok := unalias(t).(*types2.Named); ok && named.Obj() != nil && named.TypeArgs().Len() == 0 {
+		// The object of an instantiation is the declaration's, and the
+		// declaration's type is the generic one: substituting a generic type
+		// that carries no type arguments is undefined, and types2 answers it
+		// with the invalid type. The object below carries the instantiated
+		// type instead, which is the type this node has and the only one a
+		// descriptor can be written from.
 		o := b.obj(named.Obj())
 		return &Node{Op: OGlobal, Pos: pos, Type: irt, Obj: o}
 	}

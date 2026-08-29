@@ -305,3 +305,291 @@ func TestToolexecSharesAForeignStencilBetweenTwoPackages(t *testing.T) {
 			"the way gc marks its own stencils", n)
 	}
 }
+
+// The program the statement half of the foreign walk has to compile.
+//
+// slices.Sort and slices.SortFunc reach pdqsort, which is where the walk stops
+// being a handful of expressions: assignments, three-clause loops, parallel
+// swaps, an expression switch, break and continue, len, and a method of a
+// concrete type of the declaring package, all inside a body no source file of
+// this build holds.
+//
+// Every slice is printed whole rather than asserted with a predicate, and every
+// one holds duplicates. A parallel assignment built as two assignments in order
+// copies one value into both places, which leaves the result sorted and the
+// multiset wrong: "is it sorted" passes and the printed slice does not.
+//
+// The element types are one word, two words whose comparison calls the runtime,
+// and a struct with a pointer in it, so a body stencilled at the wrong type
+// reads the wrong number of words.
+//
+// The long slice is what reaches the rest of pdqsort. Below thirteen elements
+// the body sorts by insertion and returns, and below fifty it does not choose a
+// pivot by the Tukey ninther, which is the arm that calls a method of the
+// declaring package's own xorshift type.
+const foreignSortProgram = `package main
+
+import (
+	"cmp"
+	"slices"
+)
+
+type pair struct {
+	n    int
+	name string
+}
+
+func printInts(s []int) {
+	for i := 0; i < len(s); i++ {
+		println(i, s[i])
+	}
+}
+
+func main() {
+	ints := []int{5, 3, 9, 1, 3, 7, 2, 8, 6, 4, 0, 5, 3, 9, 1, 7, 2, 8, 6, 4}
+	slices.Sort(ints)
+	printInts(ints)
+	println(slices.IsSortedFunc(ints, func(a, b int) int { return cmp.Compare(a, b) }))
+
+	long := make([]int, 61)
+	for i := range long {
+		long[i] = (i * 37) % 61
+	}
+	slices.SortFunc(long, func(a, b int) int { return cmp.Compare(a, b) })
+	printInts(long)
+
+	strs := []string{"pear", "fig", "apple", "fig", "date", "cherry", "banana", "apple", "elderberry", "date", "grape", "cherry", "kiwi", "lemon"}
+	slices.Sort(strs)
+	for i := 0; i < len(strs); i++ {
+		println(i, strs[i])
+	}
+
+	pairs := []pair{{3, "c"}, {1, "a"}, {2, "b"}, {1, "aa"}, {5, "e"}, {4, "d"}, {2, "bb"}, {0, "z"}, {3, "cc"}, {5, "ee"}, {4, "dd"}, {0, "zz"}, {6, "f"}, {6, "ff"}}
+	slices.SortFunc(pairs, func(a, b pair) int { return cmp.Compare(a.n, b.n) })
+	for i := 0; i < len(pairs); i++ {
+		println(i, pairs[i].n, pairs[i].name)
+	}
+	println(slices.IsSortedFunc(pairs, func(a, b pair) int { return cmp.Compare(a.n, b.n) }))
+
+	println(cmp.Compare(1, 2), cmp.Compare(2, 2), cmp.Compare(3, 2))
+	println(cmp.Compare("a", "b"), cmp.Compare("b", "b"), cmp.Compare("c", "b"))
+	println(slices.EqualFunc(ints, ints, func(a, b int) bool { return a == b }))
+	println(slices.EqualFunc(ints, ints[:3], func(a, b int) bool { return a == b }))
+	println(slices.EqualFunc(strs, strs, func(a, b string) bool { return a == b }))
+}
+`
+
+// foreignSortModule is the module the test below builds.
+func foreignSortModule() map[string]string {
+	return map[string]string{
+		"go.mod":  "module nanogo.example/foreignsort\n\ngo 1.27\n",
+		"main.go": foreignSortProgram,
+	}
+}
+
+// TestToolexecRunsTheStatementFormsOfAForeignGeneric is the evidence for the
+// statement half of the walk.
+//
+// A stencilled body compiles whatever it computes, so the question is whether
+// the linked program agrees with the one gc builds from the same source. It is
+// answered by running both.
+func TestToolexecRunsTheStatementFormsOfAForeignGeneric(t *testing.T) {
+	h := setup(t, foreignSortModule(), []string{"main"})
+
+	if out, err := h.build(t, "-o", "foreignsort", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	got := runProgram(t, filepath.Join(h.mod, "foreignsort"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}
+
+// The module whose library holds one generic per construct the foreign walk
+// maps, so that a construct the standard library does not reach is still run.
+//
+// driver's TestCompileStencilsTheConstructsTheForeignWalkMaps builds the same
+// library in this process, which is where the coverage comes from. What this
+// adds is the answer: each function below returns a value that differs if the
+// construct was built wrongly rather than merely accepted.
+func foreignFormsModule() map[string]string {
+	return map[string]string{
+		"go.mod": "module nanogo.example/foreignforms\n\ngo 1.27\n",
+		"lib/lib.go": `package lib
+
+type Tick struct{ N int }
+
+func (t *Tick) Bump() int { t.N++; return t.N }
+
+// Sum is an assignment, an operation assignment and a three-clause loop.
+func Sum[T ~int](vs []T) T {
+	total := T(0)
+	for i := 0; i < len(vs); i++ {
+		total += vs[i]
+	}
+	return total
+}
+
+// Reverse is the parallel assignment, and a loop whose post statement assigns
+// two variables at once.
+func Reverse[T any](s []T) {
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+}
+
+// Counted is a var declaration with no initialiser, ++, break and continue.
+func Counted[T ~int](s []T, skip T) int {
+	var n int
+	for _, v := range s {
+		if v == skip {
+			continue
+		}
+		if v < 0 {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+// Classify is an expression switch with a multi-value case and a default,
+// inside a loop, so that the break in one clause and the continue in another
+// have two plausible targets each: break ends the switch and reaches the
+// statement after it, and continue reaches the loop's post statement.
+func Classify[T ~int](v T) int {
+	n := 0
+	for i := 0; i < 3; i++ {
+		switch v {
+		case 0:
+			n += 10
+			break
+		case 1, 2:
+			n += 20
+			continue
+		default:
+			n += 30
+		}
+		n++
+	}
+	return n
+}
+
+func Two[T ~int](v T) (T, T) { return v, v + 1 }
+
+// Pair assigns two results at once, swaps them, and throws one away.
+func Pair[T ~int](v T) T {
+	a, b := Two(v)
+	a, b = b, a
+	_ = b
+	return a - b
+}
+
+// Lengths is len and cap.
+func Lengths[T any](s []T) int { return len(s) + cap(s) }
+
+// Bumped calls a method of a concrete type twice, so the two calls have to see
+// one another's write.
+func Bumped[T ~int](v T) int {
+	var t Tick
+	t.N = int(v)
+	return t.Bump() + t.Bump()
+}
+
+// ShiftAssign assigns through a shift, a bitwise or, and a decrement.
+func ShiftAssign[T ~int](v T) T {
+	v <<= 2
+	v |= 1
+	v--
+	return v
+}
+
+// Capture is a function literal that writes a variable of the body around it.
+// The variable is read after the literal has run, so a capture by value is a
+// different answer and not a link failure.
+func Capture[T ~int](v T) T {
+	acc := v
+	add := func(d T) { acc += d }
+	add(v)
+	add(1)
+	return acc
+}
+
+// Nested is a literal inside a literal, whose capture reaches through two
+// levels: the outer literal captures a variable it does not read itself.
+func Nested[T ~int](v T) T {
+	acc := v
+	outer := func() func() {
+		return func() { acc += 2 }
+	}
+	outer()()
+	return acc
+}
+`,
+		"main.go": `package main
+
+import "nanogo.example/foreignforms/lib"
+
+type pair struct {
+	n    int
+	name string
+}
+
+func main() {
+	println(lib.Sum([]int{1, 2, 3, 4}))
+	println(lib.Counted([]int{1, 2, 3, 2, 5}, 2), lib.Counted([]int{1, -2, 3}, 9))
+	println(lib.Classify(0), lib.Classify(1), lib.Classify(2), lib.Classify(7))
+	println(lib.Pair(4))
+	println(lib.Lengths([]int{1, 2, 3}))
+	println(lib.Bumped(5))
+	println(lib.ShiftAssign(3))
+	println(lib.Capture(6))
+	println(lib.Nested(6))
+
+	// One word, two words, and a struct with a pointer in it, so a body
+	// stencilled at the wrong type moves the wrong number of words.
+	ns := []int{1, 2, 3, 4, 5}
+	lib.Reverse(ns)
+	for i := 0; i < len(ns); i++ {
+		println(i, ns[i])
+	}
+	ss := []string{"a", "b", "c", "d"}
+	lib.Reverse(ss)
+	for i := 0; i < len(ss); i++ {
+		println(i, ss[i])
+	}
+	ps := []pair{{1, "a"}, {2, "b"}, {3, "c"}}
+	lib.Reverse(ps)
+	for i := 0; i < len(ps); i++ {
+		println(i, ps[i].n, ps[i].name)
+	}
+}
+`,
+	}
+}
+
+// TestToolexecRunsEachConstructTheForeignWalkMaps runs one instantiation per
+// construct and compares every answer with gc's.
+//
+// The standard library is not enough on its own: every generic in it that the
+// walk accepts reaches the same few nodes, so whole branches of the mapping
+// would be built and never run.
+func TestToolexecRunsEachConstructTheForeignWalkMaps(t *testing.T) {
+	h := setup(t, foreignFormsModule(), []string{"main"})
+
+	if out, err := h.build(t, "-o", "foreignforms", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	got := runProgram(t, filepath.Join(h.mod, "foreignforms"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

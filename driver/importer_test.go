@@ -497,6 +497,27 @@ func TestCompileStencilsAGenericOfAnotherPackage(t *testing.T) {
 		{"a generic reached through another generic", "package main\n\nimport \"slices\"\n\n" +
 			"func f(xs []string, v string) int { return slices.Index(xs, v) }\n\n" +
 			"func main() {\n\tif f([]string{\"a\", \"b\"}, \"b\") != 1 {\n\t\tpanic(\"no\")\n\t}\n}\n"},
+		// The four the self-host gate's last package reaches, and the whole of
+		// pdqsort behind them: a body of assignments, three-clause loops,
+		// parallel swaps, an expression switch, break and continue, len, and a
+		// method of a concrete type another package declares.
+		{"a three-way comparison", "package main\n\nimport \"cmp\"\n\n" +
+			"func f(a, b int) int { return cmp.Compare(a, b) }\n\n" +
+			"func main() {\n\tif f(1, 2) != -1 {\n\t\tpanic(\"no\")\n\t}\n}\n"},
+		// cmp is imported because slices.Sort reaches cmp.Less, whose body is
+		// in cmp's own archive: [export.Reader] reads the bodies of a package
+		// this compilation read an archive for, and the archive list is the
+		// checker's imports.
+		{"a sort of an ordered slice", "package main\n\nimport (\n\t\"cmp\"\n\t\"slices\"\n)\n\n" +
+			"func main() {\n\txs := []int{3, 1, 2}\n\tslices.Sort(xs)\n" +
+			"\tif xs[0] != 1 || cmp.Compare(1, 2) != -1 {\n\t\tpanic(\"no\")\n\t}\n}\n"},
+		{"a sort with a comparison function", "package main\n\nimport (\n\t\"cmp\"\n\t\"slices\"\n)\n\n" +
+			"func main() {\n\txs := []int{3, 1, 2}\n" +
+			"\tslices.SortFunc(xs, func(a, b int) int { return cmp.Compare(a, b) })\n" +
+			"\tif !slices.IsSortedFunc(xs, func(a, b int) int { return cmp.Compare(a, b) }) {\n\t\tpanic(\"no\")\n\t}\n}\n"},
+		{"an element-by-element comparison", "package main\n\nimport \"slices\"\n\n" +
+			"func main() {\n\txs := []int{1, 2}\n" +
+			"\tif !slices.EqualFunc(xs, xs, func(a, b int) bool { return a == b }) {\n\t\tpanic(\"no\")\n\t}\n}\n"},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			_, err := compileSource(t, tc.src, func(c *Config) {
@@ -513,29 +534,29 @@ func TestCompileStencilsAGenericOfAnotherPackage(t *testing.T) {
 // measured against a real body rather than a written one.
 //
 // The mapping covers what the instantiations nanogo's own source reaches need
-// and refuses the rest by name. cmp.Compare is the smallest declaration in the
-// standard library that falls outside it: its body assigns, and an assignment
-// is a kind the walk does not build. The refusal has to name the declaration
-// and the kind, because that pair is the whole of what somebody extending the
-// mapping needs to know.
+// and refuses the rest by name. slices.Clone is the smallest declaration in the
+// standard library that falls outside it: its body names the zero value of a
+// slice type, and a zero value is a kind the walk does not build. The refusal
+// has to name the declaration and the kind, because that pair is the whole of
+// what somebody extending the mapping needs to know.
 //
 // A test that only asserted the compile would pass just as well if the walk
-// guessed at the assignment and produced a function that computes something
-// else, which is the failure this refusal exists to prevent.
+// guessed at the node and produced a function that computes something else,
+// which is the failure this refusal exists to prevent.
 func TestCompileRefusesAForeignBodyItCannotMap(t *testing.T) {
 	arm64Only(t)
 	needGoCommand(t)
 	dir := t.TempDir()
-	src := "package main\n\nimport \"cmp\"\n\n" +
-		"func f(a, b int) int { return cmp.Compare(a, b) }\n\n" +
-		"func main() {\n\tif f(1, 2) != -1 {\n\t\tpanic(\"no\")\n\t}\n}\n"
+	src := "package main\n\nimport \"slices\"\n\n" +
+		"func f(s []int) int { return len(slices.Clone(s)) }\n\n" +
+		"func main() {\n\tif f([]int{1, 2}) != 2 {\n\t\tpanic(\"no\")\n\t}\n}\n"
 	_, err := compileSource(t, src, func(c *Config) {
 		c.ImportCfg = stdImportCfg(t, dir, "slices", "sync/atomic", "cmp")
 	})
 	if err == nil {
 		t.Fatal("a body holding a kind the walk does not map was built")
 	}
-	for _, want := range []string{"cmp.Compare[int]", "assignment"} {
+	for _, want := range []string{"slices.Clone[[]int,int]", "zero value"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not name %q: %v", want, err)
 		}
@@ -663,14 +684,126 @@ func Guarded[T ~int](v T) int {
 	}
 	return 0
 }
+
+// Length is the builtin len, and Capacity the builtin cap.
+func Length[T any](s []T) int { return len(s) }
+
+func Capacity[T any](s []T) int { return cap(s) }
+
+// Sum is an assignment, an operation assignment, and a three-clause loop.
+func Sum[T ~int](vs []T) T {
+	total := T(0)
+	for i := 0; i < len(vs); i++ {
+		total += vs[i]
+	}
+	return total
+}
+
+// Reverse is the parallel assignment, which is the one a wrong build turns
+// into two copies of one value rather than a swap, and a loop whose post
+// statement assigns two variables at once.
+func Reverse[T any](s []T) {
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+}
+
+// Counted is a var declaration with no initialiser, ++, break and continue.
+func Counted[T ~int](s []T, skip T) int {
+	var n int
+	for _, v := range s {
+		if v == skip {
+			continue
+		}
+		if v < 0 {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+// Classify is an expression switch with a multi-value case and a default,
+// inside a loop, so that the break in one clause and the continue in another
+// have two plausible targets each: break ends the switch and reaches the
+// statement after it, and continue reaches the loop's post statement.
+func Classify[T ~int](v T) int {
+	n := 0
+	for i := 0; i < 3; i++ {
+		switch v {
+		case 0:
+			n += 10
+			break
+		case 1, 2:
+			n += 20
+			continue
+		default:
+			n += 30
+		}
+		n++
+	}
+	return n
+}
+
+// Two returns two values and Pair assigns them at once, then swaps them and
+// throws one away, which is the blank destination.
+func Two[T ~int](v T) (T, T) { return v, v + 1 }
+
+func Pair[T ~int](v T) T {
+	a, b := Two(v)
+	a, b = b, a
+	_ = b
+	return a - b
+}
+
+// Shifted assigns through a shift and through a bitwise or, and -- decrements.
+func ShiftAssign[T ~int](v T) T {
+	v <<= 2
+	v |= 1
+	v--
+	return v
+}
+
+// Tick has a method with a pointer receiver, so a foreign body that calls it
+// takes the address of a local first.
+type Tick struct{ N int }
+
+func (t *Tick) Bump() int { t.N++; return t.N }
+
+// Bumped calls it twice, so the two calls have to see one another's write.
+func Bumped[T ~int](v T) int {
+	var t Tick
+	t.N = int(v)
+	return t.Bump() + t.Bump()
+}
+
+// Capture is a function literal that reads and writes a variable of the body
+// around it. The variable is read after the literal has run, so a capture by
+// value is a different answer and not a link failure.
+func Capture[T ~int](v T) T {
+	acc := v
+	add := func(d T) { acc += d }
+	add(v)
+	add(1)
+	return acc
+}
+
+// Nested is a literal inside a literal, whose capture reaches through two
+// levels: the outer literal captures a variable it does not read itself.
+func Nested[T ~int](v T) T {
+	acc := v
+	outer := func() func() {
+		return func() { acc += 2 }
+	}
+	outer()()
+	return acc
+}
 `)
 	write("refuse/refuse.go", `package refuse
 
 // Each of these is one construct the foreign walk does not map. They live in
 // their own package so that a test can instantiate exactly one of them and see
 // the refusal that names it.
-
-func Len[T any](s []T) int { return len(s) }
 
 func MapAt[T comparable](m map[T]int, k T) int { return m[k] }
 
@@ -680,9 +813,7 @@ func Assert[T any](v any) bool { _, ok := v.(T); return ok }
 
 func Lit[T any](v T) []T { return []T{v} }
 
-func Closure[T any](v T) func() T { return func() T { return v } }
-
-func Assign[T any](v T) T { x := v; x = v; return x }
+func Appended[T any](s []T, v T) int { return len(append(s, v)) }
 
 func Ranged[T comparable](m map[T]int) int {
 	n := 0
@@ -692,12 +823,30 @@ func Ranged[T comparable](m map[T]int) int {
 	return n
 }
 
-func Switched[T ~int](v T) int {
-	switch v {
-	case 0:
+func TypeSwitched[T any](v any, d T) int {
+	switch v.(type) {
+	case int:
 		return 1
 	}
 	return 0
+}
+
+type Namer interface{ Name() int }
+
+// ThroughDict calls a method on a type parameter, whose callee is a slot of
+// the dictionary rather than a symbol the call names.
+func ThroughDict[T Namer](v T) int { return v.Name() }
+
+type Box[T any] struct{ V T }
+
+func (b *Box[T]) Get() T { return b.V }
+
+// WithSubdict calls a method of an instantiation whose type argument is the
+// enclosing declaration's type parameter, so the call carries a dictionary.
+func WithSubdict[T any](v T) T {
+	var b Box[T]
+	b.V = v
+	return b.Get()
 }
 
 func Deferred[T any](f func(T), v T) { defer f(v) }
@@ -730,20 +879,26 @@ func TestCompileRefusesEachForeignConstructItDoesNotMap(t *testing.T) {
 	for _, tc := range []struct {
 		what string
 		call string
+		want string
 	}{
-		{"a builtin", "refuse.Len([]int{1})"},
-		{"a map index", "refuse.MapAt(map[int]int{1: 2}, 1)"},
-		{"a slice expression", "len(refuse.Slice([]int{1, 2}))"},
-		{"a type assertion", "btoi(refuse.Assert[int](any(1)))"},
-		{"a composite literal", "len(refuse.Lit(1))"},
-		{"a function literal", "refuse.Closure(1)()"},
-		{"an assignment", "refuse.Assign(1)"},
-		{"a range", "refuse.Ranged(map[int]int{1: 2})"},
-		{"a switch", "refuse.Switched(1)"},
+		{"a map index", "refuse.MapAt(map[int]int{1: 2}, 1)", "an index of a map"},
+		{"a slice expression", "len(refuse.Slice([]int{1, 2}))", `the expression "slice"`},
+		{"a type assertion", "btoi(refuse.Assert[int](any(1)))", `the expression "type assertion"`},
+		{"a composite literal", "len(refuse.Lit(1))", `the expression "composite literal"`},
+		{"a builtin that needs a descriptor", "refuse.Appended([]int{1}, 2)", "a call of the builtin append"},
+		{"a range over a map", "refuse.Ranged(map[int]int{1: 2})", "and only a range over a slice is built"},
+		{"a type switch", "refuse.TypeSwitched(any(1), 2)", "a type switch"},
+		{"a method through a dictionary slot", "refuse.ThroughDict(named(3))", "a call of Name on a type parameter"},
+		{"a method of an instantiation", "refuse.WithSubdict(4)", "a call of Get"},
+		{"a deferred call", "func() int { refuse.Deferred(func(int) {}, 1); return 0 }()", `the statement "go or defer"`},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			src := "package main\n\nimport \"nanogo.example/gen/refuse\"\n\n" +
 				"func btoi(b bool) int {\n\tif b {\n\t\treturn 1\n\t}\n\treturn 0\n}\n\n" +
+				// A concrete type satisfying refuse.Namer, so that the call
+				// through a dictionary slot is reached with no interface
+				// value crossing the call site.
+				"type named int\n\nfunc (n named) Name() int { return int(n) }\n\n" +
 				"func main() {\n\tif " + tc.call + " == 12345 {\n\t\tpanic(\"no\")\n\t}\n}\n"
 			_, err := compileSource(t, src, func(c *Config) {
 				c.ImportCfgFile = cfgFile
@@ -755,6 +910,12 @@ func TestCompileRefusesEachForeignConstructItDoesNotMap(t *testing.T) {
 			// The declaration, because the body is in no file of this build.
 			if !strings.Contains(err.Error(), "nanogo.example/gen/refuse.") {
 				t.Errorf("the refusal does not name the declaration: %v", err)
+			}
+			// The construct, because a refusal that named only the
+			// declaration would be indistinguishable from the walk stopping
+			// for some other reason.
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the refusal does not name %q: %v", tc.want, err)
 			}
 		})
 	}
@@ -802,6 +963,19 @@ func main() {
 	d += lib.Variadic(1, 2, 3) - 3
 	d += lib.CallVariadic(2, 3) - 5
 	d += lib.SpreadVariadic([]int{1, 2}) - 2
+	d += lib.Length([]int{1, 2, 3}) - 3
+	d += lib.Capacity(make([]int, 2, 5)) - 5
+	d += lib.Sum([]int{1, 2, 3, 4}) - 10
+	d += lib.Counted([]int{1, 2, 3, 2, 5}, 2) - 3
+	d += lib.Classify(0) + lib.Classify(2) + lib.Classify(7) - 186
+	d += lib.Pair(4) - 1
+	d += lib.ShiftAssign(3) - 12
+	d += lib.Bumped(5) - 13
+	d += lib.Capture(6) - 13
+	d += lib.Nested(6) - 8
+	rev := []int{1, 2, 3, 4}
+	lib.Reverse(rev)
+	d += rev[0] - 4
 	if lib.Not(false) {
 		d += 0
 	}

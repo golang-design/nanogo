@@ -6,6 +6,7 @@ package ir
 
 import (
 	"fmt"
+	"go/constant"
 
 	"golang.design/x/nanogo/export"
 	"golang.design/x/nanogo/syntax"
@@ -48,6 +49,10 @@ import (
 //     carries a dictionary slot and no reference to the callee at all. The
 //     dictionary the archive holds is what names it, which is what
 //     [export.Body.Dict] carries.
+//   - A function literal is a body of its own, in another element of the
+//     archive, with a numbering of its own and a capture list naming variables
+//     of the body around it. The frame below therefore holds two numberings
+//     and a use says which one it indexes.
 //
 // # What is refused
 //
@@ -58,6 +63,11 @@ import (
 // a node this walk guessed at would be a wrong answer inside somebody else's
 // function. A refusal is a build that stops with a message naming the
 // construct, which is the failure specs/013-generics.md asks for.
+//
+// A kind the walk maps is refused again inside itself wherever the shape it
+// met is one it cannot build: a builtin that needs a run-time descriptor, a
+// method reached through a dictionary, a value converted where it is assigned.
+// Each of those names itself, for the same reason the kind does.
 
 // A BodySource supplies the body of a generic declaration another package
 // declares.
@@ -103,6 +113,13 @@ type foreignFrame struct {
 	// the order the walk reaches them. That order is the order gc numbered
 	// them in, because it is the order gc's writer wrote them in.
 	locals []foreignLocal
+
+	// captures is the second numbering a body of a function literal has: the
+	// variables of the body around it that the literal reads, in the order the
+	// format lists them. A use names one numbering or the other and the format
+	// says which (specs/033-closures-defer-panic.md), so the two are kept
+	// apart here rather than joined into one list.
+	captures []foreignLocal
 }
 
 // foreignLocal is one local of a foreign body.
@@ -257,12 +274,99 @@ func (b *builder) buildForeignInstance(in *instance) *Func {
 		b.errorf("ir: %s opens with %d local(s) and its signature has %d",
 			in.sym, len(in.body.Params), len(b.foreign.locals))
 	} else {
+		errs := len(b.errs)
 		fn.Body = b.foreignStmts(in.body.Stmts)
+		b.foreignCheckNumbering(errs, in.body)
 	}
 
 	b.fn, b.sig, b.sinks, b.free = saveFn, saveSig, saveSinks, saveFree
 	b.stencil, b.foreign = saveStencil, saveForeign
 	return fn
+}
+
+// foreignCheckNumbering compares the locals the walk declared with the locals
+// the tree numbers.
+//
+// A use of a local is a number and nothing else, so a walk that declared one
+// local too few numbers every later local one place out. That is not a build
+// that stops: it is a body that reads the wrong variable, compiles, links and
+// computes something else, which is the one failure this whole file is
+// arranged against. Counting the declaring sites of the tree and comparing the
+// answer turns it into a build that stops.
+//
+// errs is the number of errors recorded before the body was walked. A walk
+// that refused something stopped part way through, so its count is expected to
+// disagree and the comparison is skipped: the refusal is already the message.
+func (b *builder) foreignCheckNumbering(errs int, body *export.Body) {
+	if len(b.errs) != errs {
+		return
+	}
+	if want := foreignNumLocals(body); len(b.foreign.locals) != want {
+		b.errorf("ir: %s numbers %d local(s) and the walk of it declared %d",
+			b.foreign.in.sym, want, len(b.foreign.locals))
+	}
+}
+
+// foreignNumLocals returns the number of locals one body numbers.
+//
+// It is the receiver, the parameters and the results, then one for each
+// variable a statement declares: an assignment that declares its destination,
+// a range clause that declares one, and a clause of a type switch whose guard
+// names a variable. Those are the three sites the format writes a local at.
+//
+// A function literal's body is another element with a numbering of its own, so
+// nothing here descends into one.
+func foreignNumLocals(body *export.Body) int {
+	n := len(body.Params)
+	assignees := func(list []export.Assignee) {
+		for _, a := range list {
+			if a.Kind == export.AssignDef {
+				n++
+			}
+		}
+	}
+	var stmts func([]export.Stmt)
+	stmts = func(list []export.Stmt) {
+		for _, s := range list {
+			switch s := s.(type) {
+			case *export.BlockStmt:
+				stmts(s.Body)
+			case *export.AssignStmt:
+				assignees(s.Lhs)
+			case *export.IfStmt:
+				stmts(s.Init)
+				if s.Then != nil {
+					stmts(s.Then.Body)
+				}
+				stmts(s.Else)
+			case *export.ForStmt:
+				if s.Range != nil {
+					assignees(s.Range.Lhs)
+				} else {
+					stmts(s.Init)
+					stmts(s.Post)
+				}
+				if s.Body != nil {
+					stmts(s.Body.Body)
+				}
+			case *export.SwitchStmt:
+				stmts(s.Init)
+				for i := range s.Clauses {
+					if s.Clauses[i].Var != nil {
+						n++
+					}
+					stmts(s.Clauses[i].Body)
+				}
+			case *export.SelectStmt:
+				for i := range s.Clauses {
+					stmts(s.Clauses[i].Comm)
+					stmts(s.Clauses[i].Body)
+				}
+			}
+		}
+	}
+	stmts(body.Stmts)
+	return n
 }
 
 // foreignParam declares one of the locals a body opens with.
@@ -309,14 +413,30 @@ func (b *builder) foreignType(u export.TypeUse) types2.Type { return b.subst(u.T
 // produces.
 //
 // Every expression the format types carries its type, because gc writes a
-// reshape node holding it in front of nearly every one. The two that carry
-// none are the two answered here: a use of a local, whose type is in the
-// frame's numbering, and a reference to a declaration, whose type is the
-// declaration's.
+// reshape node holding it in front of nearly every one. Three kinds carry
+// none, and each is answered here rather than by the caller that met it.
+//
+// A use of a local and a reference to a declaration are the first two: the
+// type of a local is in the frame's numbering and the type of a declaration is
+// the declaration's.
+//
+// An operation is the third, and it is the one that needs the language's rule.
+// gc writes the reshape node in front of an operand and not in front of an
+// operation, so an operation whose operand is another operation has no type in
+// the stream at either end. The rule has two cases: a comparison and a
+// conditional produce a bool, and every other operation has the type of the
+// operand it keeps, which is the left one for a binary operation and a shift
+// and the only one for a unary operation.
 func (b *builder) foreignTypeOf(e export.Expr) types2.Type {
 	switch e := e.(type) {
+	case nil:
+		return nil
 	case *export.LocalExpr:
-		if l, ok := b.foreignLocalAt(e); ok {
+		// The silent lookup, because this is the type query and not the walk.
+		// The walk reaches the same use and refuses it there, and refusing it
+		// here as well would record the same message once per operation the
+		// use is nested in.
+		if l, ok := b.foreignVarAt(e); ok {
 			return l.typ
 		}
 		return nil
@@ -328,20 +448,58 @@ func (b *builder) foreignTypeOf(e export.Expr) types2.Type {
 	if t := e.ExprType(); t != nil {
 		return b.subst(t)
 	}
+	switch e := e.(type) {
+	case *export.BinaryExpr:
+		switch e.Op {
+		case export.OpEq, export.OpNe, export.OpLt, export.OpLe, export.OpGt, export.OpGe,
+			export.OpAndAnd, export.OpOrOr:
+			return types2.Typ[types2.Bool]
+		}
+		if t := b.foreignTypeOf(e.X); t != nil {
+			return t
+		}
+		return b.foreignTypeOf(e.Y)
+	case *export.UnaryExpr:
+		switch e.Op {
+		case export.OpAddr, export.OpDeref, export.OpRecv:
+			// Each produces a type its operand's does not name, and the
+			// operand alone does not say which. The caller refuses one whose
+			// type the stream did not carry.
+			return nil
+		}
+		return b.foreignTypeOf(e.X)
+	}
 	return nil
 }
 
-// foreignLocalAt returns the local one use names.
+// foreignLocalAt returns the variable one use names.
+//
+// The two numberings are separate lists and the format says which one a use
+// indexes. A body that is not a function literal's captures nothing, so its
+// capture list is empty and a use that names one is out of range, which is the
+// refusal a malformed body gets for free.
 func (b *builder) foreignLocalAt(e *export.LocalExpr) (foreignLocal, bool) {
+	l, ok := b.foreignVarAt(e)
+	if !ok {
+		what, n := "local", len(b.foreign.locals)
+		if e.Captured {
+			what, n = "captured variable", len(b.foreign.captures)
+		}
+		b.refuseForeign("a use of %s %d, of %d the body has", what, e.Index, n)
+	}
+	return l, ok
+}
+
+// foreignVarAt is [builder.foreignLocalAt] without the refusal.
+func (b *builder) foreignVarAt(e *export.LocalExpr) (foreignLocal, bool) {
+	list := b.foreign.locals
 	if e.Captured {
-		b.refuseForeign("a use of a variable captured by a function literal")
+		list = b.foreign.captures
+	}
+	if e.Index < 0 || e.Index >= len(list) {
 		return foreignLocal{}, false
 	}
-	if e.Index < 0 || e.Index >= len(b.foreign.locals) {
-		b.refuseForeign("a use of local %d, of %d the body declares", e.Index, len(b.foreign.locals))
-		return foreignLocal{}, false
-	}
-	return b.foreign.locals[e.Index], true
+	return list[e.Index], true
 }
 
 // @@@ Statements
@@ -365,15 +523,300 @@ func (b *builder) foreignStmt(s export.Stmt) {
 		if n := b.foreignExpr(s.X); n != nil {
 			b.emit(n)
 		}
+	case *export.AssignStmt:
+		b.foreignAssign(s)
+	case *export.AssignOpStmt:
+		b.foreignAssignOp(s)
+	case *export.IncDecStmt:
+		b.foreignIncDec(s)
+	case *export.BranchStmt:
+		b.foreignBranch(s)
 	case *export.ReturnStmt:
 		b.foreignReturn(s)
 	case *export.IfStmt:
 		b.foreignIf(s)
 	case *export.ForStmt:
 		b.foreignFor(s)
+	case *export.SwitchStmt:
+		b.foreignSwitch(s)
 	default:
 		b.refuseForeign("the statement %q", export.StmtKindOf(s).String())
 	}
+}
+
+// foreignAssign builds an assignment, a short variable declaration, and a var
+// declaration inside a body.
+//
+// The destinations are built before the values, and that order is a
+// requirement rather than a preference. gc's writer wrote the destination list
+// first, so a variable a destination declares takes its number before anything
+// on the right takes one, and a walk that built the right first would number
+// every later local one place out and read the wrong variable with no
+// diagnostic. The specification's order of evaluation is the same order, so
+// nothing is traded for it.
+//
+// The rest is [builder.assign] over the other tree: the operands of the
+// destinations are evaluated before any destination is written, which is what
+// makes "a, b = b, a" a swap and not two copies of one value.
+func (b *builder) foreignAssign(s *export.AssignStmt) {
+	parallel := len(s.Lhs) > 1
+	dsts := make([]Expr, len(s.Lhs))
+	dtypes := make([]types2.Type, len(s.Lhs))
+	for i := range s.Lhs {
+		a := &s.Lhs[i]
+		switch a.Kind {
+		case export.AssignBlank:
+			// The blank identifier names no storage, and its destination is
+			// built below, once the value it is assigned says what type it
+			// has. Nothing is numbered for it: the format writes no local for
+			// a blank destination.
+		case export.AssignDef:
+			t := b.foreignType(a.Type)
+			o := b.foreignLocalDecl(a.Name, t)
+			dsts[i], dtypes[i] = &Node{Op: OLocal, Type: o.Type, Obj: o}, t
+		case export.AssignExpr:
+			dsts[i], dtypes[i] = b.foreignExpr(a.Expr), b.foreignTypeOf(a.Expr)
+			if parallel {
+				dsts[i] = b.stabilizeParallel(dsts[i])
+			}
+		default:
+			b.refuseForeign("an assignment to a destination the format writes as %q", a.Kind.String())
+			return
+		}
+	}
+
+	switch {
+	case s.Rhs.Single:
+		b.foreignMultiAssign(s, dsts, dtypes)
+	case len(s.Rhs.Exprs) == 0:
+		b.foreignDeclare(s, dsts)
+	case len(s.Lhs) == 1 && len(s.Rhs.Exprs) == 1:
+		e := s.Rhs.Exprs[0]
+		et := b.foreignTypeOf(e)
+		val := b.assignConv(b.foreignExpr(e), et, dtypes[0])
+		b.emit(b.foreignAssignTo(s.Lhs[0], b.foreignBlank(dsts[0], dtypes[0], et), val))
+	case len(s.Lhs) == len(s.Rhs.Exprs):
+		srcs := make([]Expr, len(s.Rhs.Exprs))
+		for i, e := range s.Rhs.Exprs {
+			et := b.foreignTypeOf(e)
+			dsts[i] = b.foreignBlank(dsts[i], dtypes[i], et)
+			srcs[i] = b.snapshot(b.assignConv(b.foreignExpr(e), et, dtypes[i]))
+		}
+		for i := range dsts {
+			b.emit(b.foreignAssignTo(s.Lhs[i], dsts[i], srcs[i]))
+		}
+	default:
+		b.refuseForeign("an assignment of %d value(s) to %d destination(s)", len(s.Rhs.Exprs), len(s.Lhs))
+	}
+}
+
+// foreignAssignTo returns the assignment of src to one destination.
+//
+// A destination the statement declares is marked, which is what the syntax
+// walk's define does. The mark is per destination rather than per statement,
+// because the format writes one kind per destination and "x, err := f()" where
+// err already exists carries both.
+func (b *builder) foreignAssignTo(a export.Assignee, dst, src Expr) Stmt {
+	if a.Kind == export.AssignDef {
+		return define(syntax.NoPos, dst, src)
+	}
+	return Assign(syntax.NoPos, dst, src)
+}
+
+// foreignBlank fills in the destination of a blank assignee, whose type is the
+// type of the value assigned to it and is carried nowhere else.
+func (b *builder) foreignBlank(dst Expr, dstType, srcType types2.Type) Expr {
+	if dst != nil {
+		return dst
+	}
+	t := dstType
+	if t == nil {
+		t = srcType
+	}
+	if t == nil {
+		b.refuseForeign("an assignment to the blank identifier of a value whose type the stream does not carry")
+		return b.badExpr(syntax.NoPos)
+	}
+	// The object is in no frame, so nothing allocates a slot for it and the
+	// assignment survives only for the effects of its right-hand side.
+	o := &Object{Name: "_", Class: ClassLocal, Type: b.irType(t)}
+	return &Node{Op: OLocal, Type: o.Type, Obj: o}
+}
+
+// foreignDeclare builds "var x T", whose value is the zero of its type.
+//
+// It is a declaration and not an assignment, which is what ODeclare exists
+// for: the specification makes each execution of a declaration a fresh
+// variable, so a var in a loop body is zero on every iteration.
+func (b *builder) foreignDeclare(s *export.AssignStmt, dsts []Expr) {
+	for i := range s.Lhs {
+		if s.Lhs[i].Kind != export.AssignDef {
+			b.refuseForeign("a declaration whose destination %d declares no variable", i)
+			return
+		}
+		if s.Lhs[i].Name == "_" {
+			// The blank identifier names no storage, so there is nothing to
+			// zero.
+			continue
+		}
+		b.emit(&Node{Op: ODeclare, Type: voidType, X: dsts[i]})
+	}
+}
+
+// foreignMultiAssign builds an assignment whose one right-hand side produces
+// several values.
+//
+// The types of the values come out of the tree rather than out of the callee's
+// signature: the format writes one entry per result, with the conversion the
+// destination applies to it, and that entry is the checker's own answer for a
+// body no syntax tree here holds.
+func (b *builder) foreignMultiAssign(s *export.AssignStmt, dsts []Expr, dtypes []types2.Type) {
+	m := &s.Rhs
+	if len(m.Results) != len(s.Lhs) {
+		b.refuseForeign("an assignment of %d value(s) to %d destination(s)", len(m.Results), len(s.Lhs))
+		return
+	}
+	for i := range m.Results {
+		if m.Results[i].Converted {
+			// The value is converted where it is assigned, and one node
+			// cannot hold a conversion per destination. The syntax walk
+			// answers it with a temporary per value; doing the same here needs
+			// the descriptors the entry carries for a conversion to an
+			// interface, which nothing below this pass builds.
+			b.refuseForeign("an assignment whose value %d is converted where it is assigned", i)
+			return
+		}
+		dsts[i] = b.foreignBlank(dsts[i], dtypes[i], b.foreignType(m.Results[i].Src))
+	}
+	def := len(s.Lhs) > 0
+	for i := range s.Lhs {
+		if s.Lhs[i].Kind != export.AssignDef {
+			def = false
+		}
+	}
+	op1 := syntax.Operator(0)
+	if def {
+		op1 = defineOp
+	}
+	b.emit(&Node{Op: OAssign, Op1: op1, Type: voidType, Args: dsts, Y: b.foreignExpr(m.Expr)})
+}
+
+// foreignAssignOp builds x op= y, by rewriting it to x = x op y.
+//
+// The rewrite is what keeps an OBinary an operation and never an assignment.
+// The left operand is evaluated once, which is why its parts are held in
+// temporaries before it is used twice.
+func (b *builder) foreignAssignOp(s *export.AssignOpStmt) {
+	op, ok := foreignBinaryOps[s.Op]
+	if !ok {
+		b.refuseForeign("the operation assignment %q", s.Op.String())
+		return
+	}
+	dst := b.stabilize(b.foreignExpr(s.Lhs))
+	if dst == nil {
+		return
+	}
+	lt := b.foreignTypeOf(s.Lhs)
+	var rhs Expr
+	if op == syntax.Shl || op == syntax.Shr {
+		// The count of a shift keeps its own type. The specification does not
+		// convert it to the type of the shifted operand.
+		rhs = b.foreignOperand(s.Rhs)
+	} else {
+		rhs = b.assignConv(b.foreignOperand(s.Rhs), b.foreignTypeOf(s.Rhs), lt)
+	}
+	n := &Node{Op: OBinary, Op1: op, Type: dst.Type, X: cloneExpr(dst), Y: rhs}
+	b.emit(Assign(syntax.NoPos, dst, n))
+}
+
+// foreignIncDec builds x++ and x--.
+func (b *builder) foreignIncDec(s *export.IncDecStmt) {
+	op, ok := foreignBinaryOps[s.Op]
+	if !ok || (op != syntax.Add && op != syntax.Sub) {
+		b.refuseForeign("the increment or decrement %q", s.Op.String())
+		return
+	}
+	dst := b.stabilize(b.foreignExpr(s.X))
+	if dst == nil {
+		return
+	}
+	one := &Node{Op: OConst, Type: dst.Type, Val: Const{Val: constant.MakeInt64(1)}}
+	n := &Node{Op: OBinary, Op1: op, Type: dst.Type, X: cloneExpr(dst), Y: one}
+	b.emit(Assign(syntax.NoPos, dst, n))
+}
+
+// foreignBranch builds break and continue.
+//
+// A label is refused rather than built. gc writes a label flat, as a statement
+// of its own that the next statement of the same list is the target of, and a
+// branch that names one has to be paired with it. goto and fallthrough are
+// refused for the same reason, because each is a jump to a label.
+func (b *builder) foreignBranch(s *export.BranchStmt) {
+	if s.Labelled {
+		b.refuseForeign("a %s naming the label %s", s.Op.String(), s.Label)
+		return
+	}
+	var op Op
+	switch s.Op {
+	case export.OpBreak:
+		op = OBreak
+	case export.OpContinue:
+		op = OContinue
+	default:
+		b.refuseForeign("the branch %q", s.Op.String())
+		return
+	}
+	b.emit(&Node{Op: op, Type: voidType})
+}
+
+// foreignSwitch builds an expression switch.
+//
+// A type switch is refused: its guard declares a variable in every clause and
+// each clause matches a type against an interface, which is the descriptor
+// work specs/032-type-descriptors-and-itabs.md owns and which the walk over
+// the syntax tree reaches through the checker's Implicits rather than through
+// anything the format carries.
+func (b *builder) foreignSwitch(s *export.SwitchStmt) {
+	if s.Guard != nil {
+		b.refuseForeign("a type switch")
+		return
+	}
+	n := &Node{Op: OSwitch, Type: voidType}
+	b.push()
+	for _, init := range s.Init {
+		b.foreignStmt(init)
+	}
+	tagType := types2.Type(types2.Typ[types2.Bool])
+	if s.Tag != nil {
+		xt := b.foreignTypeOf(s.Tag)
+		if xt == nil {
+			b.pop()
+			b.refuseForeign("a switch on a value whose type the stream does not carry")
+			return
+		}
+		tagType = types2.Default(xt)
+		n.X = b.assignConv(b.foreignOperand(s.Tag), xt, tagType)
+	} else {
+		// A switch with no tag is a switch on true. The comparison against
+		// each case is then the same operation in both forms.
+		n.X = &Node{Op: OConst, Type: b.irType(tagType), Val: Const{Val: constant.MakeBool(true)}}
+	}
+	n.Init = b.pop()
+
+	for i := range s.Clauses {
+		c := &s.Clauses[i]
+		if c.Var != nil {
+			b.refuseForeign("a switch clause that declares a variable")
+			return
+		}
+		cn := &Node{Op: OCase, Type: voidType, Index: i}
+		for _, e := range c.Exprs {
+			cn.Args = append(cn.Args, b.assignConv(b.foreignExpr(e), b.foreignTypeOf(e), tagType))
+		}
+		cn.Body = b.foreignStmts(c.Body)
+		n.Body = append(n.Body, cn)
+	}
+	b.emit(n)
 }
 
 // foreignReturn builds a return.
@@ -433,16 +876,16 @@ func (b *builder) foreignIf(s *export.IfStmt) {
 
 // foreignFor builds a for statement.
 //
-// Only the range form over a slice is built. The three-clause form declares
-// its variables in an assignment, which this walk does not build, so a loop of
-// that shape cannot reach here with its declarations intact.
+// Only the range form over a slice is built. A range over anything else needs
+// the conversion the clause records for its key and its value, which this walk
+// does not read.
 func (b *builder) foreignFor(s *export.ForStmt) {
-	if s.Range == nil {
-		b.refuseForeign("a three-clause for statement")
+	if s.Body == nil {
+		b.refuseForeign("a for statement with no body")
 		return
 	}
-	if s.Body == nil {
-		b.refuseForeign("a range statement with no body")
+	if s.Range == nil {
+		b.foreignForClauses(s)
 		return
 	}
 	rc := s.Range
@@ -492,21 +935,81 @@ func (b *builder) foreignFor(s *export.ForStmt) {
 	}
 
 	n.Body = b.foreignStmts(s.Body.Body)
-	if len(decls) > 0 {
-		if !s.DistinctVars {
-			// The loop shares one variable across the iterations, which is
-			// the rule before Go 1.22. perIteration writes the rule after it,
-			// and the two differ only for a variable whose address is taken.
-			for _, o := range decls {
-				if o.Addrtaken {
-					b.refuseForeign("a loop that shares one address-taken variable across its iterations, which is the rule before Go 1.22")
-					return
-				}
-			}
-		}
-		b.perIteration(n, decls)
+	if !b.foreignPerIteration(n, decls, s.DistinctVars) {
+		return
 	}
 	b.emit(n)
+}
+
+// foreignForClauses builds the three-clause form of a for statement.
+//
+// The clauses are built in the order the format wrote them, which is the order
+// a variable the init statement declares is numbered in: init, condition,
+// post, body. The condition and the post statement are built where they are
+// evaluated again on every iteration, so nothing may be hoisted out of either.
+func (b *builder) foreignForClauses(s *export.ForStmt) {
+	n := &Node{Op: OFor, Type: voidType}
+	b.push()
+	first := len(b.foreign.locals)
+	for _, init := range s.Init {
+		b.foreignStmt(init)
+	}
+	decls := b.foreignDeclsSince(first)
+	n.Init = b.pop()
+	if s.Cond != nil {
+		n.X = b.foreignGuarded(s.Cond)
+	}
+	n.Body = b.foreignStmts(s.Body.Body)
+	if len(s.Post) > 0 {
+		b.noHoist++
+		n.Post = b.foreignStmts(s.Post)
+		b.noHoist--
+	}
+	// After the body, because whether the address of a loop variable is taken
+	// is not known until the body that takes it has been built.
+	if !b.foreignPerIteration(n, decls, s.DistinctVars) {
+		return
+	}
+	b.emit(n)
+}
+
+// foreignDeclsSince returns the variables the body declared after the frame
+// held first of them, which for a loop is the variables its init statement
+// declares.
+//
+// The frame's numbering is the list, so nothing here has to recognise the
+// shape of the statement that declared them.
+func (b *builder) foreignDeclsSince(first int) []*Object {
+	var out []*Object
+	for _, l := range b.foreign.locals[first:] {
+		if l.obj != nil && l.obj.Name != "_" {
+			out = append(out, l.obj)
+		}
+	}
+	return out
+}
+
+// foreignPerIteration gives each iteration its own copy of the variables the
+// loop declares, and reports whether the loop is built.
+//
+// A loop written before Go 1.22 shares one variable across the iterations.
+// [builder.perIteration] writes the rule after it, and the two differ only for
+// a variable whose address is taken, so a loop that shares one is refused
+// rather than built under the other rule.
+func (b *builder) foreignPerIteration(loop *Node, decls []*Object, distinct bool) bool {
+	if len(decls) == 0 {
+		return true
+	}
+	if !distinct {
+		for _, o := range decls {
+			if o.Addrtaken {
+				b.refuseForeign("a loop that shares one address-taken variable across its iterations, which is the rule before Go 1.22")
+				return false
+			}
+		}
+	}
+	b.perIteration(loop, decls)
+	return true
 }
 
 // @@@ Expressions
@@ -556,10 +1059,117 @@ func (b *builder) foreignExpr(e export.Expr) Expr {
 		return b.foreignConvert(e)
 	case *export.CallExpr:
 		return b.foreignCall(e)
+	case *export.FuncLitExpr:
+		return b.foreignFuncLit(e)
 	default:
 		b.refuseForeign("the expression %q", export.ExprKindOf(e).String())
 		return b.badExpr(syntax.NoPos)
 	}
+}
+
+// foreignFuncLit builds a function literal of a foreign body.
+//
+// A literal is two things and the format writes them apart: a body of its own,
+// which is another element with its own numbering, and a capture list, which
+// names variables of the body around it in that body's numbering. The list is
+// taken from the format and not recomputed from the objects the literal's body
+// turned out to name, for two reasons. It is gc's own closureVars, so it is
+// exactly the set the literal reads from outside and it cannot be a guess. And
+// it is ordered, where a set recovered here would have to be sorted by
+// something: every object of a foreign body takes the unknown position, so the
+// syntax walk's order, which is position then name, would put two locals of one
+// name in whichever order a map produced and specs/053-determinism.md forbids
+// that.
+//
+// The capture is by reference, which is the one mechanism
+// specs/033-closures-defer-panic.md has: the object the literal names is the
+// object the enclosing body names, and ir/closure.go gives it a heap cell.
+func (b *builder) foreignFuncLit(e *export.FuncLitExpr) Expr {
+	if e.RangeFuncBody {
+		// The closure gc builds out of the body of a range over a function.
+		// It returns through a hidden state variable and a runtime call that
+		// no source spells, and nothing here builds either.
+		b.refuseForeign("the closure gc builds out of the body of a range over a function")
+		return b.badExpr(syntax.NoPos)
+	}
+	if e.Decoded == nil {
+		b.refuseForeign("a function literal whose body the archive holds no element for")
+		return b.badExpr(syntax.NoPos)
+	}
+	if len(e.Params)+len(e.Results) != len(e.Decoded.Params) {
+		// A literal has no receiver, so its parameters and its results are the
+		// whole of the locals its body opens with. A body that opens with a
+		// different count is one whose numbering does not line up with its
+		// signature, and every use of a local in it would name the wrong
+		// variable.
+		b.refuseForeign("a function literal whose body opens with %d local(s) and whose signature has %d",
+			len(e.Decoded.Params), len(e.Params)+len(e.Results))
+		return b.badExpr(syntax.NoPos)
+	}
+
+	// The captures are resolved against the body around the literal, which is
+	// the frame that is still current here. Nothing looks upward later: a use
+	// inside the literal indexes the resolved list.
+	caps := make([]foreignLocal, len(e.Captured))
+	objs := make([]*Object, len(e.Captured))
+	for i := range e.Captured {
+		l, ok := b.foreignLocalAt(&e.Captured[i].Local)
+		if !ok || l.obj == nil {
+			return b.badExpr(syntax.NoPos)
+		}
+		caps[i], objs[i] = l, l.obj
+	}
+
+	sig := b.foreignLitSignature(e)
+	name, sym := b.literalNames()
+	fn := &Func{Name: name, Sym: sym, Type: b.irType(sig)}
+	b.isLiteral[fn] = true
+
+	saveFn, saveSig, saveSinks, saveFree := b.fn, b.sig, b.sinks, b.free
+	saveForeign := b.foreign
+	b.fn, b.sig, b.sinks, b.free = fn, sig, nil, make(map[*Object]bool)
+	b.foreign = &foreignFrame{
+		in:       saveForeign.in,
+		body:     e.Decoded,
+		dict:     saveForeign.dict,
+		captures: caps,
+	}
+	for i := 0; i < sig.Params().Len(); i++ {
+		fn.Params = append(fn.Params, b.foreignParam(sig.Params().At(i), ClassParam))
+	}
+	for i := 0; i < sig.Results().Len(); i++ {
+		fn.Results = append(fn.Results, b.foreignParam(sig.Results().At(i), ClassResult))
+	}
+	errs := len(b.errs)
+	fn.Body = b.foreignStmts(e.Decoded.Stmts)
+	b.foreignCheckNumbering(errs, e.Decoded)
+	b.fn, b.sig, b.sinks, b.free = saveFn, saveSig, saveSinks, saveFree
+	b.foreign = saveForeign
+
+	// The capture list needs no check against the objects the literal turned
+	// out to name. A body of the literal reaches a variable of the body around
+	// it through the capture list and through nothing else, because the frame
+	// above holds that list and the literal's own locals and no third one, so a
+	// capture the format did not list is a use whose index is out of range and
+	// is refused above.
+	return b.closureNode(fn, syntax.NoPos, objs)
+}
+
+// foreignLitSignature returns the signature of a function literal of a foreign
+// body.
+//
+// It is built from the parameter and result lists the format wrote rather than
+// from the type of the expression, because the reshape node that would carry
+// that type is not written in front of every literal and the two lists are.
+func (b *builder) foreignLitSignature(e *export.FuncLitExpr) *types2.Signature {
+	vars := func(list []export.Param) *types2.Tuple {
+		out := make([]*types2.Var, len(list))
+		for i, p := range list {
+			out[i] = types2.NewParam(syntax.NoPos, p.Pkg, p.Name, b.foreignType(p.Type))
+		}
+		return types2.NewTuple(out...)
+	}
+	return types2.NewSignatureType(nil, nil, nil, vars(e.Params), vars(e.Results), e.Variadic)
 }
 
 // foreignGlobal builds a reference to a package-scope declaration.
@@ -689,7 +1299,7 @@ func (b *builder) foreignBinary(e *export.BinaryExpr) Expr {
 		b.refuseForeign("the binary operator %q", e.Op.String())
 		return b.badExpr(syntax.NoPos)
 	}
-	bt := b.foreignBinaryType(e, op)
+	bt := b.foreignTypeOf(e)
 	if bt == nil {
 		b.refuseForeign("an operation whose type the stream does not carry")
 		return b.badExpr(syntax.NoPos)
@@ -715,28 +1325,6 @@ func (b *builder) foreignBinary(e *export.BinaryExpr) Expr {
 	return &Node{Op: kind, Op1: op, Type: t, X: lhs, Y: rhs}
 }
 
-// foreignBinaryType returns the type of a binary operation.
-//
-// gc writes the reshape node that carries a type in front of an operand and
-// not in front of an operation, so this is the one place the type has to come
-// from the language's rule rather than out of the stream. The rule has two
-// cases: a comparison and a conditional produce a bool, and every other
-// operation has the type of its left operand, which is the one a shift keeps
-// too.
-func (b *builder) foreignBinaryType(e *export.BinaryExpr, op syntax.Operator) types2.Type {
-	if t := b.foreignTypeOf(e); t != nil {
-		return t
-	}
-	switch op {
-	case syntax.Eql, syntax.Neq, syntax.Lss, syntax.Leq, syntax.Gtr, syntax.Geq, syntax.AndAnd, syntax.OrOr:
-		return types2.Typ[types2.Bool]
-	}
-	if t := b.foreignTypeOf(e.X); t != nil {
-		return t
-	}
-	return b.foreignTypeOf(e.Y)
-}
-
 // foreignConvert builds a conversion.
 //
 // An implicit one goes through assignConv, which is where the rest of this
@@ -754,8 +1342,10 @@ func (b *builder) foreignConvert(e *export.ConvertExpr) Expr {
 // foreignCall builds a call.
 func (b *builder) foreignCall(e *export.CallExpr) Expr {
 	if e.Method != nil {
-		b.refuseForeign("a call through a method selection")
-		return b.badExpr(syntax.NoPos)
+		return b.foreignMethodCall(e)
+	}
+	if bi := foreignBuiltinOf(e.Fun); bi != nil {
+		return b.foreignBuiltin(e, bi)
 	}
 	var fun Expr
 	var sig *types2.Signature
@@ -779,6 +1369,184 @@ func (b *builder) foreignCall(e *export.CallExpr) Expr {
 		n.Index = spread
 	}
 	return n
+}
+
+// foreignBuiltinOf returns the predeclared function a call names, and nil for
+// every other callee.
+//
+// A builtin is not a value and has no signature, so it has to be recognised
+// before the callee is built as an operand: [builder.foreignCall] would
+// otherwise refuse it as a call of something with no signature, which names
+// neither the builtin nor the reason.
+func foreignBuiltinOf(fun export.Expr) *types2.Builtin {
+	g, ok := fun.(*export.GlobalExpr)
+	if !ok {
+		return nil
+	}
+	bi, _ := g.Obj.Obj.(*types2.Builtin)
+	return bi
+}
+
+// foreignBuiltin builds a call to a predeclared function.
+//
+// len and cap are the two that are pure operations on their operand. Every
+// other builtin either allocates, writes through a pointer or reaches the
+// runtime, and each of those needs the type descriptor the tree carries in
+// [export.CallExpr.RType] or the shape of a composite literal, so each is
+// refused by its own name.
+func (b *builder) foreignBuiltin(e *export.CallExpr, bi *types2.Builtin) Expr {
+	name := bi.Name()
+	if pkg := bi.Pkg(); pkg != nil && pkg.Name() == "unsafe" {
+		name = "unsafe." + name
+	}
+	var op Op
+	switch name {
+	case "len":
+		op = OLen
+	case "cap":
+		op = OCap
+	default:
+		b.refuseForeign("a call of the builtin %s", name)
+		return b.badExpr(syntax.NoPos)
+	}
+	if e.RType != nil {
+		// The descriptor a builtin needs at run time. Neither len nor cap has
+		// one, so a tree that carries one here is not the call this walk
+		// recognised.
+		b.refuseForeign("a call of the builtin %s carrying a type descriptor", name)
+		return b.badExpr(syntax.NoPos)
+	}
+	if e.Dots || e.Args.Single || len(e.Args.Exprs) != 1 {
+		b.refuseForeign("a call of the builtin %s with %d argument(s)", name, len(e.Args.Exprs))
+		return b.badExpr(syntax.NoPos)
+	}
+	// The language gives both an int, which is what the stream carries when it
+	// carries anything at all.
+	t := b.foreignTypeOf(e)
+	if t == nil {
+		t = types2.Typ[types2.Int]
+	}
+	return &Node{Op: op, Type: b.irType(t), X: b.foreignOperand(e.Args.Exprs[0])}
+}
+
+// foreignMethodCall builds a call through a method selection.
+//
+// Only a method of a concrete type reached without a dictionary is built. The
+// four flags below are the four ways gc writes a selection that needs one, and
+// each is refused by its own name rather than as one refusal covering the
+// node: a call through a dictionary reads the callee out of a slot, and
+// building it as a direct call would name a method of the wrong type.
+func (b *builder) foreignMethodCall(e *export.CallExpr) Expr {
+	m := &e.Method.Method
+	switch {
+	case m.Generic:
+		b.refuseForeign("a call of %s, which is a method with type parameters of its own", m.Sel.Name)
+	case m.TypeParam:
+		b.refuseForeign("a call of %s on a type parameter, whose callee is a dictionary slot", m.Sel.Name)
+	case m.Subdict:
+		b.refuseForeign("a call of %s through a subdictionary", m.Sel.Name)
+	case m.StaticDict:
+		b.refuseForeign("a call of %s with a dictionary argument", m.Sel.Name)
+	default:
+		return b.foreignConcreteMethodCall(e, m)
+	}
+	return b.badExpr(syntax.NoPos)
+}
+
+// foreignConcreteMethodCall builds a call of a method of a concrete type.
+//
+// The method is looked up again against the substituted receiver type, for the
+// reason [builder.foreignField] states: the format names the method and the
+// position of a method in a type is a fact about the type, and the type here is
+// the substituted one. What is read out of the tree instead is the shape of the
+// receiver, because the embedded fields, the dereference and the address gc
+// recorded are the adjustment gc already made and re-deriving it would be a
+// second answer to a question already answered.
+func (b *builder) foreignConcreteMethodCall(e *export.CallExpr, m *export.MethodRef) Expr {
+	recvType := b.foreignType(m.Recv)
+	if recvType == nil {
+		b.refuseForeign("a call of %s on a receiver whose type the stream does not carry", m.Sel.Name)
+		return b.badExpr(syntax.NoPos)
+	}
+	if isInterface(recvType) {
+		// The function is read out of the itab, which is the row
+		// specs/032-type-descriptors-and-itabs.md owns.
+		b.refuseForeign("a call of %s through the interface %s", m.Sel.Name, types2.TypeString(recvType, nil))
+		return b.badExpr(syntax.NoPos)
+	}
+	// The receiver first, because that is the order the format wrote the two
+	// in and a receiver the walk cannot build is a fact about the tree rather
+	// than about the type.
+	recv := b.foreignRecv(e.Method.Recv, recvType)
+	if recv == nil {
+		return b.badExpr(syntax.NoPos)
+	}
+	obj, index, _ := types2.LookupFieldOrMethod(recvType, true, m.Sel.Pkg, m.Sel.Name)
+	fn, _ := obj.(*types2.Func)
+	if fn == nil || len(index) == 0 {
+		b.refuseForeign("a call of %s, which %s has no method for", m.Sel.Name, types2.TypeString(recvType, nil))
+		return b.badExpr(syntax.NoPos)
+	}
+	fsig, _ := fn.Type().(*types2.Signature)
+	if fsig == nil {
+		b.refuseForeign("a call of the method %s, which has no signature", m.Sel.Name)
+		return b.badExpr(syntax.NoPos)
+	}
+	io := b.obj(fn)
+	n := &Node{Op: OCall, Type: b.resultType(fsig), X: &Node{Op: OGlobal, Type: io.Type, Obj: io}}
+	if e.Dots {
+		n.Index = spread
+	}
+	n.Args = append([]Expr{recv}, b.foreignCallArgs(e, fsig)...)
+	return n
+}
+
+// foreignRecv builds the operand of a method selection, with the implicit
+// field selections, dereference and address the selection applies.
+//
+// b.foreignOperand and not b.foreignExpr: the receiver is evaluated before the
+// arguments, so a receiver that is a call goes into a temporary where it
+// stands.
+func (b *builder) foreignRecv(x export.Expr, want types2.Type) Expr {
+	if x == nil {
+		b.refuseForeign("a method selection with no receiver")
+		return nil
+	}
+	r, ok := x.(*export.RecvExpr)
+	if !ok {
+		// A receiver the format wrote without the node that carries the
+		// adjustment. gc writes one in front of every method selection, so a
+		// tree without one is not the shape this walk read.
+		b.refuseForeign("a method selection whose receiver is %q rather than a receiver node", export.ExprKindOf(x).String())
+		return nil
+	}
+	xt := b.foreignTypeOf(r.X)
+	if xt == nil {
+		b.refuseForeign("a method selection on an operand with no type")
+		return nil
+	}
+	base, t := b.fieldPath(b.foreignOperand(r.X), xt, r.Implicits)
+	if r.Deref {
+		p, ok := coreType(t).(*types2.Pointer)
+		if !ok {
+			b.refuseForeign("a method selection that dereferences %s", types2.TypeString(t, nil))
+			return nil
+		}
+		base, t = &Node{Op: ODeref, Type: b.irType(p.Elem()), X: base}, p.Elem()
+	}
+	if r.Addr {
+		base, t = b.addrOf(base, t), types2.NewPointer(t)
+	}
+	if !types2.Identical(t, want) {
+		// The receiver the tree built is not the one the method's selection
+		// names, which means the adjustment read out of the tree and the type
+		// the tree recorded for the selection disagree. Passing it would call
+		// the method with a receiver of another type.
+		b.refuseForeign("a method selection whose receiver is %s where %s was recorded",
+			types2.TypeString(t, nil), types2.TypeString(want, nil))
+		return nil
+	}
+	return base
 }
 
 // foreignInstCallee returns the object and the signature of an instantiated

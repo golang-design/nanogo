@@ -548,3 +548,62 @@ func TestStencilBuildsTheShapesASubstitutionRebuilds(t *testing.T) {
 		t.Errorf("the range variable of keys[int,string] is %s, want %s", got, want)
 	}
 }
+
+// TestStencilNamesAnInstantiationInATypeSwitchCase is the type node of an
+// instantiation.
+//
+// A case of a type switch names a type, and the node that names one carries an
+// object beside the type. For a defined type that object is the declaration's,
+// and the declaration of an instantiation is the generic: its type is
+// "trie[V any]" and substituting a generic type that carries no type arguments
+// is undefined, which types2 answers with the invalid type. Reading the object
+// off the declaration therefore refused every instantiation named in a case,
+// with a message about the invalid type that named neither the case nor the
+// declaration.
+func TestStencilNamesAnInstantiationInATypeSwitchCase(t *testing.T) {
+	const src = `package p
+
+type trie[V any] map[int]any
+
+func (t trie[V]) find(k int) int {
+	v, ok := t[k]
+	if !ok {
+		return 0
+	}
+	switch v.(type) {
+	case trie[V]:
+		return 1
+	}
+	return 2
+}
+
+func user(t trie[int]) int { return t.find(1) }
+`
+	pkg, files, info := buildTypecheck(t, src)
+	p, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("the instantiation was refused: %v", err)
+	}
+	var clause *Node
+	for _, fn := range p.Funcs {
+		for _, s := range fn.Body {
+			Walk(s, func(n *Node) bool {
+				if n.Op == OTypeSwitch && len(n.Body) > 0 && len(n.Body[0].Args) > 0 {
+					clause = n.Body[0].Args[0]
+				}
+				return true
+			})
+		}
+	}
+	if clause == nil {
+		t.Fatal("no instantiation of the method with a type switch was built")
+	}
+	// The node's type is the instantiation and not the declaration, and the
+	// object beside it carries the same type.
+	if clause.Type == nil || clause.Type.Kind != Map {
+		t.Fatalf("the case names the type %s, want the map trie[int] is", clause.Type)
+	}
+	if clause.Obj == nil || clause.Obj.Type != clause.Type {
+		t.Errorf("the case's object carries %v and the node carries %v", clause.Obj, clause.Type)
+	}
+}
