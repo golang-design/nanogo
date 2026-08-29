@@ -71,6 +71,21 @@ func checkExportedTypes(cfg *Config, pkg *types2.Package, fset *syntax.FileSet) 
 			// descriptor.
 			continue
 		}
+		if named, _ := obj.Type().(*types2.Named); named != nil && named.TypeParams().Len() != 0 {
+			// A generic type declares no run-time type. trie[V] has no
+			// descriptor because there is no such value: only trie[int] and
+			// trie[string] are types a program can hold, and each of those is
+			// owed by whoever writes the instantiation, the same way an
+			// unnamed type is. gc emits none for the uninstantiated
+			// declaration either.
+			//
+			// Asking ir.Converter for one gets the refusal a type parameter
+			// deserves, "V has no run-time representation", reported against
+			// the package rather than against the instantiation that would
+			// really need a descriptor. specs/013-generics.md owns the
+			// instantiation side.
+			continue
+		}
 		// Every declared type, not only the exported ones. An importer cannot
 		// name an unexported type, but cmd/link's defgotype walks into a
 		// struct's fields, so a variable of an exported type reaches the

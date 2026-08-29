@@ -130,6 +130,44 @@ func TestExportedTypeRefusalSkipsMainAndAliases(t *testing.T) {
 	}
 }
 
+// TestExportedTypeSkipsAGenericDeclaration covers the third thing the walk
+// does not owe a descriptor for.
+//
+// A generic type declares no run-time type. trie[V] is not a type a program
+// can hold a value of: only trie[int] and trie[string] are, and each of those
+// is owed by whoever writes the instantiation, which is the rule gc applies to
+// an unnamed type. gc emits nothing for the uninstantiated declaration either.
+//
+// Asking ir.Converter for one gets the refusal a type parameter deserves, "V
+// has no run-time representation", reported against the package that declared
+// the generic type rather than against the instantiation that would really
+// need a descriptor. nanogo's own types2 fork was refused that way, over a
+// trie[V] its code instantiates only at types that never leave the package.
+func TestExportedTypeSkipsAGenericDeclaration(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+
+	for _, tc := range []struct {
+		what string
+		src  string
+	}{
+		{"a generic type nothing instantiates",
+			"package lib\n\ntype trie[V any] map[int]any\n\nfunc F(n int) int { return n }\n"},
+		{"a generic type the package instantiates itself",
+			"package lib\n\ntype box[V any] struct{ v V }\n\n" +
+				"func F(n int) int {\n\tb := box[int]{v: n}\n\treturn b.v\n}\n"},
+		{"a generic type beside an ordinary one",
+			"package lib\n\ntype pair[V any] struct{ a, b V }\n\ntype Point struct{ X, Y int }\n\n" +
+				"func F(p Point) int { return p.X + p.Y }\n"},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			if _, err := compileSource(t, tc.src, func(c *Config) { c.Package = "lib" }); err != nil {
+				t.Errorf("%s was refused: %v", tc.what, err)
+			}
+		})
+	}
+}
+
 // TestGeneratedEqualityLetsAFieldWiseStructCompile is the other half of the
 // refusal that used to sit in TestExportedTypeRefusalNamesWhatIsMissing.
 //
