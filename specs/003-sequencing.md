@@ -242,10 +242,10 @@ measures both orders:
 | --- | --- |
 | reach SSA construction with no lowering pass | 21,380 |
 | get past construction once the lowering pass has run, which is what the driver does | 41,500 |
-| lower completely to arm64 machine operations | 21,305 |
-| carry a stack map | 21,305 |
+| lower completely to arm64 machine operations | 21,324 |
+| carry a stack map | 21,324 |
 
-**21,380 of those functions reach SSA construction** without the pass. 21,305
+**21,380 of those functions reach SSA construction** without the pass. 21,324
 of the 21,380 carry a stack map, over 120,493 safepoints, and 10,727 of them
 have a pointer bit set. 162 have a stack object.
 
@@ -381,7 +381,7 @@ the remainder is values wider than a machine register, went with it.
 again.** `ssa/build.go` had no case for `ir.OAssign`, none for `ir.OCase`, and
 read a `for` statement's post list out of `Else` rather than `Post`. The three
 were 25,036 refusals and one miscompile. The corpus now reports 21,380 reaching
-SSA and 21,305 lowering, so the identity that held while the accepted set was
+SSA and 21,324 lowering, so the identity that held while the accepted set was
 small is gone: what is left undecomposed is 14 functions holding a wide
 `SelectN`, 6 holding an array and 31 holding a struct, and 57 of them do not
 lower.

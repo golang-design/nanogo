@@ -389,8 +389,8 @@ tree from all of it, 41,802 functions. How much of that tree the middle end
 accepts is the number below.
 
 **21,380 of those functions reach SSA construction** from a tree the lowering
-pass has not touched, and 21,305 of them lower completely to arm64 machine
-operations. 21,305 of the 21,380 carry a stack map.
+pass has not touched, and 21,324 of them lower completely to arm64 machine
+operations. 21,324 of the 21,380 carry a stack map.
 
 The lowering pass builds part of [`specs/020`](specs/020-ir.md)'s table, and
 the driver runs it before construction, so a real compile reaches further:
