@@ -271,10 +271,32 @@ an instantiation in an importing package needs the function bodies that
 declarations only. So G1 needs a body reader in export data before a stenciler
 can exist, and nanogo's own `types2` fork is full of generic declarations.
 
-Of the 28 packages a `func main() {}` needs, nanogo compiles 9 and refuses 19:
-8 for assembly, 7 for a declared type's descriptor, 2 for register allocator
-output, 1 for a package-level `error` variable, and 1 for `append`. The count of
-nanogo's own packages that nanogo compiles is zero.
+### What actually blocks G1, measured
+
+Each of nanogo's own 19 packages was compiled on its own, with an allowlist
+holding that package alone so that a failure upstream could not hide one
+downstream. Six compile: the root package, `export/pkgbits`, `obj`,
+`obj/arm64`, `rtsym` and `ssa/rules`. Two are commands the harness delegates.
+The other eleven fail, and they fail on **five** distinct blockers, not eleven:
+
+| Blocker | Packages it blocks | Owner |
+| --- | --- | --- |
+| a method value whose receiver is captured by value | **5**: `driver`, `ir`, `link`, `loader`, `ssagen` | [033](033-closures-defer-panic.md) |
+| an importer needs a descriptor for a type the package declares | 2: `export`, `types2` | [032](032-type-descriptors-and-itabs.md) |
+| an unexported method's name needs a package path | 2: `dist`, and `regexp` in Go's corpus | [032](032-type-descriptors-and-itabs.md) |
+| taking an address, in a constant and in a call | 2: `rtype`, `ssa` | [021](021-ssa-construction.md) |
+| a cross-package generic instantiation | 1: `syntax` | [013](013-generics.md), [015](015-export-data.md) |
+
+The first row is the lever. One construct blocks five of the eleven, and the
+same construct is a refusal in Go's own corpus, so it is the item with the most
+behind it by a wide margin. The last row is the one with the most *in* it: it
+needs an export-data body reader before a stenciler can exist, which is two
+subsystems and not one.
+
+A closed blocker is not a compiled package. Every refusal closed this session
+exposed something it had been hiding, and twice what it exposed was worse than
+the refusal, so each row above should be read as what fails **first** and not
+as the whole of what a package needs.
 
 One caveat [001](001-bootstrap-gates.md) states about its own gate, repeated
 here because it decides how much G1 is worth: $N_2 = N_3$ is necessary and not
