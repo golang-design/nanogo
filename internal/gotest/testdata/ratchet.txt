@@ -191,7 +191,9 @@ pass matched recover2.go
 pass matched recover3.go
 pass matched recover4.go
 pass rejected recover5.go
+pass matched reflectmethod1.go
 pass matched reflectmethod2.go
+pass matched reflectmethod3.go
 pass matched reflectmethod4.go
 pass matched reflectmethod7.go
 pass compiled reflectmethod8.go
@@ -225,6 +227,7 @@ pass rejected switch6.go
 pass rejected switch7.go
 pass matched tinyfin.go
 pass compiled torture.go
+pass matched turing.go
 pass rejected typecheck.go
 pass rejected typecheckloop.go
 pass matched typeswitch.go
