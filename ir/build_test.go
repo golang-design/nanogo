@@ -2863,6 +2863,92 @@ func f(x int, g func(int)) {
 	}
 }
 
+// TestBuildDeferAndGoWrapABuiltin checks the statements whose call is not one.
+//
+// A builtin is an operation and not a call to a function value, so there is
+// no word to give runtime.deferproc until a literal holds it. The literal is
+// therefore built whether or not the builtin has operands, which is the one
+// way this differs from a call of a func value, and gc's
+// normalizeGoDeferCall does the same
+// (specs/033-closures-defer-panic.md).
+func TestBuildDeferAndGoWrapABuiltin(t *testing.T) {
+	p := buildSource(t, `
+func f(n int, c chan int, m map[string]int, k string, a, b []int) {
+	defer println(n)
+	go println(n)
+	defer close(c)
+	defer delete(m, k)
+	defer copy(a, b)
+	defer recover()
+}
+`)
+	fn := buildFuncOf(t, p, "f")
+	got := buildLines(fn)
+	want := []string{
+		".autotmp_0 = n",
+		"defer(closure(.autotmp_0)())",
+		".autotmp_1 = n",
+		"go(closure(.autotmp_1)())",
+		".autotmp_2 = c",
+		"defer(closure(.autotmp_2)())",
+		".autotmp_3 = m",
+		".autotmp_4 = k",
+		"defer(closure(.autotmp_3, .autotmp_4)())",
+		".autotmp_5 = a",
+		".autotmp_6 = b",
+		"defer(closure(.autotmp_5, .autotmp_6)())",
+		"defer(closure()())",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got\n%s\nwant\n%s\n\n%s",
+			strings.Join(got, "\n"), strings.Join(want, "\n"), buildDump(fn))
+	}
+
+	// Every literal is marked. The mark is what tells runtime.gorecover not to
+	// count the frame, and for "defer recover()" it is what makes the statement
+	// a no-op, which is what the specification says it is: recover returns nil
+	// unless a deferred function called it directly.
+	wrappers := 0
+	for _, w := range p.Funcs {
+		if w.Wrapper {
+			wrappers++
+		}
+	}
+	if wrappers != 6 {
+		t.Errorf("%d wrapper literals, want one per statement", wrappers)
+	}
+
+	// The second operand of copy and of delete travels in Y rather than in the
+	// argument list, which the callee rule this shares with a call never
+	// reached. A second operand read at the call rather than at the statement
+	// is a silent wrong answer.
+	inner := buildFuncOf(t, p, "f.func4")
+	if body := buildStr(inner.Body[0]); body != "delete(.autotmp_3, .autotmp_4)" {
+		t.Errorf("the deferred delete reads %s, want both operands out of temporaries", body)
+	}
+}
+
+// TestBuildDeferOperandThatCannotChangeIsNotSaved checks the operands that
+// need no temporary.
+//
+// A temporary here is a capture, a capture is a heap cell, and a cell needs a
+// type descriptor, so saving an operand whose value cannot change refuses
+// programs for nothing: "defer println((func())(nil))" is Go's own
+// test/deferprint.go and its operand is the same value at both moments.
+func TestBuildDeferOperandThatCannotChangeIsNotSaved(t *testing.T) {
+	p := buildSource(t, `func f() { defer println(byte(255), (func())(nil), []int(nil)) }`)
+	fn := buildFuncOf(t, p, "f")
+	got := buildLines(fn)
+	want := []string{"defer(closure()())"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got\n%s\nwant\n%s\n\n%s",
+			strings.Join(got, "\n"), strings.Join(want, "\n"), buildDump(fn))
+	}
+	if inner := buildFuncOf(t, p, "f.func1"); len(inner.Captures) != 0 {
+		t.Errorf("the literal captures %d objects, want none:\n%s", len(inner.Captures), buildDump(inner))
+	}
+}
+
 // TestBuildAssignmentAndClauseOps checks the node set's own operations, which
 // replaced the conventions this builder used before they existed.
 func TestBuildAssignmentAndClauseOps(t *testing.T) {

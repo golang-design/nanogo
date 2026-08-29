@@ -36,6 +36,8 @@ a program.
 | `defer f(x)`, with arguments | built; `ir.Build` puts the call in a literal that captures the operands, marked `FuncIDWrapper` |
 | `defer x.M()`, a method of a concrete type | built; the receiver is the call's first operand and travels the same way |
 | `defer i.M()`, a method of an interface | **refused**; the value the runtime is given would be a method value |
+| `defer println(x)`, `defer close(c)`, a builtin | built; a builtin is an operation and not a func value, so it travels inside the same literal, whether or not it has operands |
+| `defer recover()` | built, and it does not recover; the literal is marked, so `runtime.gorecover` counts no non-wrapper frame, which is what the language asks of a `recover` no deferred function called directly |
 | `go f()` and `go f(x)` | built; `runtime.newproc` takes the same one word, on the same terms |
 | `panic` of a value that is already an interface | reaches `runtime.gopanic` and runs the deferred chain; the runtime then prints the value, and for a non-nil operand that print is a fatal error, so this row is a miscompile and not a feature |
 | `panic` of anything else | **refused**; the operand converts to an interface and `ssa.Build` builds no such conversion |
@@ -137,8 +139,50 @@ f(x)` where `f` recovers stops recovering, and nothing says so at compile time.
 `ssagen` writes the funcID and `internal/e2e`'s
 `TestToolexecRecoversFromAWrappedDefer` is the program that proves it.
 
-A call with no operands is not wrapped. Wrapping it would add the very frame
-`recover` counts, for nothing.
+A call of a func value with no operands is not wrapped. Wrapping it would add
+the very frame `recover` counts, for nothing.
+
+**A builtin is wrapped whether or not it has operands, and the reason is a
+different one.** `defer println(x)` and `go println(x)` hold an operation and
+not a call, so there is no word to hand `runtime.deferproc` until a literal
+holds one. `ir.Build` therefore wraps every builtin a statement can name:
+`close`, `copy`, `delete`, `clear`, `panic`, `print`, `println` and `recover`,
+which is the set the language allows as a statement. gc wraps the same set, in
+`typecheck`'s `normalizeGoDeferCall`.
+
+`panic` is in that set, so `defer panic(v)` and `go panic(v)` now reach the two
+`panic` rows above rather than a refusal of their own: the operand of an
+interface type reaches the miscompile and every other operand is still refused
+at `ssa.Build`, on the conversion. No file of Go's own corpus writes either
+statement.
+
+Wrapping is also what puts the builtin's own lowering inside the literal.
+Lowering a `println` emits its runtime calls into the list being lowered, so a
+builtin left where the statement is would print at the statement and defer
+only `runtime.printunlock`: a wrong program rather than a refused one.
+
+**`defer recover()` is built and it does not recover, which is what the
+language requires.** `recover` returns nil unless a deferred function called it
+directly, and here the deferred function is `recover` itself.
+`runtime.gorecover` decides this by counting the non-wrapper frames between
+itself and `runtime.gopanic` and recovering only when there is exactly one; the
+literal is marked, so there are none. `runtime.gorecover`'s own comment names
+this case and its own answer for it. The mark is therefore what makes the
+statement correct rather than merely compilable: without it the wrapper is one
+non-wrapper frame, the panic is caught, and the program that should have died
+exits zero. `internal/e2e`'s `TestToolexecDoesNotRecoverFromADeferredRecover`
+is the program that says so, and Go's own `test/recover1.go` runs the
+interaction with an enclosing panic.
+
+**An operand that reads nothing gets no temporary.** A temporary here is a
+capture, a capture is a heap cell, and a cell needs a type descriptor, so
+saving an operand whose value cannot change refuses programs for nothing:
+`defer println((func())(nil))` is Go's own `test/deferprint.go` and a literal
+func type has no descriptor to allocate a cell with. A constant is such an
+operand, so is a conversion of one, because a conversion is a function of its
+operand and reads nothing else, and so is a declared function, which nothing
+can reassign. gc leaves the same operands where they are, and for the same
+reason its `visit` returns for a literal, for nil and for a function name.
 
 **A method of an interface is the row that is left.** Its receiver stays inside
 the selection, so the value the runtime would be given is a method value: the
@@ -402,15 +446,20 @@ ordinary tests do not take.
 - Closure capture by value and by reference, with the loop-variable semantics of
   Go 1.22 and later, where each iteration has a fresh variable.
 
-None of the four bullets is reached. Of the corpus files the first bullet
-names, exactly one reaches `internal/gotest/testdata/ratchet.txt`:
-`recover5.go`, as `rejected`, which proves the type checker and not the back
-end. No `defer*.go` and no `closure*.go` file runs. What runs is
-`internal/e2e`'s six programs: a closure, a `defer`, a `go`, a `defer` that
-runs while panicking, a `recover`, and a `print`. [004](004-conformance.md)
-counts them under L3, and its own caution about the link-and-run cases applies
-to them as well: the oracle is expected output written in the test, not the
-same program built by `gc`.
+None of the four bullets is reached in full. Of the corpus files the first
+bullet names, four run and match `gc`'s own build: `deferprint.go`,
+`print.go`, `goprint.go` and `recover1.go`, each of which the deferred-builtin
+row unblocked. `recover.go` is still refused, on `defer i.M()`, which is the
+interface method value row above. `recover5.go` reaches
+`internal/gotest/testdata/ratchet.txt` as `rejected`, which proves the type
+checker and not the back end. No `closure*.go` file runs.
+
+What else runs is `internal/e2e`'s programs: a closure, a `defer`, a `go`, a
+`defer` that runs while panicking, a `recover`, a `print`, a deferred builtin
+and a `defer recover()`. [004](004-conformance.md) counts them under L3, and
+its own caution about the link-and-run cases applies to them as well: the
+oracle is expected output written in the test, except for the deferred builtin,
+whose oracle is the same program built by `gc`.
 
 ## What was wrong
 
@@ -465,3 +514,23 @@ interface operand dies in `runtime.printpanicval` with `name offset out of
 range` and prints no panic value. The section above states both cases
 separately, because the difference between them is a special case in the
 runtime and not anything this spec's lowering does.
+
+### The wrapping rule was written for a call and read as one for a statement
+
+This spec said the operands of a `defer` or a `go` travel inside a literal and
+that a call with no operands is not wrapped, and both sentences are about a
+call of a func value. `defer println(x)` has operands and was refused anyway,
+because a builtin is not a call, and `defer recover()` has none and needs the
+literal for a reason the no-operand sentence does not cover: there is no func
+value to give the runtime, with or without operands. The sections above
+separate the two rules, and `defer recover()` gets a row of its own, because a
+reader who took the no-operand sentence at its word would conclude that
+wrapping it is wrong when it is the only thing that makes it right.
+
+### The operands were all said to be temporaries
+
+"The operands are already in temporaries" was true of the builder and it was
+too much. A temporary is a capture and a capture is a heap cell with a type
+descriptor, so `defer println((func())(nil))` was refused for a capture of a
+literal func type, where the operand cannot change and needs no cell at all.
+The section above states which operands need one.

@@ -1208,27 +1208,36 @@ func (b *builder) callStmt(s *syntax.CallStmt) {
 	}
 	// A name is not enough here. The variable a name refers to may be
 	// assigned between the statement and the call, and the call has to use
-	// the value the statement saw, so everything but a constant and a known
-	// function symbol goes into a temporary.
-	switch {
-	case call.X == nil:
-	case isInterfaceMethod(call.X):
-		// An interface method call keeps the receiver inside the selection,
-		// so the receiver is what is snapshotted.
-		call.X.X = b.snapshot(call.X.X)
-	case !isFuncSymbol(call.X):
-		// Everything else, a field of function type and a package-level
-		// variable of function type included. The value the call uses is what
-		// the statement reads, so the whole selection is snapshotted:
-		// snapshotting only the struct would read the field when the call
-		// runs, and leaving a global alone would read the variable then.
-		//
-		// A declared function is the one case that needs no temporary,
-		// because nothing can reassign it.
-		call.X = b.snapshot(call.X)
+	// the value the statement saw, so an operand whose value can change goes
+	// into a temporary. deferOperand states which ones cannot.
+	if call.Op == OCall {
+		switch {
+		case call.X == nil:
+		case isInterfaceMethod(call.X):
+			// An interface method call keeps the receiver inside the
+			// selection, so the receiver is what is snapshotted.
+			call.X.X = b.snapshot(call.X.X)
+		case !isFuncSymbol(call.X):
+			// Everything else, a field of function type and a package-level
+			// variable of function type included. The value the call uses is what
+			// the statement reads, so the whole selection is snapshotted:
+			// snapshotting only the struct would read the field when the call
+			// runs, and leaving a global alone would read the variable then.
+			//
+			// A declared function is the one case that needs no temporary,
+			// because nothing can reassign it.
+			call.X = b.snapshot(call.X)
+		}
+	} else {
+		// A builtin. It has no callee, so X and Y are operands like the ones
+		// in Args and each is saved on the same terms: close and panic carry
+		// their operand in X, and copy and delete carry the second one in Y,
+		// which the callee rule above never reached.
+		call.X = b.deferOperand(call.X)
+		call.Y = b.deferOperand(call.Y)
 	}
 	for i, a := range call.Args {
-		call.Args[i] = b.snapshot(a)
+		call.Args[i] = b.deferOperand(a)
 	}
 	op := ODefer
 	if s.Tok == syntax.Go {
@@ -1237,11 +1246,55 @@ func (b *builder) callStmt(s *syntax.CallStmt) {
 	b.emit(&Node{Op: op, Pos: s.Pos(), Type: voidType, X: b.wrapCallStmt(s.Pos(), call)})
 }
 
+// deferOperand returns the operand a defer or a go statement gives its call,
+// held in a temporary when the value can change before the call runs.
+//
+// The specification evaluates the operands when the statement runs, and the
+// temporary is how the value the statement saw reaches the call. An operand
+// that reads nothing needs none, and giving it one costs more than a slot:
+// the temporary becomes a capture of the literal wrapCallStmt builds, a
+// capture needs a heap cell, and a cell needs a type descriptor, so
+// "defer println((func())(nil))" would be refused for a value that is the
+// same at both moments. gc leaves the same operands where they are, in
+// typecheck's normalizeGoDeferCall, whose visit returns for a literal, for
+// nil and for a declared function.
+func (b *builder) deferOperand(n Expr) Expr {
+	if isFuncSymbol(n) || isStable(n) {
+		return n
+	}
+	return b.snapshot(n)
+}
+
+// isStable reports whether n has the same value wherever it is evaluated.
+//
+// A constant is one. So is a conversion of one, because a conversion is a
+// function of its operand and reads nothing else, which is what makes
+// "(chan int)(nil)" and "byte(255)" the same value inside the literal as
+// outside it.
+func isStable(n Expr) bool {
+	for n != nil && n.Op == OConvert {
+		n = n.X
+	}
+	return n != nil && n.Op == OConst
+}
+
 // isInterfaceMethod reports whether n is a method selected on an interface
 // value, which is the one selection that keeps its receiver inside it.
 func isInterfaceMethod(n Expr) bool {
 	return n != nil && n.Op == OField && n.X != nil && n.X.Type != nil &&
 		n.X.Type.Kind == Interface
+}
+
+// builtinStmtOps is the set of builtins a defer or a go statement can name.
+//
+// The specification restricts the call of both the way it restricts an
+// expression statement, so the set is the builtins whose result may be
+// discarded, and every one of them is an operation of its own rather than a
+// call to a function value. append, len and the rest are absent because their
+// result must be used, which makes them an expression and not a statement.
+var builtinStmtOps = map[Op]bool{
+	OClose: true, OCopy: true, ODelete: true, OClear: true,
+	OPanic: true, ORecover: true, OPrint: true, OPrintln: true,
 }
 
 // wrapCallStmt turns the call of a defer or a go statement into a call that
@@ -1259,11 +1312,20 @@ func isInterfaceMethod(n Expr) bool {
 // mechanism covers both: "defer end(n)" followed by an assignment to n still
 // calls end with the value n held at the statement.
 //
-// A call with no operands needs no literal and gets none. Wrapping it would
-// add a frame between the deferred call and runtime.gopanic, which is the one
-// thing recover counts.
+// A call of a function value with no operands needs no literal and gets none.
+// Wrapping it would add a frame between the deferred call and
+// runtime.gopanic, which is the one thing recover counts.
+//
+// A builtin is wrapped whether or not it has operands, because the reason is
+// a different one: a builtin is an operation and not a value, so there is no
+// word to hand the runtime until a literal holds it. "defer recover()" is the
+// case with no operands, and gc wraps it too (typecheck's
+// normalizeGoDeferCall lists ORECOVER beside OPRINT and OCLOSE).
 func (b *builder) wrapCallStmt(pos syntax.Pos, call Expr) Expr {
-	if call == nil || call.Op != OCall || len(call.Args) == 0 {
+	if call == nil {
+		return call
+	}
+	if !builtinStmtOps[call.Op] && (call.Op != OCall || len(call.Args) == 0) {
 		return call
 	}
 	fn := b.newLiteral(pos)
@@ -1272,6 +1334,12 @@ func (b *builder) wrapCallStmt(pos syntax.Pos, call Expr) Expr {
 	// when exactly one non-wrapper frame stands between it and
 	// runtime.gopanic, so "defer f(x)" where f recovers keeps recovering only
 	// because this literal is marked.
+	//
+	// The mark is also what makes "defer recover()" a no-op, which is what
+	// the specification asks for: recover returns nil unless a deferred
+	// function called it directly, and the wrapper leaves zero non-wrapper
+	// frames rather than one. runtime.gorecover names this case in its own
+	// comment as "the weird case".
 	fn.Wrapper = true
 	node := b.closureNode(fn, pos, b.freeIn(call))
 	return &Node{Op: OCall, Pos: pos, Type: voidType, X: node}

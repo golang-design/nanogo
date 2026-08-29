@@ -493,3 +493,111 @@ func TestToolexecKeepsAnEscapingLocalAlive(t *testing.T) {
 		t.Fatalf("the program exited %d, want 7: a pointer to a local outlived the frame it named", got)
 	}
 }
+
+// The builtin half of specs/033-closures-defer-panic.md, run as a program.
+//
+// "defer println(x)" and "go println(x)" are Go's own test/deferprint.go,
+// test/print.go and test/goprint.go. A builtin is an operation and not a call
+// to a function value, so the statement is built only because ir.Build wraps
+// the builtin in a literal, and the literal is where the print lowers. What a
+// program can see is the order and the values: the operands are the ones the
+// statement read, and the print happens at the return and not at the
+// statement.
+//
+// The three labelled prints come out in the reverse of the order the
+// statements are written in, which is what says the calls reached the defer
+// chain rather than running where they were written. n is assigned after each
+// statement, so a compiler that read the operand at the call would print 3
+// three times.
+const deferBuiltinProgram = `package main
+
+func main() {
+	n := 0
+	defer println("third", n)
+	n = 1
+	defer println("second", n)
+	n = 2
+	defer print("first ", n, "\n")
+	n = 3
+	// The operands of Go's own test/deferprint.go. None of them can change,
+	// so none needs a temporary, and a temporary would need a heap cell whose
+	// type has to be named.
+	defer println(42, true, false, true, 1.5, "world", (chan int)(nil), []int(nil), (map[string]int)(nil), (func())(nil), byte(255))
+	done := make(chan bool)
+	go closeIt(done)
+	<-done
+}
+
+func closeIt(c chan bool) {
+	defer close(c)
+	c <- true
+}
+`
+
+// TestDeferredBuiltinMatchesGc builds the program with nanogo and with the
+// installed compiler and compares what the two write.
+func TestDeferredBuiltinMatchesGc(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/deferbuiltin\n\ngo 1.27\n",
+		"main.go": deferBuiltinProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "deferbuiltin", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := maskAddresses(runProgram(t, filepath.Join(h.mod, "deferbuiltin")))
+	want := maskAddresses(gcOutput(t, h))
+	if got != want {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+	if !strings.HasSuffix(got, "first 2\nsecond 1\nthird 0\n") {
+		t.Errorf("the deferred prints did not run in reverse order with the operands the statements read:\n%s", got)
+	}
+}
+
+// deferredRecoverProgram is the case the literal must not repair.
+//
+// "defer recover()" does not stop a panic. runtime.gorecover recovers only
+// when exactly one non-wrapper frame stands between it and runtime.gopanic,
+// and the literal ir.Build wraps the builtin in is marked FuncIDWrapper, so
+// there are none. That is what the specification asks for: recover returns
+// nil unless a deferred function called it directly, and here the deferred
+// function is recover itself.
+//
+// An unmarked literal would leave one non-wrapper frame, the panic would be
+// caught, and the program would exit 0. So the exit status is the assertion,
+// and it separates a wrapper that compiles from one that is right.
+const deferredRecoverProgram = `package main
+
+func boom(xs []int) {
+	defer recover()
+	_ = xs[3]
+}
+
+func main() {
+	boom(nil)
+}
+`
+
+// TestToolexecDoesNotRecoverFromADeferredRecover runs it.
+//
+// An uncaught panic ends the process with status 2.
+func TestToolexecDoesNotRecoverFromADeferredRecover(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/deferredrecover\n\ngo 1.27\n",
+		"main.go": deferredRecoverProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "deferredrecover", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := exitCode(t, filepath.Join(h.mod, "deferredrecover")); got != 2 {
+		t.Fatalf("the program exited %d, want 2: \"defer recover()\" caught the panic", got)
+	}
+}

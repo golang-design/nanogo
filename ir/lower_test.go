@@ -1783,9 +1783,6 @@ func TestLowerRefusals(t *testing.T) {
 		// wanted.
 		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
 		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
-		{"defer of a builtin", `func f(c chan int) { defer close(c) }`, ODefer, "holds a close and not a call"},
-		{"defer of println", `func f(n int) { defer println(n) }`, ODefer, "holds a println and not a call"},
-		{"defer of recover", `func f() { defer recover() }`, ODefer, "holds a recover and not a call"},
 		{"a select with no clauses", `func f() { select {} }`, OSelect, "runtime.block"},
 		{"an assertion to a one-word struct", `
 type W struct{ P *int }
@@ -3144,20 +3141,54 @@ func external()
 	}
 }
 
-// TestLowerDeferDoesNotRunItsBuiltin is the miscompile this ordering prevents.
+// TestLowerDeferDoesNotRunItsBuiltin is the miscompile the literal prevents.
 //
-// A deferred builtin is a row this pass refuses, and it has to be refused
-// before the deferred call is lowered rather than after. Lowering a builtin
-// emits its runtime calls into the list being built, so "defer println(x)"
-// would print where the statement is and defer only runtime.printunlock: a
-// wrong program rather than a refused one.
+// A builtin lowers into runtime calls emitted in the list being lowered, so a
+// deferred builtin left where the statement is would print at the statement
+// and defer only runtime.printunlock: a wrong program and not a refused one.
+// The literal ir.Build wraps it in is what keeps the two apart, because the
+// print lowers into the literal's body and the statement keeps one call to
+// runtime.deferproc (specs/033-closures-defer-panic.md).
 func TestLowerDeferDoesNotRunItsBuiltin(t *testing.T) {
-	fn, err := lowerFunc(t, `func f(n int) { defer println(n) }`, "f")
-	if err == nil {
-		t.Fatalf("the row was lowered:\n%s", buildDump(fn))
+	fn := lowerOK(t, `func f(n int) { defer println(n) }`)
+	for _, c := range lowerCalls(fn) {
+		if strings.HasPrefix(c, "runtime.print") {
+			t.Errorf("the deferred println left %s in the body:\n%s", c, buildDump(fn))
+		}
 	}
-	if c := lowerCalls(fn); len(c) != 0 {
-		t.Errorf("the refused defer left %v in the body:\n%s", c, buildDump(fn))
+	if !lowerCalled(fn, "runtime.deferproc") {
+		t.Errorf("the deferred println does not reach runtime.deferproc:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerDefersEveryBuiltinStatement is the row a builtin reaches.
+//
+// runtime.deferproc and runtime.newproc take a func value, and a builtin is
+// an operation and not a value, so each of these statements is built only
+// because ir.Build put the builtin in a literal. The assertion is the one
+// this pass owns: the statement lowers, and what it hands the runtime is the
+// literal.
+func TestLowerDefersEveryBuiltinStatement(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		call string
+	}{
+		{"println", `func f(n int) { defer println(n) }`, "runtime.deferproc"},
+		{"print", `func f(n int) { defer print(n) }`, "runtime.deferproc"},
+		{"close", `func f(c chan int) { defer close(c) }`, "runtime.deferproc"},
+		{"recover", `func f() { defer recover() }`, "runtime.deferproc"},
+		{"copy", `func f(a, b []int) { defer copy(a, b) }`, "runtime.deferproc"},
+		{"delete", `func f(m map[string]int, k string) { defer delete(m, k) }`, "runtime.deferproc"},
+		{"go println", `func f(n int) { go println(n) }`, "runtime.newproc"},
+		{"go close", `func f(c chan int) { go close(c) }`, "runtime.newproc"},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if !lowerCalled(fn, tc.call) {
+				t.Fatalf("the statement does not reach %s:\n%s", tc.call, buildDump(fn))
+			}
+		})
 	}
 }
 
