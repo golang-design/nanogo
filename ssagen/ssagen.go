@@ -1430,14 +1430,24 @@ func (e *emitter) resultPlaces(base int64, types []*ir.Type) ([]place, error) {
 	return valuePlaces(vals)
 }
 
-// callResultBase returns where one call's arguments left the stack part of the
-// outgoing area.
-func (e *emitter) callResultBase(v *ssa.Value) (int64, error) {
+// callResults places the values one call site reads back.
+//
+// The assignment pass placed them over the callee's declared result list and
+// recorded the answer, because that list and the values the call site reads
+// are the same words only while the register set holds them all
+// (specs/030-abi.md). The walk over the values read is the fallback, for a
+// call selection created after the assignment pass ran.
+func (e *emitter) callResults(v *ssa.Value, types []*ir.Type) ([]place, error) {
+	if abi := e.f.ABI; abi != nil {
+		if c := abi.CallAt(v.ID); c != nil && len(c.Results) == len(types) {
+			return valuePlaces(c.Results)
+		}
+	}
 	vals, _, _, err := ssa.ABICallArgs(e.a.Target, v)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return ssa.ABIStackEnd(vals), nil
+	return e.resultPlaces(ssa.ABIStackEnd(vals), types)
 }
 
 // storeArg writes one outgoing argument into the frame.
@@ -1492,12 +1502,7 @@ func (e *emitter) results(call *ssa.Value) {
 			return
 		}
 	}
-	base, err := e.callResultBase(call)
-	if err != nil {
-		e.fail("v%d: %v", call.ID, err)
-		return
-	}
-	places, err := e.resultPlaces(base, types)
+	places, err := e.callResults(call, types)
 	if err != nil {
 		e.fail("v%d: %v", call.ID, err)
 		return
@@ -1526,27 +1531,56 @@ func (e *emitter) results(call *ssa.Value) {
 }
 
 // ret places the result values, tears the frame down and returns.
+//
+// The placement is ssa.ABIReturn and not a walk of the operand types here,
+// because specs/030-abi.md places a return over the declared result list and
+// the operands are the machine words decomposition left in its place. The
+// assignment pass recorded that placement and the allocator pre-coloured the
+// same operands from the same record.
 func (e *emitter) ret(v *ssa.Value) {
 	args := v.Args
 	if v.Op.TakesMemory() && len(args) > 0 {
 		args = args[:len(args)-1]
 	}
-	types := make([]*ir.Type, 0, len(args))
-	for _, a := range args {
-		types = append(types, a.Type)
-	}
-	// A return continues from where this function's own arguments left the
-	// stack part of its incoming area.
-	places, err := e.resultPlaces(ssa.ABIStackEnd(e.f.ABI.In), types)
+	vals, err := ssa.ABIReturn(e.a.Target, v)
 	if err != nil {
 		e.fail("v%d: %v", v.ID, err)
+		return
+	}
+	places, err := valuePlaces(operandPlaces(vals))
+	if err != nil {
+		e.fail("v%d: %v", v.ID, err)
+		return
+	}
+	if len(places) < len(args) {
+		e.fail("v%d: the convention places %d of the %d values the return passes", v.ID, len(places), len(args))
 		return
 	}
 	x := make([]xfer, 0, len(args))
 	for i, a := range args {
 		p := places[i]
 		if !p.inReg {
-			e.fail("v%d: a result that travels in the frame is not written", v.ID)
+			if _, ok := memOpFor(a.Type, true); !ok {
+				// One value the machine has no store for, which is an
+				// aggregate the assignment pass could not copy into the area
+				// (ssa.rewriteResults). Refusing here names the function and
+				// the value; storing one word of it would write the wrong
+				// bytes. specs/025-lowering-and-rules.md refuses the load such
+				// a value comes out of first, so this is the second line and
+				// not the first.
+				e.fail("v%d: a result that travels in the frame is not written", v.ID)
+				continue
+			}
+			// A result the registers could not hold travels in the caller's
+			// frame, in the result area of this function's own incoming
+			// argument area. That area is above the frame the prologue
+			// pushed, which is why the frame size is added back.
+			//
+			// The store is here, ahead of the parallel move and of the
+			// epilogue, and nothing between it and the return is a safepoint.
+			// specs/027-liveness-and-stackmaps.md describes the result area
+			// as holding no pointer for exactly that reason.
+			e.storeArg(a, e.frame.size+linkSlot+p.off)
 			continue
 		}
 		x = append(x, xfer{dst: ssa.RegLoc(ssa.Reg(p.reg)), src: e.home(a), v: a})

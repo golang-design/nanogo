@@ -1753,3 +1753,127 @@ func TestABIAreaHoldsAResultTheCallSiteDiscards(t *testing.T) {
 			dropped, read)
 	}
 }
+
+// TestAssignABIPlacesResultsOverTheDeclaredList is the rule the word list and
+// the declared list disagree about.
+//
+// The function returns a fifteen-word struct and an interface. The struct
+// takes the first fifteen result registers and two are needed for the
+// interface, so specs/030-abi.md's all-or-nothing rule puts the whole
+// interface in the result area and leaves the sixteenth register unused. That
+// is what gc does with (Collected, error) and with every other pair of this
+// shape.
+//
+// Decomposition has already split the interface into its two words by the time
+// this pass runs, so a walk of the values the return passes places the itab in
+// the sixteenth register and only the data word in the area. Both halves of
+// the value are then somewhere the caller does not read. Inside a nanogo-only
+// program that is self-consistent, so the check is here and the comparison
+// against gc is internal/e2e's.
+func TestAssignABIPlacesResultsOverTheDeclaredList(t *testing.T) {
+	tg := NewArm64Target()
+	s15 := abiStruct("s15", 15, abiTInt)
+	f := NewFunc("f")
+	f.Type = &ir.Type{Kind: ir.FuncKind, Name: "func() (s15, any)",
+		Results: []*ir.Type{s15, abiTIface}}
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	src := b.NewValue(0, OpLocalAddr, abiPtrTo(s15), mem)
+	src.Aux = &ir.Object{Name: "v", Type: s15, Class: ir.ClassLocal}
+	big := b.NewValue(0, OpLoad, s15, src, mem)
+	// The interface reaches the return as its two words, which is what
+	// decomposition leaves of a value of two parts.
+	itab := b.NewValue(0, OpConstNil, abiUnsafePtr)
+	data := b.NewValue(0, OpConstNil, abiUnsafePtr)
+	b.Control = b.NewValue(0, OpMakeResult, MemType, big, itab, data, mem)
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	abi := f.ABI
+	if len(abi.Out) != 2 {
+		t.Fatalf("%d results are placed, and the function declares two", len(abi.Out))
+	}
+	if !abi.Out[0].InReg || len(abi.Out[0].Parts) != 15 {
+		t.Fatalf("the struct is in %d parts, in registers %v", len(abi.Out[0].Parts), abi.Out[0].InReg)
+	}
+	for i := range abi.Out[0].Parts {
+		if got, want := abi.Out[0].Parts[i].Reg, tg.ResultRegs[ClassInt][i]; got != want {
+			t.Errorf("word %d of the struct is in %v, want %v", i, got, want)
+		}
+	}
+	if abi.Out[1].InReg {
+		t.Fatalf("the interface took registers, and one of the sixteen is left")
+	}
+	if abi.Out[1].Off != 0 || abi.Out[1].Type.Size != 16 {
+		t.Errorf("the interface is %d bytes at %d, want 16 at 0", abi.Out[1].Type.Size, abi.Out[1].Off)
+	}
+	if abi.ArgsSize != 16 {
+		t.Errorf("the area is %d bytes and holds the interface alone", abi.ArgsSize)
+	}
+
+	// The return passes the fifteen words of the struct, the two words of the
+	// interface and the memory. The struct's words are in the registers the
+	// placement named and the interface's are in the two words of the area.
+	mr := b.Control
+	if len(mr.Args) != 18 {
+		t.Fatalf("the return passes %d operands, want 15 words, 2 words and the memory\n%s", len(mr.Args), f)
+	}
+	vals, err := ABIReturn(tg, mr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vals) != 17 {
+		t.Fatalf("%d operands are placed, want 17", len(vals))
+	}
+	for i := 0; i < 15; i++ {
+		if !vals[i].InReg || vals[i].Parts[0].Reg != tg.ResultRegs[ClassInt][i] {
+			t.Errorf("operand %d is in %v, want %v", i, vals[i].Parts[0].Reg, tg.ResultRegs[ClassInt][i])
+		}
+	}
+	for i, want := range []int64{0, 8} {
+		av := &vals[15+i]
+		if av.InReg {
+			t.Errorf("word %d of the interface took a register", i)
+		}
+		if av.Off != want {
+			t.Errorf("word %d of the interface is at %d, want %d", i, av.Off, want)
+		}
+	}
+	// The sixteenth result register holds nothing, which is what makes the
+	// two compilers agree.
+	for i := range vals {
+		if vals[i].InReg && vals[i].Parts[0].Reg == tg.ResultRegs[ClassInt][15] {
+			t.Errorf("operand %d took the sixteenth result register", i)
+		}
+	}
+}
+
+// TestAssignABIFallsBackToTheReturnWithoutASignature keeps the pass working on
+// a function assembled value by value, which carries no signature and whose
+// operand list is the only description of what it returns.
+func TestAssignABIFallsBackToTheReturnWithoutASignature(t *testing.T) {
+	tg := NewArm64Target()
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	a0 := b.NewValue(0, OpArg, abiTInt)
+	a0.Aux = &ir.Object{Name: "p", Type: abiTInt, Class: ir.ClassLocal}
+	b.Control = b.NewValue(0, OpMakeResult, MemType, a0, a0, mem)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.ABI.Out) != 2 {
+		t.Fatalf("%d results are placed, and the return passes two values", len(f.ABI.Out))
+	}
+	for i := range f.ABI.Out {
+		if !f.ABI.Out[i].InReg {
+			t.Errorf("result %d is not in a register, and two integers fit", i)
+		}
+	}
+}

@@ -552,3 +552,206 @@ func TestToolexecGivesADiscardedResultItsSpaceInTheFrame(t *testing.T) {
 		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
 	}
 }
+
+// The three packages of the wide-result differential.
+//
+// gclib holds the types and the functions gc compiles. nglib holds the same
+// functions compiled by nanogo, and the callers of gclib's. main is compiled
+// by gc, so every call between main and nglib, and every call between nglib
+// and gclib, crosses the boundary between the two compilers.
+//
+// S is fifteen machine words, so (S, error) is seventeen and the sixteen
+// integer result registers cannot hold both. specs/030-abi.md assigns
+// all-or-nothing per declared result: gc gives S the first fifteen registers,
+// leaves the sixteenth unused, and puts the whole error in the result area.
+// nanogo placed its results over the words a return passes instead, which put
+// the itab of the error in the sixteenth register and only its data word in
+// the area. Inside a nanogo-only program that is self-consistent and prints
+// right answers, so only a comparison against gc reports it, and this program
+// is that comparison.
+const wideResultGcLibrary = `package gclib
+
+import "errors"
+
+type S struct {
+	A, B, C, D, E []int
+}
+
+// P is two words, so decomposition splits it and a P the registers cannot
+// hold reaches the boundary as two values rather than as one.
+type P struct {
+	X, Y int
+}
+
+var ErrOdd = errors.New("odd")
+
+func Sum(xs []int) int {
+	t := 0
+	for _, x := range xs {
+		t += x
+	}
+	return t
+}
+
+func Total(s S) int {
+	return Sum(s.A) + Sum(s.B) + Sum(s.C) + Sum(s.D) + Sum(s.E)
+}
+
+//go:noinline
+func Make(n int) (S, error) {
+	var s S
+	s.A = []int{n}
+	s.B = []int{n + 1, n + 2}
+	s.C = []int{n + 3}
+	s.D = []int{n + 4, n + 5, n + 6}
+	s.E = []int{n + 7}
+	if n%2 == 1 {
+		return s, ErrOdd
+	}
+	return s, nil
+}
+
+//go:noinline
+func Pair(n int) (S, P) {
+	var s S
+	s.A = []int{n}
+	s.E = []int{n + 1}
+	return s, P{n * 2, n * 3}
+}
+
+//go:noinline
+func Wide(n int) ([17]int64, error) {
+	var a [17]int64
+	for i := range a {
+		a[i] = int64(n + i)
+	}
+	if n%2 == 1 {
+		return a, ErrOdd
+	}
+	return a, nil
+}
+`
+
+const wideResultNanogoLibrary = `package nglib
+
+import "nanogo.example/wideresult/gclib"
+
+//go:noinline
+func Make(n int) (gclib.S, error) {
+	var s gclib.S
+	s.A = []int{n}
+	s.B = []int{n + 1, n + 2}
+	s.C = []int{n + 3}
+	s.D = []int{n + 4, n + 5, n + 6}
+	s.E = []int{n + 7}
+	if n%2 == 1 {
+		return s, gclib.ErrOdd
+	}
+	return s, nil
+}
+
+//go:noinline
+func Pair(n int) (gclib.S, gclib.P) {
+	var s gclib.S
+	s.A = []int{n}
+	s.E = []int{n + 1}
+	return s, gclib.P{X: n * 2, Y: n * 3}
+}
+
+//go:noinline
+func Wide(n int) ([17]int64, error) {
+	var a [17]int64
+	for i := range a {
+		a[i] = int64(n + i)
+	}
+	if n%2 == 1 {
+		return a, gclib.ErrOdd
+	}
+	return a, nil
+}
+
+//go:noinline
+func SumMade(n int) (int, bool) {
+	s, err := gclib.Make(n)
+	return gclib.Total(s), err != nil
+}
+
+//go:noinline
+func SumPaired(n int) (int, int, int) {
+	s, p := gclib.Pair(n)
+	return gclib.Total(s), p.X, p.Y
+}
+
+//go:noinline
+func SumWide(n int) (int64, bool) {
+	a, err := gclib.Wide(n)
+	t := int64(0)
+	for _, x := range a {
+		t += x
+	}
+	return t, err != nil
+}
+`
+
+const crossToolchainWideResultProgram = `package main
+
+import (
+	"fmt"
+
+	"nanogo.example/wideresult/gclib"
+	"nanogo.example/wideresult/nglib"
+)
+
+func main() {
+	for n := 0; n < 4; n++ {
+		s, err := nglib.Make(n)
+		fmt.Println("make", n, gclib.Total(s), err)
+		p, q := nglib.Pair(n)
+		fmt.Println("pair", n, gclib.Total(p), q.X, q.Y)
+		a, err2 := nglib.Wide(n)
+		fmt.Println("wide", n, a, err2)
+		t, bad := nglib.SumMade(n)
+		fmt.Println("summade", n, t, bad)
+		u, x, y := nglib.SumPaired(n)
+		fmt.Println("sumpaired", n, u, x, y)
+		w, bad2 := nglib.SumWide(n)
+		fmt.Println("sumwide", n, w, bad2)
+	}
+}
+`
+
+// TestGcAndNanogoAgreeOnAResultTheRegistersCannotHold builds the three
+// packages above with nanogo owning the middle one and compares every line
+// against an all-gc build.
+//
+// The middle package is the only one nanogo compiles, so main's calls into it
+// test the callee's half of the convention and its own calls into gclib test
+// the caller's half. A placement the two compilers disagree about is a result
+// read out of a register the other never wrote, and no test inside one
+// compiler can see it.
+func TestGcAndNanogoAgreeOnAResultTheRegistersCannotHold(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":         "module nanogo.example/wideresult\n\ngo 1.27\n",
+		"gclib/gclib.go": wideResultGcLibrary,
+		"nglib/nglib.go": wideResultNanogoLibrary,
+		"main.go":        crossToolchainWideResultProgram,
+	}, []string{
+		"# nanogo owns the middle package and gc owns the two either side",
+		"nanogo.example/wideresult/nglib",
+	})
+
+	if out, err := h.build(t, "-o", "wideresult", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	lines := h.decisions(t)
+	if !compiled(lines, "nanogo.example/wideresult/nglib") {
+		t.Fatalf("nanogo delegated the library, so no call crossed the boundary:\n%s", strings.Join(lines, "\n"))
+	}
+	if compiled(lines, "main") || compiled(lines, "nanogo.example/wideresult/gclib") {
+		t.Fatalf("nanogo compiled a package either side of the library:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "wideresult"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

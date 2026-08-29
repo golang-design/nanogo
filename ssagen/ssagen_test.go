@@ -2001,22 +2001,26 @@ func TestReturnValuesTravelInRegisters(t *testing.T) {
 		t.Errorf("no return:\n%s", text)
 	}
 
-	// Past the sixteenth register a result travels in the argument area. The
-	// assignment writes an aggregate there with a block move, which needs an
-	// address to copy from; a scalar has none, so the seventeenth integer
-	// result stays an operand of the return and this package refuses it
-	// rather than writing it into a register that is not its own.
+	// Past the sixteenth register a result travels in the argument area, and
+	// the code generator stores it there. The area is above the frame this
+	// function pushed, so the store is at the frame size plus the word the
+	// link register occupies plus the result's own offset.
 	c = hand(t, "manyresults", build(20))
-	_, err := Emit(c.f, c.a, obj.NewPackage("main"), Options{Sym: "main.manyresults"})
-	if err == nil || !strings.Contains(err.Error(), "travels in the frame") {
-		t.Errorf("a scalar result past the registers gave %v", err)
-	}
+	p = obj.NewPackage("main")
+	r = emit(t, c, p)
 	if n := len(c.f.ABI.Out); n != 20 {
 		t.Errorf("%d results are placed, want 20", n)
 	}
 	for i := 16; i < 20; i++ {
 		if c.f.ABI.Out[i].InReg {
 			t.Errorf("result %d took a register, and there are sixteen", i)
+		}
+	}
+	text = disassemble(t, r, p)
+	for i := 16; i < 20; i++ {
+		off := r.Frame + linkSlot + c.f.ABI.Out[i].Off
+		if want := fmt.Sprintf(", %d(RSP)", off); !strings.Contains(text, want) {
+			t.Errorf("result %d is not stored at %q:\n%s", i, want, text)
 		}
 	}
 }

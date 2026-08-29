@@ -171,6 +171,16 @@ type ABICall struct {
 	// one for each value that was copied into the area and left the list.
 	Vals []ABIValue
 
+	// Results has one entry per value the call site reads back, in the order
+	// the SelectN indices name them, and is nil for a boundary that reads
+	// none.
+	//
+	// It is a second list because a call's results are placed over the
+	// callee's declared result list while its operands are placed over the
+	// operand list, and a result the registers cannot hold is read out of the
+	// area rather than out of a register.
+	Results []ABIValue
+
 	// Size is the area the call needs.
 	Size int64
 }
@@ -745,7 +755,7 @@ func (a *abiPass) run() error {
 	// therefore walks both lists, with the register counters restarted between
 	// them: that restart is the only difference the spec names, and the
 	// shared stack counter is the one it does not.
-	in, out, argsSize, err := ABIWalk(a.t, types, a.resultTypes(), a.objs)
+	in, out, argsSize, err := ABIWalk(a.t, types, a.declaredResults(), a.objs)
 	if err != nil {
 		return fmt.Errorf("ssa: abi: %s: %w", a.f.Name, err)
 	}
@@ -840,13 +850,39 @@ func (a *abiPass) collectArgs() {
 	}
 }
 
-// resultTypes returns the types the function returns, from the first block
-// that returns.
+// declaredResults returns the list the convention places this function's
+// results over, which is the declared result list and not the values a return
+// passes.
 //
-// ir.Type carries no result list for a function kind, so the values a return
-// passes are the only description of the signature that reaches here. Every
-// return of one function passes the same types, so the first one answers for
-// all of them.
+// The two are not the same list. Decomposition has run, so a return passes one
+// value per machine word of a result it split, and specs/030-abi.md assigns
+// all-or-nothing per entry of the list it walks. A list of words and a list of
+// declared results therefore give the same registers in the same order only
+// while the register set holds them both. Above that they part: gc gives
+// (Collected, error) fifteen registers for the struct and puts the whole error
+// in the frame, and a walk of the words puts the itab in the sixteenth
+// register and only the data word in the frame. That is a callee writing one
+// half of its error where its caller reads neither.
+//
+// A function assembled value by value carries no signature, which the tests of
+// the passes below do, and the values a return passes are then the only
+// description there is.
+func (a *abiPass) declaredResults() []*ir.Type {
+	t := a.f.Type
+	if t == nil || t.Kind != ir.FuncKind {
+		return a.resultTypes()
+	}
+	out := make([]*ir.Type, 0, len(t.Results))
+	for _, r := range t.Results {
+		if r == nil {
+			return a.resultTypes()
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// resultTypes returns the types the values of the first return have.
 func (a *abiPass) resultTypes() []*ir.Type {
 	for _, b := range a.f.Blocks {
 		if b.Kind != BlockRet || b.Control == nil || b.Control.Op != OpMakeResult {
@@ -1001,20 +1037,103 @@ func (a *abiPass) homeInArgs(arg, st *Value, av *ABIValue) {
 	}
 }
 
-// rewriteResults writes a result the register set cannot hold into the result
-// area of the caller's frame.
+// abiResultSpans says how many of the values a return passes, or a call site
+// reads, each entry of a placement occupies.
 //
-// Go's convention puts such a result in the incoming argument area, after the
-// arguments the registers could not hold. The callee writes it there, so it
-// returns nothing in a register and the value stops being an operand of the
-// return.
+// The placement is over the declared results and the values are the machine
+// words decomposition left in their place, so the two lists have different
+// lengths and one has to be mapped onto the other. Decomposition states the
+// rule this reads back (ssa/decompose.go, number): a result it split is one
+// value per part, and a result it left whole is one value whatever its type
+// is. The two are told apart by the value's own type, because every part of a
+// split value is a scalar or a pointer and only a whole aggregate is
+// multiword.
 //
-// The copy is placed directly ahead of the return, and that placement is what
-// makes the arguments bitmap of specs/027-liveness-and-stackmaps.md right. The
-// bitmap describes the result area as holding no pointer, because at every
-// safepoint of this function the result has not been written yet. A safepoint
-// after the copy would see live pointers in words the map calls free. gc's
-// bitmap for such a function is the same all-zero map over the same width.
+// The walk has to consume the value list exactly. A mapping that ended early
+// or ran past the end would put a later result over words that hold an earlier
+// one, so the answer is refused instead and the caller falls back to the list
+// it can measure.
+func abiResultSpans(place []ABIValue, vals []*Value) ([]int, bool) {
+	spans := make([]int, len(place))
+	j := 0
+	for i := range place {
+		t := place[i].Type
+		if t == nil {
+			return nil, false
+		}
+		switch {
+		case j < len(vals) && vals[j] != nil && vals[j].Type != nil &&
+			Multiword(vals[j].Type) && vals[j].Type.Size == t.Size:
+			// One value of the result's own type, which decomposition either
+			// left whole or never split because it has no parts.
+			spans[i] = 1
+		case !Multiword(t):
+			spans[i] = 1
+		default:
+			spans[i] = len(place[i].Parts)
+		}
+		j += spans[i]
+		if j > len(vals) {
+			return nil, false
+		}
+	}
+	if j != len(vals) {
+		return nil, false
+	}
+	return spans, true
+}
+
+// abiWordValue is the placement of one word of a value the convention placed
+// as a whole.
+//
+// A result decomposition already split arrives at the boundary as one value
+// per word, and each of those needs a placement of its own: the register its
+// part travels in, or the word of the area the part sits at. The offset is the
+// value's own offset plus the part's, because the parts of one value are
+// consecutive words of the value and the value is one run of the area.
+func abiWordValue(av *ABIValue, k int) ABIValue {
+	p := &av.Parts[k]
+	return ABIValue{
+		Type:  p.Type,
+		Off:   av.Off + p.Off,
+		Parts: []ABIPart{{Off: 0, Type: p.Type, Reg: p.Reg}},
+		InReg: av.InReg,
+	}
+}
+
+// rewriteResults places the values one return passes and records the
+// placement.
+//
+// It is splitOperands for a return, and it is a function of its own because a
+// return is placed over the declared result list while a call's operands are
+// placed over the operand list. The two lists part above sixteen result words,
+// which is what declaredResults says.
+//
+// Three shapes come out of the walk, one per row of specs/030-abi.md's table
+// of where the address of a value in memory comes from:
+//
+//   - A result in registers that reaches here whole takes one load per
+//     register, which is the work decomposition stopped short of.
+//   - A result the registers cannot hold that reaches here whole is copied
+//     into the result area by a block move ahead of the return.
+//   - A result the registers cannot hold that decomposition already split
+//     stays as its words, each placed on the word of the area it belongs to.
+//     The code generator stores those words like any other operand the
+//     convention put in the area.
+//
+// The copies and the loads are threaded on one memory, so a load made after a
+// copy reads the memory that copy produced. Both are scheduled at the return
+// and the older memory is no longer live there, which is the InvMemChain of
+// ssa/verify.go and, below the verifier, a load the scheduler may move across
+// a store.
+//
+// The copy and the stores are the last thing before the return, and that is
+// what makes the arguments bitmap of specs/027-liveness-and-stackmaps.md
+// right. The bitmap describes the result area as holding no pointer, because
+// at every safepoint of this function the result has not been written yet. A
+// safepoint after the copy would see live pointers in words the map calls
+// free. gc's bitmap for such a function is the same all-zero map over the same
+// width.
 func (a *abiPass) rewriteResults() {
 	abi := a.f.ABI
 	n := 0
@@ -1027,38 +1146,111 @@ func (a *abiPass) rewriteResults() {
 		if len(args) > 0 && IsMemory(args[len(args)-1]) {
 			args = args[:len(args)-1]
 		}
-		if len(args) != len(abi.Out) {
-			continue
-		}
 		mem := a.memoryOf(mr)
 		if mem == nil {
 			continue
 		}
-		keep := make([]*Value, 0, len(mr.Args))
+		spans, ok := abiResultSpans(abi.Out, args)
+		if !ok {
+			continue
+		}
+
+		// The copies run first, all of them, so that every load the split
+		// below makes reads the memory they left. Both are scheduled at the
+		// return, and a load placed there reading the older memory is two
+		// memory values live at one point, which is the InvMemChain of
+		// ssa/verify.go and, below the verifier, a load the scheduler may
+		// move across a store.
+		copied := make([]bool, len(abi.Out))
+		lo := 0
 		for i := range abi.Out {
 			av := &abi.Out[i]
-			var src *Value
-			if !av.InReg && av.Type.Size > 0 {
-				src = a.addressOf(mr, args[i])
+			at := lo
+			lo += spans[i]
+			if spans[i] != 1 || av.InReg || av.Type.Size == 0 || len(av.Parts) == 0 {
+				continue
 			}
+			if !Multiword(args[at].Type) {
+				continue
+			}
+			src := a.addressOf(mr, args[at])
 			if src == nil {
-				// Either the result travels in registers, or it is not a
-				// value this pass can take the address of. The second keeps
-				// the operand, and the code generator then refuses the
-				// function, which is a refusal with a place to look rather
-				// than a copy of the wrong bytes.
-				keep = append(keep, args[i])
+				// A value this pass cannot take the address of. The operand
+				// stays and the code generator refuses the function, which is
+				// a refusal with a place to look rather than a copy of the
+				// wrong bytes.
 				continue
 			}
 			o := a.home("~r", n, av.Type, av.Off, true)
 			n++
 			mem = a.copyInto(mr, b, o, av.Type, src, mem)
-			a.kill(args[i])
+			a.kill(args[at])
+			copied[i] = true
 		}
-		if len(keep) == len(args) {
+
+		rec := &ABICall{Size: abi.ArgsSize, Vals: make([]ABIValue, 0, len(args))}
+		out := make([]*Value, 0, len(args)+1)
+		changed := false
+		lo = 0
+		for i := range abi.Out {
+			av := &abi.Out[i]
+			hi := lo + spans[i]
+			whole := hi-lo == 1 && args[lo] != nil && Multiword(args[lo].Type)
+			switch {
+			case copied[i]:
+				// In the result area already, and no longer an operand.
+				c := *av
+				c.Copied = true
+				rec.Vals = append(rec.Vals, c)
+				changed = true
+
+			case av.Type.Size == 0 || len(av.Parts) == 0:
+				// No width, so no register and no word. The operands, if
+				// there are any, are placed where they are.
+				for k := lo; k < hi; k++ {
+					out = append(out, args[k])
+					rec.Vals = append(rec.Vals, *av)
+				}
+
+			case av.InReg && whole && len(av.Parts) >= 2:
+				parts := a.loadParts(mr, args[lo], av, mem)
+				if parts == nil {
+					out = append(out, args[lo])
+					rec.Vals = append(rec.Vals, *av)
+					break
+				}
+				out = append(out, parts...)
+				for k := range av.Parts {
+					rec.Vals = append(rec.Vals, abiWordValue(av, k))
+				}
+				changed = true
+
+			case hi-lo == len(av.Parts):
+				// One operand per word already. Each takes the register its
+				// part travels in, or the word of the area the part sits at.
+				for k := lo; k < hi; k++ {
+					out = append(out, args[k])
+					rec.Vals = append(rec.Vals, abiWordValue(av, k-lo))
+				}
+
+			default:
+				for k := lo; k < hi; k++ {
+					out = append(out, args[k])
+					rec.Vals = append(rec.Vals, *av)
+				}
+			}
+			lo = hi
+		}
+		// The record is kept whether or not the operand list changed, because
+		// the placement is over the declared results either way and a walk of
+		// the operand list is not it.
+		if int(mr.ID) < len(abi.Calls) {
+			abi.Calls[mr.ID] = rec
+		}
+		if !changed {
 			continue
 		}
-		setArgs(mr, append(keep, mem)...)
+		setArgs(mr, append(out, mem)...)
 	}
 }
 
@@ -1110,20 +1302,23 @@ func (a *abiPass) copyInto(anchor *Value, b *Block, o *ir.Object, typ *ir.Type, 
 	return mv
 }
 
-// rewriteBoundaries places every value that crosses a call boundary whole.
+// rewriteBoundaries places every value a call passes whole.
 //
-// A call that passes an aggregate, and a return that returns one, hold it as
-// one operand when decomposition stopped at its bound. The convention gives it
-// several registers, and one value cannot be in several registers, so the
-// operand becomes one load per register. When the registers cannot hold it at
-// all, it is copied into the outgoing area instead and stops being an operand.
+// A call that passes an aggregate holds it as one operand when decomposition
+// stopped at its bound. The convention gives it several registers, and one
+// value cannot be in several registers, so the operand becomes one load per
+// register. When the registers cannot hold it at all, it is copied into the
+// outgoing area instead and stops being an operand.
+//
+// A return is rewriteResults', because a return is placed over the declared
+// result list and a call's operands are placed over the operand list.
 func (a *abiPass) rewriteBoundaries() error {
 	for _, b := range a.f.Blocks {
 		for _, v := range b.Values {
 			if a.isDead(v) {
 				continue
 			}
-			if !v.Op.IsCall() && v.Op != OpMakeResult {
+			if !v.Op.IsCall() {
 				continue
 			}
 			if err := a.splitOperands(v); err != nil {
@@ -1134,7 +1329,7 @@ func (a *abiPass) rewriteBoundaries() error {
 	return nil
 }
 
-// splitOperands places the operands of one call or return.
+// splitOperands places the operands of one call.
 //
 // It records the placement whenever it changes the operand list, because the
 // list then stops describing what the call passes: a copied value is not in it
@@ -1145,16 +1340,9 @@ func (a *abiPass) rewriteBoundaries() error {
 func (a *abiPass) splitOperands(v *Value) error {
 	lo := abiCallPrefix(v)
 	types := abiOperandTypes(v, lo)
-	var place []ABIValue
-	var size int64
-	var err error
-	if v.Op == OpMakeResult {
-		place, size, err = ABIResults(a.t, ABIStackEnd(a.f.ABI.In), types)
-	} else {
-		// The call's results are walked with its arguments, because the
-		// spill slots the size covers sit above both.
-		place, _, size, err = ABIWalk(a.t, types, abiCallResultTypes(v), nil)
-	}
+	// The call's results are walked with its arguments, because the spill
+	// slots the size covers sit above both.
+	place, _, size, err := ABIWalk(a.t, types, abiCallResultTypes(v), nil)
 	if err != nil || len(place) != len(v.Args)-lo-a.memArgs(v) {
 		return nil
 	}
@@ -1181,17 +1369,11 @@ func (a *abiPass) splitOperands(v *Value) error {
 			// whole value's slot puts it. That is where the callee spills the
 			// register the word arrived in.
 			for j := range av.Parts {
-				p := &av.Parts[j]
-				rec.Vals = append(rec.Vals, ABIValue{
-					Type:  p.Type,
-					Off:   av.Off + p.Off,
-					Parts: []ABIPart{{Off: 0, Type: p.Type, Reg: p.Reg}},
-					InReg: true,
-				})
+				rec.Vals = append(rec.Vals, abiWordValue(av, j))
 			}
 			changed = true
 
-		case !av.InReg && av.Type.Size > 0 && mem != nil && v.Op != OpMakeResult:
+		case !av.InReg && av.Type.Size > 0 && mem != nil:
 			src := a.addressOf(v, arg)
 			if src == nil {
 				if Multiword(av.Type) {
@@ -1329,24 +1511,31 @@ func (a *abiPass) spillResults() bool {
 
 // spillCallResults spills the results of one call.
 //
-// The placement is the walk rewriteCallResults makes, because the two have to
-// agree on which results are wide: one that gives a result a slot the other
-// then leaves whole would write a value nobody reads.
+// The placement is the walk callResults makes, over the callee's declared
+// result list, because the two have to agree on which results are wide: one
+// that gives a result a slot the other then leaves whole would write a value
+// nobody reads.
+//
+// Only a result that reaches the call site whole needs a place. One
+// decomposition already split is one value per machine word, and each of those
+// is a value the machine can move or store: a word in a register is read out
+// of it and a word of the result area is loaded out of it, and neither is a
+// value this pass has to write down first.
 func (a *abiPass) spillCallResults(call *Value) bool {
 	sel, ok := a.resultReads(call)
 	if !ok {
 		return false
 	}
-	types := make([]*ir.Type, 0, len(sel))
-	for _, v := range sel {
-		types = append(types, v.Type)
-	}
 	args, _, _, err := ABICallArgs(a.t, call)
 	if err != nil {
 		return false
 	}
-	place, _, err := ABIResults(a.t, ABIStackEnd(args), types)
-	if err != nil || len(place) != len(sel) {
+	place, _, err := ABIResults(a.t, ABIStackEnd(args), abiCallResultTypes(call))
+	if err != nil {
+		return false
+	}
+	spans, ok := abiResultSpans(place, sel)
+	if !ok {
 		return false
 	}
 
@@ -1354,8 +1543,14 @@ func (a *abiPass) spillCallResults(call *Value) bool {
 	// reader that takes two wide results of one call gets one chain.
 	mem := call
 	changed := false
+	at := 0
 	for i := range place {
-		v := sel[i]
+		lo := at
+		at += spans[i]
+		if spans[i] != 1 {
+			continue
+		}
+		v := sel[lo]
 		if !a.wideResult(v, &place[i]) || a.resultStore(v) != nil {
 			continue
 		}
@@ -1496,7 +1691,15 @@ func (a *abiPass) rewriteCallResults() error {
 	return nil
 }
 
-// callResults splits and renumbers the results of one call.
+// callResults splits and renumbers the results of one call, and records where
+// each value the call site reads comes back from.
+//
+// The placement is over the callee's declared result list, which
+// abiCallResultTypes reads off the signature the call carries, and not over
+// the values the call site reads. The two part above sixteen result words for
+// the reason declaredResults gives, and the callee places over the declared
+// list, so a call site that placed over the words would read half of a result
+// out of a register the callee never wrote.
 //
 // It reports an error for a result the call site cannot read, rather than
 // leaving a store no rule lowers. Lowering panics on such a store by the
@@ -1507,90 +1710,169 @@ func (a *abiPass) callResults(call *Value) error {
 	if !ok {
 		return a.unreadableResult(call, "the call site does not read one value per result")
 	}
-	types := make([]*ir.Type, 0, len(sel))
-	for _, v := range sel {
-		types = append(types, v.Type)
-	}
-	args, _, _, err := ABICallArgs(a.t, call)
+	args, _, size, err := ABICallArgs(a.t, call)
 	if err != nil {
 		return a.unreadableResult(call, "the convention does not place the call's arguments")
 	}
-	place, _, err := ABIResults(a.t, ABIStackEnd(args), types)
-	if err != nil || len(place) != len(sel) {
+	place, _, err := ABIResults(a.t, ABIStackEnd(args), abiCallResultTypes(call))
+	if err != nil {
 		return a.unreadableResult(call, "the convention does not place the call's results")
+	}
+	spans, ok := abiResultSpans(place, sel)
+	if !ok {
+		return a.unreadableResult(call, "the values the call site reads are not the words of the results the callee returns")
 	}
 
 	// The survey runs first, because a result the walk below cannot place has
 	// to stop the function rather than renumber half of a list.
-	split, framed := false, false
+	//
+	// Only a result that reaches the call site whole can fail it. One
+	// decomposition already split is one value per machine word, and every
+	// word is a value the machine moves or loads.
+	at := 0
 	for i := range place {
 		av := &place[i]
-		if a.unread(sel[i]) {
+		lo := at
+		at += spans[i]
+		if av.Type == nil || av.Type.Size == 0 || len(av.Parts) == 0 {
+			continue
+		}
+		if spans[i] != 1 || !Multiword(sel[lo].Type) {
+			continue
+		}
+		v := sel[lo]
+		if a.unread(v) {
 			// Nothing reads it, so it needs no place at all: the words come
-			// back where the convention says and are dropped. It still
-			// occupies them, so a result after it is still renumbered, which
-			// is what the loop below does with the width recorded here.
-			if av.InReg && len(av.Parts) >= 2 {
-				split = true
-			}
-			continue
-		}
-		if !av.InReg && av.Type != nil && av.Type.Size > 0 {
-			// The registers could not hold it, so the callee wrote it into
-			// the area and the call site reads it back from there.
-			if a.resultStore(sel[i]) == nil {
-				return a.resultRefusal(sel[i], "the call site does not read it into one place, so the words it arrived in have nowhere to go")
-			}
-			framed = true
-			continue
-		}
-		if !Multiword(sel[i].Type) {
+			// back where the convention says and are dropped.
 			continue
 		}
 		switch {
-		case len(av.Parts) < 2:
-			// One word or none, which every store the machine has can write.
-		case a.resultStore(sel[i]) == nil:
-			return a.resultRefusal(sel[i], "the call site does not write it to one place, so its words have nowhere to go")
-		default:
-			split = true
-		}
-	}
-	if framed {
-		mem := a.memoryOf(call)
-		for i := range place {
-			av := &place[i]
-			if av.InReg || av.Type == nil || av.Type.Size == 0 {
-				continue
+		case !av.InReg:
+			// The registers could not hold it, so the callee wrote it into
+			// the area and the call site reads it back from there.
+			if a.resultStore(v) == nil {
+				return a.resultRefusal(v, "the call site does not read it into one place, so the words it arrived in have nowhere to go")
 			}
-			a.readFromArea(call, sel[i], a.resultStore(sel[i]), av, mem)
+		case len(av.Parts) >= 2:
+			if a.resultStore(v) == nil {
+				return a.resultRefusal(v, "the call site does not write it to one place, so its words have nowhere to go")
+			}
 		}
-	}
-	if !split {
-		// Decomposition placed every result already, and renumbering would
-		// move each index onto itself.
-		return nil
 	}
 
+	mem := a.memoryOf(call)
+	res := make([]ABIValue, 0, len(sel))
 	word := int64(0)
+	homes := 0
+	at = 0
 	for i := range place {
 		av := &place[i]
-		v := sel[i]
-		if Multiword(v.Type) && av.InReg && len(av.Parts) >= 2 {
-			if st := a.resultStore(v); st != nil {
-				a.splitResult(v, st, av, word)
-			} else {
-				a.dropResult(v, av, word)
+		n := spans[i]
+		vs := sel[at : at+n]
+		at += n
+		whole := n == 1 && Multiword(vs[0].Type)
+
+		switch {
+		case av.Type == nil || av.Type.Size == 0 || len(av.Parts) == 0:
+			for _, v := range vs {
+				v.AuxInt = word
+				word++
+				res = append(res, *av)
 			}
-			word += int64(len(av.Parts))
-			continue
+
+		case !av.InReg && whole:
+			// A result the registers could not hold and that the call site
+			// reads as one value. The store it already makes becomes a block
+			// move out of the area; one that nothing reads is left where it
+			// is and occupies its word of the list.
+			if st := a.resultStore(vs[0]); st != nil {
+				a.readFromArea(call, vs[0], st, av, mem, homes)
+				homes++
+			}
+			vs[0].AuxInt = word
+			word++
+			res = append(res, *av)
+
+		case !av.InReg:
+			// The callee wrote the result into the area and decomposition
+			// already split the read of it, so each word is loaded out of the
+			// word of the area that holds it.
+			a.readWordsFromArea(call, vs, av, homes)
+			homes++
+			for k := range av.Parts {
+				vs[k].AuxInt = word
+				word++
+				res = append(res, abiWordValue(av, k))
+			}
+
+		case whole && len(av.Parts) >= 2:
+			if st := a.resultStore(vs[0]); st != nil {
+				a.splitResult(vs[0], st, av, word)
+			} else {
+				a.dropResult(vs[0], av, word)
+			}
+			for k := range av.Parts {
+				word++
+				res = append(res, abiWordValue(av, k))
+			}
+
+		case n == len(av.Parts):
+			for k := range av.Parts {
+				vs[k].AuxInt = word
+				word++
+				res = append(res, abiWordValue(av, k))
+			}
+
+		default:
+			for _, v := range vs {
+				v.AuxInt = word
+				word++
+				res = append(res, *av)
+			}
 		}
-		// A result this pass leaves whole is one value and one word, which is
-		// the width decomposition counted for it.
-		v.AuxInt = word
-		word++
+	}
+	if int(call.ID) < len(a.f.ABI.Calls) {
+		rec := a.f.ABI.Calls[call.ID]
+		if rec == nil {
+			rec = &ABICall{Vals: args, Size: size}
+			a.f.ABI.Calls[call.ID] = rec
+		}
+		rec.Results = res
 	}
 	return nil
+}
+
+// readWordsFromArea replaces the words of a result the registers could not
+// hold by loads out of the outgoing argument area.
+//
+// It is readFromArea for a result decomposition already split. There is no
+// store to turn into a block move, because there is no whole value at the call
+// site: each word is a value of its own and each is read from the word of the
+// area the callee wrote it to.
+//
+// The loads sit directly behind the call, for the reason spillResults puts its
+// store there: the area they read is the call's outgoing argument area and the
+// next call this function makes writes over it.
+//
+// The SelectN values stay, with no reader. Each names one place of the call's
+// result list and the code generator walks that list by index, so one removed
+// here is a place the generator cannot count past. They are given no home,
+// because nothing reads them, and the generator then emits nothing for them.
+func (a *abiPass) readWordsFromArea(call *Value, sel []*Value, av *ABIValue, n int) {
+	if len(sel) != len(av.Parts) {
+		return
+	}
+	anchor := sel[0]
+	b := anchor.Block
+	o := a.home("~R", n, av.Type, av.Off, false)
+	base := a.mk(anchor, b, anchor.Pos, OpLocalAddr, abiPtrTo(av.Type), call)
+	base.Aux = o
+	for k := range av.Parts {
+		p := &av.Parts[k]
+		addr := a.partAddr(anchor, b, anchor.Pos, base, p)
+		ld := a.mk(anchor, b, anchor.Pos, OpLoad, p.Type, addr, call)
+		a.replaceValue(sel[k], ld)
+	}
 }
 
 // dropResult replaces a call result nothing reads by one result per register.
@@ -1661,11 +1943,11 @@ func (a *abiPass) resultReads(call *Value) ([]*Value, bool) {
 // result list, and the code generator walks that list by index: a result
 // removed here is a result the generator cannot count past. It is given no
 // home, because nothing reads it, and the generator then emits nothing for it.
-func (a *abiPass) readFromArea(call, sel, st *Value, av *ABIValue, mem *Value) {
+func (a *abiPass) readFromArea(call, sel, st *Value, av *ABIValue, mem *Value, n int) {
 	if st == nil || mem == nil {
 		return
 	}
-	o := a.home("~R", int(sel.AuxInt), av.Type, av.Off, false)
+	o := a.home("~R", n, av.Type, av.Off, false)
 	src := a.mk(st, st.Block, st.Pos, OpLocalAddr, abiPtrTo(av.Type), st.Args[2])
 	src.Aux = o
 	dst := st.Args[0]
@@ -1971,7 +2253,7 @@ func ABIUseReg(t *Target, v *Value, i int) (Reg, bool) {
 	case v.Op.IsCall():
 		out, lo, _, err = ABICallArgs(t, v)
 	default:
-		out, _, err = ABIResults(t, abiFuncArgStackEnd(v), abiOperandTypes(v, 0))
+		out, err = ABIReturn(t, v)
 	}
 	if err != nil {
 		return NoReg, false
@@ -2047,6 +2329,28 @@ func ABICallArgs(t *Target, v *Value) (out []ABIValue, lo int, size int64, err e
 	// them so that the size covers the whole area.
 	out, _, size, err = ABIWalk(t, abiOperandTypes(v, lo), abiCallResultTypes(v), nil)
 	return out, lo, size, err
+}
+
+// ABIReturn places the values one return passes, one entry per operand.
+//
+// It is the record rewriteResults left, for the reason ABICallArgs takes the
+// record for a call: the placement is over the declared result list and the
+// operand list is the machine words decomposition left in its place, so a walk
+// of the operands is a different walk. The register allocator and the code
+// generator both read this, so a return has one placement rather than two that
+// have to agree.
+//
+// The walk is the fallback, for a return in a function assembled by hand and
+// for one selection created after the assignment pass ran. Neither has a
+// record and in both the operand list is the only list there is.
+func ABIReturn(t *Target, v *Value) ([]ABIValue, error) {
+	if v != nil && v.Block != nil && v.Block.Func != nil {
+		if c := v.Block.Func.ABI.CallAt(v.ID); c != nil {
+			return c.Vals, nil
+		}
+	}
+	out, _, err := ABIResults(t, abiFuncArgStackEnd(v), abiOperandTypes(v, 0))
+	return out, err
 }
 
 // abiCallResultTypes returns the types the call's results occupy the outgoing
