@@ -384,6 +384,27 @@ var unsafePtrType = &ir.Type{
 	PtrBits: []byte{1}, Name: "unsafe.Pointer",
 }
 
+// machinePtrType is the type of an address the collector must NOT follow: the
+// stack pointer, the static base, a closure's entry word, an itab's method
+// word, and the barrier's address of runtime.writeBarrier. None of them points
+// at a heap object. All of them are one machine word.
+//
+// It is the twin of unsafePtrType and differs from it in the pointer map
+// alone, which is the whole of what the collector reads, so the two are
+// written here together and nowhere else. Two spellings of the same width with
+// two pointer maps is how the write barrier gave a frame a second OpSB whose
+// spill slot the locals bitmap called a pointer, and the program stopped in
+// runtime.adjustpointers with "bad pointer in frame" the next time a stack
+// grew under it.
+//
+// The direction of a mistake here is not symmetric. Calling a non-pointer a
+// pointer stops the program with a diagnostic. Calling a heap pointer a
+// non-pointer frees a reachable object and says nothing, so a value belongs
+// here only when it can be shown never to point into the heap.
+var machinePtrType = &ir.Type{
+	Kind: ir.UnsafePtr, Size: ir.PtrSize, Align: ir.PtrSize, Name: "unsafe.Pointer",
+}
+
 func (d *decomposer) scalarType(k ir.Kind) *ir.Type {
 	t := &ir.Type{Kind: k, Name: k.String()}
 	// Layout fills Size, Align and PtrBits. Writing them here instead would be

@@ -228,11 +228,6 @@ type lowerer struct {
 	exitMem []*Value
 
 	sp, sb *Value
-
-	// ptr is the type of a machine pointer, made once. Lowering computes
-	// addresses that no Go type describes, such as the address of a frame slot
-	// that holds several objects, and they are all one machine word.
-	ptr *ir.Type
 }
 
 func (l *lowerer) fail(b *Block, v *Value, op Op, format string, args ...any) {
@@ -786,13 +781,10 @@ func (e *Edit) base(slot **Value, op Op) *Value {
 	return v
 }
 
-// PtrType returns the type of an untyped machine pointer.
-func (e *Edit) PtrType() *ir.Type {
-	if e.l.ptr == nil {
-		e.l.ptr = &ir.Type{Kind: ir.UnsafePtr, Size: ir.PtrSize, Align: ir.PtrSize, Name: "unsafe.Pointer"}
-	}
-	return e.l.ptr
-}
+// PtrType returns the type of an untyped machine pointer: one word that is an
+// address and is not a pointer into the heap. See machinePtrType, which is the
+// one place that type is written.
+func (e *Edit) PtrType() *ir.Type { return machinePtrType }
 
 // CheckLowered reports the values that are still target-neutral.
 //

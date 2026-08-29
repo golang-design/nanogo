@@ -598,3 +598,37 @@ func TestVerifyAcceptsStringsThatAreNotConcatenated(t *testing.T) {
 		t.Fatalf("Verify reported %v on strings that are compared, not concatenated\n%s", vs, f)
 	}
 }
+
+// A second static base is a second name for one address, and the two are free
+// to disagree about the one thing that matters: whether the collector follows
+// it. Go's own test/linkmain_run.go stopped with "bad pointer in frame" on
+// every run because a pass made one and typed it as a pointer.
+func TestVerifyCatchesASecondStaticBase(t *testing.T) {
+	f, entry, _ := minimalFunc()
+	entry.NewValue(0, OpSB, machinePtrType)
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("Verify reported %v for one static base\n%s", vs, f)
+	}
+	entry.NewValue(0, OpSB, machinePtrType)
+	wantOnly(t, f, Verify(f), InvOneBase)
+}
+
+func TestVerifyCatchesASecondStackPointer(t *testing.T) {
+	f, entry, _ := minimalFunc()
+	entry.NewValue(0, OpSP, machinePtrType)
+	entry.NewValue(0, OpSP, machinePtrType)
+	wantOnly(t, f, Verify(f), InvOneBase)
+}
+
+// A base described as holding a pointer gets its spill slot marked in the
+// locals bitmap, and runtime.adjustpointers reads that word when the stack
+// grows. Neither base points into the heap, so neither may say it does.
+func TestVerifyCatchesAPointerTypedBase(t *testing.T) {
+	f, entry, _ := minimalFunc()
+	entry.NewValue(0, OpSB, unsafePtrType)
+	wantOnly(t, f, Verify(f), InvOneBase)
+
+	g, gentry, _ := minimalFunc()
+	gentry.NewValue(0, OpSP, unsafePtrType)
+	wantOnly(t, g, Verify(g), InvOneBase)
+}

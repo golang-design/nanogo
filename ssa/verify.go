@@ -62,6 +62,10 @@ const (
 	// InvGoSpecific: no Go-specific operation of specs/020-ir.md's lowering
 	// table survives into SSA.
 	InvGoSpecific
+
+	// InvOneBase: a function has at most one stack pointer and one static
+	// base, and neither is described to the collector as a pointer.
+	InvOneBase
 )
 
 var invariantNames = [...]string{
@@ -74,6 +78,7 @@ var invariantNames = [...]string{
 	InvMemChain:     "one memory value live at any point in a block",
 	InvReachable:    "every value is reachable from the entry",
 	InvGoSpecific:   "no Go-specific operation survives",
+	InvOneBase:      "one stack pointer and one static base, neither a pointer",
 }
 
 func (i Invariant) String() string {
@@ -180,6 +185,7 @@ func Verify(f *Func) []Violation {
 		}
 	}
 	v.memory()
+	v.bases()
 	for _, b := range f.Blocks {
 		if !v.dom.Reachable(b) {
 			// One violation for the block, then nothing else about it. Every
@@ -226,6 +232,50 @@ func (v *verifier) addBlock(inv Invariant, b *Block, format string, args ...any)
 		Value:     -1,
 		Detail:    fmt.Sprintf(format, args...),
 	})
+}
+
+// bases checks the two values that name a base address rather than compute
+// one: OpSP, the frame's own, and OpSB, the one every global's address is
+// measured from.
+//
+// Two properties, and they fail in different ways.
+//
+// There is at most one of each. A base is the same address for the whole of a
+// function, so a second is a second name for one thing, and every pass that
+// makes one asks first whether the function already has it. This is what says
+// a pass forgot to ask.
+//
+// Neither holds a pointer the collector may follow. Neither points into the
+// heap: the frame is scanned by the maps and the static base is not an object
+// at all. A base typed as a pointer gets its spill slot marked in the locals
+// bitmap, and runtime.adjustpointers reads exactly those words the next time
+// the stack grows under the frame. It finds whatever the slot held and the
+// program stops with "bad pointer in frame", a long way from the pass that
+// wrote the type. specs/027-liveness-and-stackmaps.md is the rule and
+// ssa/decompose.go's machinePtrType is the type that keeps it.
+func (v *verifier) bases() {
+	var seen [2]*Value
+	for _, b := range v.f.Blocks {
+		for _, val := range b.Values {
+			i := -1
+			switch val.Op {
+			case OpSP:
+				i = 0
+			case OpSB:
+				i = 1
+			default:
+				continue
+			}
+			if seen[i] != nil {
+				v.add(InvOneBase, b, val, "%v is already v%d, and a function has one", val.Op, seen[i].ID)
+				continue
+			}
+			seen[i] = val
+			if val.Type != nil && val.Type.HasPointers() {
+				v.add(InvOneBase, b, val, "%v has type %s, which holds a pointer, so its slot is marked in the locals bitmap", val.Op, val.Type)
+			}
+		}
+	}
 }
 
 func (v *verifier) checkEntry() {
