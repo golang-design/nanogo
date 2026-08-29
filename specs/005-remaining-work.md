@@ -279,21 +279,27 @@ downstream. A whole-tree build stops at the first failure and reports nothing
 about the rest, which is why the numbers below were wrong before they were
 measured this way.
 
-**Twelve compile**: the root package, `dist`, `driver`, `export/pkgbits`,
-`link`, `loader`, `obj`, `obj/arm64`, `rtsym`, `rtype`, `ssa` and `ssa/rules`.
-Two are commands the harness delegates. Five fail, on one blocker:
+**Fifteen compile**: the root package, `dist`, `driver`, `export`,
+`export/pkgbits`, `ir`, `link`, `loader`, `obj`, `obj/arm64`, `rtsym`, `rtype`,
+`ssa`, `ssa/rules` and `ssagen`. Two are commands the harness delegates. Two
+fail, on one blocker:
 
 | Blocker | Packages | Owner |
 | --- | --- | --- |
-| a generic declaration another package owns, whose body lives only in that package's archive and is never read back | 5: `export`, `ir`, `ssagen`, `syntax`, `types2` | [015](015-export-data.md), [013](013-generics.md) |
+| an instantiation of a generic another package declares: the declaration and its body are carried now, and nothing turns them into code | 2: `syntax`, `types2` | [013](013-generics.md) |
 
-One subsystem gates all five, and it is the export-data body **reader**. Four
-reach it through `sync/atomic.Pointer[T]`: three have to re-export the
-declaration and cannot, because gc's format writes a generic declaration as a
-body reference and that body is in `sync/atomic`'s archive, and `syntax` has to
-stencil `Pointer[[]*SrcFile].Store` and needs the same body for the same
-reason. `types2` reaches it through `slices.Contains` instantiated at a type of
-its own. nanogo writes bodies and does not read them.
+The subsystem that gated five is built. A generic declaration another package
+owns is copied out of that package's archive element by element, the way gc's
+own linker does it, and gc reads the result back, instantiates it and runs it
+(`export`'s `TestGcInstantiatesAForeignGenericNanogoCopied`). `export`, `ir`
+and `ssagen` compile because they only had to *carry* the declaration.
+
+What is left is the other half, and it is stencilling and not carrying.
+`syntax` instantiates a foreign generic method, `sync/atomic.Pointer.Store`,
+and `types2` a foreign generic function, `slices.Contains`. The body reaches
+both of them now. Nothing walks it and emits code at the type arguments the
+instantiation names, which is what [013](013-generics.md) owns and what nanogo
+already does for a generic this package declares.
 
 An earlier version of this table said a *method of a generic type* owned three
 of these. That was wrong, and the way it was wrong is worth keeping. The
