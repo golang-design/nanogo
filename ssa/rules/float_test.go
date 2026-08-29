@@ -1081,7 +1081,7 @@ func TestARM64FloatRefusals(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			msg := lowerPanic(t, c.fn())
+			msg := lowerRefusal(t, c.fn())
 			if msg == "" {
 				t.Fatalf("lowering %s did not fail, so the rule guessed at it", c.name)
 			}

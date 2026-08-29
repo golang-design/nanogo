@@ -182,7 +182,9 @@ func lower(t *testing.T, f *ssa.Func) *ssa.Func {
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("the function did not verify before lowering: %v\n%s", vs, f)
 	}
-	ssa.Lower(f, ARM64)
+	if err := ssa.Lower(f, ARM64); err != nil {
+		t.Fatalf("lowering refused a function this test expects it to lower: %v\n%s", err, f)
+	}
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("the function did not verify after lowering: %v\n%s", vs, form(f))
 	}
@@ -1806,19 +1808,20 @@ func lowerOne(t *testing.T, path string, fn *ir.Func, c *corpusCounts) {
 	}
 	ok := func() (ok bool) {
 		defer func() {
-			e := recover()
-			if e == nil {
-				return
+			if e := recover(); e != nil {
+				t.Fatalf("%s: %s: lowering panicked rather than returning: %v\n%s", path, fn.Name, e, debug.Stack())
 			}
-			le, isLower := e.(*ssa.LowerError)
-			if !isLower {
-				t.Fatalf("%s: %s: lowering panicked: %v\n%s", path, fn.Name, e, debug.Stack())
-			}
-			c.refused[le.Op.String()]++
-			ok = false
 		}()
-		ssa.Lower(f, ARM64)
-		return true
+		err := ssa.Lower(f, ARM64)
+		if err == nil {
+			return true
+		}
+		le, isLower := err.(*ssa.LowerError)
+		if !isLower {
+			t.Fatalf("%s: %s: lowering returned %T: %v", path, fn.Name, err, err)
+		}
+		c.refused[le.Op.String()]++
+		return false
 	}()
 	if !ok {
 		return
@@ -1935,7 +1938,7 @@ func TestCompareRefusesWideOperands(t *testing.T) {
 		// fallback produces a function that is missing an operation, and that
 		// is the hardest bug in the compiler to find. Asserting the crash is
 		// asserting the contract.
-		msg := lowerPanic(t, f)
+		msg := lowerRefusal(t, f)
 		if msg == "" {
 			t.Errorf("%s: lowering a wide comparison did not fail; it was guessed at, and %v is what it became",
 				ty.Name, cmp.Op)
@@ -1994,7 +1997,7 @@ func TestCompareRefusesAWholeAggregate(t *testing.T) {
 		p := newBuilder()
 		cmp := p.val(ssa.OpEq, tBool, p.arg(ty), p.arg(ty))
 		f := p.ret(cmp)
-		msg := lowerPanic(t, f)
+		msg := lowerRefusal(t, f)
 		if msg == "" {
 			t.Errorf("%s: the comparison of a whole aggregate lowered to %v, which compares its bytes and not its fields",
 				ty.Name, cmp.Op)
@@ -2006,16 +2009,22 @@ func TestCompareRefusesAWholeAggregate(t *testing.T) {
 	}
 }
 
-// lowerPanic runs the pass and returns the panic message, or "" if it did not
-// panic.
-func lowerPanic(t *testing.T, f *ssa.Func) (msg string) {
+// lowerRefusal runs the pass and returns the refusal, or "" if it lowered.
+//
+// ssa.Lower reports a construct it has no rule for through its result rather
+// than by panicking, so that a user sees a message naming the function instead
+// of a stack trace. A panic reaching here is a defect in the pass and is not
+// treated as a refusal.
+func lowerRefusal(t *testing.T, f *ssa.Func) (msg string) {
 	t.Helper()
 	defer func() {
 		if r := recover(); r != nil {
-			msg = fmt.Sprint(r)
+			t.Fatalf("lowering panicked rather than returning: %v", r)
 		}
 	}()
-	ssa.Lower(f, ARM64)
+	if err := ssa.Lower(f, ARM64); err != nil {
+		return err.Error()
+	}
 	return ""
 }
 

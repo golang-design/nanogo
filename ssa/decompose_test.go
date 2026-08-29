@@ -1174,7 +1174,9 @@ func TestDecomposeThenLower(t *testing.T) {
 	p.mem = st
 	f := p.ret(p.v(ssa.OpLoad, decStr, src, p.mem))
 
-	ssa.Lower(f, rules.ARM64)
+	if err := ssa.Lower(f, rules.ARM64); err != nil {
+		t.Fatalf("lowering refused the function: %v", err)
+	}
 	decVerified(t, f)
 	if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
 		t.Fatalf("not lowered: %v", vs)
@@ -1594,15 +1596,18 @@ func decomposeOne(t *testing.T, path string, fn *ir.Func, c *decomposeCounts) {
 			if e == nil {
 				return
 			}
-			le, isLower := e.(*ssa.LowerError)
-			if !isLower {
-				t.Fatalf("%s: %s: lowering panicked: %v\n%s", path, fn.Name, e, debug.Stack())
-			}
-			c.refused[le.Op.String()+" <"+decRefusedKind(f, le.Value)+">"]++
-			ok = false
+			t.Fatalf("%s: %s: lowering panicked rather than returning: %v\n%s", path, fn.Name, e, debug.Stack())
 		}()
-		ssa.Lower(f, rules.ARM64)
-		return true
+		err := ssa.Lower(f, rules.ARM64)
+		if err == nil {
+			return true
+		}
+		le, isLower := err.(*ssa.LowerError)
+		if !isLower {
+			t.Fatalf("%s: %s: lowering returned %T: %v", path, fn.Name, err, err)
+		}
+		c.refused[le.Op.String()+" <"+decRefusedKind(f, le.Value)+">"]++
+		return false
 	}()
 	if !ok {
 		return
@@ -1773,7 +1778,9 @@ func TestDecomposeStringEqualLowers(t *testing.T) {
 	for _, op := range []ssa.Op{ssa.OpEq, ssa.OpNeq} {
 		p, eq := stringEqFn(op)
 		f := p.ret(eq)
-		ssa.Lower(f, rules.ARM64)
+		if err := ssa.Lower(f, rules.ARM64); err != nil {
+			t.Fatalf("lowering refused the function: %v", err)
+		}
 		decVerified(t, f)
 		if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
 			t.Fatalf("%v: %v", op, vs)
@@ -2031,7 +2038,9 @@ func TestDecomposeSliceNilComparesPointer(t *testing.T) {
 		if vs := ssa.CheckDecomposed(f); len(vs) != 0 {
 			t.Errorf("%v: %v", op, vs)
 		}
-		ssa.Lower(f, rules.ARM64)
+		if err := ssa.Lower(f, rules.ARM64); err != nil {
+			t.Fatalf("lowering refused the function: %v", err)
+		}
 		if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
 			t.Errorf("%v: %v", op, vs)
 		}
@@ -2095,7 +2104,9 @@ func TestDecomposeStringEqualAsControl(t *testing.T) {
 			t.Errorf("b%d returns with %s", b.ID, got.LongString())
 		}
 	}
-	ssa.Lower(f, rules.ARM64)
+	if err := ssa.Lower(f, rules.ARM64); err != nil {
+		t.Fatalf("lowering refused the function: %v", err)
+	}
 	if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
 		t.Errorf("%v", vs)
 	}
@@ -2146,7 +2157,9 @@ func TestDecomposeStringOrderLowers(t *testing.T) {
 		p := newDecFn()
 		cmp := p.v(op, decBool, p.load(decStr), p.load(decStr))
 		f := p.ret(cmp)
-		ssa.Lower(f, rules.ARM64)
+		if err := ssa.Lower(f, rules.ARM64); err != nil {
+			t.Fatalf("lowering refused the function: %v", err)
+		}
 		decVerified(t, f)
 		if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
 			t.Fatalf("%v: %v", op, vs)
@@ -2302,7 +2315,9 @@ func TestDecomposeIfaceEqualLowers(t *testing.T) {
 		p := newDecFn()
 		cmp := p.v(op, decBool, p.load(decIface), p.load(decIface))
 		f := p.ret(cmp)
-		ssa.Lower(f, rules.ARM64)
+		if err := ssa.Lower(f, rules.ARM64); err != nil {
+			t.Fatalf("lowering refused the function: %v", err)
+		}
 		decVerified(t, f)
 		if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
 			t.Fatalf("%v: %v", op, vs)

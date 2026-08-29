@@ -1029,13 +1029,16 @@ func smCorpusOne(t *testing.T, path string, fn *ir.Func, c *smCounts) {
 			if e == nil {
 				return
 			}
-			if _, isLower := e.(*ssa.LowerError); !isLower {
-				t.Fatalf("%s: %s: lowering panicked: %v\n%s", path, fn.Name, e, debug.Stack())
-			}
-			ok = false
+			t.Fatalf("%s: %s: lowering panicked rather than returning: %v\n%s", path, fn.Name, e, debug.Stack())
 		}()
-		ssa.Lower(f, rules.ARM64)
-		return true
+		err := ssa.Lower(f, rules.ARM64)
+		if err == nil {
+			return true
+		}
+		if _, isLower := err.(*ssa.LowerError); !isLower {
+			t.Fatalf("%s: %s: lowering returned %T: %v", path, fn.Name, err, err)
+		}
+		return false
 	}()
 	if !ok {
 		return

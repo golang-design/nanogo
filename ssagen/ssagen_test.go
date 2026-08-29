@@ -170,7 +170,9 @@ func compile(t *testing.T, src, name string) *compiled {
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("the function did not verify after the ABI pass: %v", vs)
 	}
-	ssa.Lower(f, rules.ARM64)
+	if err := ssa.Lower(f, rules.ARM64); err != nil {
+		t.Fatalf("lowering refused the function: %v", err)
+	}
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("the function did not verify after lowering: %v", vs)
 	}
@@ -1126,7 +1128,9 @@ func hand(t *testing.T, name string, build func(f *ssa.Func)) *compiled {
 	if err := ssa.AssignABI(f, target); err != nil {
 		t.Fatalf("ssa.AssignABI: %v", err)
 	}
-	ssa.Lower(f, rules.ARM64)
+	if err := ssa.Lower(f, rules.ARM64); err != nil {
+		t.Fatalf("lowering refused the hand-built function: %v", err)
+	}
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("the hand-built function did not verify after lowering: %v", vs)
 	}

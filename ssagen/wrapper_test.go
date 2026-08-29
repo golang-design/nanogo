@@ -103,7 +103,9 @@ func (c *checked) build(t *testing.T, fn *ir.Func) *compiled {
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("%s did not verify after the ABI pass: %v", fn.Sym, vs)
 	}
-	ssa.Lower(f, rules.ARM64)
+	if err := ssa.Lower(f, rules.ARM64); err != nil {
+		t.Fatalf("lowering refused %s: %v", fn.Sym, err)
+	}
 	if vs := ssa.Verify(f); len(vs) != 0 {
 		t.Fatalf("%s did not verify after lowering: %v", fn.Sym, vs)
 	}
