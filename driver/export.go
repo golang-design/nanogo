@@ -37,6 +37,13 @@ func exportBodies(cfg *Config, pkg *types2.Package, info *types2.Info, fset *syn
 		File: func(name string) string { return TrimPath(cfg.TrimRewrites, name) },
 	}
 	source := export.NewBodySource(pkg, info, fset)
+
+	// A method of a generic type is held back rather than built here. Its
+	// slots are numbered into the dictionary the type shares with every
+	// method it declares, between the type's own slots and the slots of the
+	// method declared after it, so the whole type is built in one call
+	// below.
+	blocks := make(map[*types2.Func]*syntax.BlockStmt)
 	for _, f := range files {
 		for _, d := range f.DeclList {
 			fd, ok := d.(*syntax.FuncDecl)
@@ -51,13 +58,18 @@ func exportBodies(cfg *Config, pkg *types2.Package, info *types2.Info, fset *syn
 			if !ok {
 				continue
 			}
-			body, err := source.BuildBody(pkg.Path()+"."+name, obj.Signature(), fd.Body)
+			sig := obj.Signature()
+			if sig.RecvTypeParams().Len() != 0 && sig.TypeParams().Len() == 0 {
+				blocks[obj] = fd.Body
+				continue
+			}
+			body, err := source.BuildBody(pkg.Path()+"."+name, sig, fd.Body)
 			if err != nil {
-				// The builder refuses a method of a generic type, a type
-				// declared inside a generic declaration and a loop over a
-				// function, each by name. A generic declaration whose body
-				// is refused is refused by the writer too, because a
-				// generic declaration cannot reach a file without its body.
+				// The builder refuses a type declared inside a generic
+				// declaration and a loop over a function, each by name. A
+				// generic declaration whose body is refused is refused by
+				// the writer too, because a generic declaration cannot
+				// reach a file without its body.
 				continue
 			}
 			bodies.Funcs = append(bodies.Funcs, export.InlineFunc{
@@ -68,7 +80,59 @@ func exportBodies(cfg *Config, pkg *types2.Package, info *types2.Info, fset *syn
 			})
 		}
 	}
+	bodies.Funcs = append(bodies.Funcs, genericTypeBodies(pkg, source, blocks)...)
 	return bodies
+}
+
+// genericTypeBodies builds the methods of every generic type the package
+// declares at package scope.
+//
+// One call per type, because the dictionary is the type's: the slots run over
+// the underlying type and then over each method in declaration order, and a
+// method numbered on its own would name a slot that holds another type
+// (specs/013-generics.md).
+//
+// The order of the types is the order of the sorted scope, so the elements the
+// writer allocates are fixed by the names and not by the checker's map
+// (specs/053-determinism.md).
+//
+// A type whose methods cannot all be built is skipped and not reported. The
+// writer refuses it by name when the exported surface reaches it, and it needs
+// no body at all when nothing reaches it.
+func genericTypeBodies(pkg *types2.Package, source *export.BodySource, blocks map[*types2.Func]*syntax.BlockStmt) []export.InlineFunc {
+	var out []export.InlineFunc
+	scope := pkg.Scope()
+	for _, name := range scope.Names() {
+		obj, _ := scope.Lookup(name).(*types2.TypeName)
+		if obj == nil || obj.IsAlias() {
+			continue
+		}
+		named, _ := obj.Type().(*types2.Named)
+		if named == nil || named.TypeParams().Len() == 0 || named.NumMethods() == 0 {
+			continue
+		}
+		_, built, err := source.BuildTypeBodies(named, blocks)
+		if err != nil {
+			continue
+		}
+		funcs := make([]export.InlineFunc, 0, len(built))
+		for i, body := range built {
+			m := named.Method(i)
+			sym, ok := export.SymName(m)
+			if !ok {
+				funcs = nil
+				break
+			}
+			funcs = append(funcs, export.InlineFunc{
+				Obj:  m,
+				Name: sym,
+				Cost: export.MaxInlineCost,
+				Body: body,
+			})
+		}
+		out = append(out, funcs...)
+	}
+	return out
 }
 
 // exportableDecl reports whether a declaration's body can be offered.

@@ -694,12 +694,9 @@ func (pw *pkgWriter) objIdx(obj types2.Object) pkgbits.Index {
 // dictionary holds are one allocation ([Dict]) and a second one would be a
 // second numbering.
 //
-// Three generic shapes are refused by name, and each is refused because its
+// Two generic shapes are refused by name, and each is refused because its
 // dictionary is not the one a body carries:
 //
-//   - A generic type declaration and a method of one share the type's
-//     dictionary, which spans the underlying type and every method the type
-//     declares. Nothing here assembles it.
 //   - A generic method's dictionary holds its receiver's type parameters
 //     ahead of its own, and the body builder does not build one.
 //   - A generic declaration of another package needs the body that package's
@@ -712,21 +709,7 @@ func (pw *pkgWriter) dictOf(obj types2.Object) *Dict {
 		return &Dict{Pkg: pw.curpkg}
 	}
 	if !isFunc {
-		// A generic type declaration. Its dictionary spans the type and every
-		// method the type declares, which is why it is the type's and not one
-		// per method, and it is allocated empty here: doObj writes the
-		// underlying type and then each method's signature, in that order, and
-		// each derived type takes its slot as it is written. objDict runs
-		// after doObj, so the list it writes is complete.
-		//
-		// The package it belongs to is its own and not the package being
-		// written. A file's export data is the linked form, so a generic type
-		// another package declares is written out here in full, and its
-		// dictionary is that package's. Nothing is read back to build it: a
-		// type declaration has no body, and the methods that do have one are
-		// refused by writer.method until their bodies can be numbered against
-		// this dictionary.
-		return &Dict{Pkg: obj.Pkg(), TypeParams: tparams}
+		return pw.typeDict(obj.(*types2.TypeName), tparams)
 	}
 	if rtparams {
 		pw.refuse(objName(obj), "the declaration is a method with type parameters, and its dictionary holds the receiver's type parameters ahead of its own")
@@ -742,6 +725,66 @@ func (pw *pkgWriter) dictOf(obj types2.Object) *Dict {
 		pw.refuse(objName(obj), "the declaration is generic and has no body, and a generic declaration cannot reach a file without one")
 	}
 	return fb.Body.Dict
+}
+
+// typeDict returns the dictionary a generic type declaration is written with.
+//
+// It is one dictionary for the type and every method the type declares, and
+// not one per method: gc writes the methods inside the type's element and
+// their bodies against the type's dictionary, so a method numbered against a
+// dictionary of its own is a method gc reads as naming different types
+// (specs/013-generics.md).
+//
+// A type with no method needs nothing the writer cannot allocate as it goes,
+// and its dictionary is allocated empty here. doObj writes the underlying
+// type and each derived type takes its slot as it is written, and objDict
+// runs after doObj, so the list it writes is complete.
+//
+// A type with methods needs the slots each body names, which are numbered
+// between the signatures and not after them, and only
+// [BodySource.BuildTypeBodies] can number those. So the dictionary of such a
+// type is the one its bodies were built against, found through any of them,
+// and a type whose methods did not all come from one such call is refused.
+//
+// The package the dictionary belongs to is the type's own and not the package
+// being written. A file's export data is the linked form, so a generic type
+// another package declares is written out here in full. Its method bodies
+// exist only in that package's archive, which this writer does not read back,
+// so a foreign generic type with methods is refused by name.
+//
+// An alias gets a dictionary of its own even when it names a generic type
+// that declares methods. Its type parameters are objects of the alias
+// declaration, so doObj writes a right-hand side that names them and every
+// slot that walk allocates belongs here. The methods stay with the aliased
+// type and are written inside that type's element against that type's
+// dictionary.
+func (pw *pkgWriter) typeDict(obj *types2.TypeName, tparams []*types2.TypeParam) *Dict {
+	if obj.IsAlias() {
+		return &Dict{Pkg: obj.Pkg(), TypeParams: tparams}
+	}
+	named, _ := obj.Type().(*types2.Named)
+	if named == nil || named.NumMethods() == 0 {
+		return &Dict{Pkg: obj.Pkg(), TypeParams: tparams}
+	}
+	if obj.Pkg() != pw.curpkg {
+		pw.refuse(objName(obj), "the declaration is a generic type of another package and declares methods, whose bodies exist only in that package's archive, which this writer does not read back")
+	}
+	var shared *Dict
+	for i := range named.NumMethods() {
+		m := named.Method(i)
+		fb := pw.bodies[m]
+		if fb == nil || fb.Body == nil || fb.Body.Dict == nil || !fb.Body.HasBlock {
+			pw.refuse(objName(m), "the method belongs to a generic type and no body was built for it, and the type's dictionary is short by the slots the body names")
+		}
+		if shared == nil {
+			shared = fb.Body.Dict
+			continue
+		}
+		if fb.Body.Dict != shared {
+			pw.refuse(objName(m), "the method's body was numbered against a dictionary of its own rather than against the one the type shares with every method it declares")
+		}
+	}
+	return shared
 }
 
 // doObj writes obj's public definition to w and its extension data to wext,
@@ -788,6 +831,19 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		}
 
 		named := obj.Type().(*types2.Named)
+
+		// A generic type with methods carries the dictionary its bodies were
+		// numbered against ([pkgWriter.typeDict]), and every slot of it is
+		// already allocated. A slot allocated here would land after every
+		// slot a body took, where gc expects one of the type's own, and gc
+		// reads the wrong slot without complaint. So the check is that the
+		// walk below allocates none.
+		sealed := named.NumMethods() != 0 && w.dict != nil && w.dict.Generic()
+		before := 0
+		if sealed {
+			before = len(w.dict.Derived)
+		}
+
 		w.pos(obj.Pos())
 		w.typeParamNames(objTypeParams(obj))
 		wext.typeExt()
@@ -799,6 +855,9 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		w.Len(named.NumMethods())
 		for i := 0; i < named.NumMethods(); i++ {
 			w.method(wext, named.Method(i))
+		}
+		if sealed && len(w.dict.Derived) != before {
+			w.p.refuse(objName(obj), fmt.Sprintf("the type and its methods named %d derived types the dictionary its bodies were numbered against does not hold", len(w.dict.Derived)-before))
 		}
 		// No method has type parameters of its own: objIdx refuses one.
 		w.Len(0)
@@ -942,14 +1001,18 @@ func (w *writer) method(wext *writer, meth *types2.Func) {
 		// with no dictionary at all.
 		w.p.refuse(objName(meth), "the method is generic, and the format writes a generic method as a declaration of its own whose dictionary holds the receiver's type parameters ahead of the method's")
 	}
-	if sig.RecvTypeParams().Len() != 0 {
-		w.p.refuse(objName(meth), "the method belongs to a generic type, and its dictionary is the type's rather than its own")
-	}
-
+	// The receiver's type parameter names, which is what gc writes and what
+	// gc reads: the reader takes the count from the dictionary the element
+	// carries and not from a length in the stream, so a method of a generic
+	// type that wrote none would leave every later field one name short.
+	//
+	// The dictionary the names are counted against is the type's, which
+	// [pkgWriter.typeDict] built and which the body of this method was
+	// numbered against.
 	w.Sync(pkgbits.SyncMethod)
 	w.pos(meth.Pos())
 	w.selector(meth)
-	w.typeParamNames(nil)
+	w.typeParamNames(recvTypeParams(sig))
 	w.param(sig.Recv())
 	w.signature(sig)
 	w.pos(meth.Pos()) // the declaration's position, which the linker copies
@@ -1094,6 +1157,19 @@ func (w *writer) linkname() {
 // isGlobal reports whether obj was declared at package scope.
 func isGlobal(obj types2.Object) bool {
 	return obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope()
+}
+
+// recvTypeParams returns the type parameters a method's receiver declares.
+func recvTypeParams(sig *types2.Signature) []*types2.TypeParam {
+	l := sig.RecvTypeParams()
+	if l == nil || l.Len() == 0 {
+		return nil
+	}
+	s := make([]*types2.TypeParam, l.Len())
+	for i := range s {
+		s[i] = l.At(i)
+	}
+	return s
 }
 
 // objTypeParams returns the type parameters obj declares.

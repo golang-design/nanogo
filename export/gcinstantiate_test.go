@@ -88,13 +88,25 @@ const instantiatingMain = "package main\n\n" +
 // and nothing else, because every instantiation is code the importing package
 // generates.
 func TestGcInstantiatesAGenericNanogoWrote(t *testing.T) {
+	gcRunsAgainstNanogo(t, "nanogo.example/gen", genericSource, instantiatingMain,
+		"7 [1 2] [3 7] 9\n2 4 2 1 4\n0 0 {<nil> 1}\n")
+}
+
+// gcRunsAgainstNanogo compiles main against nanogo's export data for lib and
+// runs the program, and checks what it printed.
+//
+// Nothing of the library is compiled from source: the archive gc imports holds
+// only the export data nanogo wrote, so every instantiation in the program is
+// code gc stenciled out of nanogo's bodies and nanogo's dictionaries.
+func gcRunsAgainstNanogo(t *testing.T, module, lib, main, want string) {
+	t.Helper()
 	goCmd := goTool(t)
 	tc, err := obj.VerifyToolchain()
 	if err != nil {
 		t.Skipf("cannot probe the installed toolchain: %v", err)
 	}
 
-	const path = "nanogo.example/gen/lib"
+	path := module + "/lib"
 	mod := t.TempDir()
 	write := func(name, body string) {
 		full := filepath.Join(mod, name)
@@ -105,9 +117,9 @@ func TestGcInstantiatesAGenericNanogoWrote(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("go.mod", "module nanogo.example/gen\n\ngo 1.27\n")
-	write("lib/lib.go", genericSource)
-	write("main.go", instantiatingMain)
+	write("go.mod", "module "+module+"\n\ngo 1.27\n")
+	write("lib/lib.go", lib)
+	write("main.go", main)
 
 	// The archive of every package the program needs, which is what an
 	// -importcfg names. The library's own entry is replaced below.
@@ -127,7 +139,7 @@ func TestGcInstantiatesAGenericNanogoWrote(t *testing.T) {
 	}
 
 	// nanogo's export data for the library, from the same source.
-	payload, _, _ := writeSource(t, path, genericSource, nil)
+	payload, _, _ := writeSource(t, path, lib, nil)
 	nano := pkgdefArchive(t, tc.Header, mod, "nano-lib.a", payload)
 
 	cfg := func(name, lib string) string {
@@ -164,10 +176,101 @@ func TestGcInstantiatesAGenericNanogoWrote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the program did not run: %v\n%s", err, b)
 	}
-	want := "7 [1 2] [3 7] 9\n2 4 2 1 4\n0 0 {<nil> 1}\n"
 	if string(b) != want {
 		t.Errorf("the program printed %q, want %q", b, want)
 	}
+}
+
+// genericTypeSource declares two generic types whose methods name every kind
+// of slot the shared dictionary holds.
+//
+// The dictionary is the type's and not the method's, so the slots run over the
+// underlying type and then over each method in declaration order. A method
+// numbered against a dictionary of its own would name a slot that holds
+// another type, which gc resolves without complaint, so the values the program
+// prints are the check.
+//
+// List declares more than one method and mixes a value receiver with a pointer
+// one, so a method whose slots were numbered too low would name the slots of
+// the method declared before it. Box exists so that two shared dictionaries
+// are in the file at once and a body cannot be reading the other one.
+//
+// Pair declares two type parameters, which is what measures the position a
+// receiver's type parameter resolves to. A method names them through objects
+// of its own declaration, so the position and nothing else says which one it
+// is ([Dict.TypeParamIndex]), and with one type parameter every position is
+// zero and a wrong rule is right by accident. The two are instantiated at
+// types that are not each other, so a swapped position is a value that
+// differs.
+const genericTypeSource = "package p\n\n" +
+	"type List[T any] struct{ items []T }\n\n" +
+	// A pointer receiver, which is a derived type of its own, and a
+	// derived parameter.
+	"func (l *List[T]) Push(v T) { l.items = append(l.items, v) }\n\n" +
+	// A value receiver and no derived type in the signature at all.
+	"func (l List[T]) Len() int { return len(l.items) }\n\n" +
+	// A derived result.
+	"func (l List[T]) At(i int) T { return l.items[i] }\n\n" +
+	// A derived slice result.
+	"func (l List[T]) All() []T { return l.items }\n\n" +
+	// A derived value converted to an interface, which is a method table
+	// the dictionary holds.
+	"func (l List[T]) Any(i int) any { return l.items[i] }\n\n" +
+	// A call of a generic function whose type argument is derived, which is
+	// a subdictionary the dictionary holds.
+	"func (l List[T]) Last() T { return last(l.items) }\n\n" +
+	"func last[T any](xs []T) T {\n" +
+	"\tvar zero T\n" +
+	"\tif len(xs) == 0 {\n\t\treturn zero\n\t}\n" +
+	"\treturn xs[len(xs)-1]\n" +
+	"}\n\n" +
+	"type Box[T any] struct{ v T }\n\n" +
+	"func (b Box[T]) Get() T { return b.v }\n\n" +
+	"func (b *Box[T]) Set(v T) { b.v = v }\n\n" +
+	"type Pair[K, V any] struct {\n\tk K\n\tv V\n}\n\n" +
+	"func (p Pair[K, V]) Key() K { return p.k }\n\n" +
+	"func (p Pair[K, V]) Val() V { return p.v }\n\n" +
+	"func (p *Pair[K, V]) Set(k K, v V) { p.k, p.v = k, v }\n\n" +
+	"func (p Pair[K, V]) Swap() Pair[V, K] { return Pair[V, K]{p.v, p.k} }\n"
+
+// instantiatingTypeMain is the program gc compiles against nanogo's export
+// data for [genericTypeSource].
+//
+// Every method is called at int and at a struct holding a pointer, which have
+// different sizes and different pointer maps, so a dictionary standing in for
+// the other one is a value that differs rather than one that happens to agree.
+const instantiatingTypeMain = "package main\n\n" +
+	"import (\n\t\"fmt\"\n\n\tlib \"nanogo.example/gentype/lib\"\n)\n\n" +
+	"type item struct {\n\tp *int\n\tn int\n}\n\n" +
+	"func main() {\n" +
+	"\tvar ints lib.List[int]\n" +
+	"\tints.Push(3)\n\tints.Push(5)\n\tints.Push(7)\n" +
+	"\tfmt.Println(ints.Len(), ints.At(1), ints.All(), ints.Any(2), ints.Last())\n" +
+	"\tn := 4\n" +
+	"\tvar items lib.List[item]\n" +
+	"\titems.Push(item{nil, 1})\n\titems.Push(item{&n, 2})\n" +
+	"\tfmt.Println(items.Len(), items.At(0).n, *items.At(1).p, items.Last().n, items.Any(0))\n" +
+	"\tvar bi lib.Box[int]\n\tbi.Set(11)\n" +
+	"\tvar bs lib.Box[item]\n\tbs.Set(item{&n, 6})\n" +
+	"\tfmt.Println(bi.Get(), bs.Get().n, *bs.Get().p)\n" +
+	"\tvar pr lib.Pair[int, string]\n\tpr.Set(9, \"nine\")\n" +
+	"\tfmt.Println(pr.Key(), pr.Val(), pr.Swap().Key(), pr.Swap().Val())\n" +
+	"\tvar pi lib.Pair[item, int]\n\tpi.Set(item{&n, 5}, 6)\n" +
+	"\tfmt.Println(pi.Key().n, *pi.Key().p, pi.Val(), pi.Swap().Val().n)\n" +
+	"}\n"
+
+// TestGcInstantiatesAGenericTypeNanogoWrote is the oracle for a method of a
+// generic type.
+//
+// The method is written inside the type's element and its body is numbered
+// against the dictionary the type shares with every method it declares
+// (specs/013-generics.md). A slot numbered against any other dictionary is a
+// type gc resolves to whatever that slot holds, and gc reads it without
+// complaint, so the program running and printing the right values is the
+// check and a diagnostic is not.
+func TestGcInstantiatesAGenericTypeNanogoWrote(t *testing.T) {
+	gcRunsAgainstNanogo(t, "nanogo.example/gentype", genericTypeSource, instantiatingTypeMain,
+		"3 5 [3 5 7] 7 7\n2 1 4 2 {<nil> 1}\n11 6 4\n9 nine nine 9\n5 4 6 5\n")
 }
 
 // runGo runs the go command in dir and returns its combined output.

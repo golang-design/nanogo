@@ -57,10 +57,20 @@ func buildSource(t *testing.T, path, src string) (*types2.Package, *syntax.FileS
 
 	source := NewBodySource(pkg, info, fset)
 	var funcs []InlineFunc
+	// A method of a generic type is held back, the way driver/export.go
+	// holds one back: its slots are numbered into the dictionary the type
+	// shares with every method it declares, so the whole type is built in
+	// one call below.
+	blocks := make(map[*types2.Func]*syntax.BlockStmt)
 	for _, name := range names {
 		fd := decls[name]
 		obj := info.Defs[fd.Name].(*types2.Func)
-		body, err := source.BuildBody(path+"."+name, obj.Signature(), fd.Body)
+		sig := obj.Signature()
+		if sig.RecvTypeParams().Len() != 0 && sig.TypeParams().Len() == 0 {
+			blocks[obj] = fd.Body
+			continue
+		}
+		body, err := source.BuildBody(path+"."+name, sig, fd.Body)
 		if err != nil {
 			// The builder refuses a shape by name and the driver skips it,
 			// because a generic declaration whose body is refused is refused
@@ -70,7 +80,33 @@ func buildSource(t *testing.T, path, src string) (*types2.Package, *syntax.FileS
 		}
 		funcs = append(funcs, InlineFunc{Obj: obj, Name: name, Cost: MaxInlineCost, Body: body})
 	}
-	return pkg, fset, funcs
+	return pkg, fset, append(funcs, genericTypeFuncs(pkg, source, blocks)...)
+}
+
+// genericTypeFuncs builds the methods of every generic type the package
+// declares, one call per type, the way driver/export.go does.
+func genericTypeFuncs(pkg *types2.Package, source *BodySource, blocks map[*types2.Func]*syntax.BlockStmt) []InlineFunc {
+	var out []InlineFunc
+	scope := pkg.Scope()
+	for _, name := range scope.Names() {
+		obj, _ := scope.Lookup(name).(*types2.TypeName)
+		if obj == nil || obj.IsAlias() {
+			continue
+		}
+		named, _ := obj.Type().(*types2.Named)
+		if named == nil || named.TypeParams().Len() == 0 || named.NumMethods() == 0 {
+			continue
+		}
+		_, built, err := source.BuildTypeBodies(named, blocks)
+		if err != nil {
+			continue
+		}
+		for i, body := range built {
+			m := named.Method(i)
+			out = append(out, InlineFunc{Obj: m, Name: methodSym(named, m), Cost: MaxInlineCost, Body: body})
+		}
+	}
+	return out
 }
 
 // writeSource builds every body of src and writes the export data.

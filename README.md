@@ -184,12 +184,16 @@ nanogo: main: nanogo cannot compile function main at /tmp/app/main.go:3:6: ir.Lo
 
 - `defer println(x)`. A builtin is not a function value, so there is nothing
   to hand the runtime.
-- A method of a generic type, such as `L[int].Get`, and a method with type
-  parameters of its own. nanogo instantiates a generic function and not a
-  generic type, so nothing produces the body. A generic type used for its
-  fields alone compiles.
+- A method with type parameters of its own, such as `(T).M[X any]`.
+  Instantiating the receiver does not instantiate the method, so the key of
+  the instantiation is not the list on the selector alone. A method of a
+  generic type this package declares compiles, and the export data carries it.
 - An instantiation of a generic function another package declared. The body is
   in that package's archive and nanogo has no path from a call site to it yet.
+- A package that names a generic type another package declared that has
+  methods, such as `sync/atomic.Pointer`. A file's export data is the linked
+  form, so the foreign type goes into it whole, and the body of each of its
+  methods is in that package's archive.
 - Taking the address of a variable the compiler keeps in a register.
 - A package with assembly in it, and a package that imports `"C"`.
 - A package with a `//go:embed` directive in it, naming the patterns the

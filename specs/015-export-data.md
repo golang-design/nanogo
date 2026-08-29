@@ -27,13 +27,13 @@ Both directions, for everything but a generic declaration.
 | The container's read half | `export/pkgbits/` | built |
 | The container's write half | `export/pkgbits/` | built |
 | The declaration reader | `export/read.go`, `export/reader.go` | built; produces the `*types2.Package` values nanogo's checker imports |
-| The declaration writer | `export/writer.go` | built; carries a generic function and a method-less generic type with its dictionary, and refuses a generic method and a method of a generic type by name |
+| The declaration writer | `export/writer.go` | built; carries a generic function, and a generic type this package declares with its methods against one shared dictionary, and refuses a generic method and a generic type of another package that declares methods |
 | The `__.PKGDEF` archive member | `driver/archive.go` | built; nanogo writes both members `gc` writes |
 | `-importcfg` parsing | `driver/importcfg.go` | built; all four directives, in separate tables, and an unknown directive is an error |
 | Function bodies, the reader | `export/body.go`, `export/bodyread.go`, `export/bodies.go` | built; every body of every standard library package decodes, and the decode is exact |
 | Function bodies, the element encoder | `export/bodywrite.go` | built; every body element of every standard library package is written back byte for byte as `gc` wrote it |
 | Function bodies, the builder | `export/bodybuild.go` | built; `syntax` plus the checker's record becomes the tree of `export/body.go`, and 6,150 elements of 371 packages encode to `gc`'s own bytes |
-| The object dictionary | `export/bodydict.go` | built; one allocator numbers the slots a generic body names and the entries `objDict` writes |
+| The object dictionary | `export/bodydict.go` | built; one allocator numbers the slots a generic body names and the entries `objDict` writes, and one allocator serves a generic type and every method it declares |
 | Function bodies, the writer's resolver | `export/bodyexport.go` | built; a body built from `syntax` carries no element index, and this allocates every one it names and refuses what it cannot allocate |
 | Which bodies are offered | `driver/export.go`, `export/bodyinline.go` | built; the driver decides by what the declaration is and `export` by what its body holds. `gc` reads one and inlines it (`internal/e2e/import_test.go`) |
 | Positions | `export/writer.go` | built for a declaration nanogo compiled and for a body it carries; absent for a declaration of another package |
@@ -178,24 +178,48 @@ the dictionary while it builds the body, `Body.Dict` carries it, and
 | subdictionaries | a call of an instantiated function or method whose type arguments are not all known here | `funcInst`, `methodExpr` |
 | method expressions | a method named on a type parameter | `methodExpr` |
 
-**What is refused, and why each.** Four generic shapes, each because its
+**A generic type and its methods share one dictionary, and it is filled in one
+pass.** `gc` writes the methods inside the type's element and their bodies
+against the type's dictionary, and it allocates the slots in the order it
+writes: the underlying type first, then, for each method in declaration order,
+the receiver, the signature and then the body. Nothing after the first slot can
+be numbered without what came before it, so the whole type is built in one
+call. `BodySource.BuildTypeBodies` does that, and every method's body carries
+the one allocation `objDict` writes out.
+
+Three consequences follow, and each is a refusal rather than a guess.
+
+- Every method needs a body. A method whose body was not built leaves the slots
+  it would have taken out of the dictionary, so every method declared after it
+  is numbered too low. The driver skips a method carrying a `//go:` directive
+  for the reason the table below gives, and the writer then refuses the type by
+  name.
+- The writer allocates no slot of its own. It walks the underlying type and
+  each method's signature again while it writes, and every slot that walk asks
+  for is one the builder already numbered. A slot the writer had to add would
+  land after every slot a body took, where `gc` expects one of the type's own,
+  so `doObj` counts the dictionary before the walk and after it and refuses
+  when the two differ.
+- A receiver's type parameters are objects of the method's own declaration and
+  not of the type's, so the checker builds a value of its own for `List[T]`
+  under each method and each takes a slot of its own. `gc` keys its dictionary
+  by the same identity, so the slots agree, and `Dict.TypeParamIndex` resolves
+  every one of those type parameters to the position the type declared it at,
+  which is what `gc`'s `writerDict.typeParamIndex` does.
+
+**What is refused, and why each.** Three generic shapes, each because its
 dictionary is not the one a body carries:
 
-- A method of a generic type. Its dictionary is the *type's*, which spans the
-  underlying type and every method the type declares, in the order they were
-  declared. The type declaration itself carries that dictionary now: it is
-  allocated empty with the type and each derived type takes its slot as the
-  underlying type and then each method's signature is written, which is the
-  order `gc` reads them back in. What is still missing is the body: a method's
-  body has to be numbered against the same dictionary, after the underlying
-  type and after every method declared before it, and `BuildBody` numbers one
-  dictionary per declaration. So a generic type with no method is written and
-  one with a method is refused by name. `iter.Seq` is the first kind, and
-  twenty-one more standard library packages reach `gc`'s reader because of it.
+- A generic type of another package that declares methods. A method of a
+  generic type carries its body and nothing else, for the reason the linked
+  form gives above, and the body exists only in the declaring package's
+  archive. This writer builds bodies from `syntax` and reads none back, so the
+  type is refused by name. `sync/atomic.Pointer` is the case that reaches
+  nanogo's own packages.
 - A method with type parameters of its own. The format writes it as a
   declaration of its own, whose dictionary holds the receiver's type
   parameters ahead of the method's.
-- A generic declaration of another package. Its body and the dictionary it was
+- A generic function of another package. Its body and the dictionary it was
   numbered against live in that package's archive, and this writer does not
   read either back.
 - A type declared inside a generic declaration. Every use of it carries the
@@ -467,11 +491,12 @@ instantiation where `gc` writes a subdictionary slot. Both encode to bytes a
 reader accepts.
 
 **What is refused, and why each is refused rather than built.** 108 methods of
-a generic type: their dictionary is the type's, and it spans the underlying
-type and every method declared before them, so the slots cannot be numbered
-from the method alone. 10 loops over a function: `gc` rewrites the loop into a
-closure and calls into the runtime before it writes anything, so `gc`'s tree
-is not a tree of that source at all.
+a generic type, which the oracle builds one declaration at a time and
+`BuildBody` refuses for that reason: their dictionary is the type's, and the
+slots cannot be numbered from the method alone. `BuildTypeBodies` builds them,
+one call per type, and the oracle does not use it. 10 loops over a function:
+`gc` rewrites the loop into a closure and calls into the runtime before it
+writes anything, so `gc`'s tree is not a tree of that source at all.
 
 **What the corpus cannot see.** It holds only the bodies `gc` chose to export,
 so an encoding no exported body uses is one this oracle says nothing about. The
@@ -526,7 +551,7 @@ sides decide, and the split follows what each can see.
 | --- | --- | --- |
 | `driver/export.go` | a declaration with no block | it is satisfied by assembly or by a linkname and there is no body |
 | `driver/export.go` | a declaration carrying a `//go:` directive the driver records | the writer carries no directive at all ([016](016-directives-and-pragmas.md)), and `gc`'s inliner refuses seven of them outright. `gc` would read a pragma field of zero and inline what the source forbade |
-| `driver/export.go` | a declaration the builder refuses | a method of a generic type, a type declared inside a generic declaration, and a loop over a function |
+| `driver/export.go` | a declaration the builder refuses | a type declared inside a generic declaration, and a loop over a function |
 | `export/bodyexport.go` | a generic declaration | its body reaches an importer through its own extension data and never through the private root's list |
 | `export/bodyexport.go` | a body whose elements cannot be allocated | above |
 | `export/bodyexport.go` | a declaration the file holds no element for | the private root's entry names its declaration rather than pointing at it, so an entry for a declaration nothing in the file names is one no reader can pair |

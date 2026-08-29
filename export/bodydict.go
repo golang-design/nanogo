@@ -123,12 +123,22 @@ func (d *Dict) TypeParamIndex(tp *types2.TypeParam) (int, bool) {
 			return base + i, true
 		}
 	}
-	// A generic method names its receiver's type parameters through the
-	// receiver declaration's own objects, which are not the objects the
-	// type declared. gc falls back on the declared index for exactly that
-	// case, so an index inside the receiver's list is the answer.
-	if i := tp.Index(); i >= 0 && i < len(d.Receivers) && len(d.Receivers) != 0 {
-		return len(d.Implicits) + i, true
+	// A method names its receiver's type parameters through objects the
+	// method declaration made, which are not the objects the receiver's
+	// declaration made, so neither loop above finds one by identity. gc
+	// resolves such a name by the declared position alone
+	// (noder.writerDict.typeParamIndex), and the position is the answer in
+	// the two dictionaries a receiver's type parameter can be named in: the
+	// receiver's list of a generic method's own dictionary, and the type's
+	// own list when the dictionary is the one a generic type shares with
+	// its methods. specs/013-generics.md has the numbering.
+	if i := tp.Index(); i >= 0 {
+		if i < len(d.Receivers) {
+			return len(d.Implicits) + i, true
+		}
+		if len(d.Receivers) == 0 && i < len(d.TypeParams) {
+			return base + i, true
+		}
 	}
 	return 0, false
 }

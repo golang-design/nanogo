@@ -5,10 +5,14 @@
 package export
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"golang.design/x/nanogo/export/pkgbits"
+	"golang.design/x/nanogo/syntax"
+	"golang.design/x/nanogo/types2"
 )
 
 // The object dictionary a generic declaration carries into the file.
@@ -178,6 +182,124 @@ func TestWriteFillsEachDictionaryList(t *testing.T) {
 	}
 }
 
+// TestWriteNumbersAGenericTypeAsGcDoes compares the dictionary nanogo writes
+// for a generic type with the one gc writes for the same source.
+//
+// The dictionary and the bodies numbered against it are both nanogo's, so a
+// numbering of nanogo's own would be self consistent and gc would read it.
+// This is the stronger claim: the slots are gc's slots, so a shape gc walks in
+// another order is a difference this reports rather than one that waits for a
+// declaration whose two orders disagree.
+//
+// The alias is here because its type parameters are objects of the alias
+// declaration and not of the type it names. gc gives it a dictionary of its
+// own, and an alias handed the type's would hold the type's entries and take
+// slots in it besides.
+func TestWriteNumbersAGenericTypeAsGcDoes(t *testing.T) {
+	const path = "nanogo.example/gcdict/lib"
+	src := "package lib\n\n" +
+		"type List[T any] struct{ items []T }\n\n" +
+		"func (l *List[T]) Push(v T) { l.items = append(l.items, v) }\n\n" +
+		"func (l List[T]) Len() int { return len(l.items) }\n\n" +
+		"func (l List[T]) All() []T { return l.items }\n\n" +
+		"func (l List[T]) Any(i int) any { return l.items[i] }\n\n" +
+		"type Alias[T any] = List[T]\n\n" +
+		"type Pair[K, V any] struct {\n\tk K\n\tv V\n}\n\n" +
+		"func (p Pair[K, V]) Key() K { return p.k }\n\n" +
+		"func (p *Pair[K, V]) Set(k K, v V) { p.k, p.v = k, v }\n\n" +
+		"func (p Pair[K, V]) Swap() Pair[V, K] { return Pair[V, K]{p.v, p.k} }\n"
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"go.mod":     "module nanogo.example/gcdict\n\ngo 1.27\n",
+		"lib/lib.go": src,
+		"lib/use.go": "package lib\n\nvar _ List[int]\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archive, err := os.ReadFile(exportFile(t, dir, "./lib"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcPayload, err := Payload(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcDec := pkgbits.NewPkgDecoder(path, string(gcPayload))
+
+	payload, _, _ := writeSource(t, path, src+"\nvar _ List[int]\n", nil)
+	dec := pkgbits.NewPkgDecoder(path, string(payload))
+
+	for _, name := range []string{"List", "Alias", "Pair"} {
+		got, want := readDict(t, &dec, name), readDict(t, &gcDec, name)
+		if got != want {
+			t.Errorf("nanogo numbered %s %+v and gc numbered it %+v", name, got, want)
+		}
+		if want.derived == 0 {
+			t.Errorf("gc numbered no derived type for %s, so the test proved nothing about it", name)
+		}
+	}
+}
+
+// TestWriteRefusesAGenericTypeOfAnotherPackageWithMethods names the half of
+// the rule that needs the reader.
+//
+// A file's export data is the linked form, so a generic type another package
+// declares is written out here in full, methods and all. A method of a generic
+// type carries its body and nothing else: gc's reader records a definition for
+// a declaration with type parameters before it reads the extension data, and
+// the relocated form asserts there is none. The body exists only in the
+// declaring package's archive, and this writer builds bodies from source and
+// does not read one back, so the type is refused by name.
+//
+// sync/atomic.Pointer is the case that reaches nanogo's own packages: a
+// package holding one cannot write its export data until the body of Load can
+// be copied out of sync/atomic's archive.
+func TestWriteRefusesAGenericTypeOfAnotherPackageWithMethods(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module nanogo.example/foreign\n\ngo 1.27\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found := archives(t, dir, "sync/atomic")
+	files := make(map[string]string, len(found))
+	for _, a := range found {
+		files[a[0]] = a[1]
+	}
+	if files["sync/atomic"] == "" {
+		t.Skip("the go command built no archive for sync/atomic")
+	}
+	imp := &archiveImporter{reader: NewReader(), archives: files, cache: make(map[string]*types2.Package)}
+
+	const src = "package p\n\nimport \"sync/atomic\"\n\nvar P atomic.Pointer[int]\n"
+	fset := syntax.NewFileSet()
+	sf := fset.AddFile("xtest/foreign/a.go", len(src))
+	f, err := syntax.Parse(sf, []byte(src), nil, nil, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	conf := types2.Config{Fset: fset, Sizes: types2.SizesFor("gc", "arm64"), Importer: imp}
+	pkg, err := conf.Check("xtest/foreign", []*syntax.File{f}, nil)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+
+	_, _, err = Write(pkg, false, &Source{Fset: fset})
+	if err == nil {
+		t.Fatal("the writer wrote a generic type of another package that declares methods")
+	}
+	if !strings.Contains(err.Error(), "sync/atomic.Pointer") {
+		t.Errorf("the refusal is %q and does not name the type", err)
+	}
+	if !strings.Contains(err.Error(), "that package's archive") {
+		t.Errorf("the refusal is %q and does not say where the bodies are", err)
+	}
+}
+
 // TestWriteRefusesTheGenericShapesItHasNoDictionaryFor names each shape whose
 // dictionary is not the one a body carries.
 //
@@ -190,10 +312,6 @@ func TestWriteRefusesTheGenericShapesItHasNoDictionaryFor(t *testing.T) {
 		src  string
 		want string
 	}{{
-		name: "a method of a generic type",
-		src:  "package p\n\ntype List[T any] struct{ Head T }\n\nfunc (l List[T]) Get() T { return l.Head }\n",
-		want: "its dictionary is the type's rather than its own",
-	}, {
 		name: "a method with type parameters",
 		src:  "package p\n\ntype T struct{}\n\nfunc (T) M[X any](x X) X { return x }\n",
 		want: "receiver's type parameters ahead of the method's",
@@ -211,8 +329,79 @@ func TestWriteRefusesTheGenericShapesItHasNoDictionaryFor(t *testing.T) {
 	}
 }
 
+// TestWriteRefusesAGenericTypeWhoseMethodHasNoBody is the rule a generic type
+// with methods cannot be written around.
+//
+// The dictionary is the type's, and its slots run over the underlying type and
+// then over each method in declaration order. A method whose body was not
+// built leaves the slots it would have taken out of the dictionary, so every
+// method declared after it is numbered too low, and gc reads a slot numbered
+// too low as a different type without complaint.
+func TestWriteRefusesAGenericTypeWhoseMethodHasNoBody(t *testing.T) {
+	src := "package p\n\ntype List[T any] struct{ Head T }\n\nfunc (l List[T]) Get() T { return l.Head }\n"
+	pkg, fset, _ := buildSource(t, "xtest/nomethodbody", src)
+	_, _, err := Write(pkg, false, &Source{Fset: fset})
+	if err == nil {
+		t.Fatal("the writer wrote a method of a generic type with no body")
+	}
+	if !strings.Contains(err.Error(), "no body was built") {
+		t.Errorf("the refusal is %q and does not say the body is missing", err)
+	}
+}
+
+// TestWriteWritesAGenericTypeWithMethods checks that one dictionary carries
+// the type and every method it declares.
+//
+// Two dictionaries would be two numberings, and a body numbered against the
+// second one names slots the file holds under the first. So the check is that
+// every method's body carries the one allocation, and that its entries are in
+// the order gc writes them in: the underlying type first, then each method's
+// receiver and signature in declaration order.
+func TestWriteWritesAGenericTypeWithMethods(t *testing.T) {
+	src := "package p\n\n" +
+		"type List[T any] struct{ Head T }\n\n" +
+		"func (l List[T]) Get() T { return l.Head }\n\n" +
+		"func (l *List[T]) Set(v T) { l.Head = v }\n"
+	pkg, fset, funcs := buildSource(t, "xtest/genericmethods", src)
+	if len(funcs) != 2 {
+		t.Fatalf("the harness built %d bodies and the type declares two methods", len(funcs))
+	}
+	dict := funcs[0].Body.Dict
+	for _, fn := range funcs {
+		if fn.Body.Dict != dict {
+			t.Fatalf("%s carries a dictionary of its own and the type's is shared", fn.Name)
+		}
+	}
+	// The underlying type takes the first slots, because gc writes it before
+	// the first method. Then each method's receiver, in declaration order.
+	//
+	// Each method's receiver names a type parameter of its own: the checker
+	// makes the T of "func (l List[T])" an object of the method declaration
+	// and not the object the type declared, so List[T] under one method is
+	// not the value the checker built for List[T] under another. gc keys the
+	// dictionary by the same identity ([Dict.Derive]) and allocates the same
+	// slots, and [Dict.TypeParamIndex] is what makes every one of them
+	// resolve to the type's own position.
+	want := []string{
+		"T", "struct{Head T}",
+		"T", "p.List[T]",
+		"T", "p.List[T]", "*p.List[T]",
+	}
+	got := make([]string, len(dict.Derived))
+	qual := func(pkg *types2.Package) string { return pkg.Name() }
+	for i, typ := range dict.Derived {
+		got[i] = types2.TypeString(typ, qual)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("the derived types are %v and gc's order is %v", got, want)
+	}
+	if _, _, err := Write(pkg, false, &Source{Fset: fset, Funcs: funcs}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+}
+
 // TestWriteWritesAGenericTypeWithNoMethods is the half of the generic type
-// that the dictionary rule admits.
+// that needs no body at all.
 //
 // A generic type's dictionary spans the type and every method it declares, so
 // it is allocated with the type and filled as the underlying type and then

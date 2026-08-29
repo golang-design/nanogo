@@ -173,13 +173,22 @@ the dictionary holds cannot disagree. `gc` reads a library of generic functions
 nanogo wrote, stencils each at two concrete type arguments, and the program
 links and runs ([015](015-export-data.md) has the measurement).
 
-Four generic shapes are refused by the *writer*, each because its dictionary is
-not the one a body carries: a generic type declaration and a method of one,
-whose dictionary spans the type and every method it declares; a method with
-type parameters of its own, whose dictionary holds the receiver's ahead of
-them; a generic declaration of another package, whose body and dictionary live
-in that package's archive; and a type declared inside a generic declaration,
-whose every use carries the enclosing type parameters implicitly.
+**A generic type this package declares reaches a file with its methods.** The
+dictionary is the type's and not the method's: `gc` writes the methods inside
+the type's element and numbers their bodies against the type's dictionary,
+after the underlying type and after every method declared before them. So the
+whole type is built in one pass, `BodySource.BuildTypeBodies`, and every
+method's body carries the one allocation. `gc` reads a generic type nanogo
+wrote, calls each of its methods at two concrete type arguments, and the
+program links and runs ([015](015-export-data.md) has the measurement).
+
+Three generic shapes are refused by the *writer*, each because its dictionary
+is not the one a body carries: a method with type parameters of its own, whose
+dictionary holds the receiver's ahead of them; a generic declaration of another
+package, whose body and dictionary live in that package's archive, which for a
+generic type means one that declares methods; and a type declared inside a
+generic declaration, whose every use carries the enclosing type parameters
+implicitly.
 
 ## The three strategies
 
@@ -377,15 +386,22 @@ arguments, `ir.MethodSymbol` spells them, the descriptor is written under the
 name that holds them, and `ir/stencil.go` builds the method set of every
 instantiation the converter meets.
 
-**What no program can use yet is the export data.** A package's own
-declarations reach a file, and a method of a generic type is written into the
-type's dictionary, after the underlying type and after every method declared
-before it. `export.BodySource` numbers one dictionary per declaration, so it
-refuses a method of a generic type by name and the writer refuses with it
-([015](015-export-data.md)). A generic type with **no** method is written and a
-generic type with one is not, so a package that declares `L[T]` with a method
-does not compile, even though its bodies are built and correct. That is the one
-piece left, and it is [015](015-export-data.md)'s rather than this file's.
+**The export data carries it too, for a type this package declares.** A method
+of a generic type is written inside the type's element and its body is numbered
+into the type's dictionary, after the underlying type and after every method
+declared before it, so the whole type is built in one call and the methods
+share one allocation ([015](015-export-data.md) has the rule and the three
+consequences of it). A package that declares `L[T]` with a method compiles now,
+and `gc` stencils each method out of the bytes.
+
+What a package that *names* `L[T]` cannot do is write its own export data when
+`L` belongs to another package. A file's export data is the linked form, so the
+foreign type goes in whole, methods and all, and a method of a generic type
+carries its body and nothing else. That body exists only in the declaring
+package's archive. `sync/atomic.Pointer` is the case that reaches nanogo's own
+packages, and closing it is reading a body out of an archive and relocating
+every element it names into the file being written, which is
+[015](015-export-data.md)'s rather than this file's.
 
 A method may also declare its own type parameters. `types2/resolver.go` gates
 the declaration on `go1_27` and names the feature "generic method",

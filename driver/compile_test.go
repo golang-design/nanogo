@@ -973,11 +973,16 @@ func TestCompileRefusesWhatTheStencilerDoesNotBuild(t *testing.T) {
 // build has failed for a construct nanogo cannot compile. Reported as anything
 // else it reads as a compiler bug: internal/gotest classifies a message that
 // does not say "nanogo cannot compile" as nanogo rejecting legal Go.
+//
+// The declaration is a method of a generic type carrying a //go: directive.
+// The writer carries no directive at all (specs/016-directives-and-pragmas.md)
+// so no body is offered for such a method, and the dictionary the type shares
+// with its methods would then be short by the slots that body names.
 func TestCompileRefusesADeclarationTheExportWriterCannotEncode(t *testing.T) {
 	arm64Only(t)
 	needGoCommand(t)
 	_, err := compileSource(t, "package main\n\ntype Box[T any] struct{ V T }\n\n"+
-		"func (b Box[T]) Get() T { return b.V }\n\nfunc main() {}\n", nil)
+		"//go:noinline\nfunc (b Box[T]) Get() T { return b.V }\n\nfunc main() {}\n", nil)
 	if err == nil {
 		t.Fatal("the package was accepted")
 	}

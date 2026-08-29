@@ -83,9 +83,12 @@ func (s *BodySource) BuildBody(name string, sig *types2.Signature, block *syntax
 	// A method of a generic type shares the type's dictionary: gc writes the
 	// method inside the type's element and its body into the type's
 	// dictionary, after the underlying type and after every method declared
-	// before it. Nothing here has the type's element, so the slots cannot be
-	// numbered, and a slot numbered against a dictionary of its own is a
-	// slot gc reads as a different type.
+	// before it. One body cannot be numbered against that dictionary on its
+	// own, because every slot ahead of it belongs to the type or to a method
+	// declared before it, and a slot numbered against a dictionary of its
+	// own is a slot gc reads as a different type.
+	// [BodySource.BuildTypeBodies] builds the whole type at once and is the
+	// entry point for such a method.
 	if sig.RecvTypeParams().Len() != 0 && sig.TypeParams().Len() == 0 {
 		return nil, &BodyError{
 			Package: s.pkg.Path(), Name: name, Writing: true,
@@ -119,6 +122,83 @@ func (s *BodySource) seed(name string, sig *types2.Signature, dict *Dict) {
 		b.derivedOf(recv.Type())
 	}
 	b.walkSignature(sig)
+}
+
+// BuildTypeBodies builds the dictionary a generic type shares with its
+// methods, and the body of each method the type declares.
+//
+// gc writes a generic type and its methods into one element against one
+// dictionary (specs/013-generics.md), and it allocates the slots of that
+// dictionary in the order it writes: the underlying type first, then, for
+// each method in declaration order, the receiver, the signature and the body.
+// Nothing after the first slot can be numbered without what came before it,
+// so the whole type is built here in one call rather than one method at a
+// time.
+//
+// blocks gives the block of each method, which is what the checker does not
+// hold. A method with no entry is a method whose body the caller left out,
+// and the type is refused rather than given a dictionary short by that
+// method's slots: every later slot would then be numbered too low.
+//
+// The bodies come back in [types2.Named.Method] order, which is declaration
+// order and is the order the writer writes them in. Each carries the shared
+// dictionary, so the slots a body names and the entries the file holds are
+// one allocation.
+func (s *BodySource) BuildTypeBodies(named *types2.Named, blocks map[*types2.Func]*syntax.BlockStmt) (dict *Dict, bodies []*Body, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			e, ok := v.(*BodyError)
+			if !ok {
+				panic(v)
+			}
+			dict, bodies, err = nil, nil, e
+		}
+	}()
+
+	obj := named.Obj()
+	dict = &Dict{Pkg: obj.Pkg(), TypeParams: typeParamSlice(named.TypeParams())}
+	if !dict.Generic() {
+		return nil, nil, &BodyError{
+			Package: s.pkg.Path(), Name: obj.Name(), Writing: true,
+			Reason: "the type declares no type parameter, so its methods carry no dictionary of the type's",
+		}
+	}
+
+	// The underlying type, which is what gc's doObj writes before the first
+	// method. A derived type it names takes the first slots.
+	(&bodyBuilder{s: s, name: objName(obj), dict: dict}).derivedOf(named.Underlying())
+
+	for i := range named.NumMethods() {
+		m := named.Method(i)
+		sig := m.Signature()
+		name := s.pkg.Path() + "." + methodSym(named, m)
+		if sig.TypeParams().Len() != 0 {
+			// gc promotes a method with type parameters of its own to a
+			// declaration of its own, whose dictionary holds the receiver's
+			// type parameters ahead of the method's. It is not the type's
+			// dictionary, and the writer refuses such a method too.
+			return nil, nil, &BodyError{
+				Package: s.pkg.Path(), Name: name, Writing: true,
+				Reason: "the method has type parameters of its own, and its dictionary holds the receiver's type parameters ahead of them",
+			}
+		}
+		block := blocks[m]
+		if block == nil {
+			return nil, nil, &BodyError{
+				Package: s.pkg.Path(), Name: name, Writing: true,
+				Reason: "the method belongs to a generic type and no body was offered for it, so the slots of every method declared after it cannot be numbered",
+			}
+		}
+		// The receiver and then the signature, which is the order
+		// [writer.method] writes them in, and then the body.
+		b := &bodyBuilder{s: s, name: name, sig: sig, dict: dict}
+		b.derivedOf(sig.Recv().Type())
+		b.walkSignature(sig)
+		body, _ := s.build(name, sig, dict, block)
+		body.Dict = dict
+		bodies = append(bodies, body)
+	}
+	return dict, bodies, nil
 }
 
 // typeParamSlice unpacks a type parameter list.

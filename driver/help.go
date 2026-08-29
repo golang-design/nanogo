@@ -157,6 +157,12 @@ What nanogo compiles:
 	named pkg.F[int] and pkg.F[string], with no dictionary and no run-time
 	indirection (specs/013-generics.md).
 
+	A generic type this package declares, with its methods. L[int].Get is
+	an ordinary method of the ordinary type L[int], and the export data
+	carries the type and every method it declares against one dictionary,
+	so gc stencils each of them out of the archive nanogo wrote
+	(specs/013-generics.md).
+
 What nanogo refuses, by name, with the reason:
 
 	defer of print or println. A builtin is not a function value, so there
@@ -164,10 +170,15 @@ What nanogo refuses, by name, with the reason:
 
 	Taking the address of a variable the compiler keeps in a register.
 
-	A method of a generic type, and a method with type parameters of its
-	own. nanogo instantiates a generic function and it does not
-	instantiate a generic type, so nothing produces the body of
-	L[int].Get. A generic type used for its fields alone compiles.
+	A method with type parameters of its own, such as (T).M[X any].
+	Instantiating the receiver does not instantiate the method, so the
+	key of the instantiation is not the list on the selector alone.
+
+	A package that names a generic type another package declared that has
+	methods, such as sync/atomic.Pointer. A file's export data is the
+	linked form, so the foreign type goes into it whole, and the body of
+	each of its methods is in that package's archive
+	(specs/015-export-data.md).
 
 	An instantiation of a generic function another package declared. The
 	body is in that package's archive, and nanogo has no path from a

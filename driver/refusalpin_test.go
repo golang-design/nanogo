@@ -32,12 +32,12 @@ var refusalPins = []struct {
 	probe  string // the probe in internal/audit/testdata/probes that shows it
 }{
 	{"print or println", "defer-builtin"},
-	// A method of a generic type, and not "generic function": the help says
-	// both and a generic function this package declares compiles now. That pin
-	// read "generic function", which is a substring of the sentence describing
-	// what works, so it went on passing while the probe beside it rose. A pin
-	// has to name the phrase that describes the refusal and nothing wider.
-	{"A method of a generic type", "generic-method"},
+	// probes/generic-method was pinned here. A method of a generic type
+	// compiles, and its export data carries it against the dictionary the
+	// type shares with every method it declares, so the sentence the pin
+	// guarded is gone and the pin with it. What is still refused in that
+	// area has no probe: a method with type parameters of its own, and a
+	// generic type of another package that declares methods.
 	{`imports "C"`, "cgo-import"},
 	{"assembly", "asm-package"},
 	{"go:embed", "embed-directive"},

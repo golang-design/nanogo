@@ -814,8 +814,8 @@ func TestBuildBodies(t *testing.T) {
 
 // @@@ Refusals
 
-// buildOne checks one source file and builds the body of its function f.
-func buildOne(t *testing.T, src string) error {
+// checkOne parses and type checks one source file as the package a.
+func checkOne(t *testing.T, src string) (*types2.Package, *types2.Info, *syntax.FileSet, *syntax.File) {
 	t.Helper()
 	dir := t.TempDir()
 	name := filepath.Join(dir, "a.go")
@@ -842,47 +842,20 @@ func buildOne(t *testing.T, src string) error {
 	if err != nil {
 		t.Fatalf("the source does not check: %v", err)
 	}
-	for _, d := range file.DeclList {
-		fd, ok := d.(*syntax.FuncDecl)
-		if !ok || fd.Name.Value != "f" {
-			continue
-		}
-		obj := info.Defs[fd.Name].(*types2.Func)
-		_, err := NewBodySource(pkg, info, fset).BuildBody("a.f", obj.Signature(), fd.Body)
-		return err
-	}
-	t.Fatal("the source declares no function f")
-	return nil
+	return pkg, info, fset, file
+}
+
+// buildOne checks one source file and builds the body of its function f.
+func buildOne(t *testing.T, src string) error {
+	t.Helper()
+	_, err := buildOneBody(t, src)
+	return err
 }
 
 // buildOneBody checks one source file and returns the body of its function f.
 func buildOneBody(t *testing.T, src string) (*Body, error) {
 	t.Helper()
-	dir := t.TempDir()
-	name := filepath.Join(dir, "a.go")
-	if err := os.WriteFile(name, []byte(src), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fset := syntax.NewFileSet()
-	file, err := syntax.ParseFile(fset, name, nil, nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info := &types2.Info{
-		Types:        make(map[syntax.Expr]types2.TypeAndValue),
-		Defs:         make(map[*syntax.Name]types2.Object),
-		Uses:         make(map[*syntax.Name]types2.Object),
-		Implicits:    make(map[syntax.Node]types2.Object),
-		Selections:   make(map[*syntax.SelectorExpr]*types2.Selection),
-		Scopes:       make(map[syntax.Node]*types2.Scope),
-		Instances:    make(map[*syntax.Name]types2.Instance),
-		FileVersions: make(map[*syntax.SrcFile]string),
-	}
-	conf := types2.Config{Fset: fset, Sizes: types2.SizesFor("gc", "arm64")}
-	pkg, err := conf.Check("a", []*syntax.File{file}, info)
-	if err != nil {
-		t.Fatalf("the source does not check: %v", err)
-	}
+	pkg, info, fset, file := checkOne(t, src)
 	for _, d := range file.DeclList {
 		fd, ok := d.(*syntax.FuncDecl)
 		if !ok || fd.Name.Value != "f" {
@@ -980,6 +953,155 @@ func TestBuildBodyFillsTheDictionary(t *testing.T) {
 	if len(d.Itabs)+len(d.Subdicts)+len(d.MethodExprs) != 0 {
 		t.Errorf("the body names no method table, no subdictionary and no method expression, and the dictionary holds %d, %d and %d",
 			len(d.Itabs), len(d.Subdicts), len(d.MethodExprs))
+	}
+}
+
+// TestBuildTypeBodiesShareOneDictionary checks the numbering a generic type
+// and its methods are read back with.
+//
+// The whole type is built in one call because the slots interleave: the
+// underlying type takes the first of them, and then each method takes the
+// slots of its receiver, of its signature and of its body before the next
+// method takes any. A method built on its own would number its first slot
+// where the type's last one is.
+func TestBuildTypeBodiesShareOneDictionary(t *testing.T) {
+	src := "package a\n\n" +
+		"type List[T any] struct{ items []T }\n\n" +
+		"func (l List[T]) Head() T { return l.items[0] }\n\n" +
+		"func (l *List[T]) Push(v T) { l.items = append(l.items, v) }\n"
+	pkg, info, fset, file := checkOne(t, src)
+	named := pkg.Scope().Lookup("List").Type().(*types2.Named)
+	blocks := make(map[*types2.Func]*syntax.BlockStmt)
+	for _, fd := range declaredFuncs(info, []*syntax.File{file}) {
+		obj := info.Defs[fd.Name].(*types2.Func)
+		if obj.Signature().RecvTypeParams().Len() != 0 {
+			blocks[obj] = fd.Body
+		}
+	}
+	dict, bodies, err := NewBodySource(pkg, info, fset).BuildTypeBodies(named, blocks)
+	if err != nil {
+		t.Fatalf("BuildTypeBodies: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("the builder built %d bodies and the type declares two methods", len(bodies))
+	}
+	for i, b := range bodies {
+		if b.Dict != dict {
+			t.Errorf("the body of %s carries a dictionary of its own", named.Method(i).Name())
+		}
+		if !b.HasBlock {
+			t.Errorf("the body of %s carries no block", named.Method(i).Name())
+		}
+	}
+	if len(dict.TypeParams) != 1 || len(dict.Receivers) != 0 || len(dict.Implicits) != 0 {
+		t.Fatalf("the dictionary holds %d type parameters, %d receiver ones and %d implicit ones, and the type declares one of the first",
+			len(dict.TypeParams), len(dict.Receivers), len(dict.Implicits))
+	}
+	// The underlying type first, then, for each method, the receiver, the
+	// signature and then the body. Head's body names the field, whose type
+	// is a slot the body takes and not one the signature took, and Push's
+	// body names it again, so a body built on its own would number its
+	// slots where the next method's receiver goes.
+	//
+	// Each method's receiver names a type parameter the method declared,
+	// which is not the object the type declared, so the checker built a
+	// value of its own for List[T] under each method. gc keys the dictionary
+	// by the same identity ([Dict.Derive]) and allocates the same slots.
+	qual := func(p *types2.Package) string { return p.Name() }
+	want := []string{
+		"T", "[]T", "struct{items []T}",
+		"T", "a.List[T]", "[]T",
+		"T", "a.List[T]", "*a.List[T]", "[]T",
+	}
+	got := make([]string, len(dict.Derived))
+	for i, typ := range dict.Derived {
+		got[i] = types2.TypeString(typ, qual)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("the derived types are %v and gc's order is %v", got, want)
+	}
+	// Every T of the three resolves to the type's own position, because the
+	// dictionary an instantiation is passed holds one entry per type
+	// parameter the type declares.
+	for i, typ := range dict.Derived {
+		tp, ok := typ.(*types2.TypeParam)
+		if !ok {
+			continue
+		}
+		if idx, ok := dict.TypeParamIndex(tp); !ok || idx != 0 {
+			t.Errorf("slot %d is a type parameter numbered %d and the type declares one", i, idx)
+		}
+	}
+}
+
+// TestBuildTypeBodiesNumbersEachTypeParameterByItsPosition is the two
+// parameter case, which is the one that measures the rule.
+//
+// A method names the receiver's type parameters through objects of its own
+// declaration, so the position and nothing else says which one a name is. With
+// one type parameter every position is zero and a rule that returned zero
+// would pass, so the type here declares two and each is checked by the name
+// the type declared it under.
+func TestBuildTypeBodiesNumbersEachTypeParameterByItsPosition(t *testing.T) {
+	src := "package a\n\n" +
+		"type Pair[K, V any] struct {\n\tk K\n\tv V\n}\n\n" +
+		"func (p Pair[K, V]) Key() K { return p.k }\n\n" +
+		"func (p *Pair[K, V]) Set(k K, v V) { p.k, p.v = k, v }\n"
+	pkg, info, fset, file := checkOne(t, src)
+	named := pkg.Scope().Lookup("Pair").Type().(*types2.Named)
+	blocks := make(map[*types2.Func]*syntax.BlockStmt)
+	for _, fd := range declaredFuncs(info, []*syntax.File{file}) {
+		obj := info.Defs[fd.Name].(*types2.Func)
+		if obj.Signature().RecvTypeParams().Len() != 0 {
+			blocks[obj] = fd.Body
+		}
+	}
+	dict, _, err := NewBodySource(pkg, info, fset).BuildTypeBodies(named, blocks)
+	if err != nil {
+		t.Fatalf("BuildTypeBodies: %v", err)
+	}
+	want := map[string]int{"K": 0, "V": 1}
+	seen := 0
+	for i, typ := range dict.Derived {
+		tp, ok := typ.(*types2.TypeParam)
+		if !ok {
+			continue
+		}
+		name := tp.Obj().Name()
+		idx, ok := dict.TypeParamIndex(tp)
+		if !ok {
+			t.Errorf("slot %d holds %s and the dictionary resolves no position for it", i, name)
+			continue
+		}
+		if idx != want[name] {
+			t.Errorf("slot %d holds %s, numbered %d, and the type declares it at %d", i, name, idx, want[name])
+		}
+		seen++
+	}
+	if seen < 4 {
+		t.Errorf("the dictionary holds %d type parameter slots, and the type's own two plus each method's copy is more", seen)
+	}
+}
+
+// TestBuildTypeBodiesRefusesAMethodWithNoBody checks that a type whose
+// dictionary would be short by a method's slots is refused.
+func TestBuildTypeBodiesRefusesAMethodWithNoBody(t *testing.T) {
+	src := "package a\n\ntype List[T any] struct{ items []T }\n\nfunc (l List[T]) Head() T { return l.items[0] }\n"
+	pkg, info, fset, _ := checkOne(t, src)
+	named := pkg.Scope().Lookup("List").Type().(*types2.Named)
+	_, _, err := NewBodySource(pkg, info, fset).BuildTypeBodies(named, nil)
+	if err == nil {
+		t.Fatal("the builder built a type whose method has no body")
+	}
+	e, ok := err.(*BodyError)
+	if !ok {
+		t.Fatalf("the refusal is a %T and not a *BodyError: %v", err, err)
+	}
+	if !strings.Contains(e.Reason, "no body was offered") {
+		t.Errorf("the refusal is %q and does not say the body is missing", e.Reason)
+	}
+	if !strings.Contains(e.Error(), "a.List.Head") {
+		t.Errorf("the refusal is %q and does not name the method", e.Error())
 	}
 }
 
