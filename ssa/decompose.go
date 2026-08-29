@@ -99,9 +99,10 @@ func (s *StringSym) String() string {
 // It is idempotent: a second call finds nothing left to split.
 func Decompose(f *Func) {
 	d := &decomposer{
-		f:         f,
-		leafCache: make(map[*ir.Type][]partLeaf),
-		ptrCache:  make(map[*ir.Type]*ir.Type),
+		f:          f,
+		leafCache:  make(map[*ir.Type][]partLeaf),
+		groupCache: make(map[*ir.Type]cmpPlan),
+		ptrCache:   make(map[*ir.Type]*ir.Type),
 	}
 	d.run()
 }
@@ -123,9 +124,11 @@ type partLeaf struct {
 type decomposer struct {
 	f *Func
 
-	// leafCache and ptrCache are looked up by key and never ranged over.
-	leafCache map[*ir.Type][]partLeaf
-	ptrCache  map[*ir.Type]*ir.Type
+	// leafCache, groupCache and ptrCache are looked up by key and never ranged
+	// over.
+	leafCache  map[*ir.Type][]partLeaf
+	groupCache map[*ir.Type]cmpPlan
+	ptrCache   map[*ir.Type]*ir.Type
 
 	tInt  *ir.Type
 	tByte *ir.Type
@@ -763,20 +766,27 @@ func (d *decomposer) sourcesOK(v *Value) bool {
 // equalityOK reports whether == and != over this type are the comparison of
 // its parts.
 //
-// For most types they are, and per part is more correct than a comparison of
-// the bytes: Go does not define the padding between two fields, and a part
-// comparison never reads it.
+// A part comparison is more correct than a comparison of the bytes, and that
+// is the reason it is preferred wherever it holds: Go does not define the
+// padding between two fields, and cmpGroups's walk never produces a part for
+// padding, so it is never read.
 //
-// For a string or an interface they are not. String equality compares the
-// bytes and not the pointer, so two equal strings at two addresses would
-// compare unequal, and expandStringEqual builds the call to runtime.memequal
-// that specs/020's table gives it. General interface equality calls the type's
-// equality function through runtime.ifaceeq, which rtsym does not carry, so it
-// is still left alone and lowering refuses it by name.
+// A part is not always one word compared with one instruction, though, and the
+// grouping is what says so. A string field is two parts compared by their
+// bytes, through the call to runtime.memequal that specs/020's table gives it,
+// and expandEqual builds that term in the middle of the field-by-field
+// comparison exactly as it builds a word compare for an integer field.
 //
-// An interface against the literal nil is the exception, and it is the common
-// one. The zero interface is two zero words and nothing else is, so comparing
-// both words against zero is the whole answer.
+// An interface is where the grouping stops. General interface equality calls
+// the dynamic type's equality function through runtime.ifaceeq or
+// runtime.efaceeq, and which one is not a choice this pass may make from a
+// leaf, so it is admitted only for a whole interface, where the type is still
+// in hand. A slice, a map and a function are not comparable in Go except
+// against nil, which is not a part comparison at all.
+//
+// An interface or a slice against the literal nil is the exception, and it is
+// the common one. The zero interface is two zero words and nothing else is, so
+// comparing both words against zero is the whole answer.
 func (d *decomposer) equalityOK(u *Value) bool {
 	if len(u.Args) != 2 {
 		return false
@@ -797,13 +807,15 @@ func (d *decomposer) equalityOK(u *Value) bool {
 			return false
 		}
 	}
-	if comparableByParts(x.Type) && comparableByParts(y.Type) {
+	gx, okx := d.cmpGroups(x.Type)
+	gy, oky := d.cmpGroups(y.Type)
+	if okx && oky && sameCmpGroups(gx, gy) {
+		if groupsCall(gx, xs) {
+			// A string group is the call to runtime.memequal, which needs a
+			// memory to hang on and a place in the block to sit.
+			return d.callSiteOK(u)
+		}
 		return true
-	}
-	if x.Type.Kind == ir.String && y.Type.Kind == ir.String {
-		// The bytes, through runtime.memequal, which expandStringEqual builds
-		// out of the parts this admits.
-		return d.stringEqualOK(u)
 	}
 	if x.Type.Kind != y.Type.Kind {
 		return false
@@ -839,7 +851,7 @@ func (d *decomposer) ifaceEqualOK(u *Value) bool {
 	if x.Type.EmptyIface != y.Type.EmptyIface {
 		return false
 	}
-	return d.someMem() != nil && d.memInsertSafe(u.Block, valueIndex(u.Block, u))
+	return d.callSiteOK(u)
 }
 
 // orderOK reports whether < and <= over this type are a runtime call this
@@ -862,32 +874,166 @@ func (d *decomposer) orderOK(u *Value) bool {
 	if !d.isSplit(x) || !d.isSplit(y) {
 		return false
 	}
-	return d.someMem() != nil && d.memInsertSafe(u.Block, valueIndex(u.Block, u))
+	return d.callSiteOK(u)
 }
 
-// comparableByParts reports whether == over t is == over each of its parts.
-func comparableByParts(t *ir.Type) bool {
+// cmpKind is the way one run of leaves is compared.
+type cmpKind uint8
+
+const (
+	// cmpWord is one leaf compared with the comparison operation itself. The
+	// target decides what that is from the leaf's own type, so an integer, a
+	// pointer and a channel become CMP and a float becomes FCMP. The float
+	// case is why the leaf keeps its type rather than becoming a bit pattern:
+	// NaN is not equal to itself and negative zero is equal to positive zero,
+	// and neither holds for a compare of the bits.
+	cmpWord cmpKind = iota
+
+	// cmpString is the two leaves of a string header, compared by the bytes
+	// they point at. Go compares a string by its contents, so two equal
+	// strings at two addresses are equal and a compare of the two pointers
+	// would answer no.
+	cmpString
+)
+
+// cmpGroup is one run of leaves and the way the language compares them.
+type cmpGroup struct {
+	first, n int
+	kind     cmpKind
+}
+
+// cmpPlan is how a whole type is compared: one group per run of leaves, and
+// whether every run has an answer.
+type cmpPlan struct {
+	groups []cmpGroup
+	ok     bool
+}
+
+// cmpGroups returns how == over t is built out of the leaves of t.
+//
+// Equality by parts is not one comparison per leaf. Go defines == field by
+// field and element by element, and a field is compared the way its own type
+// is compared, so a leaf that is half of a string header is not a word
+// compare. The grouping is what carries that: the walk here is the walk
+// flatten makes, so group i covers the leaves flatten emitted for the same
+// field, and the comparison a group names is the one the language gives that
+// field's type.
+//
+// It must be a walk over the type and not a scan of the leaf list, because the
+// leaf list does not determine the answer: a string and a struct{p *byte; n
+// int} flatten to the same two leaves and are compared differently.
+//
+// Two properties fall out of the walk and are the reason this is more correct
+// than a compare of the bytes. Padding between two fields is never a leaf, so
+// it is never compared, which the language requires because it leaves those
+// bytes undefined. A field named _ is marked blank by flatten across its whole
+// span, so a group is blank in full or not at all and comparedGroups drops it
+// whole.
+//
+// The second result is false when some part has no comparison by parts. A
+// slice, a map and a function are not comparable in Go at all except against
+// nil, and a comparison against nil is not what a part comparison means:
+// equalityOK admits those by name and expandSliceNil builds the one that is
+// more than one word. An interface needs the dynamic type's equality function,
+// which expandIfaceEqual builds for a whole interface out of the two words and
+// the EmptyIface bit that says which runtime symbol reads them. flatten types
+// both words as unsafe pointers and drops that bit, so an interface inside a
+// composite has no answer here and the comparison is refused and named by
+// lowering rather than guessed at.
+func (d *decomposer) cmpGroups(t *ir.Type) ([]cmpGroup, bool) {
+	if have, ok := d.groupCache[t]; ok {
+		return have.groups, have.ok
+	}
+	gs, n, ok := groupWalk(nil, t, 0)
+	// The groups index the leaves, so a walk that did not cover the leaves
+	// exactly is not a plan anything may be built from.
+	if ok && n != len(d.leavesOf(t)) {
+		ok = false
+	}
+	d.groupCache[t] = cmpPlan{groups: gs, ok: ok}
+	return gs, ok
+}
+
+// groupWalk appends the groups of t, whose leaves start at index at, and
+// returns the index after them.
+func groupWalk(out []cmpGroup, t *ir.Type, at int) ([]cmpGroup, int, bool) {
 	if t == nil {
-		return false
+		return out, at, false
 	}
 	switch t.Kind {
-	case ir.String, ir.Interface, ir.Slice, ir.Map, ir.FuncKind:
-		// The first two need a call. The last three are not comparable in Go
-		// at all, except against nil, and a part comparison against nil is
-		// not what the language means by it: equalityOK admits those by name
-		// and expandSliceNil builds the one that is more than one word.
-		return false
+	case ir.String:
+		return append(out, cmpGroup{first: at, n: 2, kind: cmpString}), at + 2, true
+
+	case ir.Slice, ir.Map, ir.FuncKind, ir.Interface:
+		return out, at, false
+
+	case ir.Complex64, ir.Complex128:
+		// The real and the imaginary part, each compared as a float, which is
+		// what the language says a complex comparison is.
+		out = append(out, cmpGroup{first: at, n: 1}, cmpGroup{first: at + 1, n: 1})
+		return out, at + 2, true
+
 	case ir.Struct, ir.Tuple:
 		for i := range t.Fields {
-			if !comparableByParts(t.Fields[i].Type) {
-				return false
+			var ok bool
+			out, at, ok = groupWalk(out, t.Fields[i].Type, at)
+			if !ok {
+				return out, at, false
 			}
 		}
-		return true
+		return out, at, true
+
 	case ir.Array:
-		return comparableByParts(t.Elem)
+		if t.Elem == nil {
+			return out, at, true
+		}
+		for i := int64(0); i < t.Len; i++ {
+			var ok bool
+			out, at, ok = groupWalk(out, t.Elem, at)
+			if !ok {
+				return out, at, false
+			}
+		}
+		return out, at, true
+	}
+
+	// A type that occupies no storage contributes no leaf, so it contributes
+	// no group either, and it is equal to itself.
+	if t.Size == 0 {
+		return out, at, true
+	}
+	return append(out, cmpGroup{first: at, n: 1}), at + 1, true
+}
+
+// sameCmpGroups reports whether two types are compared the same way.
+//
+// Go admits == between two operands only when one is assignable to the other,
+// which for two composite types means identical underlying types, so this
+// holds whenever the language admitted the expression. It is checked rather
+// than assumed because the parts of the two operands are read by one index.
+func sameCmpGroups(xs, ys []cmpGroup) bool {
+	if len(xs) != len(ys) {
+		return false
+	}
+	for i := range xs {
+		if xs[i] != ys[i] {
+			return false
+		}
 	}
 	return true
+}
+
+// groupsCall reports whether comparing these groups makes a runtime call.
+//
+// A blank group is not compared, so a struct whose only string field is named
+// _ needs no call and no memory to hang one on.
+func groupsCall(gs []cmpGroup, leaves []partLeaf) bool {
+	for _, g := range gs {
+		if g.kind == cmpString && !leaves[g.first].blank {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *decomposer) isSplit(v *Value) bool {
@@ -1141,8 +1287,6 @@ func (d *decomposer) rewrite() {
 			case OpEq, OpNeq:
 				if len(v.Args) == 2 && d.isSplit(v.Args[0]) {
 					switch k := v.Args[0].Type.Kind; {
-					case k == ir.String:
-						d.expandStringEqual(b, v, &out)
 					case k == ir.Slice:
 						d.expandSliceNil(v)
 					case k == ir.Interface && v.Args[0].Op != OpConstNil && v.Args[1].Op != OpConstNil:
@@ -1223,20 +1367,28 @@ func (d *decomposer) partAddr(b *Block, pos syntax.Pos, ptr *Value, lf partLeaf,
 }
 
 // expandEqual turns == and != over a whole value into the comparison of every
-// part, joined by and, or by or for !=.
+// group of parts, joined by and, or by or for !=.
+//
+// A group is one field, so the term it contributes is the comparison the
+// language gives that field's type: one machine comparison for an integer, a
+// pointer or a float, and the length check plus the call to runtime.memequal
+// for a string. cmpGroups is where the grouping comes from and why it is not a
+// scan of the parts.
 //
 // v becomes the join, so nothing that reads the result is redirected. A value
-// with no parts is equal to every other value of its type, which is what an
-// empty struct is.
+// with no group is equal to every other value of its type, which is what an
+// empty struct is, and a single group is written into v so that a one-field
+// struct compares with the one operation the comparison already was.
 func (d *decomposer) expandEqual(b *Block, v *Value, out *[]*Value) {
-	xs, ys := d.comparedParts(v)
+	xs, ys := d.parts[v.Args[0].ID], d.parts[v.Args[1].ID]
+	gs := d.comparedGroups(v.Args[0].Type, len(xs))
 	cmp := v.Op
 	join := OpAnd
 	if cmp == OpNeq {
 		join = OpOr
 	}
 
-	if len(xs) == 0 {
+	if len(gs) == 0 {
 		v.Op = OpConstBool
 		setArgs(v)
 		v.AuxInt = 0
@@ -1245,30 +1397,23 @@ func (d *decomposer) expandEqual(b *Block, v *Value, out *[]*Value) {
 		}
 		return
 	}
-	if len(xs) == 1 {
-		setArgs(v, xs[0], ys[0])
+	if len(gs) == 1 {
+		d.groupTerm(b, v, gs[0], xs, ys, v, out)
 		return
 	}
 
-	acc := d.mk(b, v.Pos, cmp, v.Type, xs[0], ys[0])
-	*out = append(*out, acc)
-	for i := 1; i < len(xs)-1; i++ {
-		c := d.mk(b, v.Pos, cmp, v.Type, xs[i], ys[i])
-		*out = append(*out, c)
-		j := d.mk(b, v.Pos, join, v.Type, acc, c)
-		*out = append(*out, j)
-		acc = j
+	acc := d.groupTerm(b, v, gs[0], xs, ys, nil, out)
+	for i := 1; i < len(gs)-1; i++ {
+		c := d.groupTerm(b, v, gs[i], xs, ys, nil, out)
+		acc = d.emit(b, nil, v, join, out, acc, c)
 	}
-	last := len(xs) - 1
-	c := d.mk(b, v.Pos, cmp, v.Type, xs[last], ys[last])
-	*out = append(*out, c)
-	v.Op = join
-	setArgs(v, acc, c)
+	c := d.groupTerm(b, v, gs[len(gs)-1], xs, ys, nil, out)
+	d.emit(b, v, v, join, out, acc, c)
 }
 
-// comparedParts returns the parts of the two operands that == and != read.
+// comparedGroups returns the groups of parts that == and != read.
 //
-// It is every part but the ones that belong to a field named _. The language
+// It is every group but the ones that belong to a field named _. The language
 // does not compare a blank field, so two values that differ only there are
 // equal, and comparing all the parts answers unequal for a struct whose bytes
 // differ in a field no program can read.
@@ -1277,38 +1422,74 @@ func (d *decomposer) expandEqual(b *Block, v *Value, out *[]*Value) {
 // struct{_, _, _ int} out of different bytes through unsafe and requires them
 // to compare equal. gc skips the fields the same way, in compare.EqStruct.
 //
+// flatten marks every part of a blank field, however deep the field's type
+// goes, and a group never spans two fields, so a group is blank in full or not
+// at all and the first part answers for it.
+//
 // The two operands have the same type by the time this runs, because
 // equalityOK admitted the pair only after checking that their leaves agree in
-// width and offset.
-func (d *decomposer) comparedParts(v *Value) (xs, ys []*Value) {
-	xs, ys = d.parts[v.Args[0].ID], d.parts[v.Args[1].ID]
-	leaves := d.leavesOf(v.Args[0].Type)
-	if len(leaves) != len(xs) {
-		// The parts do not line up with the walk, so nothing here can say
-		// which of them is blank. That is not a shape equalityOK admits, and
-		// comparing every part is the answer it used to give for all of them.
-		return xs, ys
+// width and offset and that their groups agree.
+func (d *decomposer) comparedGroups(t *ir.Type, n int) []cmpGroup {
+	gs, ok := d.cmpGroups(t)
+	leaves := d.leavesOf(t)
+	if !ok || len(leaves) != n {
+		// The walk does not line up with the parts, so nothing here can say
+		// which of them is blank or which belong together. That is not a
+		// shape equalityOK admits, and one word comparison per part is the
+		// answer this used to give for all of them.
+		one := make([]cmpGroup, n)
+		for i := range one {
+			one[i] = cmpGroup{first: i, n: 1}
+		}
+		return one
 	}
-	keep := false
-	for _, l := range leaves {
-		if l.blank {
-			keep = true
+	blank := false
+	for _, g := range gs {
+		if leaves[g.first].blank {
+			blank = true
 			break
 		}
 	}
-	if !keep {
-		return xs, ys
+	if !blank {
+		return gs
 	}
-	nx := make([]*Value, 0, len(xs))
-	ny := make([]*Value, 0, len(ys))
-	for i, l := range leaves {
-		if l.blank {
+	keep := make([]cmpGroup, 0, len(gs))
+	for _, g := range gs {
+		if leaves[g.first].blank {
 			continue
 		}
-		nx = append(nx, xs[i])
-		ny = append(ny, ys[i])
+		keep = append(keep, g)
 	}
-	return nx, ny
+	return keep
+}
+
+// groupTerm builds the value that answers whether one group of parts compares
+// equal, or unequal when v is a !=.
+//
+// dst, when it is not nil, takes the last operation of the term, so that a
+// comparison with one group keeps its identity and nothing that reads it is
+// redirected.
+func (d *decomposer) groupTerm(b *Block, v *Value, g cmpGroup, xs, ys []*Value, dst *Value, out *[]*Value) *Value {
+	if g.kind == cmpString {
+		return d.stringEqualTerm(b, v, xs[g.first], xs[g.first+1], ys[g.first], ys[g.first+1], dst, out)
+	}
+	return d.emit(b, dst, v, v.Op, out, xs[g.first], ys[g.first])
+}
+
+// emit produces one operation of a comparison, writing into dst when there is
+// one and appending a fresh value otherwise.
+//
+// The type is v's, which is the boolean the comparison already produced, so a
+// term and the comparison it replaces agree without the caller saying so.
+func (d *decomposer) emit(b *Block, dst, v *Value, op Op, out *[]*Value, args ...*Value) *Value {
+	if dst != nil {
+		dst.Op = op
+		setArgs(dst, args...)
+		return dst
+	}
+	w := d.mk(b, v.Pos, op, v.Type, args...)
+	*out = append(*out, w)
+	return w
 }
 
 // expandSliceNil compares a slice against the literal nil.
@@ -1476,8 +1657,8 @@ func RuntimeFunc(name string) *ir.Object {
 	panic("ssa: " + name + " is not in rtsym")
 }
 
-// expandStringEqual builds string equality out of the parts of the two
-// strings, per specs/020's row: runtime.memequal plus a length check.
+// stringEqualTerm builds string equality out of the two parts of each string
+// header, per specs/020's row: runtime.memequal plus a length check.
 //
 // The shape is
 //
@@ -1493,15 +1674,18 @@ func RuntimeFunc(name string) *ir.Object {
 // differ would read past the end of the shorter one. With the mask it is
 // called with zero, which reads nothing and answers true, and the length
 // comparison is then the whole answer.
-func (d *decomposer) expandStringEqual(b *Block, v *Value, out *[]*Value) {
-	xs, ys := d.parts[v.Args[0].ID], d.parts[v.Args[1].ID]
-	mem := d.someMem()
-
-	lenEq := d.mk(b, v.Pos, OpEq, d.boolType(), xs[1], ys[1])
+//
+// It is a term rather than the whole rewrite because a string is as often a
+// field as it is a value: expandEqual joins this with the comparison of every
+// other field, and a struct with two string fields makes this shape twice in
+// one block. The SelectN of each call sits immediately after it, which is what
+// keeps repairMemory naming the right call when a block holds more than one.
+func (d *decomposer) stringEqualTerm(b *Block, v *Value, xp, xn, yp, yn, dst *Value, out *[]*Value) *Value {
+	lenEq := d.mk(b, v.Pos, OpEq, d.boolType(), xn, yn)
 	wide := d.mk(b, v.Pos, OpZeroExt, d.intType(), lenEq)
 	mask := d.mk(b, v.Pos, OpNeg, d.intType(), wide)
-	n := d.mk(b, v.Pos, OpAnd, d.intType(), xs[1], mask)
-	call := d.mk(b, v.Pos, OpStaticCall, MemType, xs[0], ys[0], n, mem)
+	n := d.mk(b, v.Pos, OpAnd, d.intType(), xn, mask)
+	call := d.mk(b, v.Pos, OpStaticCall, MemType, xp, yp, n, d.someMem())
 	call.Aux = RuntimeFunc("runtime.memequal")
 	res := d.mk(b, v.Pos, OpSelectN, d.boolType(), call)
 	// The ABI states a bool result in the low byte and says nothing about the
@@ -1512,14 +1696,10 @@ func (d *decomposer) expandStringEqual(b *Block, v *Value, out *[]*Value) {
 	d.memAdded = true
 
 	if v.Op == OpEq {
-		v.Op = OpAnd
-		setArgs(v, lenEq, same)
-		return
+		return d.emit(b, dst, v, OpAnd, out, lenEq, same)
 	}
-	both := d.mk(b, v.Pos, OpAnd, d.boolType(), lenEq, same)
-	*out = append(*out, both)
-	v.Op = OpNot
-	setArgs(v, both)
+	both := d.emit(b, nil, v, OpAnd, out, lenEq, same)
+	return d.emit(b, dst, v, OpNot, out, both)
 }
 
 // expandStringOrder builds < and <= over two strings.
@@ -1613,9 +1793,9 @@ func (d *decomposer) expandIfaceEqual(b *Block, v *Value, out *[]*Value) {
 	setArgs(v, both)
 }
 
-// stringEqualOK reports whether the equality of two strings can be built where
-// it stands.
-func (d *decomposer) stringEqualOK(u *Value) bool {
+// callSiteOK reports whether a comparison that becomes a runtime call can be
+// built where it stands.
+func (d *decomposer) callSiteOK(u *Value) bool {
 	return d.someMem() != nil && d.memInsertSafe(u.Block, valueIndex(u.Block, u))
 }
 

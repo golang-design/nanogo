@@ -229,6 +229,57 @@ the body reads them, which is the reason `Arg` is excluded already, and adding
 found from outside this pass, with `go build -toolexec=nanogo` over the program
 above, and the failure is a refusal rather than a miscompile.
 
+### Equality is compared field by field
+
+`==` over a value wider than a register is not one comparison, and it is not a
+comparison of the bytes either. Go defines it field by field and element by
+element, and a field is compared the way that field's own type is compared. So
+the pass builds one term per field and joins them, with `And` for `==` and `Or`
+over the negated terms for `!=`.
+
+The grouping is what makes a term more than one part. `cmpGroups` walks the
+type alongside the walk that produced the parts, so a group covers exactly the
+parts one field contributed, and the group names the comparison the language
+gives that field's type:
+
+| field type | parts | term |
+| --- | --- | --- |
+| integer, pointer, channel, bool | 1 | the comparison itself, which becomes `CMP` |
+| float | 1 | the comparison itself, which becomes `FCMP` |
+| string | 2 | the length check and `runtime.memequal` of [020](020-ir.md) |
+| complex | 2 | the two float comparisons |
+| struct, array | the leaves of the elements | the groups of the elements |
+| interface, slice, map, function | refused | none |
+
+**It must be a walk over the type and not a scan of the parts**, because the
+parts do not determine the answer. `string` and `struct{p *byte; n int}` flatten
+to the same two parts, a pointer and an integer, and one is compared by the
+bytes it points at while the other is compared as two words. Only the type says
+which. The same walk is what carries the answer through a struct inside a struct
+and through an array of strings.
+
+Two properties of the language fall out of the walk and are why this is more
+correct than a comparison of the bytes would be. Padding between two fields is
+never a part, so `==` never reads it, which the language requires because those
+bytes are undefined. And a float field keeps its type all the way to selection,
+so `NaN != NaN` and $-0.0 = +0.0$ hold. A comparison of the bits gives the
+opposite answer on both.
+
+An interface field is where the grouping stops. General interface equality
+reaches the dynamic type's equality function through `runtime.ifaceeq` or
+`runtime.efaceeq`, and which of the two reads the first word follows from
+`ir.Type.EmptyIface`, which the parts of a composite no longer carry: both words
+of an interface become `unsafe.Pointer` so that [027](027-liveness-and-stackmaps.md)
+sees them. A whole interface still compares, because the type is in hand there.
+A composite holding one is refused, and the refusal names the operation the way
+every other missing rule does rather than guessing which runtime symbol to call.
+
+A slice, a map and a function are not comparable in Go at all except against
+`nil`, and a comparison against `nil` is not a part comparison: a slice against
+`nil` is its data pointer alone, which is the answer `gc` gives, and an
+interface against `nil` is its two words against zero. Both are admitted by name
+and neither reaches the grouping.
+
 ## Operations that lower to calls
 
 Some target-neutral operations have no machine instruction. They lower to calls,
@@ -391,6 +442,30 @@ Accurate and left alone: the pseudo-operation table, which matches
 `ssa.isPseudo` operation for operation including the exclusion of `MakeResult`;
 the shift-mask derivation, which matches `lowerShift` arithmetically; and the
 requirement that constant and address forms be rematerialisable.
+
+### Equality by parts required every part to be one word
+
+No spec in this deck said how `==` over a multi-word value is built, and the
+pass required every part of the type to be a single-word compare. A struct with
+a string field failed that requirement, so the operands were never split, and
+the whole `Load` of the struct reached selection where no rule takes it.
+`export.Dict.MethodExprIndex` refused for it, and it compares a
+`struct{Pkg *types2.Package; Name string}`, which is the smallest shape that
+hits it.
+
+The requirement was the wrong one. Go compares field by field and a field is
+compared the way its own type is compared, so the unit is the field and not the
+part. `cmpGroups` is that unit and the section above is the statement the spec
+was missing.
+
+The corpus counts did not move for it, and the reason is worth recording rather
+than reading as no effect. Go's own `test/cmp.go` compares a
+`struct{x int; y string}` and a `[2]string`, both of which the grouping now
+builds, and then compares a
+`struct{x int; _ string; y float64; _ float64; z int}`, which is six parts and
+above `MaxDecomposeParts`. The file's refusal moved from the first shape to the
+second and it is still one refusal. The other `Load` refusal in the corpus,
+`test/shift3.go`, is a `complex128` and was never this.
 
 ### The bound at a call boundary was written in one direction only
 

@@ -383,10 +383,12 @@ func main() { os.Exit(sum([]int{1, 2, 3, 4, 5, 6})) }
 
 // The program whose lowering has no rule for one of its values.
 //
-// Equality over a struct with a string field is the shape: ssa/decompose.go's
-// comparableByParts refuses to split it, because string equality is
-// runtime.memequal and not a word compare, so the whole 24-byte Load reaches
-// selection and no arm64 rule takes it.
+// Equality over a struct with an interface field is the shape: general
+// interface equality reaches the dynamic type's equality function through
+// runtime.ifaceeq or runtime.efaceeq, and which of the two reads the first
+// word follows from a bit the parts of a composite no longer carry, so
+// ssa/decompose.go's cmpGroups refuses the type, the operands are never split,
+// and the whole 24-byte Load reaches selection with no arm64 rule for it.
 //
 // The construct matters less than where it fails. Every other stage reports a
 // construct it cannot handle as a refusal naming the function, and lowering is
@@ -395,7 +397,7 @@ const noLoweringRuleProgram = `package main
 
 type pair struct {
 	n int
-	s string
+	e any
 }
 
 //go:noinline

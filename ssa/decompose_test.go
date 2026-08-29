@@ -75,6 +75,41 @@ var (
 	}})
 	decPtrStr = decLaid(&ir.Type{Kind: ir.Ptr, Elem: decStr, Name: "*string"})
 
+	// Two string fields, which is two calls to runtime.memequal in one block.
+	decTwoStr = decLaid(&ir.Type{Kind: ir.Struct, Name: "twostr", Fields: []ir.Field{
+		{Name: "A", Type: decStr},
+		{Name: "B", Type: decStr},
+	}})
+	decArrStr = decLaid(&ir.Type{Kind: ir.Array, Elem: decStr, Len: 2, Name: "[2]string"})
+	// A string one level down, so the grouping has to survive the recursion.
+	decInner = decLaid(&ir.Type{Kind: ir.Struct, Name: "inner", Fields: []ir.Field{
+		{Name: "S", Type: decStr},
+	}})
+	decNest = decLaid(&ir.Type{Kind: ir.Struct, Name: "nest", Fields: []ir.Field{
+		{Name: "I", Type: decInner},
+		{Name: "N", Type: decInt},
+	}})
+	// A string field named _, whose bytes are as unspecified as padding.
+	decBlankStr = decLaid(&ir.Type{Kind: ir.Struct, Name: "blankstr", Fields: []ir.Field{
+		{Name: "_", Type: decStr},
+		{Name: "N", Type: decInt},
+	}})
+	decWithIface = decLaid(&ir.Type{Kind: ir.Struct, Name: "withiface", Fields: []ir.Field{
+		{Name: "E", Type: decIface},
+		{Name: "N", Type: decInt},
+	}})
+	decMap     = decLaid(&ir.Type{Kind: ir.Map, Name: "map[int]int"})
+	decWithMap = decLaid(&ir.Type{Kind: ir.Struct, Name: "withmap", Fields: []ir.Field{
+		{Name: "M", Type: decMap},
+		{Name: "N", Type: decInt},
+	}})
+	// A pointer and a length side by side, which flattens to the two leaves a
+	// string flattens to and is compared as two words rather than by bytes.
+	decHeader = decLaid(&ir.Type{Kind: ir.Struct, Name: "header", Fields: []ir.Field{
+		{Name: "P", Type: decPtr},
+		{Name: "N", Type: decInt},
+	}})
+
 	// The type of a word that holds a pointer the type system no longer
 	// describes: an *itab, a *_type, or the data word of an interface.
 	decUnsafe = decLaid(&ir.Type{Kind: ir.UnsafePtr, Name: "unsafe.Pointer"})
@@ -881,10 +916,25 @@ func TestDecomposeEquality(t *testing.T) {
 		// to runtime.memequal of specs/020's table, joined by And.
 		{"string", decStr, false, ssa.OpEq, ssa.OpAnd, true},
 		{"string neq", decStr, false, ssa.OpNeq, ssa.OpNot, true},
-		// A string inside a struct is not reached: the expansion is written
-		// for a whole string and the field-wise walk has no place to put a
-		// call, so the struct stays whole.
-		{"struct holding a string", decNamed, false, ssa.OpEq, ssa.OpEq, false},
+		// A string inside a struct is compared the way a string is compared,
+		// joined by And with the comparison of the other field. The struct's
+		// leaves are the ones flatten produced, so the field-wise walk of
+		// cmpGroups is what says which two of them are a string header.
+		{"struct holding a string", decNamed, false, ssa.OpEq, ssa.OpAnd, true},
+		{"struct holding a string neq", decNamed, false, ssa.OpNeq, ssa.OpOr, true},
+		{"struct of two strings", decTwoStr, false, ssa.OpEq, ssa.OpAnd, true},
+		{"array of strings", decArrStr, false, ssa.OpEq, ssa.OpAnd, true},
+		{"nested struct holding a string", decNest, false, ssa.OpEq, ssa.OpAnd, true},
+		// A blank string field is not compared at all, so what is left is the
+		// one integer field and the comparison keeps its operation.
+		{"struct holding a blank string", decBlankStr, false, ssa.OpEq, ssa.OpEq, true},
+		// An interface field has no answer by parts: which runtime symbol
+		// reads the first word follows from ir.Type.EmptyIface, which the
+		// parts of a composite no longer carry.
+		{"struct holding an interface", decWithIface, false, ssa.OpEq, ssa.OpEq, false},
+		// A map field is not comparable in Go at all, and its one word must
+		// not become a pointer compare because it fits a register.
+		{"struct holding a map", decWithMap, false, ssa.OpEq, ssa.OpEq, false},
 		// Two general interfaces need the dynamic type's equality function,
 		// which is the call to runtime.ifaceeq of specs/020's table, joined by
 		// And with the comparison of the two itabs.
@@ -2574,5 +2624,232 @@ func TestCheckDecomposedNamesASurvivingInterfaceOp(t *testing.T) {
 		if !strings.Contains(vs[0].String(), op.String()) {
 			t.Errorf("the violation is %q and does not name %v", vs[0], op)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Equality where the leaves are not all one kind
+
+// decMemequals returns the number of calls to runtime.memequal a lowered
+// function makes, and the number of calls it makes to anything else.
+func decMemequals(f *ssa.Func) (memequal, other int) {
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != ssa.OpARM64CALLstatic {
+				continue
+			}
+			if o, _ := v.Aux.(*ir.Object); o != nil && o.Name == "runtime.memequal" {
+				memequal++
+				continue
+			}
+			other++
+		}
+	}
+	return memequal, other
+}
+
+// decEqLowered decomposes and lowers == over two loads of t.
+func decEqLowered(t *testing.T, typ *ir.Type, op ssa.Op) *ssa.Func {
+	t.Helper()
+	p := newDecFn()
+	f := p.ret(p.v(op, decBool, p.load(typ), p.load(typ)))
+	if err := ssa.Lower(f, rules.ARM64); err != nil {
+		t.Fatalf("%v: lowering refused the function: %v", typ, err)
+	}
+	decVerified(t, f)
+	if vs := ssa.CheckLowered(f, rules.ARM64); len(vs) != 0 {
+		t.Fatalf("%v: %v", typ, vs)
+	}
+	if vs := ssa.CheckDecomposed(f); len(vs) != 0 {
+		t.Fatalf("%v: a value wider than a register survived: %v", typ, vs)
+	}
+	return f
+}
+
+// TestDecomposeEqualStringFieldLowers is the shape that used to reach
+// selection whole.
+//
+// A struct with a string field is compared field by field, and the string
+// field is compared the way a string is compared. Before the grouping, the
+// whole type was refused because one of its leaves was not a word compare, the
+// operands were never split, and the wide Load reached lowering with no rule.
+func TestDecomposeEqualStringFieldLowers(t *testing.T) {
+	for _, op := range []ssa.Op{ssa.OpEq, ssa.OpNeq} {
+		f := decEqLowered(t, decNamed, op)
+		if n, other := decMemequals(f); n != 1 || other != 0 {
+			t.Errorf("%v: %d calls to memequal and %d to anything else, want one and none", op, n, other)
+		}
+	}
+}
+
+// TestDecomposeEqualTwoStringFields puts two calls in one block.
+//
+// It is the shape repairMemory had never seen: the pass used to insert at most
+// one call per comparison. Each call takes the memory the one before it
+// produced, and each SelectN still names its own call.
+func TestDecomposeEqualTwoStringFields(t *testing.T) {
+	for _, typ := range []*ir.Type{decTwoStr, decArrStr} {
+		f := decEqLowered(t, typ, ssa.OpEq)
+		if n, other := decMemequals(f); n != 2 || other != 0 {
+			t.Errorf("%v: %d calls to memequal and %d to anything else, want two and none", typ, n, other)
+		}
+		var calls []*ssa.Value
+		for _, b := range f.Blocks {
+			for _, v := range b.Values {
+				if v.Op == ssa.OpARM64CALLstatic {
+					calls = append(calls, v)
+				}
+			}
+		}
+		if len(calls) != 2 {
+			continue
+		}
+		// The second call is ordered after the first, so the two reads of the
+		// same memory cannot be scheduled apart.
+		if last := len(calls[1].Args) - 1; calls[1].Args[last] != calls[0] {
+			t.Errorf("%v: the second call takes %s, want the first call", typ, calls[1].Args[last].LongString())
+		}
+	}
+}
+
+// TestDecomposeEqualNestedStringField takes the grouping through a struct
+// inside a struct, which is where a scan of the leaf list would lose the
+// field boundaries.
+func TestDecomposeEqualNestedStringField(t *testing.T) {
+	f := decEqLowered(t, decNest, ssa.OpEq)
+	if n, other := decMemequals(f); n != 1 || other != 0 {
+		t.Errorf("%d calls to memequal and %d to anything else, want one and none", n, other)
+	}
+}
+
+// TestDecomposeEqualHeaderIsNotAString is why the grouping is a walk over the
+// type rather than a scan of the parts.
+//
+// struct{P *int; N int} and string flatten to the same two leaves, a pointer
+// and an integer. The struct compares both words and the string compares the
+// bytes they point at, and only the type says which.
+func TestDecomposeEqualHeaderIsNotAString(t *testing.T) {
+	f := decEqLowered(t, decHeader, ssa.OpEq)
+	if n, other := decMemequals(f); n != 0 || other != 0 {
+		t.Errorf("%d calls to memequal and %d to anything else, want none of either", n, other)
+	}
+}
+
+// TestDecomposeEqualBlankStringField asserts that a string field named _ is
+// not compared at all.
+//
+// Its bytes are as unspecified as padding, so comparing them is a wrong
+// answer and not a wasted call. What is left is the one integer field, so the
+// comparison keeps its operation and makes no call.
+func TestDecomposeEqualBlankStringField(t *testing.T) {
+	p := newDecFn()
+	eq := p.v(ssa.OpEq, decBool, p.load(decBlankStr), p.load(decBlankStr))
+	f := p.ret(eq)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if eq.Op != ssa.OpEq || eq.Args[0].Type != decInt {
+		t.Fatalf("the comparison became %s, want Eq over the one integer field", eq.LongString())
+	}
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == ssa.OpStaticCall {
+				t.Errorf("a blank string field was compared: %s", v.LongString())
+			}
+		}
+	}
+}
+
+// TestDecomposeEqualSkipsPadding asserts that == never reads the bytes between
+// two fields.
+//
+// Go leaves them undefined, so a byte compare of struct{A int8; B int64} can
+// answer unequal for two values the language calls equal. The walk that
+// produces the parts never produces one for padding, so the comparison reads
+// exactly the two fields and nothing between them.
+func TestDecomposeEqualSkipsPadding(t *testing.T) {
+	padded := decLaid(&ir.Type{Kind: ir.Struct, Name: "padded", Fields: []ir.Field{
+		{Name: "A", Type: decI8},
+		{Name: "B", Type: decInt},
+	}})
+	if padded.Size != 16 {
+		t.Fatalf("the type is %d bytes, want 16: the case needs the padding", padded.Size)
+	}
+	offs, types, ok := ssa.PartsOfType(padded)
+	if !ok {
+		t.Fatalf("the type does not split")
+	}
+	if len(offs) != 2 || offs[0] != 0 || offs[1] != 8 || types[0] != decI8 || types[1] != decInt {
+		t.Fatalf("the parts are %v at %v, want int8 at 0 and int at 8", types, offs)
+	}
+
+	p := newDecFn()
+	eq := p.v(ssa.OpEq, decBool, p.load(padded), p.load(padded))
+	f := p.ret(eq)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	// Two comparisons joined by And, one per field, and each one as wide as
+	// the field rather than as wide as the gap after it.
+	if eq.Op != ssa.OpAnd || len(eq.Args) != 2 {
+		t.Fatalf("the comparison became %s, want And of two", eq.LongString())
+	}
+	widths := []int64{1, 8}
+	for i, a := range eq.Args {
+		if a.Op != ssa.OpEq || a.Args[0].Type.Size != widths[i] {
+			t.Errorf("field %d compares as %s, want an Eq of %d bytes", i, a.LongString(), widths[i])
+		}
+	}
+}
+
+// TestDecomposeEqualFloatFieldIsNotABitCompare asserts that a float field is
+// compared as a float.
+//
+// NaN is not equal to itself and negative zero is equal to positive zero, and
+// neither holds for a compare of the bits, so the leaf must keep its type all
+// the way to selection. The struct also holds a string, so the float travels
+// the path the grouping added rather than the one that was already there.
+func TestDecomposeEqualFloatFieldIsNotABitCompare(t *testing.T) {
+	withFloat := decLaid(&ir.Type{Kind: ir.Struct, Name: "withfloat", Fields: []ir.Field{
+		{Name: "F", Type: decF64},
+		{Name: "S", Type: decStr},
+	}})
+	f := decEqLowered(t, withFloat, ssa.OpEq)
+	fcmp := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == ssa.OpARM64FCMPD {
+				fcmp++
+			}
+		}
+	}
+	if fcmp != 1 {
+		t.Errorf("%d float compares, want one: the float field became a bit compare\n%s", fcmp, f)
+	}
+	if n, _ := decMemequals(f); n != 1 {
+		t.Errorf("%d calls to memequal, want one", n)
+	}
+}
+
+// TestDecomposeEqualRefusesAnInterfaceField states the boundary of the
+// grouping.
+//
+// General interface equality reaches the dynamic type's equality function
+// through runtime.ifaceeq or runtime.efaceeq, and which of the two reads the
+// first word follows from ir.Type.EmptyIface. A part of a composite no longer
+// carries that, so the comparison is refused here and lowering names it,
+// rather than this pass guessing which symbol to call.
+func TestDecomposeEqualRefusesAnInterfaceField(t *testing.T) {
+	p := newDecFn()
+	eq := p.v(ssa.OpEq, decBool, p.load(decWithIface), p.load(decWithIface))
+	f := p.ret(eq)
+	ssa.Decompose(f)
+	decVerified(t, f)
+	if eq.Op != ssa.OpEq {
+		t.Fatalf("the comparison became %s, want an untouched Eq", eq.LongString())
+	}
+	if len(ssa.CheckDecomposed(f)) == 0 {
+		t.Fatal("the operands were split for a comparison that has no answer by parts")
+	}
+	if err := ssa.Lower(f, rules.ARM64); err == nil {
+		t.Fatal("lowering accepted a value it has no rule for")
 	}
 }
