@@ -56,6 +56,12 @@ type Reader struct {
 	// (specs/040-object-format.md), and the linker will not load an archive
 	// that no entry names.
 	imports []Import
+
+	// bodies caches the function bodies of each archive [Reader.Bodies]
+	// decoded, and bodyErrs the reason one could not be decoded. Both are
+	// lookup tables and neither is ranged over (specs/053-determinism.md).
+	bodies   map[string][]*FuncBody
+	bodyErrs map[string]error
 }
 
 // Import is one package this compilation read export data for.
@@ -228,4 +234,104 @@ func cutLine(b []byte) (line string, rest []byte, ok bool) {
 		return "", b, false
 	}
 	return string(b[:i]), b[i+1:], true
+}
+
+// Bodies returns every function body the archive of path carries, decoded
+// against the packages this Reader already read.
+//
+// It is the door the stenciler of specs/013-generics.md reaches a generic
+// another package declared through. The archive is the one this compilation
+// imported the package from, and the decode shares this Reader's package
+// table and its [types2.Context], which is what makes the answer usable: a
+// declaration the body names resolves to the object the type checker holds
+// for it, and an instantiation the body names is the checker's own type. A
+// second reader over the same archive would produce a parallel object graph,
+// and a call in the body would then name a function the compilation has no
+// object for.
+//
+// The archive is remembered from [Reader.Read], so a package this compilation
+// never imported has no file here and is refused by name rather than
+// searched for.
+//
+// The list is read once per package and kept, because one compilation
+// instantiates several declarations of one package and each decode is the
+// whole archive.
+func (r *Reader) Bodies(path string) ([]*FuncBody, error) {
+	if r.bodies == nil {
+		r.bodies = make(map[string][]*FuncBody)
+		r.bodyErrs = make(map[string]error)
+	}
+	if have, ok := r.bodies[path]; ok {
+		return have, r.bodyErrs[path]
+	}
+	bodies, err := r.readBodies(path)
+	r.bodies[path], r.bodyErrs[path] = bodies, err
+	return bodies, err
+}
+
+// Body returns the body of one declaration, or nil when the archive carries
+// none for it.
+//
+// name is gc's linker symbol name, which is what the export data names a body
+// by: "Contains" for a function and "(*Pointer).Store" for a method.
+func (r *Reader) Body(path, name string) (*FuncBody, error) {
+	bodies, err := r.Bodies(path)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range bodies {
+		// Generic first: the same declaration can reach a file twice, once
+		// through its extension data and once through the private root's
+		// inlining list, and the generic one is the shape an importer
+		// instantiates from (specs/015-export-data.md).
+		if b.Generic && b.Path == path && b.Name == name {
+			return b, nil
+		}
+	}
+	for _, b := range bodies {
+		if b.Path == path && b.Name == name {
+			return b, nil
+		}
+	}
+	return nil, nil
+}
+
+// readBodies decodes one archive's bodies.
+func (r *Reader) readBodies(path string) ([]*FuncBody, error) {
+	file := ""
+	for _, imp := range r.imports {
+		if imp.Path == path {
+			file = imp.File
+			break
+		}
+	}
+	if file == "" {
+		return nil, fmt.Errorf("this compilation read no archive for %q", path)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := Payload(data)
+	if err != nil {
+		return nil, err
+	}
+	var bodies []*FuncBody
+	err = func() (err error) {
+		// The decoder reports a stream it cannot read by panicking, for the
+		// reason [Reader.Read] states. A body the reader refuses arrives as a
+		// *BodyError instead, which ReadBodies already returns.
+		defer func() {
+			if v := recover(); v != nil {
+				err = fmt.Errorf("%v", v)
+			}
+		}()
+		dec := pkgbits.NewPkgDecoder(path, string(payload))
+		_, bodies, err = ReadBodies(r.ctxt, r.packages, dec)
+		return err
+	}()
+	if err != nil {
+		return nil, err
+	}
+	return bodies, nil
 }

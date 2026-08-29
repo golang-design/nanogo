@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"golang.design/x/nanogo/export"
+	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/types2"
 )
 
@@ -60,7 +61,18 @@ type importer struct {
 }
 
 func newImporter(cfg *Config) *importer {
-	return &importer{cfg: cfg, reader: export.NewReader()}
+	i := &importer{cfg: cfg, reader: export.NewReader()}
+	// The stenciler of specs/013-generics.md reads the body of a generic
+	// another package declares out of that package's archive
+	// (specs/015-export-data.md). It has to read it through this Reader and
+	// not through one of its own: the body names declarations and types, and
+	// they have to resolve to the objects the type checker holds rather than
+	// to a parallel graph a second decode of the same archive would build.
+	//
+	// It is set here because this is where the Reader is made, and one
+	// process runs one compilation.
+	ir.ForeignBodies = i.reader
+	return i
 }
 
 // Import implements [types2.Importer].

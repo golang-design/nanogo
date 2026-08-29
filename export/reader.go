@@ -34,6 +34,13 @@ type pkgReader struct {
 	// posBases caches the file name of each SectionPosBase element a body
 	// resolved. See [pkgReader.posBaseFile].
 	posBases map[pkgbits.Index]string
+
+	// dicts is the exported form of each dictionary a body was decoded
+	// against, by the reader's own dictionary. One declaration's bodies
+	// share one dictionary, and a generic type shares one with every method
+	// it declares, so the identity of the reader's dictionary is the
+	// identity of the exported one. See [pkgReader.readDict].
+	dicts map[*readerDict]*Dict
 }
 
 // ReadPackage decodes one package from an already opened container.
@@ -65,6 +72,7 @@ func readPackage(ctxt *types2.Context, imports map[string]*types2.Package, input
 		typs: make([]types2.Type, input.NumElems(pkgbits.SectionType)),
 
 		posBases: make(map[pkgbits.Index]string),
+		dicts:    make(map[*readerDict]*Dict),
 	}
 
 	r := pr.newReader(pkgbits.SectionMeta, pkgbits.PublicRootIdx, pkgbits.SyncPublic)

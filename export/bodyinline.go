@@ -24,6 +24,19 @@ import "fmt"
 //   - GetCallerPC and GetCallerSP. Both answer about the physical caller, and
 //     a caller that was inlined away is not the caller the source meant.
 //
+// A third produces a broken binary rather than a wrong program, and it was
+// found by building one:
+//
+//   - An instantiation of a generic. gc inlines the offered body into its
+//     caller and then inlines the instantiation into that, and the inline tree
+//     of the caller then names a symbol nothing defined: cmd/link stops with
+//     "inlined function slices.Contains[go.shape.[]int,go.shape.int] missing
+//     func info". A body gc wrote reaches its own inliner having already been
+//     through gc's own instantiation pass, and one nanogo wrote has not, so
+//     what the two hand the inliner is not the same thing.
+//     specs/024-inlining-and-devirtualization.md owns closing the gap; until
+//     it is closed the body is offered without it.
+//
 // The rest of the set is narrowness rather than necessity. This is the first
 // shape a body reaches gc in, so it holds no statement and no expression whose
 // handling in gc's inliner nanogo has not seen work: no go or defer statement,
@@ -85,6 +98,9 @@ func (c *inlineCheck) expr(k ExprKind) {
 
 // obj notes one use of a package-scope declaration.
 func (c *inlineCheck) obj(o ObjUse) {
+	if len(o.Targs) != 0 {
+		c.refuse("the body names the instantiation %s, and gc's inliner leaves the inline tree of the caller naming a symbol nothing defines", o.Name)
+	}
 	if o.Pkg == nil && o.Name == "recover" {
 		c.refuse("the body calls recover, which recovers nothing once it is inlined into another function")
 	}

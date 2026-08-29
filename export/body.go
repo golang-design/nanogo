@@ -48,9 +48,15 @@ type Body struct {
 	Rbrace Pos
 
 	// Dict is the object dictionary the declaration this body belongs to
-	// needs, which [BodySource.BuildBody] fills while it builds the body.
-	// It is nil for a body read from an archive, which names the slots of a
-	// dictionary that archive already holds.
+	// needs. [BodySource.BuildBody] fills it while it builds the body,
+	// allocating a slot as it writes the node that names one. A body read
+	// from an archive carries the dictionary that archive holds, decoded
+	// (bodydictread.go): the slots were numbered when the declaring package
+	// was compiled, and the body names them by number, so a consumer cannot
+	// resolve one without it.
+	//
+	// One declaration's bodies share one value, and a generic type shares
+	// one with every method it declares, on both paths.
 	Dict *Dict
 }
 
@@ -796,3 +802,15 @@ func (*ZeroExpr) exprKind() ExprKind           { return ExprZero }
 func (*FuncInstExpr) exprKind() ExprKind       { return ExprFuncInst }
 func (*RecvExpr) exprKind() ExprKind           { return ExprRecv }
 func (*RuntimeBuiltinExpr) exprKind() ExprKind { return ExprRuntimeBuiltin }
+
+// StmtKindOf returns the encoding of one statement, and ExprKindOf the
+// encoding of one expression.
+//
+// The node set is closed, so a consumer switches on the concrete type and not
+// on the code. The codes are here for the consumer that reaches a node it has
+// no case for: [StmtKind.String] and [ExprKind.String] name it, and a refusal
+// that names the construct is what tells a partial consumer from a wrong one.
+func StmtKindOf(s Stmt) StmtKind { return s.stmtKind() }
+
+// ExprKindOf returns the encoding of one expression. See [StmtKindOf].
+func ExprKindOf(e Expr) ExprKind { return e.exprKind() }

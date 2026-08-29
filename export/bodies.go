@@ -34,6 +34,13 @@ type FuncBody struct {
 	// private root, which is an inlinable body.
 	Generic bool
 
+	// Pragma is the //go: directives the declaration carries, as gc's own
+	// bit set. It is not translated, because the two compilers do not agree
+	// on the numbering and nothing here reads one: a consumer that acts on a
+	// directive has to translate it, and one that cannot has to refuse a
+	// declaration that carries any (specs/016-directives-and-pragmas.md).
+	Pragma int
+
 	// Idx is the SectionBody element, and Body is it decoded.
 	Idx  pkgbits.Index
 	Body *Body
@@ -84,6 +91,7 @@ func readBodies(ctxt *types2.Context, imports map[string]*types2.Package, input 
 			Path:    o.path,
 			Name:    o.name,
 			Generic: true,
+			Pragma:  o.pragma,
 			Idx:     o.body,
 			Body:    body,
 			Nested:  pr.nested - before,
@@ -101,6 +109,7 @@ type owner struct {
 	notes  int           // receiver and parameters
 	dict   *readerDict   // the dictionary the body's derived types resolve in
 	body   pkgbits.Index // the body named by the extension data, or -1
+	pragma int           // the //go: directives, as gc's bit set
 }
 
 // declarations walks every object in the file and returns the ones that can
@@ -134,8 +143,8 @@ func (pr *pkgReader) declarations(pkg *types2.Package) []owner {
 			}
 			o := owner{path: objPkg.Path(), name: objName, body: -1}
 			o.params, o.notes = sigLocals(fn.Signature())
-			o.dict = pr.bodyDict(idx, tag)
-			o.body = pr.funcExtBody(idx, o.notes, o.path+"."+o.name)
+			o.dict = pr.bodyDict(idx, tag, objPkg)
+			o.body, o.pragma = pr.funcExtBody(idx, o.notes, o.path+"."+o.name)
 			out = append(out, o)
 
 		case pkgbits.ObjType:
@@ -179,18 +188,19 @@ func methodSym(named *types2.Named, m *types2.Func) string {
 	return name + "." + m.Name()
 }
 
-// funcExtBody returns the body a function's extension data names, or -1.
-func (pr *pkgReader) funcExtBody(idx pkgbits.Index, notes int, name string) pkgbits.Index {
+// funcExtBody returns the body a function's extension data names, or -1, with
+// the declaration's pragma flags.
+func (pr *pkgReader) funcExtBody(idx pkgbits.Index, notes int, name string) (pkgbits.Index, int) {
 	r := &bodyReader{
 		reader: pr.newReader(pkgbits.SectionObjExt, idx, pkgbits.SyncObject1),
 		name:   name,
 		relocs: make(map[pkgbits.RefTableEntry]bool),
 	}
-	body := r.funcExt(notes)
+	body, pragma := r.funcExt(notes)
 	if n := r.Data.Len(); n != 0 {
 		r.refuse("%d bytes of the extension data were not decoded", n)
 	}
-	return body
+	return body, pragma
 }
 
 // methodExtBodies returns the bodies the methods of a defined type name.
@@ -206,7 +216,7 @@ func (pr *pkgReader) methodExtBodies(idx pkgbits.Index, objPkg *types2.Package, 
 		name:   name,
 		relocs: make(map[pkgbits.RefTableEntry]bool),
 	}
-	dict := pr.bodyDict(idx, pkgbits.ObjType)
+	dict := pr.bodyDict(idx, pkgbits.ObjType, objPkg)
 
 	// The three fields. The two descriptor symbol indices are always
 	// present: gc's reader has no branch here, so the shape gc's linker
@@ -231,15 +241,15 @@ func (pr *pkgReader) methodExtBodies(idx pkgbits.Index, objPkg *types2.Package, 
 			params: locals,
 			notes:  notes,
 			dict:   dict,
-			body:   r.funcExt(notes),
 		}
+		o.body, o.pragma = r.funcExt(notes)
 		out = append(out, o)
 	}
 	return out
 }
 
 // funcExt decodes a function's extension data and returns the body it names,
-// or -1 when it names none.
+// or -1 when it names none, with the declaration's pragma flags.
 //
 // Two shapes reach a file. gc's linker writes the relocated one, which holds
 // the ABI, the escape analysis notes and the inlining cost, for an object it
@@ -250,9 +260,9 @@ func (pr *pkgReader) methodExtBodies(idx pkgbits.Index, objPkg *types2.Package, 
 // notes is the receiver plus the parameters, because the relocated shape
 // writes one escape analysis note for each of them and no note for a result.
 // A reader that miscounted them would desync.
-func (r *bodyReader) funcExt(notes int) pkgbits.Index {
+func (r *bodyReader) funcExt(notes int) (pkgbits.Index, int) {
 	r.Sync(pkgbits.SyncFuncExt)
-	r.pragmaFlag()
+	pragma := r.pragmaFlag()
 	r.linkname()
 
 	// The two WebAssembly fields are not read. They are written only where
@@ -260,7 +270,7 @@ func (r *bodyReader) funcExt(notes int) pkgbits.Index {
 	// of its own target (specs/030-abi.md).
 
 	if !r.Bool() {
-		return r.reloc(pkgbits.SectionBody)
+		return r.reloc(pkgbits.SectionBody), pragma
 	}
 	r.Uint64() // the ABI the definition is at
 	for range notes {
@@ -270,7 +280,7 @@ func (r *bodyReader) funcExt(notes int) pkgbits.Index {
 		r.Len()  // the inlining cost
 		r.Bool() // whether the results can be delayed
 	}
-	return -1
+	return -1, pragma
 }
 
 func (r *bodyReader) pragmaFlag() int {
@@ -319,6 +329,7 @@ func (pr *pkgReader) inlineBodies(owners []owner) []*FuncBody {
 		out = append(out, &FuncBody{
 			Path:   path,
 			Name:   name,
+			Pragma: o.pragma,
 			Idx:    idx,
 			Body:   body,
 			Nested: pr.nested - before,
@@ -334,7 +345,7 @@ func (pr *pkgReader) inlineBodies(owners []owner) []*FuncBody {
 // lists wherever it needs a descriptor whose identity depends on the type
 // arguments. The type parameters themselves are read from the declaration's
 // own element, because a derived type is written in terms of them.
-func (pr *pkgReader) bodyDict(idx pkgbits.Index, tag pkgbits.CodeObj) *readerDict {
+func (pr *pkgReader) bodyDict(idx pkgbits.Index, tag pkgbits.CodeObj, objPkg *types2.Package) *readerDict {
 	dict := pr.objDictIdx(idx)
 
 	r := pr.newReader(pkgbits.SectionObjDict, idx, pkgbits.SyncObject1)
@@ -391,6 +402,12 @@ func (pr *pkgReader) bodyDict(idx pkgbits.Index, tag pkgbits.CodeObj) *readerDic
 	}
 
 	pr.bindTypeParams(idx, tag, dict)
+
+	// The exported form, built here because this is the one place that has
+	// the whole dictionary and the declaration it belongs to. A body carries
+	// it, and the stenciler of specs/013-generics.md reads the slots the body
+	// names out of it (bodydictread.go).
+	pr.readDict(dict, objPkg)
 	return dict
 }
 

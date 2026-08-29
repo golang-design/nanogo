@@ -7,6 +7,7 @@ package ir
 import (
 	"strings"
 
+	"golang.design/x/nanogo/export"
 	"golang.design/x/nanogo/syntax"
 	"golang.design/x/nanogo/types2"
 )
@@ -65,12 +66,16 @@ type instance struct {
 	// body.
 	sym string
 
-	// origin is the generic declaration and decl is its source. decl is what
-	// makes this pass possible and what bounds it: a generic declared in
-	// another package has no syntax tree here, and instanceOf refuses it by
-	// name rather than emitting a call to a symbol nothing defines.
+	// origin is the generic declaration and decl is its source. A generic
+	// this package declares has a syntax tree here, and decl is it.
 	origin *types2.Func
 	decl   *syntax.FuncDecl
+
+	// body is the declaration's body read out of the archive of the package
+	// that declares it, and is set instead of decl for a generic another
+	// package declares. foreign.go is the walk over it, and exactly one of
+	// the two is set: they are the two front halves of specs/020-ir.md.
+	body *export.Body
 
 	// targs are the type arguments, already substituted through the enclosing
 	// instantiation if this one was discovered inside another.
@@ -134,6 +139,25 @@ type instance struct {
 // writes the import path of every defined type in it. gc spells its dictionary
 // the same way, through types.LinkString, which is why the two lists above
 // agree on int, string and main.S.
+//
+// # Where it does collide, and why that is not a problem
+//
+// The paragraph above is about a generic the package being compiled declares,
+// and that is the case it was measured on. A generic another package declares
+// is different, and go tool nm over a gc-compiled package that calls
+// slices.Contains at []int says so: gc puts three symbols in that package's
+// archive, slices.Contains[go.shape.[]int,go.shape.int], the dictionary
+// slices..dict.Contains[[]int,int], and slices.Contains[[]int,int] itself,
+// which is the wrapper gc generates so that the instantiation has a symbol
+// callable without a dictionary. That last spelling is this one.
+//
+// The collision is between two definitions of one function, which is what the
+// name was chosen to make it. gc's wrapper loads the dictionary and tail-calls
+// the shape body, and nanogo's is a full stencil, and both compute what the
+// source says. gc marks its own copy duplicate-tolerant so cmd/link merges
+// them, and internal/e2e builds the mixed program and compares it against an
+// all-gc build of the same source: the linked binary holds one definition and
+// prints gc's answers.
 func instanceSym(origin *types2.Func, targs []types2.Type) string {
 	var b strings.Builder
 	b.WriteString(funcSym(origin))
@@ -234,7 +258,22 @@ func (b *builder) instanceOf(x *syntax.Name, origin *types2.Func) *Object {
 		// body in the program.
 		targs[i] = types2.Canonical(b.ctxt, b.subst(inst.TypeArgs.At(i)))
 	}
+	obj, _ := b.funcInstance(origin, targs)
+	return obj
+}
 
+// funcInstance returns the object one instantiation of a generic function
+// names, and queues the instantiation to be built.
+//
+// targs are already substituted through the enclosing instantiation and
+// canonical, because the symbol is the identity of the instantiation. It is
+// the entry point both discoveries reach: the checker's record on a name, and
+// the dictionary slot a foreign body's call carries (foreign.go).
+//
+// The signature is returned beside the object, because a caller that has no
+// syntax tree has no other way to ask what the instantiation takes and
+// returns.
+func (b *builder) funcInstance(origin *types2.Func, targs []types2.Type) (*Object, *types2.Signature) {
 	if tparams := types2.TypeParamsOf(origin.Type()); len(tparams) != len(targs) {
 		// Instantiate panics on a count mismatch rather than returning an
 		// error, and so does NewSubstitution. The checker cannot record one,
@@ -243,12 +282,12 @@ func (b *builder) instanceOf(x *syntax.Name, origin *types2.Func) *Object {
 		// trace.
 		b.errorf("ir: %s has %d type parameters and an instantiation of it names %d",
 			funcSym(origin), len(tparams), len(targs))
-		return nil
+		return nil, nil
 	}
 
 	sym := instanceSym(origin, targs)
 	if have, ok := b.instances[sym]; ok {
-		return have.obj
+		return have.obj, have.sig
 	}
 
 	// The signature is instantiated from the same list the symbol was spelled
@@ -258,31 +297,27 @@ func (b *builder) instanceOf(x *syntax.Name, origin *types2.Func) *Object {
 	sig, _ := inSig.(*types2.Signature)
 	if err != nil || sig == nil {
 		b.errorf("ir: the instantiation %s has no signature", sym)
-		return nil
+		return nil, nil
 	}
 
 	decl := b.generic[origin]
 	switch {
-	case origin.Pkg() != b.tpkg:
-		// The body lives in the archive of the package that declared it.
-		// specs/015-export-data.md reads one and specs/020-ir.md has no entry
-		// point that takes one, so there is nothing to substitute through
-		// here yet.
-		b.errorf("ir: %s is declared in package %s and an instantiation of another package's generic function is not built",
-			sym, origin.Pkg().Path())
-		return nil
-	case decl == nil:
-		b.errorf("ir: %s has no declaration in this package", sym)
-		return nil
-	case decl.Body == nil:
-		b.errorf("ir: %s has no body", sym)
-		return nil
 	case origin.Signature().RecvTypeParams().Len() > 0 || origin.Signature().Recv() != nil:
 		// A method's dictionary holds the receiver's type parameters ahead of
 		// its own, so the key of the instantiation is not the list on this
 		// name alone. specs/013-generics.md leaves that question open.
 		b.errorf("ir: %s is a method and an instantiation of a generic method is not built", sym)
-		return nil
+		return nil, nil
+	case origin.Pkg() != b.tpkg:
+		// The body lives in the archive of the package that declared it, and
+		// foreign.go is the walk over it.
+		return b.foreignInstance(sym, origin, targs, sig, nil), sig
+	case decl == nil:
+		b.errorf("ir: %s has no declaration in this package", sym)
+		return nil, nil
+	case decl.Body == nil:
+		b.errorf("ir: %s has no body", sym)
+		return nil, nil
 	}
 
 	in := &instance{sym: sym, origin: origin, decl: decl, targs: targs, sig: sig}
@@ -294,7 +329,7 @@ func (b *builder) instanceOf(x *syntax.Name, origin *types2.Func) *Object {
 	}
 	b.instances[sym] = in
 	b.todo = append(b.todo, in)
-	return in.obj
+	return in.obj, sig
 }
 
 // stencil is the instantiation being built, and is nil while an ordinary
@@ -357,12 +392,15 @@ func (b *builder) drainInstances() {
 // exactly as gc builds it: gc stencils the shape body and emits one wrapper
 // per method per instantiation, both dupok, in the package that instantiates.
 //
-// An instantiation of a generic type another package declares is left alone.
-// Its bodies are in that package's archive, specs/015-export-data.md reads one
-// and specs/020-ir.md has no entry point that takes one, so there is no tree
-// here to substitute through. The type itself still converts and still gets a
-// descriptor, which is right for a generic type with no methods: iter.Seq[int]
-// needs no body at all.
+// An instantiation of a generic type another package declares is not built
+// here, and the unit for one is the selection rather than the type. The
+// converter reports every instantiated defined type it meets, and it meets one
+// wherever a type reaches it: a field of a struct of an imported package is
+// enough, so os.File alone puts sync/atomic.Pointer[os.dirInfo] on this queue.
+// Building the method set of each would read an archive for every type the
+// package's types transitively hold, most of which no code here calls. So the
+// bodies of a foreign instantiation are built where one is named, which is
+// checkMethodIsBuilt, and foreign.go is the walk over them.
 func (b *builder) instantiateType(named *types2.Named) {
 	n := named.TypeArgs()
 	if n.Len() == 0 {
@@ -407,6 +445,10 @@ func (b *builder) methodInstance(named *types2.Named, m *types2.Func, targs []ty
 
 	decl := b.generic[origin]
 	switch {
+	case origin.Pkg() != b.tpkg && osig.RecvTypeParams().Len() == len(targs) && osig.TypeParams().Len() == 0:
+		// The bodies of a generic type another package declares are in that
+		// package's archive, and foreign.go is the walk over them.
+		return b.foreignInstance(sym, origin, targs, sig, named)
 	case osig.RecvTypeParams().Len() != len(targs):
 		// NewSubstitution panics on a count mismatch rather than returning an
 		// error. The checker cannot record one, so this is a guard against a
@@ -473,6 +515,9 @@ func instanceTypeParams(in *instance, origin *types2.Signature) []*types2.TypePa
 // statement converts to the concrete result type rather than to a type
 // parameter.
 func (b *builder) buildInstance(in *instance) *Func {
+	if in.body != nil {
+		return b.buildForeignInstance(in)
+	}
 	origin, _ := in.origin.Type().(*types2.Signature)
 	if origin == nil {
 		b.errorf("ir: %s is not a function", in.sym)
@@ -633,17 +678,17 @@ func (b *builder) resolveSelection(x *syntax.SelectorExpr, sel *types2.Selection
 // instantiate the method, so the key of the instantiation is not the list on
 // the selector alone, and specs/013-generics.md leaves that question open.
 //
-// A method of an instantiation of a generic type another package declares has
-// its body in that package's archive. specs/015-export-data.md reads one and
-// specs/020-ir.md has no entry point that takes one, so there is no tree here
-// to substitute through. gc has the same obligation and discharges it from the
-// export data: it emits the method of every instantiation, dupok, in the
-// package that instantiates.
+// A method of an instantiation this package declares is built by
+// instantiateType and is not refused here. One of an instantiation another
+// package declares is queued here, and here is the only place it is: the
+// converter meets such a type wherever a type reaches it, and the selection is
+// what says the program calls the method rather than merely holding a value of
+// the type. Its body comes out of the declaring package's archive
+// (foreign.go), and a body that cannot be read is refused there by name.
 //
-// A method of an instantiation this package declares is built, by
-// instantiateType, and is not refused here. A generic type used for its fields
-// alone is not refused either, and is correct: the field types are substituted
-// by the checker and the IR type is an ordinary struct.
+// A generic type used for its fields alone is not refused, and is correct: the
+// field types are substituted by the checker and the IR type is an ordinary
+// struct.
 func (b *builder) checkMethodIsBuilt(fn *types2.Func) {
 	sig, _ := fn.Type().(*types2.Signature)
 	if sig == nil || sig.Recv() == nil {
@@ -664,8 +709,12 @@ func (b *builder) checkMethodIsBuilt(fn *types2.Func) {
 	if obj := named.Origin().Obj(); obj != nil && obj.Pkg() == b.tpkg {
 		return
 	}
-	b.errorf("ir: %s is a method of %s and an instantiation of a generic type another package declares is not built",
-		funcSym(fn), types2.TypeString(named, nil))
+	n := named.TypeArgs()
+	targs := make([]types2.Type, n.Len())
+	for i := range targs {
+		targs[i] = n.At(i)
+	}
+	b.methodInstance(named, fn, targs)
 }
 
 // checkLocalType reports a type declared inside a generic body that the

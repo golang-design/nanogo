@@ -326,6 +326,11 @@ type builder struct {
 	stencil   *stencil
 	ctxt      *types2.Context
 
+	// foreign is the body of the instantiation being built when that body
+	// came out of an archive rather than out of a syntax tree, and is nil
+	// otherwise. foreign.go is the walk over it.
+	foreign *foreignFrame
+
 	// fn is the function being built, and sinks is the stack of statement
 	// lists it is being built into. An expression that needs a temporary
 	// appends to the top of the stack, which is why expression building and

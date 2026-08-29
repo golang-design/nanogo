@@ -106,7 +106,7 @@ func (pr *pkgReader) decodeBody(idx pkgbits.Index, dict *readerDict, nparams int
 	}
 	r.dict = dict
 
-	body := &Body{Params: make([]Local, nparams)}
+	body := &Body{Params: make([]Local, nparams), Dict: pr.dicts[dict]}
 	for i := range body.Params {
 		body.Params[i] = r.local()
 	}

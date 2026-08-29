@@ -414,37 +414,38 @@ func TestStencilFollowsAnInstantiationOutOfAMethodBody(t *testing.T) {
 	}
 }
 
-// TestStencilRefusesAMethodOfAnotherPackagesGenericType is the line the
-// generic type stops at, and it is the same line the generic function stops
-// at: the body is in that package's archive.
-func TestStencilRefusesAMethodOfAnotherPackagesGenericType(t *testing.T) {
+// TestStencilRefusesAMethodOfAnotherPackagesGenericTypeWithNoArchive is what a
+// build with no source of foreign bodies gets.
+//
+// The bodies of a generic type another package declares are in that package's
+// archive, and foreign.go reads them through the reader the type checker
+// imported with. A build that set none, which is every unit test in this
+// package, has nowhere to read them from, and the refusal names the method and
+// says so.
+func TestStencilRefusesAMethodOfAnotherPackagesGenericTypeWithNoArchive(t *testing.T) {
 	pkg, files, info := buildTypecheckWithImports(t, "package p\n\nimport \"sync/atomic\"\n\n"+
 		"func user(p *atomic.Pointer[int], v *int) { p.Store(v) }\n")
 	_, err := Build(pkg, files, info)
 	if err == nil {
 		t.Fatal("a method of another package's generic type was accepted")
 	}
-	for _, want := range []string{"sync/atomic.Pointer[int]", "another package declares"} {
+	for _, want := range []string{"sync/atomic.(*Pointer[int]).", "package sync/atomic", "no source of foreign bodies"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal is %q, want it to hold %q", err, want)
 		}
 	}
 }
 
-// TestStencilRefusesAGenericOfAnotherPackage is the line this pass stops at.
-//
-// The body of a generic another package declared lives in that package's
-// archive. specs/015-export-data.md reads one and specs/020-ir.md has no entry
-// point that takes one, so there is no tree here to substitute through and the
-// refusal says which package the body is in.
-func TestStencilRefusesAGenericOfAnotherPackage(t *testing.T) {
+// TestStencilRefusesAGenericOfAnotherPackageWithNoArchive is the same line for
+// a generic function.
+func TestStencilRefusesAGenericOfAnotherPackageWithNoArchive(t *testing.T) {
 	pkg, files, info := buildTypecheckWithImports(t, "package p\n\nimport \"slices\"\n\n"+
 		"func user(s []int) { slices.Sort(s) }\n")
 	_, err := Build(pkg, files, info)
 	if err == nil {
 		t.Fatal("an instantiation of another package's generic function was accepted")
 	}
-	for _, want := range []string{"slices.Sort[", "package slices", "not built"} {
+	for _, want := range []string{"slices.Sort[", "package slices", "no source of foreign bodies"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal is %q, want it to hold %q", err, want)
 		}
