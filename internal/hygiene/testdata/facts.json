@@ -2,7 +2,7 @@
   "arm64.encodings": 998947,
   "cover.driver": 94.5,
   "cover.export": 91.7,
-  "cover.export/pkgbits": 93.7,
+  "cover.export/pkgbits": 94,
   "cover.ir": 90.9,
   "cover.loader": 98.8,
   "cover.obj": 98.4,

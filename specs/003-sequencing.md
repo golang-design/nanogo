@@ -310,7 +310,7 @@ package:
 | `rtsym` | 100% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |
 | `rtype` | 91% | [032](032-type-descriptors-and-itabs.md) |
 | `export` | 91% | [015](015-export-data.md) |
-| `export/pkgbits` | 93% | [015](015-export-data.md) |
+| `export/pkgbits` | 94% | [015](015-export-data.md) |
 | `driver` | 94% | [050](050-driver.md), [051](051-build-integration.md) |
 | `internal/covercheck` | 97% | the gate itself |
 | `cmd/nanogo` | excluded | one statement; the reason is in the exclusions file |
