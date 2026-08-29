@@ -28,7 +28,7 @@ a program.
 | a **declared** function used as a func value | built; the same static one-word `funcval` |
 | a literal with a capture list | built; a heap closure object holding the code pointer and one heap cell per capture |
 | a method value | **refused**; its receiver is bound by value and only a capture through a heap cell is built |
-| a named result a literal captures | **refused**; the single exit of a function that defers already owns that storage |
+| a named result a literal captures | built; the result gets a cell like any other capture, and the single exit copies the cell into the result object |
 | `defer f()` with no arguments and no captures | built; `runtime.deferproc`, plus the single exit below |
 | `defer f(x)`, with arguments | built; `ir.Build` puts the call in a literal that captures the operands, marked `FuncIDWrapper` |
 | `defer x.M()`, a method of a concrete type | built; the receiver is the call's first operand and travels the same way |
@@ -150,11 +150,38 @@ meets it, and a defined func type does not.
 
 ### The single exit, which the linker requires
 
-A function that defers leaves through one epilogue, `.deferexit`, and that
-epilogue holds the only call to `runtime.deferreturn`. `cmd/link` records the
-offset of one such call per function in `pclntab`, so a function with two of
-them resumes at the wrong one after a panic. Every `return` in a function that
+A function that defers leaves through one epilogue, `.exit`, and that epilogue
+holds the only call to `runtime.deferreturn`. `cmd/link` records the offset of
+one such call per function in `pclntab`, so a function with two of them
+resumes at the wrong one after a panic. Every `return` in a function that
 defers becomes a `goto` to that label.
+
+### A captured named result
+
+A named result is a variable the language shares with a literal, so it gets a
+heap cell like every other capture. What makes it different is that the result
+object is also the storage the ABI returns, so the two have to be joined:
+
+- every `return` writes the **cell**, which is what makes `return x` visible to
+  a deferred function and to a literal that outlives the frame;
+- the exit copies the cell into the result object, **after** the call to
+  `runtime.deferreturn`, because a deferred function may assign the result and
+  what it assigns is the cell.
+
+A function that captures a result and defers nothing gets the same exit without
+the `deferreturn` call. `return x` assigns the named result whether or not the
+function defers, and a literal that outlives the frame reads the cell
+afterwards, so the write and the read back have to happen there too.
+
+**The results are address-taken and the cell is not.** A result is assigned at
+every return, so it is a phi at the exit, and the copies a phi resolves into
+sit at the end of the predecessor blocks. `runtime.recovery` restores the stack
+pointer, restores no register and jumps straight to the `deferreturn` call, so
+it skips those copies; the result has to come out of the frame instead. The
+cell is assigned once at the entry, which dominates the exit, so it is one
+value with one home, and `ssa/regalloc.go`'s `AllocInvCall` already puts a
+value live across a call in the frame. Marking it as well would pin a frame
+slot for a reason that does not hold.
 
 ### Capture is by reference, and this spec does not decide it
 

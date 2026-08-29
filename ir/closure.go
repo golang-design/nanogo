@@ -59,11 +59,20 @@ import (
 // fact about the object, which word holds a pointer, and unsafe.Pointer says
 // it: the code pointer stays a uintptr and every capture word is traced.
 //
+// # A named result is a variable like any other
+//
+// A literal may read and assign a named result, and the language shares it the
+// way it shares every other variable, so it gets a cell too. What is different
+// is that the result object is also the storage the ABI returns, so the two
+// have to be joined: every return writes the cell, and the single exit of
+// ir/lower.go copies the cell into the result object after the deferred
+// functions have run. A function that captures a result therefore gets that
+// exit whether or not it defers.
+//
 // # What is refused
 //
 // A method value, whose receiver is captured by value rather than through a
-// cell, and a named result read by a literal, whose storage the single exit of
-// a function that defers already owns. Both are named where they are refused.
+// cell. It is named where it is refused.
 
 // closureCodeField is the index of the code pointer in a closure object, and
 // closureFirstCapture is the index of the first capture after it.
@@ -167,16 +176,6 @@ func (l *lowerer) moveCapturedToHeap() {
 	l.cells = make(map[*Object]*Object, len(owned))
 	l.uncelled = make(map[*Object]bool)
 	for i, o := range owned {
-		if o.Class == ClassResult {
-			// A named result is read by the epilogue of a function that
-			// defers, which deferExit builds after this pass has run and out
-			// of the result object itself. Moving the result to a cell would
-			// leave that epilogue reading the frame slot the cell replaced.
-			l.refuse(at[i], "the closure captures the result "+o.Name+
-				", whose storage the single exit of a function that defers owns")
-			l.uncelled[o] = true
-			continue
-		}
 		if _, err := TypeSymbol(o.Type); err != nil {
 			// The cell is allocated through runtime.newobject, which takes a
 			// *_type, so a capture whose type specs/032 cannot name refuses
@@ -328,8 +327,11 @@ func (l *lowerer) rewriteCaptured(n *Node) {
 //
 // A parameter's cell is allocated at the entry and the incoming value is
 // copied into it, because a parameter is declared by the signature and not by
-// a statement. A local's cell is allocated in the innermost statement list
-// that holds every mention of it, immediately before the first of them.
+// a statement. A named result's cell is allocated at the entry for the same
+// reason, and with no copy: the allocation is already zeroed and a named
+// result starts at the zero value. A local's cell is allocated in the
+// innermost statement list that holds every mention of it, immediately before
+// the first of them.
 //
 // The innermost list is not a tidiness choice. A variable declared in the body
 // of a loop is a fresh variable on every iteration, which is the Go 1.22 rule
@@ -350,6 +352,14 @@ func (l *lowerer) placeCells(body []Stmt, owned []*Object) []Stmt {
 			entry = append(entry, Assign(o.Pos,
 				&Node{Op: ODeref, Pos: o.Pos, Type: o.Type, X: ref(cell, o.Pos)},
 				ref(o, o.Pos)))
+			continue
+		}
+		if o.Class == ClassResult {
+			// A named result is declared by the signature too, and it starts
+			// at the zero value. runtime.newobject returns zeroed memory, so
+			// the allocation is the whole of it and no copy is needed: the
+			// result object is written only by the exit, out of this cell.
+			entry = append(entry, l.newCell(cell, o.Pos))
 			continue
 		}
 		want := 0

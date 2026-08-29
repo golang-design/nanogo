@@ -158,8 +158,8 @@ func LowerAndCollect(fn *Func) (Collected, error) {
 	}
 	l.openCaptures()
 	fn.Body = l.stmts(fn.Body)
-	if l.ndefer > 0 {
-		l.deferExit()
+	if l.ndefer > 0 || l.hasCelledResult() {
+		l.singleExit()
 	}
 	if len(l.errs) > 0 {
 		return l.collected(), l.errs[0]
@@ -258,7 +258,7 @@ type lowerer struct {
 	uncelled map[*Object]bool
 
 	// ndefer counts the defer statements this function lowered. One is enough
-	// to owe the function the single exit deferExit builds, so the count is
+	// to owe the function the single exit singleExit builds, so the count is
 	// read as a flag; it is a count so that a report can say how many.
 	ndefer int
 }
@@ -3889,11 +3889,11 @@ func (l *lowerer) minMax(n Expr) Expr {
 // the cost: a heap allocation and a store where gc has neither. It is correct,
 // and the fix is a channel for data symbols rather than anything here.
 
-// deferExitLabel is the label of the epilogue a function with a defer leaves
+// exitLabel is the label of the epilogue a function with one exit leaves
 // through.
 //
 // It is not a Go identifier, so no source label collides with it.
-const deferExitLabel = ".deferexit"
+const exitLabel = ".exit"
 
 // closureExpr lowers a function literal.
 func (l *lowerer) closureExpr(n Expr) Expr {
@@ -3978,7 +3978,7 @@ func isFuncSymbol(n Expr) bool {
 // the two statements share this function: deferproc's parameter is a func()
 // and newproc's is a *funcval, and both are the address of the code pointer.
 // The difference is what the function owes afterwards, and only defer owes the
-// exit deferExit builds.
+// call to runtime.deferreturn singleExit puts in the epilogue.
 func (l *lowerer) deferStmt(n Expr, name string) Expr {
 	fv := l.deferredValue(n)
 	if fv == nil {
@@ -4061,8 +4061,8 @@ func (l *lowerer) deferredValue(n Expr) Expr {
 	return nil
 }
 
-// deferExit gives a function that defers one exit, and puts the call to
-// runtime.deferreturn in it.
+// singleExit gives a function one exit, and puts the call to
+// runtime.deferreturn in it when the function defers.
 //
 // One exit and not one call before each return, which is not a tidiness
 // choice. cmd/link records the offset of a call to runtime.deferreturn in the
@@ -4073,9 +4073,9 @@ func (l *lowerer) deferredValue(n Expr) Expr {
 // of a return the program did not take. That failure appears only on the
 // panic path, which is the one ordinary tests do not take.
 //
-// So every return writes the result objects and jumps to the epilogue, and the
-// epilogue calls deferreturn once and returns what the result objects hold.
-// The bare return is what ssa.Build already builds for a named result.
+// So every return writes the result storage and jumps to the epilogue, and the
+// epilogue calls deferreturn once and returns what that storage holds. The
+// bare return is what ssa.Build already builds for a named result.
 //
 // # Why the results move to the frame
 //
@@ -4088,16 +4088,72 @@ func (l *lowerer) deferredValue(n Expr) Expr {
 // from storage that survives the unwind. It is also what makes a deferred
 // function able to assign a named result, which is the other half of the rule
 // gc applies here.
-func (l *lowerer) deferExit() {
+//
+// The cell of a captured result needs no such mark, and the difference says
+// what the mark is for. A result is assigned at every return, so it is a phi
+// at the epilogue, and the copies a phi resolves into sit at the end of the
+// predecessor blocks, which recovery's jump skips. The cell is assigned once
+// at the entry, which dominates the epilogue, so it is one value with one
+// home; it is live across the deferreturn call, and ssa/regalloc.go's
+// AllocInvCall puts a value live across a call in the frame, so the load reads
+// a slot that was written before the first call of the function.
+//
+// # Why a captured result needs this exit even with no defer
+//
+// A named result a literal captures lives in a heap cell, because the literal
+// and the function share one variable. The result object is still the storage
+// the ABI returns, so the two have to be joined somewhere: every return writes
+// the cell, and the exit copies the cell into the result object after every
+// deferred function has run. A function that captures a result and defers
+// nothing needs the copy just the same, because "return x" assigns to the
+// named result and a literal that outlives the frame reads the cell
+// afterwards.
+func (l *lowerer) singleExit() {
 	pos := l.fn.Pos
-	for _, r := range l.fn.Results {
-		r.Addrtaken = true
+	if l.ndefer > 0 {
+		for _, r := range l.fn.Results {
+			r.Addrtaken = true
+		}
 	}
 	l.fn.Body = l.exitReturns(l.fn.Body)
-	l.fn.Body = append(l.fn.Body,
-		&Node{Op: OLabel, Pos: pos, Type: voidType, Label: deferExitLabel},
-		runtimeCall(pos, "runtime.deferreturn"),
-		&Node{Op: OReturn, Pos: pos, Type: voidType})
+	l.fn.Body = append(l.fn.Body, &Node{Op: OLabel, Pos: pos, Type: voidType, Label: exitLabel})
+	if l.ndefer > 0 {
+		l.fn.Body = append(l.fn.Body, runtimeCall(pos, "runtime.deferreturn"))
+	}
+	// After deferreturn and not before it: a deferred function may assign a
+	// named result, and what it assigns is the cell the two share.
+	for _, r := range l.fn.Results {
+		cell, ok := l.cells[r]
+		if !ok {
+			continue
+		}
+		l.fn.Body = append(l.fn.Body, Assign(pos, ref(r, pos),
+			&Node{Op: ODeref, Pos: pos, Type: r.Type, X: ref(cell, pos)}))
+	}
+	l.fn.Body = append(l.fn.Body, &Node{Op: OReturn, Pos: pos, Type: voidType})
+}
+
+// hasCelledResult reports whether a literal in this function captured one of
+// its named results.
+func (l *lowerer) hasCelledResult() bool {
+	for _, r := range l.fn.Results {
+		if _, ok := l.cells[r]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// resultStorage is where a return writes one result.
+//
+// A result a literal captures lives in a heap cell, so a return writes through
+// the cell and the epilogue copies it into the result object. A result nothing
+// captures is the result object itself.
+func (l *lowerer) resultStorage(r *Object, pos syntax.Pos) Expr {
+	if cell, ok := l.cells[r]; ok {
+		return &Node{Op: ODeref, Pos: pos, Type: r.Type, X: ref(cell, pos)}
+	}
+	return ref(r, pos)
 }
 
 // exitReturns rewrites every return of a statement list into a jump to the
@@ -4139,7 +4195,7 @@ func (l *lowerer) exitReturn(s Stmt) []Stmt {
 
 	case len(s.Args) == len(res):
 		if len(res) == 1 {
-			out = append(out, Assign(pos, ref(res[0], pos), s.Args[0]))
+			out = append(out, Assign(pos, l.resultStorage(res[0], pos), s.Args[0]))
 			break
 		}
 		// Every operand is evaluated before any result is written, because an
@@ -4152,7 +4208,7 @@ func (l *lowerer) exitReturn(s Stmt) []Stmt {
 			tmps = append(tmps, o)
 		}
 		for i, o := range tmps {
-			out = append(out, Assign(pos, ref(res[i], pos), ref(o, pos)))
+			out = append(out, Assign(pos, l.resultStorage(res[i], pos), ref(o, pos)))
 		}
 
 	default:
@@ -4163,11 +4219,11 @@ func (l *lowerer) exitReturn(s Stmt) []Stmt {
 		// result objects themselves.
 		dst := make([]Expr, 0, len(res))
 		for _, r := range res {
-			dst = append(dst, ref(r, pos))
+			dst = append(dst, l.resultStorage(r, pos))
 		}
 		out = append(out, &Node{Op: OAssign, Pos: pos, Type: voidType, Args: dst, Y: s.Args[0]})
 	}
-	return append(out, &Node{Op: OGoto, Pos: pos, Type: voidType, Label: deferExitLabel})
+	return append(out, &Node{Op: OGoto, Pos: pos, Type: voidType, Label: exitLabel})
 }
 
 // print and println.
