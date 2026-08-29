@@ -279,25 +279,24 @@ downstream. A whole-tree build stops at the first failure and reports nothing
 about the rest, which is why the numbers below were wrong before they were
 measured this way.
 
-**Eight compile**: the root package, `export/pkgbits`, `link`, `loader`, `obj`,
-`obj/arm64`, `rtsym` and `ssa/rules`. Two are commands the harness delegates.
-Nine fail, on six blockers:
+**Nine compile**: the root package, `export/pkgbits`, `link`, `loader`, `obj`,
+`obj/arm64`, `rtsym`, `ssa` and `ssa/rules`. Two are commands the harness
+delegates. Eight fail, on five blockers:
 
 | Blocker | Packages | Owner |
 | --- | --- | --- |
-| a call returns a wide struct and the call site has nowhere to put the words | 3: `ir`, `rtype`, `ssa` | [030](030-abi.md) |
+| a result that travels in the frame is not written | 2: `driver`, `ir` | [030](030-abi.md) |
 | an importer needs a descriptor for a type the package declares | 2: `export`, `types2` | [032](032-type-descriptors-and-itabs.md) |
 | a generic type's method, and an instantiation across packages | 2: `syntax`, `ssagen` | [013](013-generics.md), [015](015-export-data.md) |
 | an unexported method's name needs a package path | 1: `dist`, and `regexp` in Go's corpus | [032](032-type-descriptors-and-itabs.md) |
-| the ABI assignment leaves the memory chain failing the verifier | 1: `driver` | [030](030-abi.md) |
+| a call's results are placed over the word list and not the composite list | 1: `rtype` | [030](030-abi.md) |
 
-[030](030-abi.md) owns four of the nine, which is the largest share and the
-place to start. The last row is a defect and not a missing feature, and it is
-the one to read first: `driver` fails nanogo's own verifier after the ABI
-assignment, with two memory values live at once in a block. A pass that takes
-IR satisfying an invariant and returns IR violating it is a bug wherever it is
-found, and a wrong memory chain can reorder a load across a store without
-saying anything.
+[030](030-abi.md) still owns three of the eight, and both of its rows are about
+a result that has to travel in the frame rather than in registers. The last row
+is the sharper one: `callResults` places a call's results over the *word* list
+where this spec says the composite list, and the two part only above sixteen
+integer result words, so `rtype.StackObjectMask` returning `(Symbol, error)`
+gets nineteen one-word results and the seventeenth has nowhere to go.
 
 The generics row is the one with the most in it rather than the most behind
 it. Stenciling an instantiation in an importing package needs the function
