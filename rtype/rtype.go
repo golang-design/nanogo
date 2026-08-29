@@ -167,6 +167,23 @@ type Symbol struct {
 	// program that dies at run time, and the two are not comparable.
 	UsedInIface bool
 
+	// Typelink asks the caller to put the symbol in the module's typelink
+	// table, which is the table reflect searches when it is asked for a type
+	// it has to build.
+	//
+	// reflect.FuncOf, PointerTo, SliceOf and the rest look the spelling up in
+	// that table before they construct a descriptor of their own, because two
+	// descriptors of one type are two types: the runtime compares the pointer
+	// and reports "types from different scopes" on an assertion between them.
+	// Go's own test/reflectmethod2.go is that program, through
+	// m.Func.Interface().(func(main.M)).
+	//
+	// gc marks the same set, in writeType: a type with no name whose kind is a
+	// pointer, an array, a channel, a function, a map, a slice or a struct. A
+	// defined type is not marked, because reflect never builds one, and a
+	// synthesised type is not marked either (issue 22605).
+	Typelink bool
+
 	// Gotype is the linker name of the descriptor of this symbol's own Go
 	// type, or "" when the symbol needs none.
 	//
@@ -428,6 +445,7 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 		Data:        data,
 		Relocs:      relocs,
 		UsedInIface: true,
+		Typelink:    typelink(t),
 	}
 	return out, nil
 }
@@ -599,6 +617,29 @@ func referencedByKind(t *ir.Type) ([]*ir.Type, error) {
 		return out, nil
 	}
 	return nil, nil
+}
+
+// typelink reports whether t's descriptor belongs in the module's typelink
+// table.
+//
+// It is gc's rule in writeType. reflect builds a descriptor for a composite
+// type it is asked for and searches the table first, so a type the program
+// already holds must be findable there: two descriptors of one type are two
+// types, and the runtime says so as "types from different scopes".
+//
+// A defined type is not in the table, because reflect never builds one. A
+// synthesised type is not either, which is issue 22605: its descriptor has no
+// algorithms, and reflect handing one out for a comparable type gives a map a
+// key it cannot hash.
+func typelink(t *ir.Type) bool {
+	if t == nil || t.Name != "" || ir.NoAlgType(t) {
+		return false
+	}
+	switch t.Kind {
+	case ir.Ptr, ir.Array, ir.Chan, ir.FuncKind, ir.Map, ir.Slice, ir.Struct:
+		return true
+	}
+	return false
 }
 
 // RuntimeOwned reports whether the runtime already defines t's descriptor.

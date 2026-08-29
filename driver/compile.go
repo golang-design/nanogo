@@ -803,6 +803,12 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.
 			if s.Dupok {
 				d.Flag |= obj.SymFlagDupok
 			}
+			if s.Typelink {
+				// reflect searches the module's typelink table before it
+				// builds a descriptor of its own, and two descriptors of one
+				// type are two types. rtype says which symbols carry it.
+				d.Flag |= obj.SymFlagTypelink
+			}
 			if s.UsedInIface {
 				// rtype says which symbols carry it and why. Without it
 				// cmd/link prunes every method of the type and the runtime

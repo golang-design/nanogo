@@ -260,6 +260,19 @@ function. nanogo collects no such fact, so `rtype.Symbol.UsedInIface` is set on
 every descriptor and `driver/compile.go` puts the flag on the symbol. The cost
 is a method of a type nothing converts staying in the binary.
 
+**A descriptor `reflect` could rebuild asks to be in the typelink table.**
+`reflect.FuncOf`, `PointerTo`, `SliceOf` and the rest search
+`runtime.typelinks` before they construct a descriptor of their own, because
+two descriptors of one type are two types: the runtime compares the pointer and
+reports "types from different scopes" on an assertion between them. Go's own
+`test/reflectmethod2.go` asserts `m.Func.Interface().(func(main.M))` and died
+there, because `reflect` built a second `func(main.M)` rather than finding the
+one the program held. `rtype.Symbol.Typelink` marks the set `gc` marks in
+`writeType`: a type with **no name** whose kind is a pointer, an array, a
+channel, a function, a map, a slice or a struct. A defined type is not marked,
+because `reflect` never builds one, and a synthesised type is not marked
+either, which is Go issue 22605.
+
 **A function that asks `reflect` for a method says so.** A method found by
 `reflect.Value.Method` is reached by no call, so `cmd/link` cannot decide it is
 live. `SymFlagReflectMethod` is what tells the linker to stop deciding and keep

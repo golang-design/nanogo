@@ -416,6 +416,55 @@ func TestStrIsAnOffset(t *testing.T) {
 	}
 }
 
+// TestTypelinkMarksWhatReflectWouldOtherwiseRebuild is the table reflect
+// searches before it builds a descriptor of its own.
+//
+// Two descriptors of one type are two types: the runtime compares the pointer
+// and reports "types from different scopes" on an assertion between them. Go's
+// own test/reflectmethod2.go asserts m.Func.Interface().(func(main.M)) and
+// died there, because reflect.FuncOf built a second func(main.M) rather than
+// finding the one the program already held.
+//
+// The set is gc's, in writeType: a type with no name whose kind is one reflect
+// can construct. A defined type is not in it, because reflect never builds
+// one, and a synthesised type is not either, which is issue 22605.
+func TestTypelinkMarksWhatReflectWouldOtherwiseRebuild(t *testing.T) {
+	int64Type := &ir.Type{Kind: ir.Int64, Name: "int", Basic: "int"}
+	if err := ir.Layout(int64Type); err != nil {
+		t.Fatal(err)
+	}
+	lay := func(typ *ir.Type) *ir.Type {
+		t.Helper()
+		if err := ir.Layout(typ); err != nil {
+			t.Fatal(err)
+		}
+		return typ
+	}
+	sig := lay(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{int64Type}, Results: []*ir.Type{}})
+	for _, tc := range []struct {
+		what string
+		typ  *ir.Type
+		want bool
+	}{
+		{"a function type", sig, true},
+		{"a pointer", lay(&ir.Type{Kind: ir.Ptr, Elem: int64Type}), true},
+		{"a slice", lay(&ir.Type{Kind: ir.Slice, Elem: int64Type}), true},
+		{"an array", lay(&ir.Type{Kind: ir.Array, Len: 2, Elem: int64Type}), true},
+		{"a literal struct", lay(&ir.Type{Kind: ir.Struct, Fields: []ir.Field{{Name: "a", Type: int64Type}}}), true},
+		{"a defined type", lay(&ir.Type{Kind: ir.Int64, Name: "p.S", PkgPath: "p", Basic: "int", Methods: []ir.Method{}}), false},
+		{"a predeclared type", int64Type, false},
+	} {
+		syms, err := rtype.Descriptor(tc.typ)
+		if err != nil {
+			t.Errorf("%s: %v", tc.what, err)
+			continue
+		}
+		if syms[0].Typelink != tc.want {
+			t.Errorf("%s is marked %v, want %v", tc.what, syms[0].Typelink, tc.want)
+		}
+	}
+}
+
 // TestPtrToThisNamesThePointerDescriptor is what reflect.PointerTo reads.
 //
 // Without it reflect builds a descriptor for *T at run time, and a built one
