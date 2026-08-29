@@ -220,15 +220,15 @@ The count above is over the packages a `func main() {}` needs. This is the
 narrower and more useful measure: nanogo's own nineteen, compiled by nanogo under
 an allowlist that names all of them.
 
-**Five of nineteen compile, and one reason blocks the rest.** The other
+**Five of nineteen compile, and two reasons block the rest.** The other
 fourteen fail on an import rather than on themselves, so the work list is the
-two rows below, and the two rows are one reason. `rtsym`, `types2/errors`,
+two rows below, and they are two different reasons. `rtsym`, `types2/errors`,
 `obj`, `obj/arm64` and `export/pkgbits` compile.
 
 | Package | What stops it |
 | --- | --- |
-| `syntax` | `ir: sync/atomic.Pointer is a generic instantiation and its type arguments are not in the IR type`, reached through `FileSet`. [032](032-type-descriptors-and-itabs.md) owns the descriptor and [013](013-generics.md) the instantiation |
-| `dist` | the same message, reached through the map keyed by `Producer`. The generated hash it used to stop on is written now |
+| `syntax` | `ir: sync/atomic.(*Pointer).Store is a method of sync/atomic.Pointer[[]*syntax.SrcFile] and an instantiation of a generic type another package declares is not built`, reached through `FileSet`. The stenciler builds the methods of a generic type **this** package declares; the bodies of one another package declares live in that package's archive, and [013](013-generics.md) and [015](015-export-data.md) both record that they are not read |
+| `dist` | `rtype: the method exited of *os/exec.ExitError is unexported and declared in os, so its name needs a package path, which the name encoder does not write`. [032](032-type-descriptors-and-itabs.md) owns the encoder |
 
 `loader` and `types2` wait on `syntax`. `export` waits on `pkgbits`. `link`,
 `rtype`, `ir`, `ssa`, `ssagen` and `driver` wait on what is above them.
