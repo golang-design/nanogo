@@ -273,30 +273,39 @@ can exist, and nanogo's own `types2` fork is full of generic declarations.
 
 ### What actually blocks G1, measured
 
-Each of nanogo's own 19 packages was compiled on its own, with an allowlist
-holding that package alone so that a failure upstream could not hide one
-downstream. Six compile: the root package, `export/pkgbits`, `obj`,
+Each of nanogo's own 19 packages is compiled on its own, with an allowlist
+holding that package alone, so that a failure upstream cannot hide one
+downstream. A whole-tree build stops at the first failure and reports nothing
+about the rest, which is why the numbers below were wrong before they were
+measured this way.
+
+**Eight compile**: the root package, `export/pkgbits`, `link`, `loader`, `obj`,
 `obj/arm64`, `rtsym` and `ssa/rules`. Two are commands the harness delegates.
-The other eleven fail, and they fail on **five** distinct blockers, not eleven:
+Nine fail, on six blockers:
 
-| Blocker | Packages it blocks | Owner |
+| Blocker | Packages | Owner |
 | --- | --- | --- |
-| a method value whose receiver is captured by value | **5**: `driver`, `ir`, `link`, `loader`, `ssagen` | [033](033-closures-defer-panic.md) |
+| a generic type's method, and an instantiation across packages | 2: `syntax`, `ssagen` | [013](013-generics.md), [015](015-export-data.md) |
 | an importer needs a descriptor for a type the package declares | 2: `export`, `types2` | [032](032-type-descriptors-and-itabs.md) |
-| an unexported method's name needs a package path | 2: `dist`, and `regexp` in Go's corpus | [032](032-type-descriptors-and-itabs.md) |
 | taking an address, in a constant and in a call | 2: `rtype`, `ssa` | [021](021-ssa-construction.md) |
-| a cross-package generic instantiation | 1: `syntax` | [013](013-generics.md), [015](015-export-data.md) |
+| an unexported method's name needs a package path | 1: `dist`, and `regexp` in Go's corpus | [032](032-type-descriptors-and-itabs.md) |
+| a call returning a wide struct with nowhere to write it | 1: `ir` | [030](030-abi.md) |
+| the ABI assignment breaks the memory chain | 1: `driver` | [030](030-abi.md) |
 
-The first row is the lever. One construct blocks five of the eleven, and the
-same construct is a refusal in Go's own corpus, so it is the item with the most
-behind it by a wide margin. The last row is the one with the most *in* it: it
-needs an export-data body reader before a stenciler can exist, which is two
-subsystems and not one.
+The last two are defects and not missing features, and the second of them is
+the one to read first: `driver` fails its own verifier after the ABI
+assignment, with two memory values live at once in a block. A pass that leaves
+the IR failing an invariant it passed before is a bug wherever it is found.
 
-A closed blocker is not a compiled package. Every refusal closed this session
-exposed something it had been hiding, and twice what it exposed was worse than
-the refusal, so each row above should be read as what fails **first** and not
-as the whole of what a package needs.
+The generics row is the one with the most in it rather than the most behind
+it. Stenciling an instantiation in an importing package needs the function
+bodies [015](015-export-data.md)'s body reader would carry, and nanogo writes
+declarations only, so it is two subsystems and not one.
+
+A closed blocker is not a compiled package. Closing the method-value receiver
+moved `link` and `loader` to compiling and moved `ir`, `driver` and `ssagen` to
+the three rows above, none of which is a closure or a capture. Every row here
+should be read as what fails **first**.
 
 One caveat [001](001-bootstrap-gates.md) states about its own gate, repeated
 here because it decides how much G1 is worth: $N_2 = N_3$ is necessary and not
