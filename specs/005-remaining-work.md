@@ -286,15 +286,16 @@ Two are commands the harness delegates. Five fail, on two blockers:
 | Blocker | Packages | Owner |
 | --- | --- | --- |
 | a generic type's method, an instantiation across packages, and a type parameter with no run-time representation | 4: `ir`, `ssagen`, `syntax`, `types2` | [013](013-generics.md), [015](015-export-data.md) |
-| a wide `Load` reaches lowering with no rule, and **panics** rather than refusing | 1: `export` | [025](025-lowering-and-rules.md) |
+| a wide `Load` reaches lowering with no rule | 1: `export` | [025](025-lowering-and-rules.md) |
 
-The last row is the worst failure mode in the table and it is not a missing
-feature. `ssa.Lower` panics where every other stage refuses, so a construct it
-has no rule for takes the compiler down instead of reporting a gap. Go's own
-corpus already carries two files in the `crashed` class for the same reason.
-`export` reached it by having its descriptor refusal closed, which is the
-pattern this section keeps recording, and the newly exposed thing being a
-panic rather than a refusal is what makes it worth a row of its own.
+The last row was the worst failure mode in the table until the failure and the
+gap were separated. `ssa.Lower` used to panic where every other stage refuses,
+so a construct it had no rule for took the compiler down rather than reporting
+one; it now recovers its own error and reports it, and Go's corpus went from
+two files in the `crashed` class to none with the passing count unchanged. What
+remains on this row is the missing rule itself: equality over a struct with a
+string field is not decomposed, because string equality is `runtime.memequal`
+and not a word compare, so the whole load reaches selection whole.
 
 Five packages, two blockers, and the first owns four of the five. Everything
 [030](030-abi.md) owned is closed: `driver` and `rtype` compile, `ir` moved
