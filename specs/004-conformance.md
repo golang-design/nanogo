@@ -180,7 +180,7 @@ structural numbers this document does state are gated against that file by
 `TestTheSpecStatesWhatTheRatchetRecords`, so they cannot rot in silence:
 
 - the corpus is **356** files.
-- **206** of them pass.
+- **207** of them pass.
 
 The last two to go in were `chanlinear.go` and `gcgort.go`. Both compiled and
 ran for two batches before they were recorded, because both passed only when
@@ -189,7 +189,7 @@ the collector did not run concurrently with a pointer store and
 have made this gate fail on machine load rather than on a change. They went in
 with the barrier.
 
-The remaining 150 are not failures. They are refusals with a reason, kinds this
+The remaining 149 are not failures. They are refusals with a reason, kinds this
 harness does not carry out, recipes whose compiler flags nanogo has no
 equivalent of, and files this platform excludes. Every one of them is counted
 and named in the report.

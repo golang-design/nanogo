@@ -180,6 +180,7 @@ pass matched newexpr.go
 pass matched nil.go
 pass matched nilptr2.go
 pass matched noinit.go
+pass matched nosplit.go
 pass matched peano.go
 pass matched print.go
 pass matched printbig.go

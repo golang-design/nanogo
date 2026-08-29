@@ -279,20 +279,27 @@ downstream. A whole-tree build stops at the first failure and reports nothing
 about the rest, which is why the numbers below were wrong before they were
 measured this way.
 
-**Nine compile**: the root package, `export/pkgbits`, `link`, `loader`, `obj`,
-`obj/arm64`, `rtsym`, `ssa` and `ssa/rules`. Two are commands the harness
-delegates. Eight fail, on five blockers:
+**Ten compile**: the root package, `dist`, `export/pkgbits`, `link`, `loader`,
+`obj`, `obj/arm64`, `rtsym`, `ssa` and `ssa/rules`. Two are commands the
+harness delegates. Seven fail, on five blockers:
 
 | Blocker | Packages | Owner |
 | --- | --- | --- |
+| a generic type's method, an instantiation across packages, and a type parameter with no run-time representation | 3: `syntax`, `ssagen`, `types2` | [013](013-generics.md), [015](015-export-data.md) |
 | a result that travels in the frame is not written | 2: `driver`, `ir` | [030](030-abi.md) |
-| an importer needs a descriptor for a type the package declares | 2: `export`, `types2` | [032](032-type-descriptors-and-itabs.md) |
-| a generic type's method, and an instantiation across packages | 2: `syntax`, `ssagen` | [013](013-generics.md), [015](015-export-data.md) |
-| an unexported method's name needs a package path | 1: `dist`, and `regexp` in Go's corpus | [032](032-type-descriptors-and-itabs.md) |
 | a call's results are placed over the word list and not the composite list | 1: `rtype` | [030](030-abi.md) |
+| a wide `Load` reaches lowering with no rule, and **panics** rather than refusing | 1: `export` | [025](025-lowering-and-rules.md) |
 
-[030](030-abi.md) still owns three of the eight, and both of its rows are about
-a result that has to travel in the frame rather than in registers. The last row
+The last row is the worst failure mode in the table and it is not a missing
+feature. `ssa.Lower` panics where every other stage refuses, so a construct it
+has no rule for takes the compiler down instead of reporting a gap. Go's own
+corpus already carries two files in the `crashed` class for the same reason.
+`export` reached it by having its descriptor refusal closed, which is the
+pattern this section keeps recording, and the newly exposed thing being a
+panic rather than a refusal is what makes it worth a row of its own.
+
+[030](030-abi.md) owns three of the seven, and both of its rows are about a
+result that has to travel in the frame rather than in registers. The last row
 is the sharper one: `callResults` places a call's results over the *word* list
 where this spec says the composite list, and the two part only above sixteen
 integer result words, so `rtype.StackObjectMask` returning `(Symbol, error)`
