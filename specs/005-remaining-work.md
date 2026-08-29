@@ -279,27 +279,32 @@ downstream. A whole-tree build stops at the first failure and reports nothing
 about the rest, which is why the numbers below were wrong before they were
 measured this way.
 
-**Fifteen compile**: the root package, `dist`, `driver`, `export`,
+**Sixteen compile**: the root package, `dist`, `driver`, `export`,
 `export/pkgbits`, `ir`, `link`, `loader`, `obj`, `obj/arm64`, `rtsym`, `rtype`,
-`ssa`, `ssa/rules` and `ssagen`. Two are commands the harness delegates. Two
-fail, on one blocker:
+`ssa`, `ssa/rules`, `ssagen` and `syntax`. Two are commands the harness
+delegates. One fails:
 
 | Blocker | Packages | Owner |
 | --- | --- | --- |
-| an instantiation of a generic another package declares: the declaration and its body are carried now, and nothing turns them into code | 2: `syntax`, `types2` | [013](013-generics.md) |
+| an `export.Body` node kind the foreign stencil does not map, reached through `slices.SortFunc` | 1: `types2` | [013](013-generics.md) |
 
-The subsystem that gated five is built. A generic declaration another package
-owns is copied out of that package's archive element by element, the way gc's
-own linker does it, and gc reads the result back, instantiates it and runs it
-(`export`'s `TestGcInstantiatesAForeignGenericNanogoCopied`). `export`, `ir`
-and `ssagen` compile because they only had to *carry* the declaration.
+A generic another package declares is stencilled now. The body is read out of
+that package's archive with the dictionary its slots were numbered against, and
+`ir/foreign.go` substitutes the type arguments through it, which is the entry
+point both refusals in `ir/stencil.go` used to name as missing. Four end-to-end
+tests build with nanogo, run, and compare against an all-gc build, at element
+types of one word, two words with a runtime comparison, and a three-word struct
+with a pointer, so a wrong substitution is a wrong answer and not a link that
+happened to succeed.
 
-What is left is the other half, and it is stencilling and not carrying.
-`syntax` instantiates a foreign generic method, `sync/atomic.Pointer.Store`,
-and `types2` a foreign generic function, `slices.Contains`. The body reaches
-both of them now. Nothing walks it and emits code at the type arguments the
-instantiation names, which is what [013](013-generics.md) owns and what nanogo
-already does for a generic this package declares.
+`types2` is the one package left and it is a matter of how much of the tree the
+mapping covers rather than of a mechanism that does not exist. Its refusal
+names the construct: `slices.SortFunc`'s body holds an assignment. Behind it is
+pdqsort, which needs assignments, function literals, three-clause loops and
+swaps, and `types2` also reaches `slices.Sort`, `IsSortedFunc`, `EqualFunc` and
+`cmp.Compare`. Every kind the mapping does not cover is refused by name, so
+what remains is a list that can be read off the refusals rather than
+rediscovered.
 
 An earlier version of this table said a *method of a generic type* owned three
 of these. That was wrong, and the way it was wrong is worth keeping. The
