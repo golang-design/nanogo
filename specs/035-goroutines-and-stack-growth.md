@@ -256,10 +256,10 @@ that is written into the instruction stream.
   [042](042-arm64-backend.md) records the move from the back end's side. The
   save order is stated above because the other order loses an argument.
 
-## Two symptoms, one with a cause and one without
+## Three symptoms, one with a cause and two without
 
-Both appeared on 27 August 2026, both only under load, and neither reproduced
-on demand. They are written down because "it passed on retry" is not an
+The first two appeared on 27 August 2026 and the third on 29 August. All three
+appear only under load and none reproduces on demand. They are written down because "it passed on retry" is not an
 explanation, and because a collector or a stack bug that appears once in twenty
 runs is exactly the shape that a green suite hides.
 
@@ -289,9 +289,38 @@ recursion running deep. The lane that saw it disassembled all nine of the
 file's functions at two commits and found them byte-identical, and the program
 runs clean standalone eight times out of eight.
 
-The next person to see it should capture the failing binary and its `GODEBUG`
-output before retrying, because a retry is what destroyed the evidence both
-times.
+**A free object the collector had marked.** `test/heapsampling.go` ran clean on
+one CI run and, on the next, with no compiler change between them, died in
+nanogo's build with
+
+	runtime: marked free object in span 0x12fd09228, elemsize=1024 freeindex=3
+	(bad use of unsafe.Pointer or having race conditions)
+	0x42d866189000 free  marked   zombie
+
+A zombie is an object the sweeper freed and something marked afterwards, and
+the runtime's own message names the two things that produce one. It is not the
+statistical part of that test: `heapsampling.go` randomises its sampling and
+says so, but this is the collector refusing to continue rather than a
+measurement outside a threshold.
+
+What rules out the obvious suspect is the pair of runs. `18992b5` and
+`fa22198` differ by one number in a JSON file, the corpus passed on the first
+and this failed on the second, so no commit introduced it. The write barrier
+was in both and has been in every green run since `ab048d6`. Locally the same
+binary ran the file 25 times clean, and 10 more under `GOGC=1` with
+`gccheckmark=1,clobberfree=1`.
+
+That leaves a defect that samples with the machine, which is the shape of the
+two symptoms above. Whether it is the same defect is unknown. The evidence to
+capture next time is the span address and `elemsize` the message prints,
+because those say which size class the zombie was in, and a `GODEBUG` run with
+`clobberfree=1` on the failing machine, because a freed object that was
+overwritten and then marked says the mark came after the free rather than
+before it.
+
+The next person to see any of these should capture the failing binary and its
+`GODEBUG` output before retrying, because a retry is what destroyed the
+evidence both times.
 
 The write barrier does not explain this one. A missing barrier frees a
 reachable object and does not put a value that is not a stack into `g.stack`.
