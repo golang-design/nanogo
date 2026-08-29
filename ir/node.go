@@ -253,7 +253,17 @@ type Object struct {
 	// being wrong is memory corruption.
 	Addrtaken bool
 
-	// Escapes records the result of specs/023-escape-analysis.md.
+	// Escapes records that this variable's storage may outlive the frame that
+	// declares it, so it lives in a heap cell and both halves reach it through
+	// a pointer.
+	//
+	// specs/023-escape-analysis.md is what will decide it. Until that pass
+	// exists the sound rule it states is taken instead: the *source* takes the
+	// variable's address, or a literal captures it. ir.Build sets it and
+	// nothing after ir.Build does, which is what keeps the lowering pass from
+	// reading a mark it made itself: ir/lower.go takes addresses of its own
+	// temporaries, and a temporary whose address the compiler took does not
+	// outlive anything.
 	Escapes bool
 }
 

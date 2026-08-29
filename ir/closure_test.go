@@ -440,3 +440,56 @@ func TestLowerCaptureCellForSplitMentions(t *testing.T) {
 		}
 	}
 }
+
+// TestLowerMovesAnAddressTakenLocalToTheHeap is the interim rule
+// specs/023-escape-analysis.md states for the one site with no safe default.
+//
+// "func f() *int { n := 1; return &n }" used to return a pointer into a frame
+// that is gone. It read correctly until something overwrote that memory, which
+// is worse than a crash: a short program agreed with gc and a collection
+// between the call and the read did not. Without the pass that decides which
+// variable stays, the sound answer is the heap.
+func TestLowerMovesAnAddressTakenLocalToTheHeap(t *testing.T) {
+	fn := lowerOK(t, `func f(x int) *int { n := x; return &n }`)
+	cell := cellOfResult(fn, "n")
+	if cell == nil {
+		t.Fatalf("the address-taken local has no cell; the locals are %v", localNames(fn))
+	}
+	for _, o := range fn.Locals {
+		if o.Name == "n" && o.Addrtaken {
+			t.Error("the variable is still address-taken, so it also has a frame slot the cell replaced")
+		}
+	}
+	allocs := 0
+	for _, s := range fn.Body {
+		Walk(s, func(m *Node) bool {
+			if m.Op == OCall && m.X != nil && m.X.Obj != nil && m.X.Obj.Name == "runtime.newobject" {
+				allocs++
+			}
+			return true
+		})
+	}
+	if allocs != 1 {
+		t.Errorf("the function makes %d allocations, want the one cell:\n%s", allocs, buildDump(fn))
+	}
+}
+
+// TestLowerLeavesALocalTheCompilerTookTheAddressOf checks which mark the rule
+// above reads.
+//
+// ir/lower.go takes the address of its own temporaries, and a temporary whose
+// address the compiler took lives exactly as long as the frame. Reading
+// Addrtaken would move those to the heap as well, and a second run of the pass
+// would find work the first run created. Object.Escapes is set by ir.Build and
+// by nothing after it, which is why the pass is idempotent.
+func TestLowerLeavesALocalTheCompilerTookTheAddressOf(t *testing.T) {
+	fn := lowerOK(t, `func f(s []int) int { n := 0; for _, v := range s { n = n + v }; return n }`)
+	for _, o := range fn.Locals {
+		if o.Escapes {
+			t.Errorf("the lowering pass marked %s as escaping; only ir.Build may", o.Name)
+		}
+		if strings.HasPrefix(o.Name, ".cell_") {
+			t.Errorf("a temporary of the pass was moved to the heap:\n%s", buildDump(fn))
+		}
+	}
+}

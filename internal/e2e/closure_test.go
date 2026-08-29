@@ -394,3 +394,102 @@ func TestToolexecCapturesANamedResult(t *testing.T) {
 		t.Fatalf("the program exited %d, want 7: a captured result and the value the function returned disagreed", got)
 	}
 }
+
+const escapingLocalProgram = `package main
+
+import (
+	"os"
+	"runtime"
+)
+
+// Each of these hands out the address of one of its own variables. Two calls
+// at the same stack level must return different pointers, which is Go's own
+// test/escape.go stated in three lines.
+//
+//go:noinline
+func fromLocal(x int) *int {
+	n := x
+	return &n
+}
+
+//go:noinline
+func fromParam(x int) *int { return &x }
+
+//go:noinline
+func fromResult(x int) (n int) {
+	n = x
+	return
+}
+
+//go:noinline
+func addrOfResult(x int) *int {
+	n := fromResult(x)
+	return &n
+}
+
+//go:noinline
+func churn() {
+	for i := 0; i < 4096; i++ {
+		_ = &[16]int{i}
+	}
+}
+
+func main() {
+	p := fromLocal(1)
+	q := fromLocal(2)
+	if p == q {
+		os.Exit(1)
+	}
+	a := fromParam(3)
+	b := fromParam(4)
+	if a == b {
+		os.Exit(2)
+	}
+	c := addrOfResult(5)
+
+	// The frames those pointers came from are gone and the heap is walked
+	// twice with the world stopped. A pointer into a frame reads whatever is
+	// there now.
+	churn()
+	runtime.GC()
+	churn()
+	runtime.GC()
+
+	if *p != 1 || *q != 2 {
+		os.Exit(3)
+	}
+	if *a != 3 || *b != 4 {
+		os.Exit(4)
+	}
+	if *c != 5 {
+		os.Exit(5)
+	}
+	os.Exit(7)
+}
+`
+
+// TestToolexecKeepsAnEscapingLocalAlive is the interim rule
+// specs/023-escape-analysis.md states for the one site with no safe default: a
+// variable whose address the source takes lives in a heap cell.
+//
+// It used to stay in the frame. Two calls at one stack level then returned one
+// pointer, and the value read correctly for as long as nothing overwrote that
+// memory, which is what made it worse than a crash. The collection between the
+// calls and the reads is what makes this program say so rather than agree by
+// luck.
+func TestToolexecKeepsAnEscapingLocalAlive(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/escapinglocal\n\ngo 1.27\n",
+		"main.go": escapingLocalProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "escapinglocal", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := exitCode(t, filepath.Join(h.mod, "escapinglocal")); got != 7 {
+		t.Fatalf("the program exited %d, want 7: a pointer to a local outlived the frame it named", got)
+	}
+}

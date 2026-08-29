@@ -935,13 +935,23 @@ func TestLowerRangeKeepsThePerIterationVariable(t *testing.T) {
 		!strings.HasPrefix(carrier.X.Obj.Name, ".loopvar_") {
 		t.Errorf("the body does not open by writing the carrier:\n%s", buildDump(fn))
 	}
-	decl := loop.Body[1]
-	if decl.Op != OAssign || decl.Op1 != syntax.Def || decl.Y == nil ||
-		decl.Y.Obj == nil || !strings.HasPrefix(decl.Y.Obj.Name, ".loopvar_") {
-		t.Errorf("the per-iteration declaration is not the next statement:\n%s", buildDump(fn))
+	// The address of i is taken, so i lives in a heap cell
+	// (specs/023-escape-analysis.md), and the per-iteration declaration is the
+	// allocation of that cell followed by the copy of the carrier into it. One
+	// cell per iteration is what makes the pointer the body hands out a
+	// different pointer each time round.
+	alloc := loop.Body[1]
+	if alloc.Op != OAssign || alloc.Op1 != syntax.Def || alloc.X == nil ||
+		alloc.X.Obj == nil || alloc.X.Obj.Name != ".cell_i" {
+		t.Errorf("the per-iteration declaration does not allocate the cell of i:\n%s", buildDump(fn))
 	}
-	if decl.X == nil || decl.X.Obj == nil || decl.X.Obj.Name != "i" {
-		t.Errorf("the declaration does not name the loop variable:\n%s", buildDump(fn))
+	decl := loop.Body[2]
+	if decl.Op != OAssign || decl.X == nil || decl.X.Op != ODeref ||
+		decl.X.X == nil || decl.X.X.Obj == nil || decl.X.X.Obj.Name != ".cell_i" {
+		t.Errorf("the carrier is not copied into the cell:\n%s", buildDump(fn))
+	}
+	if decl.Y == nil || decl.Y.Obj == nil || !strings.HasPrefix(decl.Y.Obj.Name, ".loopvar_") {
+		t.Errorf("the copy does not read the carrier:\n%s", buildDump(fn))
 	}
 }
 

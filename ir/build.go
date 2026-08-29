@@ -678,7 +678,40 @@ func (b *builder) addrOf(n Expr, elem types2.Type) Expr {
 		return nil
 	}
 	markAddrtaken(n)
+	markEscapes(n)
 	return &Node{Op: OAddr, Pos: n.Pos, Type: b.ptrTo(elem), X: n}
+}
+
+// markEscapes records that the source took the address of the variable n
+// names, which is the interim answer specs/023-escape-analysis.md states for a
+// variable the compiler cannot prove stays in its frame.
+//
+// It is set here and not in markAddrtaken, which ir/lower.go calls as well.
+// A temporary whose address the lowering pass took is a temporary that lives
+// as long as the frame, and moving it to the heap would be an allocation for
+// nothing and a pass that changed its own input on a second run.
+func markEscapes(n Expr) {
+	for n != nil {
+		switch n.Op {
+		case OLocal, OGlobal:
+			if n.Obj != nil {
+				n.Obj.Escapes = true
+			}
+			return
+		case OField:
+			n = n.X
+		case OIndex:
+			if n.X == nil || n.X.Type == nil || n.X.Type.Kind != Array {
+				// The element of a slice or a map is in the heap already, so
+				// the address names no frame slot. markAddrtaken stops at the
+				// same place and for the same reason.
+				return
+			}
+			n = n.X
+		default:
+			return
+		}
+	}
 }
 
 // markAddrtaken walks from an expression to the object whose storage it names.
@@ -1266,6 +1299,10 @@ func (b *builder) closureNode(fn *Func, pos syntax.Pos, caps []*Object) Expr {
 	}
 	for _, o := range caps {
 		o.Addrtaken = true
+		// A capture is by reference and moves the variable into a heap cell
+		// (specs/033-closures-defer-panic.md), which is the same answer the
+		// address-taken rule gives, so it is recorded in the same field.
+		o.Escapes = true
 		// A variable this literal captures and does not own is also captured
 		// by the function that holds it, which is what makes a capture
 		// through two levels of literal work.
