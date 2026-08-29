@@ -46,6 +46,20 @@ type Converter struct {
 	// own number, so specs/053-determinism.md's rule about maps is met by the
 	// walk that built it rather than by this lookup.
 	gens map[*types2.TypeName]int
+
+	// instance is told about each instantiation of a generic defined type,
+	// once, the first time the converter meets it.
+	//
+	// The stenciler of specs/013-generics.md needs the notice: a method of
+	// L[int] is compiled because a value of L[int] exists somewhere in the
+	// package, and this walk is the one place every type a package names comes
+	// through. Discovery at a call site would miss the method an itab holds
+	// and nothing calls.
+	//
+	// It records and does not build. The cache entry of the type being filled
+	// is installed but not complete, so a listener that asked for the type's
+	// layout here would read a type that is half written.
+	instance func(*types2.Named)
 }
 
 // NewConverter returns a Converter with an empty cache.
@@ -72,6 +86,15 @@ func NewConverter() *Converter {
 // the package's source, and the converter sees a type graph, whose walk order
 // is neither the source's nor stable across the types that reach it first.
 func (c *Converter) Locals(gens map[*types2.TypeName]int) { c.gens = gens }
+
+// Instances asks to be told about every instantiation of a generic defined
+// type this converter meets, in the order the type graph is walked and once
+// per type.
+//
+// It is the stenciler's door. A converter that is never told notices nothing,
+// which is what every caller outside ir.Build wants: driver converts the types
+// a package owes its importers and has no worklist to put an instantiation on.
+func (c *Converter) Instances(f func(*types2.Named)) { c.instance = f }
 
 // Convert returns the IR type of t, with Size, Align, PtrBits and every field
 // offset already computed.
@@ -233,6 +256,12 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 		// entry rather than on a name that is not spelled yet.
 		if n := t.TypeArgs(); n.Len() > 0 {
 			out.Instantiated = true
+			if c.instance != nil {
+				// Here rather than after the fill, because the fill is what
+				// recurses and a notice sent after it would arrive in the
+				// order the graph unwinds rather than the order it is walked.
+				c.instance(t)
+			}
 			out.TypeArgs = make([]*Type, 0, n.Len())
 			for i := 0; i < n.Len(); i++ {
 				a, err := c.convert(n.At(i))

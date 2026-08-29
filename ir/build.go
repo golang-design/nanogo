@@ -283,6 +283,12 @@ func Build(pkg *types2.Package, files []*syntax.File, info *types2.Info) (*Packa
 			Name: pkg.Name(),
 		},
 	}
+	// The converter tells the builder about every instantiation of a generic
+	// defined type it meets, and the methods of one are stencilled from that
+	// notice. It is set after the builder exists and before anything is
+	// converted, so no instantiation is missed and none is built while the
+	// converter is halfway through a type.
+	conv.Instances(func(n *types2.Named) { b.types = append(b.types, n) })
 	b.buildPackage(files)
 	if len(b.errs) > 0 {
 		return b.out, b.errs[0]
@@ -314,6 +320,7 @@ type builder struct {
 	generic   map[*types2.Func]*syntax.FuncDecl
 	instances map[string]*instance
 	todo      []*instance
+	types     []*types2.Named
 	stencil   *stencil
 	ctxt      *types2.Context
 
@@ -483,7 +490,7 @@ func (b *builder) obj(o types2.Object) *Object {
 		}
 	case *types2.Func:
 		out.Class = ClassFunc
-		out.Name = funcSym(o)
+		out.Name = b.funcSym(o)
 	case *types2.Const:
 		out.Class = ClassConst
 	case *types2.TypeName:
@@ -576,6 +583,39 @@ func funcSym(fn *types2.Func) string {
 		return name
 	}
 	return pkgPath + "." + name
+}
+
+// funcSym is funcSym with the receiver's type arguments spelled.
+//
+// A method of an instantiated generic type is one symbol per instantiation,
+// and the free function above has no way to write the arguments: they are in
+// the type and not in the name. So the receiver crosses the type boundary and
+// the name comes from MethodSymbol, which is the same function rtype uses for
+// the Tfn a descriptor's Method array names.
+//
+// One naming function is the whole point. The body this pass stencils and the
+// descriptor row that points at it are written by two packages, and a
+// disagreement between them is a relocation to a symbol nothing defines.
+func (b *builder) funcSym(fn *types2.Func) string {
+	sig, _ := fn.Type().(*types2.Signature)
+	if sig == nil || sig.Recv() == nil {
+		return funcSym(fn)
+	}
+	recv := sig.Recv().Type()
+	_, ptr := unalias(recv).(*types2.Pointer)
+	if ptr {
+		recv = unalias(recv).(*types2.Pointer).Elem()
+	}
+	named, ok := unalias(recv).(*types2.Named)
+	if !ok || named.TypeArgs().Len() == 0 {
+		return funcSym(fn)
+	}
+	sym, err := MethodSymbol(b.irType(named), Method{Name: fn.Name()}, ptr)
+	if err != nil {
+		b.errorf("ir: the method %s of %s: %v", fn.Name(), types2.TypeString(named, nil), err)
+		return funcSym(fn)
+	}
+	return sym
 }
 
 // The statement sink.
