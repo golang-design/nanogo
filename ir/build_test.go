@@ -928,17 +928,50 @@ func TestBuildLoweringTable(t *testing.T) {
 			body: `func f(t T) func() int { return t.M }`,
 			op:   OClosure,
 			check: func(t *testing.T, p *Package, fn *Func, n *Node) {
-				if n.Obj == nil || n.Obj.Name != "p.T.M" {
+				// The receiver is saved where the method value is written and
+				// the literal captures the saved copy, which is the one
+				// capture shape specs/033-closures-defer-panic.md builds.
+				if n.Index != closureLiteral {
+					t.Errorf("the method value of a concrete type is marked a method index %d", n.Index)
+				}
+				if len(n.Args) != 1 {
+					t.Fatalf("the method value captures %d values, want the saved receiver", len(n.Args))
+				}
+				if n.Args[0].Obj == nil || !strings.HasPrefix(n.Args[0].Obj.Name, ".autotmp_") {
+					t.Errorf("the method value captures %v and not a temporary holding the receiver", n.Args[0].Obj)
+				}
+				lit := buildFuncOf(t, p, "f.func1")
+				if !lit.Wrapper {
+					t.Error("the literal of a method value is not marked a wrapper, so recover would count its frame")
+				}
+				if len(lit.Captures) != 1 || lit.Captures[0] != n.Args[0].Obj {
+					t.Errorf("the literal captures %v and the node names %v", lit.Captures, n.Args[0].Obj)
+				}
+				call := buildFirst(t, lit, OCall)
+				if call.X == nil || call.X.Obj == nil || call.X.Obj.Name != "p.T.M" {
+					t.Errorf("the literal calls %v and not the method:\n%s", call.X, buildDump(lit))
+				}
+				if len(call.Args) != 1 || call.Args[0].Obj != n.Args[0].Obj {
+					t.Errorf("the call's receiver is %v and not the saved copy:\n%s", call.Args, buildDump(lit))
+				}
+			},
+		},
+		{
+			row:  "method value of an interface",
+			body: `func f(i I) func() int { return i.M }`,
+			op:   OClosure,
+			check: func(t *testing.T, p *Package, fn *Func, n *Node) {
+				if n.Obj == nil || n.Obj.Name != "p.I.M" {
 					t.Errorf("the method value names %v", n.Obj)
 				}
 				if len(n.Args) != 1 {
 					t.Fatalf("the method value holds %d values, want the receiver", len(n.Args))
 				}
-				// A method value and a literal with one capture are otherwise
-				// the same node, and the receiver is held by value while a
-				// capture is shared.
+				// The receiver stays inside the selection, because no symbol
+				// names the function the itab holds. The method index is what
+				// carries that to the refusal.
 				if n.Index == closureLiteral {
-					t.Error("the method value is marked a function literal")
+					t.Error("the method value of an interface is marked a function literal")
 				}
 			},
 		},

@@ -79,10 +79,21 @@ import (
 // functions have run. A function that captures a result therefore gets that
 // exit whether or not it defers.
 //
+// # A by-value capture is a cell nobody else can reach
+//
+// A method value binds its receiver where it is written and the call made
+// later uses that copy. ir.Build gives it the same cell as everything else, by
+// saving the receiver in a temporary and capturing the temporary: the
+// temporary is written once and no other expression names it, so a capture by
+// reference of it and a capture by value of the receiver hold the same value
+// for as long as the closure exists. That is the argument wrapCallStmt already
+// makes for the operands of a defer, and it is why there is one capture shape
+// here and not two.
+//
 // # What is refused
 //
-// A method value, whose receiver is captured by value rather than through a
-// cell. It is named where it is refused.
+// A method value of an interface, whose function is read out of the itab and
+// named by no symbol. It is refused where the closure object would be built.
 
 // closureCodeField is the index of the code pointer in a closure object, and
 // closureFirstCapture is the index of the first capture after it.

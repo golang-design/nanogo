@@ -30,12 +30,13 @@ a program.
 | a function literal that captures nothing | built; a static one-word `funcval` holding the code pointer |
 | a **declared** function used as a func value | built; the same static one-word `funcval` |
 | a literal with a capture list | built; a heap closure object holding the code pointer and one heap cell per capture |
-| a method value | **refused**; its receiver is bound by value and only a capture through a heap cell is built |
+| a method value of a concrete type | built; the receiver is saved in a temporary where the value is written and a literal captures the temporary, marked `FuncIDWrapper` |
+| a method value of an interface | **refused**; the function is read out of the itab and a closure object holds a symbol |
 | a named result a literal captures | built; the result gets a cell like any other capture, and the single exit copies the cell into the result object |
 | `defer f()` with no arguments and no captures | built; `runtime.deferproc`, plus the single exit below |
 | `defer f(x)`, with arguments | built; `ir.Build` puts the call in a literal that captures the operands, marked `FuncIDWrapper` |
 | `defer x.M()`, a method of a concrete type | built; the receiver is the call's first operand and travels the same way |
-| `defer i.M()`, a method of an interface | **refused**; the value the runtime is given would be a method value |
+| `defer i.M()`, a method of an interface | **refused**; the value the runtime is given would be a method value of an interface, which is the row above |
 | `defer println(x)`, `defer close(c)`, a builtin | built; a builtin is an operation and not a func value, so it travels inside the same literal, whether or not it has operands |
 | `defer recover()` | built, and it does not recover; the literal is marked, so `runtime.gorecover` counts no non-wrapper frame, which is what the language asks of a `recover` no deferred function called directly |
 | `go f()` and `go f(x)` | built; `runtime.newproc` takes the same one word, on the same terms |
@@ -185,9 +186,9 @@ can reassign. gc leaves the same operands where they are, and for the same
 reason its `visit` returns for a literal, for nil and for a function name.
 
 **A method of an interface is the row that is left.** Its receiver stays inside
-the selection, so the value the runtime would be given is a method value: the
-receiver bound to the function the itab names. `closureExpr` refuses a method
-value for the same reason, and both wait on the same work.
+the selection, so the value the runtime would be given is a method value whose
+function is read out of the itab. `closureExpr` refuses one for the same
+reason, and both wait on the same work.
 
 **A capture whose type has no canonical name refuses the closure.** The cell is
 allocated through `runtime.newobject`, which takes a `*_type`, so a capture of
@@ -202,6 +203,51 @@ holds the only call to `runtime.deferreturn`. `cmd/link` records the offset of
 one such call per function in `pclntab`, so a function with two of them
 resumes at the wrong one after a panic. Every `return` in a function that
 defers becomes a `goto` to that label.
+
+### A method value binds its receiver, and the binding is a capture
+
+The language evaluates the receiver where the method value is written and the
+call made later uses that saved copy. That is a capture by value, and this
+spec builds one capture shape, so the two are joined the way the operands of a
+`defer` above are joined:
+
+```
+x.M   becomes   t := x
+                func(a ...) (r ...) { return T.M(t, a...) }
+```
+
+`t` is written once and no other expression names it, so a capture of `t` by
+reference and a capture of `x` by value hold the same value for as long as the
+closure exists. **A by-value capture is a by-reference capture of a variable
+nobody else can reach**, and no second capture shape is built for it.
+
+What is saved is the receiver the method's signature wants and not the operand
+the source wrote. `ir/build.go`'s `recvArg` has already taken the address for a
+pointer receiver on an addressable value, which is what the language saves
+there, so `f := v.M` through a pointer receiver sees a later assignment to `v`
+and one through a value receiver does not.
+
+**The literal is marked `FuncIDWrapper`, for the reason the `defer` literal
+is.** `f := x.M` followed by `defer f()` puts this frame between
+`runtime.gopanic` and the method, and `runtime.gorecover` counts the frames it
+is not told to skip. Without the mark a method that recovers stops recovering
+and nothing says so at compile time.
+
+`gc` reaches the same behaviour with one function per method rather than one
+per site. `walkMethodValue` builds `&struct{F uintptr; R T}{T.M-fm·f, x}` and
+`methodValueWrapper` generates `T.M-fm`, a duplicate-tolerant function whose
+receiver is a hidden closure variable held **inline** in that struct, and whose
+body is a tail call to the method. Holding the receiver inline needs a closure
+object type per receiver type, and the section above gives one reason there is
+one type per arity here; a wrapper shared between packages also needs a
+duplicate-tolerant symbol, which only the generated functions of
+[032](032-type-descriptors-and-itabs.md) have. The literal costs one function
+symbol per site and one cell, and needs neither.
+
+`gc` also emits a nil check of the itab at a method value whose receiver is an
+interface, so that the panic happens where the value is formed rather than
+inside the wrapper. That row is refused here for the reason above, so the
+question does not arise yet, and it is part of the same work.
 
 ### A captured named result
 

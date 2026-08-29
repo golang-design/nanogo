@@ -33,7 +33,10 @@ type T struct {
 	A, B int
 }
 
-func (t T) M() int { return t.A }
+func (t T) M() int  { return t.A }
+func (t *T) N() int { return t.B }
+
+type I interface{ M() int }
 
 type P struct {
 	A int
@@ -1781,7 +1784,7 @@ func TestLowerRefusals(t *testing.T) {
 		// specs/020-ir.md's type boundary drops, so that a count by cause says
 		// which field is holding the row back rather than only that a name was
 		// wanted.
-		{"a method value", `func f(t T) func() int { return t.M }`, OClosure, "method value"},
+		{"a method value of an interface", `func f(i I) func() int { return i.M }`, OClosure, "reads its function out of the itab"},
 		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
 		{"a select with no clauses", `func f() { select {} }`, OSelect, "runtime.block"},
 		{"an assertion to a one-word struct", `
@@ -2152,10 +2155,10 @@ func TestLowerMapIteratorMatchesTheRuntimesLayout(t *testing.T) {
 // counted once, under the first one.
 func TestLowerReportsTheFirstRefusal(t *testing.T) {
 	// Two refusals, in source order. min of floats is the earlier one, so it
-	// is the one the count is grouped under; the method value after it is not
-	// counted again. Both rows are chosen because neither is built, and the
-	// test moves to another pair when one of them is.
-	_, err := lowerFunc(t, `func f(a, b float64, t T) float64 { x := min(a, b); g := t.M; use(g()); return x }`, "f")
+	// is the one the count is grouped under; the method value of an interface
+	// after it is not counted again. Both rows are chosen because neither is
+	// built, and the test moves to another pair when one of them is.
+	_, err := lowerFunc(t, `func f(a, b float64, i I) float64 { x := min(a, b); g := i.M; use(g()); return x }`, "f")
 	le, ok := err.(*LowerError)
 	if !ok {
 		t.Fatalf("the error is a %T: %v", err, err)

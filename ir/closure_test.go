@@ -493,3 +493,120 @@ func TestLowerLeavesALocalTheCompilerTookTheAddressOf(t *testing.T) {
 		}
 	}
 }
+
+// TestLowerMethodValueSavesTheReceiver is the by-value capture of
+// specs/033-closures-defer-panic.md.
+//
+// The language evaluates the receiver where the method value is written and
+// the call made later uses that copy. ir.Build saves it in a temporary and the
+// literal captures the temporary, so the cell holds a copy nothing else names
+// and there is one capture shape rather than two.
+func TestLowerMethodValueSavesTheReceiver(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, lowerPrelude+"\n"+
+		`func f(t T) func() int { return t.M }`)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	fn := buildFuncOf(t, out, "f")
+	if err := Lower(fn); err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	// The cell of the saved receiver and the closure object, which is what a
+	// literal with one capture costs.
+	n := 0
+	for _, c := range lowerCalls(fn) {
+		if c == "runtime.newobject" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("a method value made %d allocations, want the cell and the object: %v\n%s",
+			n, lowerCalls(fn), buildDump(fn))
+	}
+	if !strings.Contains(buildDump(fn), "*"+closureCtxName(1)) {
+		t.Errorf("the method value is not a closure object with one capture:\n%s", buildDump(fn))
+	}
+	// The receiver reaches the cell and is not read again out of the frame. A
+	// method value that named the parameter after the copy would be reading
+	// storage the closure cannot see.
+	if got := mentionsParam(fn, "t"); got != 1 {
+		t.Errorf("the receiver is named %d times, want once for the copy into the temporary:\n%s",
+			got, buildDump(fn))
+	}
+
+	lit := buildFuncOf(t, out, "f.func1")
+	if !lit.Wrapper {
+		t.Error("the literal of a method value is not marked a wrapper")
+	}
+	if err := Lower(lit); err != nil {
+		t.Fatalf("Lower the literal: %v", err)
+	}
+	if lit.Closure == nil || lit.Closure.Type == nil || lit.Closure.Type.Elem == nil ||
+		lit.Closure.Type.Elem.Name != closureCtxName(1) {
+		t.Fatalf("the literal's context parameter is %v", lit.Closure)
+	}
+	if !strings.Contains(buildDump(lit), "p.T.M") {
+		t.Errorf("the literal does not call the method:\n%s", buildDump(lit))
+	}
+}
+
+// TestLowerMethodValueTakesTheAddressOfAPointerReceiver pins which value is
+// saved.
+//
+// The language saves the receiver the method's signature wants, so a pointer
+// receiver on an addressable value saves the address and a later assignment to
+// the variable is visible through the method value. A value receiver saves a
+// copy and it is not.
+func TestLowerMethodValueTakesTheAddressOfAPointerReceiver(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want Kind
+	}{
+		{"a value receiver", `func f() func() int { var t T; return t.M }`, Struct},
+		{"a pointer receiver", `func f() func() int { var t T; return t.N }`, Ptr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pkg, files, info := buildTypecheck(t, lowerPrelude+"\n"+tc.body)
+			out, err := Build(pkg, files, info)
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			lit := buildFuncOf(t, out, "f.func1")
+			if len(lit.Captures) != 1 {
+				t.Fatalf("the literal captures %d objects, want the saved receiver", len(lit.Captures))
+			}
+			if got := lit.Captures[0].Type; got == nil || got.Kind != tc.want {
+				t.Errorf("the saved receiver is %v, want a %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLowerMethodValueOfAVariadicMethodPassesTheSliceOn checks the one place
+// the forwarding call is not a plain call.
+//
+// The literal has the method's own signature, so its last parameter arrives
+// already packed. Passing it on is "f(a...)" and not "f(a)", which would pack
+// the slice a second time and call the method with one element.
+func TestLowerMethodValueOfAVariadicMethodPassesTheSliceOn(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, lowerPrelude+"\n"+
+		"func (t T) V(xs ...int) int { return len(xs) }\n\nfunc f(t T) func(...int) int { return t.V }")
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	lit := buildFuncOf(t, out, "f.func1")
+	call := buildFirst(t, lit, OCall)
+	if call.Index != spread {
+		t.Errorf("the forwarding call is not marked spread:\n%s", buildDump(lit))
+	}
+	if len(call.Args) != 2 {
+		t.Errorf("the forwarding call takes %d arguments, want the receiver and the packed slice:\n%s",
+			len(call.Args), buildDump(lit))
+	}
+	if len(buildFind(lit, OCompositeLit)) != 0 {
+		t.Errorf("the forwarding call packs the slice a second time:\n%s", buildDump(lit))
+	}
+}

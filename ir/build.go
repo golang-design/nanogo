@@ -70,9 +70,11 @@ import (
 //   - An OClosure names its function in Obj and holds its values in Args.
 //     Index tells the two forms apart, because they differ in a way
 //     specs/023-escape-analysis.md cares about: it is the method index for a
-//     method value, whose one Arg is the receiver by value, and -1 for a
-//     function literal, whose Args are captured objects shared with the
-//     function that made it.
+//     method value of an interface, whose one Arg is the receiver and whose
+//     function no symbol names, and -1 for a function literal, whose Args are
+//     captured objects shared with the function that made it. A method value
+//     of a concrete type is the second form: methodValue saves the receiver in
+//     a temporary and captures that.
 //   - fallthrough is an OGoto labelled "fallthrough". A source label cannot
 //     collide with it, because fallthrough is a keyword.
 //   - OFor keeps its init statements in Init, its condition in X, its body in
@@ -2275,15 +2277,21 @@ func (b *builder) selector(x *syntax.SelectorExpr) Expr {
 		}
 		recv, recvType := b.fieldPath(b.expr(x.X), b.typeOf(x.X), rs.index[:len(rs.index)-1])
 		recv = b.recvArg(recv, recvType, fn)
-		io := b.obj(fn)
-		return &Node{
-			Op:    OClosure,
-			Pos:   x.Pos(),
-			Type:  b.irType(sel.Type()),
-			Obj:   io,
-			Args:  []Expr{recv},
-			Index: rs.methodIndex(),
+		if isInterface(recvType) {
+			// The receiver stays inside the selection, because the function
+			// the value calls is read out of the itab and not named by a
+			// symbol. specs/033-closures-defer-panic.md refuses that row, and
+			// the method index is what carries it to the refusal.
+			return &Node{
+				Op:    OClosure,
+				Pos:   x.Pos(),
+				Type:  b.irType(sel.Type()),
+				Obj:   b.obj(fn),
+				Args:  []Expr{recv},
+				Index: rs.methodIndex(),
+			}
 		}
+		return b.methodValue(x.Pos(), sel, fn, recv)
 
 	case types2.MethodExpr:
 		// A method expression is the method's function symbol. Its first
@@ -2622,11 +2630,114 @@ func (b *builder) closure(x *syntax.FuncLit) Expr {
 		return caps[i].Name < caps[j].Name
 	})
 
-	// Index is -1 rather than a method index. A method value and a literal
-	// with one capture are otherwise the same node, and a consumer that could
-	// not tell them apart would treat a receiver passed by value as a
-	// captured object shared by reference.
+	// Index is -1 rather than a method index. A method value of an interface
+	// and a literal with one capture are otherwise the same node, and a
+	// consumer that could not tell them apart would read a receiver that stays
+	// inside the selection as a captured object.
 	return b.closureNode(fn, x.Pos(), caps)
+}
+
+// methodValue builds x.M, a method of a concrete type used as a value.
+//
+// The language evaluates the receiver where the method value is written and
+// the call made later uses that saved copy, so
+//
+//	x.M   becomes   t := x
+//	                func(a ...) (r ...) { return T.M(t, a...) }
+//
+// which is the rewrite wrapCallStmt already applies to the operands of a defer.
+// The temporary is written once and nothing else names it, so capturing it by
+// reference and capturing it by value are the same value, and the heap cell of
+// specs/033-closures-defer-panic.md is the whole of the storage a by-value
+// capture needs. No second capture shape is built, because a by-value capture
+// of a variable written once is a by-reference capture of a variable nobody
+// else can reach.
+//
+// The receiver is the receiver the method's signature wants and not the
+// operand the source wrote: recvArg has already taken the address for a
+// pointer receiver on an addressable value, which is what the language saves
+// there, so "p := &v; f := v.M" through a pointer receiver sees a later
+// assignment to v and a value receiver does not.
+//
+// gc reaches the same behaviour with one function per method rather than one
+// per site. walkMethodValue builds &struct{F uintptr; R T}{T.M-fm·f, x} and
+// methodValueWrapper generates T.M-fm, a dupok function whose receiver is a
+// hidden closure variable held by value in that struct. Holding the receiver
+// inline needs a closure object type per receiver type, and this compiler has
+// one per arity (ir/closure.go) so that no capture's own type is asked for; a
+// shared wrapper also needs a duplicate-tolerant symbol, which only the
+// generated functions of specs/032-type-descriptors-and-itabs.md have. The
+// literal costs one function symbol per site and one cell, and needs neither.
+//
+// The literal is marked Wrapper for the reason wrapCallStmt marks its own:
+// runtime.gorecover counts the frames between itself and runtime.gopanic, so
+// "f := x.M; defer f()" where M recovers keeps recovering only because this
+// frame is not counted.
+func (b *builder) methodValue(pos syntax.Pos, sel *types2.Selection, fn *types2.Func, recv Expr) Expr {
+	msig, _ := sel.Type().(*types2.Signature)
+	if msig == nil {
+		b.errorf("ir: the method value %s has no signature", fn.Name())
+		return b.badExpr(pos)
+	}
+	if b.fn == nil || recv == nil || recv.Type == nil {
+		// temp declares a local of the function being built, and the capture
+		// list of the literal is that local. Without one there is nothing to
+		// save the receiver in, and a capture word holding the receiver's own
+		// value would be a word the collector traces as a pointer.
+		b.errorf("ir: the method value %s is formed outside a function", fn.Name())
+		return b.badExpr(pos)
+	}
+	saved := b.temp(recv)
+	io := b.obj(fn)
+
+	lit := b.newLiteral(pos)
+	lit.Type = b.irType(sel.Type())
+	lit.Wrapper = true
+	args := []Expr{saved}
+	for i := 0; i < msig.Params().Len(); i++ {
+		o := &Object{
+			Name:  fmt.Sprintf(".p%d", i),
+			Type:  b.irType(msig.Params().At(i).Type()),
+			Pos:   pos,
+			Class: ClassParam,
+		}
+		lit.Params = append(lit.Params, o)
+		b.owner[o] = lit
+		args = append(args, &Node{Op: OLocal, Pos: pos, Type: o.Type, Obj: o})
+	}
+	for i := 0; i < msig.Results().Len(); i++ {
+		o := &Object{
+			Name:  fmt.Sprintf(".r%d", i),
+			Type:  b.irType(msig.Results().At(i).Type()),
+			Pos:   pos,
+			Class: ClassResult,
+		}
+		lit.Results = append(lit.Results, o)
+		b.owner[o] = lit
+	}
+	call := &Node{
+		Op:   OCall,
+		Pos:  pos,
+		Type: b.resultType(msig),
+		X:    &Node{Op: OGlobal, Pos: pos, Type: io.Type, Obj: io},
+		Args: args,
+	}
+	if msig.Variadic() {
+		// The last parameter arrives already packed, because the literal has
+		// the method's own signature. Passing it on is "f(a...)" and not
+		// "f(a)", which would pack the slice a second time.
+		call.Index = spread
+	}
+	ret := &Node{Op: OReturn, Pos: pos, Type: voidType}
+	if msig.Results().Len() > 0 {
+		// One argument whose type covers every result, which is the form
+		// "return f()" takes when f returns everything the function returns.
+		ret.Args = []Expr{call}
+		lit.Body = []Stmt{ret}
+	} else {
+		lit.Body = []Stmt{call, ret}
+	}
+	return b.closureNode(lit, pos, []*Object{saved.Obj})
 }
 
 // call builds a call, a conversion and a call to a builtin. The parser cannot

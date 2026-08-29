@@ -5,6 +5,7 @@
 package e2e
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -392,6 +393,159 @@ func TestToolexecCapturesANamedResult(t *testing.T) {
 	}
 	if got := exitCode(t, filepath.Join(h.mod, "capturedresult")); got != 7 {
 		t.Fatalf("the program exited %d, want 7: a captured result and the value the function returned disagreed", got)
+	}
+}
+
+// The program that binds a receiver into a method value.
+//
+// A method value evaluates its receiver where it is written and the call made
+// later uses that saved copy, which is the by-value capture of
+// specs/033-closures-defer-panic.md. ir.Build saves the receiver in a
+// temporary and the literal captures the temporary, so the copy lives in a
+// heap cell like every other capture.
+//
+// Four claims, and each fails differently:
+//
+//   - a value receiver is copied at the method value, so an assignment to the
+//     variable afterwards is not visible through it;
+//   - a pointer receiver saves the address, so the same assignment is visible
+//     and the call writes the variable;
+//   - the saved copy outlives the frame that made it, and the collector
+//     reaches the pointer it holds through the cell;
+//   - the receiver is evaluated exactly once, where the value is written,
+//     which is what a receiver with a side effect reports;
+//   - a deferred method value lets its method recover, which is the frame
+//     runtime.gorecover must not count.
+//
+// The last one is the mark rather than the mechanism. gorecover recovers only
+// when exactly one non-wrapper frame stands between it and runtime.gopanic,
+// and the literal that holds the receiver is a frame the program did not
+// write. Without ir.Func.Wrapper on it the recover returns nil, the panic is
+// not caught, and the process dies with no compile-time complaint.
+//
+// The exit status is the assertion, and gc's build of the same source exits 7.
+const methodValueProgram = `package main
+
+import (
+	"os"
+	"runtime"
+)
+
+type counter struct{ n int }
+
+func (c counter) get() int  { return c.n }
+func (c *counter) inc() int { c.n = c.n + 1; return c.n }
+
+type node struct{ a int }
+
+type holder struct{ p *node }
+
+func (h holder) get() int { return h.p.a }
+
+type handler struct{ code int }
+
+var code = 1
+var evals = 0
+
+func (h *handler) run() {
+	recover()
+	code = h.code
+}
+
+//go:noinline
+func source() counter {
+	evals = evals + 1
+	return counter{9}
+}
+
+//go:noinline
+func boom(xs []int) {
+	h := (&handler{7}).run
+	defer h()
+	_ = xs[3]
+}
+
+//go:noinline
+func escaped() func() int {
+	h := holder{&node{5}}
+	return h.get
+}
+
+//go:noinline
+func churn() {
+	for i := 0; i < 4096; i++ {
+		_ = &node{a: i}
+	}
+}
+
+func main() {
+	c := counter{1}
+	byValue := c.get
+	byPointer := c.inc
+	c.n = 100
+
+	if byValue() != 1 {
+		os.Exit(1)
+	}
+	if byPointer() != 101 {
+		os.Exit(2)
+	}
+	if c.n != 101 {
+		os.Exit(3)
+	}
+
+	saved := escaped()
+	churn()
+	runtime.GC()
+	churn()
+	runtime.GC()
+	if saved() != 5 {
+		os.Exit(4)
+	}
+
+	once := source().get
+	if evals != 1 {
+		os.Exit(5)
+	}
+	if once() != 9 {
+		os.Exit(6)
+	}
+
+	boom(nil)
+	os.Exit(code)
+}
+`
+
+// TestToolexecBindsAMethodValueReceiver runs the by-value capture.
+func TestToolexecBindsAMethodValueReceiver(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/methodvalue\n\ngo 1.27\n",
+		"main.go": methodValueProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "methodvalue", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	// The saved receiver holds a pointer and lives in a heap cell, so the
+	// collector reaches it through the cell's descriptor. gccheckmark marks a
+	// second time with the world stopped, which turns a missed word into a
+	// crash where the mistake is.
+	cmd := exec.Command(filepath.Join(h.mod, "methodvalue"))
+	cmd.Env = append(os.Environ(), "GODEBUG=gccheckmark=1,clobberfree=1", "GOGC=1")
+	b, err := cmd.CombinedOutput()
+	got := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("the program nanogo built did not run: %v\n%s", err, b)
+		}
+		got = ee.ExitCode()
+	}
+	if got != 7 {
+		t.Fatalf("the program exited %d, want 7: the receiver a method value saved was not the receiver the call used\n%s", got, b)
 	}
 }
 

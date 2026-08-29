@@ -4012,11 +4012,11 @@ const exitLabel = ".exit"
 // closureExpr lowers a function literal.
 func (l *lowerer) closureExpr(n Expr) Expr {
 	if n.Index != closureLiteral {
-		// A method value binds its receiver by value and not through a cell,
-		// so the receiver is a copy the closure object holds rather than a
-		// variable two functions share. closure.go builds the cell form and
-		// this is not it.
-		l.refuse(n, "a method value captures its receiver by value, and only a capture through a heap cell is built")
+		// A method value of an interface, which ir.Build leaves in this form
+		// because the function it calls is read out of the itab and no symbol
+		// names it. A method value of a concrete type arrives as a literal
+		// capturing the saved receiver and never reaches here.
+		l.refuse(n, "a method value of an interface reads its function out of the itab, and a closure object holds a symbol")
 		return n
 	}
 	if n.Obj == nil || n.Obj.Class != ClassFunc {
@@ -4163,9 +4163,9 @@ func (l *lowerer) deferredValue(n Expr) Expr {
 		if fun.X != nil && fun.X.Type != nil && fun.X.Type.Kind == Interface {
 			// A method of an interface keeps its receiver inside the
 			// selection, so the value the runtime would be given is a method
-			// value: the receiver bound to the function the itab names.
-			// closureExpr refuses a method value for the same reason.
-			l.refuse(n, "a method of an interface is a method value, which binds its receiver by value, and only a capture through a heap cell is built")
+			// value whose function is read out of the itab. closureExpr
+			// refuses one for the same reason.
+			l.refuse(n, "a method of an interface is a method value, which reads its function out of the itab, and a closure object holds a symbol")
 			return nil
 		}
 		l.refuse(n, "a call through a field of a "+fun.X.Type.Kind.String()+", which the builder does not snapshot")
