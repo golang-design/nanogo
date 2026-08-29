@@ -388,8 +388,14 @@ func TestStencilBuildsAMethodOfAnInstantiationNothingCalls(t *testing.T) {
 }
 
 // TestStencilFollowsAnInstantiationOutOfAMethodBody is the worklist across the
-// two queues: a method's body names another instantiation, whose own methods
-// are then owed.
+// two queues: an instantiation reached through another one is built too, and
+// its own methods are owed with it.
+//
+// The order is the order the converter finished the types in, which is the
+// order the type graph unwinds: Cell[int] is a field of Outer[int], so it is
+// converted first and its methods are queued first. It is an order and not a
+// preference, and specs/053-determinism.md asks only that it be the same on
+// every build.
 func TestStencilFollowsAnInstantiationOutOfAMethodBody(t *testing.T) {
 	p := buildSource(t, "type Cell[T any] struct{ v T }\n\n"+
 		"func (c Cell[T]) Get() T { return c.v }\n\n"+
@@ -397,7 +403,7 @@ func TestStencilFollowsAnInstantiationOutOfAMethodBody(t *testing.T) {
 		"func (o Outer[T]) Get() T { return o.c.Get() }\n\n"+
 		"func user() { sink(Outer[int]{}.Get()) }\n")
 	got := stencilSyms(p)
-	want := []string{"p.Outer[int].Get", "p.Cell[int].Get"}
+	want := []string{"p.Cell[int].Get", "p.Outer[int].Get"}
 	if len(got) != len(want) {
 		t.Fatalf("the instantiations are %v, want %v", got, want)
 	}

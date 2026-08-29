@@ -47,8 +47,8 @@ type Converter struct {
 	// walk that built it rather than by this lookup.
 	gens map[*types2.TypeName]int
 
-	// instance is told about each instantiation of a generic defined type,
-	// once, the first time the converter meets it.
+	// instance is told about each instantiation of a generic defined type
+	// this converter converted, once, and notified is the set already told.
 	//
 	// The stenciler of specs/013-generics.md needs the notice: a method of
 	// L[int] is compiled because a value of L[int] exists somewhere in the
@@ -56,10 +56,20 @@ type Converter struct {
 	// through. Discovery at a call site would miss the method an itab holds
 	// and nothing calls.
 	//
-	// It records and does not build. The cache entry of the type being filled
-	// is installed but not complete, so a listener that asked for the type's
-	// layout here would read a type that is half written.
+	// The set is not the cache. A conversion that fails deletes its cache
+	// entry, so a type that cannot be converted is converted again by the next
+	// caller that names it, and a notice sent from inside the fill would be
+	// sent again each time. L[P] inside a generic body is exactly that type:
+	// its argument is a type parameter, which has no run-time representation,
+	// and the stenciler asking for the type again is what sends the next
+	// notice. The queue then never empties.
+	//
+	// So the notice is sent after the fill and only when it succeeded, and the
+	// set makes it at most one notice per type. It is never ranged over; the
+	// order the stenciler sees is the order of the calls
+	// (specs/053-determinism.md).
 	instance func(*types2.Named)
+	notified map[*types2.Named]bool
 }
 
 // NewConverter returns a Converter with an empty cache.
@@ -199,7 +209,29 @@ func (c *Converter) convert(t types2.Type) (*Type, error) {
 		delete(c.cache, t)
 		return nil, err
 	}
+	c.notify(t)
 	return out, nil
+}
+
+// notify tells the listener about an instantiation of a generic defined type,
+// once, and only after the type converted.
+//
+// A type that fails to convert is not one the stenciler can build a method of,
+// and it is the type the cache does not keep, so it is the one a notice from
+// inside the fill would announce over and over. See Converter.instance.
+func (c *Converter) notify(t types2.Type) {
+	if c.instance == nil {
+		return
+	}
+	named, ok := t.(*types2.Named)
+	if !ok || named.TypeArgs().Len() == 0 || c.notified[named] {
+		return
+	}
+	if c.notified == nil {
+		c.notified = make(map[*types2.Named]bool)
+	}
+	c.notified[named] = true
+	c.instance(named)
 }
 
 // fill sets out from t. out is already in the cache, so a recursive reference
@@ -256,12 +288,6 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 		// entry rather than on a name that is not spelled yet.
 		if n := t.TypeArgs(); n.Len() > 0 {
 			out.Instantiated = true
-			if c.instance != nil {
-				// Here rather than after the fill, because the fill is what
-				// recurses and a notice sent after it would arrive in the
-				// order the graph unwinds rather than the order it is walked.
-				c.instance(t)
-			}
 			out.TypeArgs = make([]*Type, 0, n.Len())
 			for i := 0; i < n.Len(); i++ {
 				a, err := c.convert(n.At(i))
