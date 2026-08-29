@@ -307,17 +307,48 @@ func staticValue(t *ir.Type, v ir.Value) ([]byte, []dataReloc, error) {
 		binary.LittleEndian.PutUint64(data, math.Float64bits(f))
 	case t.Kind == ir.String:
 		return stringHeader(t, c)
+	case t.Kind.IsComplex():
+		// Two floats side by side, which is the layout ir's lowering pass
+		// gives a complex everywhere else. constant.Real and constant.Imag
+		// take a value of any constant kind, so an integer constant assigned
+		// to a complex variable lays out here too.
+		return complexHalves(t, c)
 	default:
 		// A constant of a kind with no layout here is refused and not left
 		// zero. Leaving it zero would put the value in the hands of the
-		// assignment in the initialisation function, and that assignment is
-		// exactly as unbuilt: a complex constant reaches SSA construction as
-		// OpConstNil, so the variable would hold zero and the program would
-		// run and be wrong. Complex is the only such kind the language has.
+		// assignment in the initialisation function, and there is no
+		// guarantee that assignment exists: a variable whose initialiser the
+		// type checker folded to a constant has no assignment at all, so the
+		// variable would silently hold zero and the program would run and be
+		// wrong.
 		return nil, nil, fmt.Errorf("a constant of type %v, which has no static layout and no assignment either", t)
 	}
 	// A kind whose constant is the predeclared nil is already the zero bytes
 	// above, because a nil Val returned before this switch.
+	return data, nil, nil
+}
+
+// complexHalves lays out the real and the imaginary half of a complex
+// constant, in that order.
+//
+// The two halves are written at the width of the type and not at the width of
+// the constant. go/constant carries a complex constant exactly, so 1/3 is a
+// rational until it is put in the bytes, and the rounding is the one the
+// language specifies for an assignment to that type.
+func complexHalves(t *ir.Type, c ir.Const) ([]byte, []dataReloc, error) {
+	data := make([]byte, t.Size)
+	half := t.Size / 2
+	for i, v := range [...]constant.Value{constant.Real(c.Val), constant.Imag(c.Val)} {
+		f, _ := constant.Float64Val(v)
+		switch half {
+		case 4:
+			binary.LittleEndian.PutUint32(data[int64(i)*half:], math.Float32bits(float32(f)))
+		case 8:
+			binary.LittleEndian.PutUint64(data[int64(i)*half:], math.Float64bits(f))
+		default:
+			return nil, nil, fmt.Errorf("a complex constant of %d bytes", t.Size)
+		}
+	}
 	return data, nil, nil
 }
 

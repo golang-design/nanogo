@@ -316,6 +316,11 @@ var (
 	lowerUint16    = mustLayoutNamed(Uint16, "uint16")
 	lowerUint64    = mustLayoutNamed(Uint64, "uint64")
 	lowerUnsafePtr = mustLayoutNamed(UnsafePtr, "unsafe.Pointer")
+	lowerFloat32   = mustLayoutNamed(Float32, "float32")
+	lowerFloat64   = mustLayoutNamed(Float64, "float64")
+	// The wide complex is named here because a division is a call that takes
+	// two of them and returns one, whatever the width the source wrote.
+	lowerComplex128 = mustLayoutNamed(Complex128, "complex128")
 )
 
 // ptrTo returns the pointer type to t, one per element type.
@@ -391,6 +396,21 @@ func (l *lowerer) header(t *Type) *Type {
 		h = &Type{Kind: Struct, Name: name, Fields: []Field{
 			{Name: "typ", Type: word},
 			{Name: "data", Type: lowerUnsafePtr},
+		}}
+	case Complex64, Complex128:
+		// A complex is a header too, and the plainest one: two floats side by
+		// side with nothing between them. The language gives the pair no
+		// field names, so real and imag are the names of the two builtins
+		// that read them.
+		//
+		// The size check below is what makes this a layout and not a guess. A
+		// complex64 is two float32s and eight bytes aligned to four, and a
+		// complex128 is two float64s and sixteen aligned to eight, which is
+		// what ir.Type's own table says and what specs/030-abi.md passes.
+		e := complexPart(t)
+		h = &Type{Kind: Struct, Name: t.Kind.String(), Fields: []Field{
+			{Name: "real", Type: e},
+			{Name: "imag", Type: e},
 		}}
 	default:
 		return nil
@@ -1126,6 +1146,25 @@ func (l *lowerer) expr(n Expr) Expr {
 		} else {
 			n.Y = l.expr(n.Y)
 		}
+		if complexPart(n.Type) != nil {
+			return l.complexBinary(n)
+		}
+		return n
+
+	case OUnary:
+		n.X = l.expr(n.X)
+		switch {
+		case complexPart(n.Type) == nil:
+		case n.Op1 == syntax.Sub:
+			return l.complexNeg(n)
+		case n.Op1 == syntax.Add:
+			// Unary plus is the identity. It reaches here rather than being
+			// folded away because the builder keeps every unary operator the
+			// source wrote.
+			return n.X
+		default:
+			l.refuse(n, "the operator has no row over a complex operand")
+		}
 		return n
 
 	case ODefer:
@@ -1163,6 +1202,13 @@ func (l *lowerer) expr(n Expr) Expr {
 	n.Y = l.expr(n.Y)
 	for i := range n.Args {
 		n.Args[i] = l.expr(n.Args[i])
+	}
+
+	if n.Op == OConst && complexPart(n.Type) != nil {
+		// A complex constant is two numbers, and every pass below carries one
+		// number per constant. It is split here so that neither of them has
+		// to learn a second shape.
+		return l.complexConst(n)
 	}
 
 	if isFuncSymbol(n) {
@@ -1212,6 +1258,12 @@ func (l *lowerer) expr(n Expr) Expr {
 		return l.makeExpr(n)
 	case OPrint, OPrintln:
 		return l.printExpr(n)
+	case OComplex:
+		return l.complexMake(n.Type, n.X, n.Y, n.Pos)
+	case OReal:
+		return l.complexHalf(n, cplxReal)
+	case OImag:
+		return l.complexHalf(n, cplxImag)
 	case OClosure:
 		return l.closureExpr(n)
 	case OTypeAssert:
@@ -1838,6 +1890,19 @@ func (l *lowerer) convertExpr(n Expr) Expr {
 	}
 	from, pos := x.Type, n.Pos
 	switch {
+	case complexPart(to) != nil && complexPart(from) != nil:
+		// Between the two widths, which is two float conversions and a
+		// rebuilt pair, or the identity when the widths agree.
+		return l.complexTo(x, to)
+
+	case complexPart(to) != nil:
+		// A real number converted to a complex one, which the language admits
+		// only through a type parameter. The imaginary half is zero, and gc's
+		// conv says the same in a comment: "Needed for generics support -
+		// can't happen in normal Go code".
+		return l.complexMake(to, x, &Node{Op: OConst, Pos: pos,
+			Type: complexPart(to), Val: Const{Val: constant.MakeFloat64(0)}}, pos)
+
 	case from.Kind == Interface && to.Kind == Interface && !to.EmptyIface && !sameIface(from, to):
 		return l.ifaceToIface(n, from, to, pos)
 
@@ -4189,9 +4254,10 @@ func (l *lowerer) exitReturn(s Stmt) []Stmt {
 // compiler to the object writer for data symbols, which is the same thing the
 // funcval of a closure that captures nothing wants.
 //
-// An interface, a slice and a complex number are refused. Each needs a symbol
-// chosen by the operand's own type, which gc instantiates per type, and this
-// pass has no instantiation.
+// An operand whose type is a struct or an array is refused, and so is a
+// pointer whose element is //go:notinheap. gc reports the first as a type
+// print cannot take, and reaches runtime.printuintptr for the second, which
+// only the runtime's own source declares such a type in.
 
 // printSym returns the runtime symbol that prints a value of t, and the type
 // the operand is converted to first.
@@ -4199,6 +4265,14 @@ func (l *lowerer) exitReturn(s Stmt) []Stmt {
 // One symbol per width class rather than one per type, which is what gc does:
 // every signed kind widens to int64 and every unsigned kind to uint64, so a
 // program that prints an int8 and one that prints an int64 call one function.
+//
+// A slice and an interface look like the exception and are not one. gc writes
+// LookupRuntime("printslice", n.Type()) and the substitution replaces the
+// declaration's "any" placeholder while keeping the symbol, so the call is
+// runtime.printslice for every element type. The substitution serves gc's own
+// conversion at the end of walkPrint; here the call is built from the
+// operand's IR type, so the operand is passed unchanged and the returned type
+// is t itself.
 func printSym(t *Type) (string, *Type) {
 	switch t.Kind {
 	case Bool:
@@ -4218,6 +4292,25 @@ func printSym(t *Type) (string, *Type) {
 	case Ptr, UnsafePtr, Map, Chan, FuncKind:
 		// All one word, and the runtime prints the word.
 		return "runtime.printpointer", lowerUnsafePtr
+	case Slice:
+		// One symbol for every element type. The operand keeps its own type,
+		// so no conversion is built: a slice of any element is the same three
+		// words the runtime reads, and runtime.printslice declares []byte only
+		// because a signature has to name something.
+		return "runtime.printslice", t
+	case Interface:
+		// The first word of an interface with no methods is a descriptor and
+		// the first word of one with methods is an itab. The two functions
+		// read the two fields, so the shape of the operand picks the symbol
+		// and a wrong pick prints the wrong word.
+		if t.EmptyIface {
+			return "runtime.printeface", t
+		}
+		return "runtime.printiface", t
+	case Complex64:
+		return "runtime.printcomplex64", t
+	case Complex128:
+		return "runtime.printcomplex128", t
 	}
 	return "", nil
 }
@@ -4264,6 +4357,228 @@ func (l *lowerer) printExpr(n Expr) Expr {
 		l.emit(runtimeCall(pos, "runtime.printnl"))
 	}
 	return runtimeCall(pos, "runtime.printunlock")
+}
+
+// Complex numbers.
+//
+// specs/020-ir.md gives complex four rows: the constructor, the two component
+// reads, and arithmetic. All four are one idea. A complex value is a pair of
+// floats laid out side by side, so the header machinery above describes it and
+// every operation over it is the operation over each half.
+//
+// Nothing below this pass has to learn a new shape for it. ssa/decompose.go
+// splits the pair into two values, specs/030-abi.md passes it as two floating
+// registers, and rtype hashes it with runtime.c64hash or c128hash. This file
+// is the only one that has to know a complex number exists.
+//
+// # Why the arithmetic is here and the comparison is not
+//
+// == and != reach ssa/decompose.go's expandEqual, which compares every part of
+// a split value and joins the results, and that is exactly the answer for a
+// complex: two complex numbers are equal when both halves are. Addition has no
+// such general form. Nothing below knows that adding two pairs means adding
+// each half, so an addition left whole would arrive at instruction selection
+// as one sixteen-byte operand and no rule would lower it.
+//
+// # Where the halves are computed
+//
+// A multiplication and a division are computed in float64 whatever the width
+// the source wrote, and the two halves are narrowed back afterwards. That is
+// not an optimisation, it is what gc does, and cmd/compile's ssagen says why
+// in one line: "Compute in Float64 to minimize cancellation error". The
+// rounding of a complex64 multiplication therefore differs from the rounding
+// of the same expression written out in float32, and a compiler that computed
+// in float32 would disagree with gc in the last bits.
+//
+// A division is a call to runtime.complex128div and not an inlined formula.
+// walkDivMod rewrites every complex division that way, both operands converted
+// to complex128 and the result converted back, because the naive formula
+// overflows for operands whose squares do not fit and the runtime's algorithm
+// scales to avoid it. cmd/compile leaves the inlined form in ssagen behind a
+// comment saying it is not executed.
+
+// The two halves of a complex value, in the order they are laid out.
+const (
+	cplxReal = 0
+	cplxImag = 1
+)
+
+// complexPart returns the float type of one half of t, or nil when t is not a
+// complex type.
+func complexPart(t *Type) *Type {
+	if t == nil {
+		return nil
+	}
+	switch t.Kind {
+	case Complex64:
+		return lowerFloat32
+	case Complex128:
+		return lowerFloat64
+	}
+	return nil
+}
+
+// complexMake writes the two halves into a fresh temporary and returns it.
+//
+// A temporary and not a pair of values, for the reason sliceHeader gives: the
+// IR has no node for "a value made of these parts", and a value wider than a
+// register already lives in the frame by the time specs/021 has built it.
+func (l *lowerer) complexMake(t *Type, re, im Expr, pos syntax.Pos) Expr {
+	p := complexPart(t)
+	o := l.tempObj(t, pos)
+	l.emit(Assign(pos, l.headerField(ref(o, pos), cplxReal, p), l.floatTo(re, p)))
+	l.emit(Assign(pos, l.headerField(ref(o, pos), cplxImag, p), l.floatTo(im, p)))
+	return ref(o, pos)
+}
+
+// floatTo converts x to the float type t when it is not already of it.
+func (l *lowerer) floatTo(x Expr, t *Type) Expr {
+	if x == nil || x.Type == t || (x.Type != nil && x.Type.Kind == t.Kind) {
+		return x
+	}
+	return &Node{Op: OConvert, Pos: x.Pos, Type: t, X: x}
+}
+
+// complexHalf reads one half of the operand of a real or an imag.
+func (l *lowerer) complexHalf(n Expr, index int) Expr {
+	if n.X == nil || complexPart(n.X.Type) == nil {
+		l.refuse(n, "an operand that is not a complex number")
+		return n
+	}
+	return l.headerField(l.stable(n.X), index, n.Type)
+}
+
+// complexHalves evaluates x once and returns a factory for each half.
+//
+// Two factories rather than two expressions, for the reason hold gives: a node
+// is rewritten in place by later passes, so one node may not stand in two
+// places of the tree.
+func (l *lowerer) complexHalves(x Expr) (func() Expr, func() Expr) {
+	p := complexPart(x.Type)
+	s := l.stable(x)
+	half := func(i int) func() Expr {
+		return func() Expr { return l.headerField(cloneExpr(s), i, p) }
+	}
+	return half(cplxReal), half(cplxImag)
+}
+
+// complexConst splits a complex constant into two float constants.
+//
+// The constant reaches this pass whole, and no pass below it can carry one: a
+// machine value is one number and a complex constant is two, so ssagen's data
+// writer refuses the layout and SSA construction has no operation that builds
+// the pair. Splitting here gives both of them what they already handle.
+func (l *lowerer) complexConst(n Expr) Expr {
+	p := complexPart(n.Type)
+	re, im := constant.MakeFloat64(0), constant.MakeFloat64(0)
+	// A constant this pass cannot read numerically is the zero of the type,
+	// which is what the predeclared nil of a Const with no value already is.
+	if c, ok := n.Val.(Const); ok && c.Val != nil {
+		re = constant.ToFloat(constant.Real(c.Val))
+		im = constant.ToFloat(constant.Imag(c.Val))
+	}
+	part := func(v constant.Value) Expr {
+		return &Node{Op: OConst, Pos: n.Pos, Type: p, Val: Const{Val: v}}
+	}
+	return l.complexMake(n.Type, part(re), part(im), n.Pos)
+}
+
+// complexTo converts a complex value to the other complex width.
+//
+// Each half is converted on its own, which is what gc's conv does: a
+// conversion between two complex types is two float conversions and a rebuilt
+// pair, and a conversion between two of the same width is the identity.
+func (l *lowerer) complexTo(x Expr, t *Type) Expr {
+	if x.Type == t || x.Type.Kind == t.Kind {
+		return x
+	}
+	re, im := l.complexHalves(x)
+	return l.complexMake(t, re(), im(), x.Pos)
+}
+
+// complexBinary lowers +, -, * and / over two complex operands.
+func (l *lowerer) complexBinary(n Expr) Expr {
+	switch n.Op1 {
+	case syntax.Add, syntax.Sub:
+		return l.complexAddSub(n)
+	case syntax.Mul:
+		return l.complexMul(n)
+	case syntax.Div:
+		return l.complexDiv(n)
+	}
+	l.refuse(n, "the operator has no row over a complex operand")
+	return n
+}
+
+// complexAddSub adds or subtracts each half, in the width the source wrote.
+//
+// No widening here, unlike the multiplication below. An addition of two
+// float32s is one rounding either way, so computing it in float64 would change
+// nothing and gc does not.
+func (l *lowerer) complexAddSub(n Expr) Expr {
+	p := complexPart(n.Type)
+	ar, ai := l.complexHalves(n.X)
+	br, bi := l.complexHalves(n.Y)
+	op := func(x, y Expr) Expr {
+		return &Node{Op: OBinary, Op1: n.Op1, Pos: n.Pos, Type: p, X: x, Y: y}
+	}
+	return l.complexMake(n.Type, op(ar(), br()), op(ai(), bi()), n.Pos)
+}
+
+// complexMul multiplies in float64 and narrows the two halves back.
+//
+// (a+bi)(c+di) is (ac-bd) + (ad+bc)i. The four products are computed in
+// float64 for a complex64 operand as well, which is the rounding gc produces
+// and the reason this is not the same expression written in float32.
+func (l *lowerer) complexMul(n Expr) Expr {
+	w := lowerFloat64
+	ar, ai := l.wideHalves(n.X)
+	br, bi := l.wideHalves(n.Y)
+	mul := func(x, y Expr) Expr {
+		return &Node{Op: OBinary, Op1: syntax.Mul, Pos: n.Pos, Type: w, X: x, Y: y}
+	}
+	join := func(op syntax.Operator, x, y Expr) Expr {
+		return &Node{Op: OBinary, Op1: op, Pos: n.Pos, Type: w, X: x, Y: y}
+	}
+	re := join(syntax.Sub, mul(ar(), br()), mul(ai(), bi()))
+	im := join(syntax.Add, mul(ar(), bi()), mul(ai(), br()))
+	return l.complexMake(n.Type, re, im, n.Pos)
+}
+
+// wideHalves returns the two halves of x, each widened to float64 once.
+//
+// Once and not once per reader. Each half is read by two of the four products,
+// and hold puts the widened value in a temporary of its own, which is a float
+// and therefore a value rather than a frame slot.
+func (l *lowerer) wideHalves(x Expr) (func() Expr, func() Expr) {
+	re, im := l.complexHalves(x)
+	return l.hold(l.floatTo(re(), lowerFloat64)), l.hold(l.floatTo(im(), lowerFloat64))
+}
+
+// complexDiv is the call to runtime.complex128div, with both operands widened
+// and the result narrowed back.
+func (l *lowerer) complexDiv(n Expr) Expr {
+	pos := n.Pos
+	x := l.complexTo(n.X, lowerComplex128)
+	y := l.complexTo(n.Y, lowerComplex128)
+	call := &Node{
+		Op:   OCall,
+		Pos:  pos,
+		Type: lowerComplex128,
+		X:    &Node{Op: OGlobal, Pos: pos, Type: funcType, Obj: runtimeFunc("runtime.complex128div")},
+		Args: []Expr{x, y},
+	}
+	return l.complexTo(call, n.Type)
+}
+
+// complexNeg negates each half.
+func (l *lowerer) complexNeg(n Expr) Expr {
+	p := complexPart(n.Type)
+	re, im := l.complexHalves(n.X)
+	neg := func(x Expr) Expr {
+		return &Node{Op: OUnary, Op1: syntax.Sub, Pos: n.Pos, Type: p, X: x}
+	}
+	return l.complexMake(n.Type, neg(re()), neg(im()), n.Pos)
 }
 
 // Interfaces.

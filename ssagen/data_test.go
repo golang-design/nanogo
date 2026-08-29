@@ -5,10 +5,12 @@
 package ssagen
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"go/constant"
 	"go/token"
+	"math"
 	"testing"
 
 	"golang.design/x/nanogo/ir"
@@ -311,15 +313,46 @@ func TestGlobalWithoutTypeIsRefused(t *testing.T) {
 	}
 }
 
-// TestGlobalComplexConstantIsRefused checks that a constant this compiler has
-// no layout for is refused rather than left zero.
+// TestGlobalComplexConstantLaysOutBothHalves checks the layout of the one
+// constant kind that is two numbers.
 //
-// Leaving it zero puts the value in the hands of the assignment in the
-// initialisation function, and that assignment is exactly as unbuilt: a
-// complex constant reaches SSA construction as OpConstNil. The variable would
-// hold zero, the program would run, and the answer would be wrong, which is
-// the failure a refusal exists to prevent.
-func TestGlobalComplexConstantIsRefused(t *testing.T) {
+// A complex variable initialised with a constant has no assignment in the
+// initialisation function at all: the type checker folded the initialiser, so
+// the bytes written here are the whole of the variable's value. Writing only
+// the real half, or leaving the bytes zero, would give a program that runs and
+// is wrong.
+func TestGlobalComplexConstantLaysOutBothHalves(t *testing.T) {
+	one2i := constant.BinaryOp(constant.MakeInt64(1), token.ADD,
+		constant.MakeImag(constant.MakeInt64(2)))
+	for _, tc := range []struct {
+		kind ir.Kind
+		name string
+		want []byte
+	}{
+		{ir.Complex128, "complex128", append(
+			binary.LittleEndian.AppendUint64(nil, math.Float64bits(1)),
+			binary.LittleEndian.AppendUint64(nil, math.Float64bits(2))...)},
+		{ir.Complex64, "complex64", append(
+			binary.LittleEndian.AppendUint32(nil, math.Float32bits(1)),
+			binary.LittleEndian.AppendUint32(nil, math.Float32bits(2))...)},
+	} {
+		ty := &ir.Type{Kind: tc.kind, Name: tc.name}
+		if err := ir.Layout(ty); err != nil {
+			t.Fatalf("layout: %v", err)
+		}
+		got, relocs, err := staticValue(ty, ir.Const{Val: one2i})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(relocs) != 0 {
+			t.Errorf("%s needed %d relocations, and a number needs none", tc.name, len(relocs))
+		}
+		if !bytes.Equal(got, tc.want) {
+			t.Errorf("%s laid out %x, want %x", tc.name, got, tc.want)
+		}
+	}
+
+	// A complex variable is not refused with an initialiser or without one.
 	ty := &ir.Type{Kind: ir.Complex128, Name: "complex128"}
 	if err := ir.Layout(ty); err != nil {
 		t.Fatalf("layout: %v", err)
@@ -329,17 +362,12 @@ func TestGlobalComplexConstantIsRefused(t *testing.T) {
 		Name: "init", Sym: "main.init", Body: []ir.Stmt{{
 			Op: ir.OAssign,
 			X:  &ir.Node{Op: ir.OGlobal, Type: ty, Obj: g},
-			Y: &ir.Node{Op: ir.OConst, Type: ty, Val: ir.Const{
-				Val: constant.BinaryOp(constant.MakeInt64(1), token.ADD,
-					constant.MakeImag(constant.MakeInt64(2)))}},
+			Y:  &ir.Node{Op: ir.OConst, Type: ty, Val: ir.Const{Val: one2i}},
 		}},
 	}}}
-	var ge *GlobalError
-	if err := CheckGlobals(p); !errors.As(err, &ge) || ge.Obj != g {
-		t.Fatalf("CheckGlobals gave %v, want a refusal naming main.c", err)
+	if err := CheckGlobals(p); err != nil {
+		t.Errorf("a complex variable with a constant initialiser was refused: %v", err)
 	}
-	// A complex variable with no initialiser is not refused: zero is its
-	// value, and the refusal is about a constant that would be lost.
 	p.Inits = nil
 	if err := CheckGlobals(p); err != nil {
 		t.Errorf("a complex variable with no initialiser was refused: %v", err)

@@ -1783,9 +1783,11 @@ type W struct{ P *int }
 func f(v any) W { return v.(W) }`, OTypeAssert, "its own data word"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},
 		{"range over a function", `func f(it func(func(int) bool)) { for v := range it { use(v) } }`, ORange, "range over func"},
-		{"println of an interface", `func f(v any) { println(v) }`, OPrintln, "an operand of interface"},
-		{"print of a slice", `func f(s []int) { print(s) }`, OPrint, "an operand of slice"},
-		{"println of a complex number", `func f(c complex128) { println(c) }`, OPrintln, "an operand of complex128"},
+		{"println of a struct", `
+type S struct{ A, B int }
+
+func f(s S) { println(s) }`, OPrintln, "an operand of struct"},
+		{"print of an array", `func f(a [2]int) { print(a) }`, OPrint, "an operand of array"},
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			fn, err := lowerFunc(t, tc.body, "f")
@@ -3009,6 +3011,15 @@ func TestLowerPrintWidensItsOperands(t *testing.T) {
 		{"a *int", "runtime.printpointer"},
 		{"a map[int]int", "runtime.printpointer"},
 		{"a func()", "runtime.printpointer"},
+		// One symbol for every element type and for every dynamic type. The
+		// three below carry no per-type instantiation, and the two interface
+		// rows differ only in which word the runtime reads first.
+		{"a []int", "runtime.printslice"},
+		{"a []string", "runtime.printslice"},
+		{"a any", "runtime.printeface"},
+		{"a interface{ M() }", "runtime.printiface"},
+		{"a complex64", "runtime.printcomplex64"},
+		{"a complex128", "runtime.printcomplex128"},
 	} {
 		fn := lowerOK(t, "func f("+tc.decl+") { print(a) }")
 		if !lowerCalled(fn, tc.want) {
@@ -4441,5 +4452,171 @@ func TestLowerTypeSwitchOverConcreteCasesIsStillOneSwitch(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("the switch became %d switches, want one", n)
+	}
+}
+
+// The complex rows of specs/020-ir.md's lowering table.
+//
+// A complex number is the one arithmetic type whose value is two machine
+// values, so every row over it is a rewrite into the operations over the two
+// halves. What the tests below check is the shape of the rewrite. The answers
+// themselves are checked against gc in internal/e2e.
+
+// TestLowerComplexBuiltinsReadTheHalves checks that real and imag are field
+// reads of a two-field header and not calls.
+func TestLowerComplexBuiltinsReadTheHalves(t *testing.T) {
+	for _, tc := range []struct {
+		row   string
+		body  string
+		index int
+	}{
+		{"real", `func f(c complex128) float64 { return real(c) }`, 0},
+		{"imag", `func f(c complex128) float64 { return imag(c) }`, 1},
+		{"real of a complex64", `func f(c complex64) float32 { return real(c) }`, 0},
+		{"imag of a complex64", `func f(c complex64) float32 { return imag(c) }`, 1},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			ret := fn.Body[len(fn.Body)-1]
+			if ret.Op != OReturn || len(ret.Args) != 1 {
+				t.Fatalf("the body does not end in a return of one value:\n%s", buildDump(fn))
+			}
+			if !headerRead(ret.Args[0], tc.index, 2) {
+				t.Errorf("%s is not a read of field %d of a two-field header:\n%s",
+					tc.row, tc.index, buildDump(fn))
+			}
+			if calls := lowerCalls(fn); len(calls) != 0 {
+				t.Errorf("%s called %v, and it is a load", tc.row, calls)
+			}
+		})
+	}
+}
+
+// TestLowerComplexMakeWritesBothHalves checks that complex(re, im) writes both
+// halves of a temporary, rather than being left for a pass that has no node
+// for a pair.
+func TestLowerComplexMakeWritesBothHalves(t *testing.T) {
+	fn := lowerOK(t, `func f(a, b float64) complex128 { return complex(a, b) }`)
+	var wrote [2]bool
+	for _, s := range fn.Body {
+		if !IsAssign(s) || s.X == nil {
+			continue
+		}
+		for i := range wrote {
+			if headerRead(s.X, i, 2) {
+				wrote[i] = true
+			}
+		}
+	}
+	if !wrote[0] || !wrote[1] {
+		t.Errorf("complex wrote real=%v imag=%v:\n%s", wrote[0], wrote[1], buildDump(fn))
+	}
+}
+
+// TestLowerComplexDivisionIsACall checks specs/031's row.
+//
+// Every complex division is runtime.complex128div, at complex128 whatever
+// width the source wrote. The obvious formula divides by the square of the
+// modulus and overflows for operands whose squares do not fit, so a division
+// this pass expanded inline would disagree with gc at the edges.
+func TestLowerComplexDivisionIsACall(t *testing.T) {
+	for _, body := range []string{
+		`func f(a, b complex128) complex128 { return a / b }`,
+		`func f(a, b complex64) complex64 { return a / b }`,
+	} {
+		fn := lowerOK(t, body)
+		if !lowerCalled(fn, "runtime.complex128div") {
+			t.Errorf("the division called %v, want runtime.complex128div:\n%s",
+				lowerCalls(fn), buildDump(fn))
+		}
+	}
+}
+
+// TestLowerComplexArithmeticIsNotACall checks that the other three operators
+// expand here rather than reaching the runtime.
+func TestLowerComplexArithmeticIsNotACall(t *testing.T) {
+	for _, body := range []string{
+		`func f(a, b complex128) complex128 { return a + b }`,
+		`func f(a, b complex128) complex128 { return a - b }`,
+		`func f(a, b complex128) complex128 { return a * b }`,
+		`func f(a complex128) complex128 { return -a }`,
+	} {
+		fn := lowerOK(t, body)
+		if calls := lowerCalls(fn); len(calls) != 0 {
+			t.Errorf("%s called %v:\n%s", body, calls, buildDump(fn))
+		}
+	}
+}
+
+// TestLowerComplexMultiplyWidens checks the rounding gc produces.
+//
+// The four products of a complex64 multiplication are computed in float64 and
+// the two halves are narrowed back, which cmd/compile's ssagen explains in one
+// line: "Compute in Float64 to minimize cancellation error". Computed in
+// float32 the products of two large operands overflow and the answer is a NaN
+// where gc gives a number, so the widening is the row and not an optimisation.
+func TestLowerComplexMultiplyWidens(t *testing.T) {
+	fn := lowerOK(t, `func f(a, b complex64) complex64 { return a * b }`)
+	var toWide, toNarrow int
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op != OConvert || n.Type == nil || n.X == nil || n.X.Type == nil {
+				return true
+			}
+			switch {
+			case n.Type.Kind == Float64 && n.X.Type.Kind == Float32:
+				toWide++
+			case n.Type.Kind == Float32 && n.X.Type.Kind == Float64:
+				toNarrow++
+			}
+			return true
+		})
+	}
+	// Four operands widened and two halves narrowed.
+	if toWide != 4 || toNarrow != 2 {
+		t.Errorf("the multiplication widened %d operands and narrowed %d halves, want 4 and 2:\n%s",
+			toWide, toNarrow, buildDump(fn))
+	}
+}
+
+// TestLowerComplexConstantSplits checks that a complex constant becomes two
+// float constants.
+//
+// No pass below this one carries a constant of two numbers: ssagen's data
+// writer lays out one number per constant and SSA construction has no
+// operation that builds a pair, so a constant left whole would be a variable
+// silently holding zero.
+func TestLowerComplexConstantSplits(t *testing.T) {
+	fn := lowerOK(t, `func f() complex128 { return 3 + 4i }`)
+	var got []string
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OConst && n.Type != nil && n.Type.Kind == Float64 {
+				got = append(got, n.Val.String())
+			}
+			return true
+		})
+	}
+	if len(got) != 2 || got[0] != "3" || got[1] != "4" {
+		t.Errorf("the constant split into %v, want the halves 3 and 4:\n%s", got, buildDump(fn))
+	}
+}
+
+// TestLowerComplexConversionConvertsBothHalves checks the row between the two
+// widths.
+func TestLowerComplexConversionConvertsBothHalves(t *testing.T) {
+	fn := lowerOK(t, `func f(c complex128) complex64 { return complex64(c) }`)
+	var narrowed int
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OConvert && n.Type != nil && n.Type.Kind == Float32 &&
+				n.X != nil && n.X.Type != nil && n.X.Type.Kind == Float64 {
+				narrowed++
+			}
+			return true
+		})
+	}
+	if narrowed != 2 {
+		t.Errorf("the conversion narrowed %d halves, want 2:\n%s", narrowed, buildDump(fn))
 	}
 }

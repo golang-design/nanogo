@@ -89,6 +89,7 @@ const (
 	GroupGoroutine
 	GroupDefer
 	GroupPrint
+	GroupComplex
 )
 
 var groupNames = [...]string{
@@ -104,6 +105,7 @@ var groupNames = [...]string{
 	GroupGoroutine: "goroutine",
 	GroupDefer:     "defer",
 	GroupPrint:     "print",
+	GroupComplex:   "complex",
 }
 
 func (g Group) String() string {
@@ -322,6 +324,38 @@ var syms = []Sym{
 	// and gc prints it with printuint, so nothing here hands the collector a
 	// number as if it were a pointer.
 	{Name: "runtime.printpointer", Sig: "func(unsafe.Pointer)", Group: GroupPrint},
+	// A slice and an interface are one symbol each and not one per element
+	// type or per dynamic type. gc writes LookupRuntime("printslice",
+	// n.Type()), which substitutes the operand's type for the "any"
+	// placeholder in the compiler's own declaration and keeps old.Sym(): the
+	// linker symbol is runtime.printslice whatever the element is. The
+	// substitution exists so that gc's typecheck.Conv at the end of walkPrint
+	// is a no-op, and this compiler needs no conversion at all, because a call
+	// is built from the argument's own IR type.
+	//
+	// The spelling here is therefore the runtime's own: []byte for the slice,
+	// and the two-word eface and iface for the two interface shapes. Every
+	// slice is the same three words and every interface the same two, which is
+	// what makes one symbol enough.
+	{Name: "runtime.printslice", Sig: "func([]byte)", Group: GroupPrint},
+	// Which of the two an interface operand reaches is decided by the layout
+	// of its first word: a descriptor for an interface with no methods and an
+	// itab for one with methods. Calling the other reads the wrong field.
+	{Name: "runtime.printeface", Sig: "func(eface)", Group: GroupPrint},
+	{Name: "runtime.printiface", Sig: "func(iface)", Group: GroupPrint},
+	// The two complex widths. printcomplex64 widens to complex128 inside the
+	// runtime, so the two are not one symbol: the operand's width decides
+	// which one, the same way printfloat32 and printfloat64 divide.
+	{Name: "runtime.printcomplex64", Sig: "func(complex64)", Group: GroupPrint},
+	{Name: "runtime.printcomplex128", Sig: "func(complex128)", Group: GroupPrint},
+
+	// Complex division. Every complex division is this call, at complex128
+	// whatever width the source wrote, which is what walkDivMod builds. The
+	// obvious formula divides by the square of the modulus and overflows for
+	// operands whose squares do not fit, so the runtime scales the operands
+	// first. cmd/compile keeps an inlined form in ssagen behind a comment
+	// saying it is not executed.
+	{Name: "runtime.complex128div", Sig: "func(complex128, complex128) complex128", Group: GroupComplex},
 
 	// Interface and string comparison. specs/031's table names these as the
 	// calls an equality or an ordering lowers to.

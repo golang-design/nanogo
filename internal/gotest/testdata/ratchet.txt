@@ -52,6 +52,7 @@ pass matched armimm.go
 pass rejected assign.go
 pass rejected assign1.go
 pass matched atomicload.go
+pass matched bigalg.go
 pass matched blank.go
 pass rejected blank1.go
 pass rejected bombad.go
@@ -72,6 +73,7 @@ pass rejected cmplx.go
 pass matched complit.go
 pass rejected complit1.go
 pass matched compos.go
+pass matched const.go
 pass rejected const1.go
 pass rejected const2.go
 pass matched const3.go
@@ -80,6 +82,7 @@ pass rejected const5.go
 pass rejected const6.go
 pass matched const7.go
 pass matched const8.go
+pass matched convT2X.go
 pass matched convert.go
 pass rejected convert1.go
 pass rejected convert2.go
@@ -158,8 +161,10 @@ pass rejected makemap.go
 pass rejected makenew.go
 pass matched makeslice.go
 pass matched mallocfin.go
+pass matched map.go
 pass rejected map1.go
 pass matched mapclear.go
+pass matched maplinear.go
 pass rejected method1.go
 pass rejected method2.go
 pass matched method3.go
@@ -168,11 +173,15 @@ pass matched named.go
 pass rejected named1.go
 pass matched newexpr.go
 pass matched nil.go
+pass matched nilptr2.go
+pass matched noinit.go
 pass matched peano.go
 pass matched printbig.go
 pass matched range.go
 pass rejected range2.go
 pass matched range3.go
+pass matched recover2.go
+pass matched recover3.go
 pass rejected recover5.go
 pass matched reflectmethod4.go
 pass compiled reflectmethod8.go

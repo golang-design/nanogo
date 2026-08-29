@@ -232,7 +232,7 @@ func TestEverySymbolIsWellFormed(t *testing.T) {
 }
 
 func TestGroupStrings(t *testing.T) {
-	for g := GroupAlloc; g <= GroupPrint; g++ {
+	for g := GroupAlloc; g <= GroupComplex; g++ {
 		if got := g.String(); got == "" || got == "group(?)" {
 			t.Errorf("group %d prints %q", g, got)
 		}
@@ -590,7 +590,7 @@ func TestEveryGroupHasASymbol(t *testing.T) {
 	for _, v := range AllVars() {
 		seen[v.Group]++
 	}
-	for g := GroupAlloc; g <= GroupPrint; g++ {
+	for g := GroupAlloc; g <= GroupComplex; g++ {
 		if seen[g] == 0 {
 			t.Errorf("the %s group is declared and empty", g)
 		}
