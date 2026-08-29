@@ -285,27 +285,31 @@ Nine fail, on six blockers:
 
 | Blocker | Packages | Owner |
 | --- | --- | --- |
-| a generic type's method, and an instantiation across packages | 2: `syntax`, `ssagen` | [013](013-generics.md), [015](015-export-data.md) |
+| a call returns a wide struct and the call site has nowhere to put the words | 3: `ir`, `rtype`, `ssa` | [030](030-abi.md) |
 | an importer needs a descriptor for a type the package declares | 2: `export`, `types2` | [032](032-type-descriptors-and-itabs.md) |
-| taking an address, in a constant and in a call | 2: `rtype`, `ssa` | [021](021-ssa-construction.md) |
+| a generic type's method, and an instantiation across packages | 2: `syntax`, `ssagen` | [013](013-generics.md), [015](015-export-data.md) |
 | an unexported method's name needs a package path | 1: `dist`, and `regexp` in Go's corpus | [032](032-type-descriptors-and-itabs.md) |
-| a call returning a wide struct with nowhere to write it | 1: `ir` | [030](030-abi.md) |
-| the ABI assignment breaks the memory chain | 1: `driver` | [030](030-abi.md) |
+| the ABI assignment leaves the memory chain failing the verifier | 1: `driver` | [030](030-abi.md) |
 
-The last two are defects and not missing features, and the second of them is
-the one to read first: `driver` fails its own verifier after the ABI
-assignment, with two memory values live at once in a block. A pass that leaves
-the IR failing an invariant it passed before is a bug wherever it is found.
+[030](030-abi.md) owns four of the nine, which is the largest share and the
+place to start. The last row is a defect and not a missing feature, and it is
+the one to read first: `driver` fails nanogo's own verifier after the ABI
+assignment, with two memory values live at once in a block. A pass that takes
+IR satisfying an invariant and returns IR violating it is a bug wherever it is
+found, and a wrong memory chain can reorder a load across a store without
+saying anything.
 
 The generics row is the one with the most in it rather than the most behind
 it. Stenciling an instantiation in an importing package needs the function
 bodies [015](015-export-data.md)'s body reader would carry, and nanogo writes
 declarations only, so it is two subsystems and not one.
 
-A closed blocker is not a compiled package. Closing the method-value receiver
-moved `link` and `loader` to compiling and moved `ir`, `driver` and `ssagen` to
-the three rows above, none of which is a closure or a capture. Every row here
-should be read as what fails **first**.
+A closed blocker is not a compiled package, and the table reshapes every time
+one closes. Closing the method-value receiver moved `link` and `loader` to
+compiling and moved `ir`, `driver` and `ssagen` onto other rows. Closing the
+operand spill moved `rtype` and `ssa` onto the first row rather than to
+compiling. Every row here is what fails **first** and not the whole of what a
+package needs.
 
 One caveat [001](001-bootstrap-gates.md) states about its own gate, repeated
 here because it decides how much G1 is worth: $N_2 = N_3$ is necessary and not
