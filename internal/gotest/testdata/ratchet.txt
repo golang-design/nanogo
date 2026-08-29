@@ -97,6 +97,7 @@ pass rejected declbad.go
 pass matched defer.go
 pass matched deferfin.go
 pass matched defernil.go
+pass matched deferprint.go
 pass matched devirtualization_nil_panics.go
 pass rejected directive.go
 pass rejected directive2.go
@@ -130,6 +131,7 @@ pass matched gc1.go
 pass matched gc2.go
 pass matched gcgort.go
 pass matched gcstring.go
+pass matched goprint.go
 pass rejected goto.go
 pass matched heapsampling.go
 pass matched helloworld.go
@@ -178,10 +180,12 @@ pass matched nil.go
 pass matched nilptr2.go
 pass matched noinit.go
 pass matched peano.go
+pass matched print.go
 pass matched printbig.go
 pass matched range.go
 pass rejected range2.go
 pass matched range3.go
+pass matched recover1.go
 pass matched recover2.go
 pass matched recover3.go
 pass matched recover4.go
