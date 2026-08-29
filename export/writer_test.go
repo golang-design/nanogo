@@ -268,43 +268,52 @@ func TestWriteIsDeterministic(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module nanogo.example/det\n\ngo 1.27\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	file := exportFile(t, dir, "unicode/utf8")
+	// go/token is the second package because its surface reaches
+	// sync/atomic.Pointer, so writing it copies a declaration out of an
+	// archive and allocates elements as it relocates (foreign.go). That path
+	// has an order of its own, and an order is what this test is about.
+	for _, path := range []string{"unicode/utf8", "go/token"} {
+		t.Run(path, func(t *testing.T) {
+			file := exportFile(t, dir, path)
+			set := []Archive{{Path: path, File: file}}
 
-	read := func() *types2.Package {
-		r := NewReader()
-		pkg, err := r.Read("unicode/utf8", file)
-		if err != nil {
-			t.Fatalf("Read: %v", err)
-		}
-		resolve(t, pkg)
-		return pkg
-	}
+			read := func() *types2.Package {
+				r := NewReader()
+				pkg, err := r.Read(path, file)
+				if err != nil {
+					t.Fatalf("Read: %v", err)
+				}
+				resolve(t, pkg)
+				return pkg
+			}
 
-	pkg := read()
-	first, fp1, err := Write(pkg, false, nil)
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	second, fp2, err := Write(pkg, false, nil)
-	if err != nil {
-		t.Fatalf("Write again: %v", err)
-	}
-	if !bytes.Equal(first, second) {
-		t.Error("two writes of one package differ")
-	}
-	if fp1 != fp2 {
-		t.Errorf("two writes of one package have fingerprints %x and %x", fp1, fp2)
-	}
+			pkg := read()
+			first, fp1, err := Write(pkg, false, &Source{Archives: set})
+			if err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			second, fp2, err := Write(pkg, false, &Source{Archives: set})
+			if err != nil {
+				t.Fatalf("Write again: %v", err)
+			}
+			if !bytes.Equal(first, second) {
+				t.Error("two writes of one package differ")
+			}
+			if fp1 != fp2 {
+				t.Errorf("two writes of one package have fingerprints %x and %x", fp1, fp2)
+			}
 
-	third, fp3, err := Write(read(), false, nil)
-	if err != nil {
-		t.Fatalf("Write after a second read: %v", err)
-	}
-	if !bytes.Equal(first, third) {
-		t.Errorf("the package written after a second read differs: %d bytes against %d", len(third), len(first))
-	}
-	if fp1 != fp3 {
-		t.Errorf("the fingerprint after a second read is %x, want %x", fp3, fp1)
+			third, fp3, err := Write(read(), false, &Source{Archives: set})
+			if err != nil {
+				t.Fatalf("Write after a second read: %v", err)
+			}
+			if !bytes.Equal(first, third) {
+				t.Errorf("the package written after a second read differs: %d bytes against %d", len(third), len(first))
+			}
+			if fp1 != fp3 {
+				t.Errorf("the fingerprint after a second read is %x, want %x", fp3, fp1)
+			}
+		})
 	}
 }
 
@@ -360,6 +369,13 @@ func TestWriteStandardLibrary(t *testing.T) {
 		t.Fatal("no archive was found, so the test proved nothing")
 	}
 
+	// The archives the writer may copy a declaration out of, which is how a
+	// generic declaration of another package reaches the file (foreign.go).
+	set := make([]Archive, 0, len(list))
+	for _, a := range list {
+		set = append(set, Archive{Path: a[0], File: a[1]})
+	}
+
 	// One Reader for the whole run, so that a package reached through two
 	// archives is one package, exactly as the driver uses it.
 	r := NewReader()
@@ -374,9 +390,17 @@ func TestWriteStandardLibrary(t *testing.T) {
 		}
 		resolve(t, pkg)
 
-		payload, _, err := Write(pkg, false, nil)
+		payload, _, err := Write(pkg, false, &Source{Archives: set})
 		if err != nil {
 			if u, ok := err.(*UnsupportedError); ok {
+				// A refusal for want of an archive is a failure. The
+				// writer was given every archive this sweep read, so a
+				// declaration it could not find is one the search does
+				// not reach rather than one no file holds.
+				if strings.Contains(u.Reason, "no archive the build named") {
+					t.Errorf("%s: %v", path, u)
+					continue
+				}
 				refused = append(refused, u.Package+": "+u.Name)
 				continue
 			}
@@ -408,6 +432,11 @@ func TestWriteStandardLibrary(t *testing.T) {
 // should read, write and report a digest for.
 const digestEnv = "NANOGO_EXPORT_DIGEST_ARCHIVE"
 
+// digestPathEnv names the import path that archive was read under. The path
+// is also the identity the writer copies a declaration under, so the
+// subprocess cannot derive it from the file.
+const digestPathEnv = "NANOGO_EXPORT_DIGEST_PATH"
+
 // TestWriteDigestHelper is the subprocess half of the two-process
 // determinism check. It is a no-op unless the parent asked for it.
 func TestWriteDigestHelper(t *testing.T) {
@@ -415,13 +444,14 @@ func TestWriteDigestHelper(t *testing.T) {
 	if file == "" {
 		t.Skip("not the subprocess of TestWriteIsDeterministicAcrossProcesses")
 	}
+	path := os.Getenv(digestPathEnv)
 	r := NewReader()
-	pkg, err := r.Read("net/url", file)
+	pkg, err := r.Read(path, file)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
 	resolve(t, pkg)
-	payload, _, err := Write(pkg, false, nil)
+	payload, _, err := Write(pkg, false, &Source{Archives: []Archive{{Path: path, File: file}}})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -437,35 +467,42 @@ func TestWriteDigestHelper(t *testing.T) {
 // the shape the fixed point of G1 needs: nanogo compiling nanogo is many
 // processes.
 //
-// net/url is the package, because it has interfaces, a self-referential type,
-// maps and a type with methods, and it declares nothing generic.
+// net/url is the first package, because it has interfaces, a self-referential
+// type, maps and a type with methods, and it declares nothing generic.
+// go/token is the second, because its surface reaches sync/atomic.Pointer and
+// the writer can only carry that by copying the declaration's elements out of
+// an archive and allocating as it relocates them (foreign.go).
 func TestWriteIsDeterministicAcrossProcesses(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module nanogo.example/det2\n\ngo 1.27\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	file := exportFile(t, dir, "net/url")
+	for _, path := range []string{"net/url", "go/token"} {
+		t.Run(path, func(t *testing.T) {
+			file := exportFile(t, dir, path)
 
-	digest := func() string {
-		t.Helper()
-		cmd := exec.Command(os.Args[0], "-test.run=^TestWriteDigestHelper$", "-test.v")
-		cmd.Env = append(os.Environ(), digestEnv+"="+file)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("the subprocess failed: %v\n%s", err, out)
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			if s, ok := strings.CutPrefix(strings.TrimSpace(line), "DIGEST "); ok {
-				return s
+			digest := func() string {
+				t.Helper()
+				cmd := exec.Command(os.Args[0], "-test.run=^TestWriteDigestHelper$", "-test.v")
+				cmd.Env = append(os.Environ(), digestEnv+"="+file, digestPathEnv+"="+path)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("the subprocess failed: %v\n%s", err, out)
+				}
+				for _, line := range strings.Split(string(out), "\n") {
+					if s, ok := strings.CutPrefix(strings.TrimSpace(line), "DIGEST "); ok {
+						return s
+					}
+				}
+				t.Fatalf("the subprocess reported no digest:\n%s", out)
+				return ""
 			}
-		}
-		t.Fatalf("the subprocess reported no digest:\n%s", out)
-		return ""
-	}
 
-	first, second := digest(), digest()
-	if first != second {
-		t.Errorf("two processes wrote different export data for net/url: %s and %s", first, second)
+			first, second := digest(), digest()
+			if first != second {
+				t.Errorf("two processes wrote different export data for %s: %s and %s", path, first, second)
+			}
+		})
 	}
 }
 

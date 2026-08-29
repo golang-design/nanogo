@@ -53,6 +53,12 @@ func (e *UnsupportedError) Error() string {
 // reaches is written out in full here. Only the universe and unsafe stay
 // stubs, which is what every reader of the format expects.
 //
+// Written out in full means re-encoded from what the checker recorded, with
+// one exception. A generic declaration of another package is copied out of an
+// archive instead, because its dictionary and its body were numbered together
+// when its own package was compiled and neither is in the checker's tree. See
+// foreign.go, which is where gc's linker.relocObj is answered.
+//
 // hasInit says the object carries the package's initialisation record. An
 // importer reads it and orders its own record after this one, so a package
 // that has a record and says it has none is a package whose initialisation
@@ -69,11 +75,12 @@ func Write(pkg *types2.Package, hasInit bool, src *Source) (data []byte, fingerp
 	var funcs, bodies []InlineFunc
 	var fset *syntax.FileSet
 	var file func(string) string
+	var archives []Archive
 	if src != nil {
-		fset, file, bodies = src.Fset, src.File, src.Funcs
-		funcs = writableBodies(pkg, fset, file, src.Funcs)
+		fset, file, bodies, archives = src.Fset, src.File, src.Funcs, src.Archives
+		funcs = writableBodies(pkg, fset, file, src.Funcs, archives)
 	}
-	pw := newPkgWriter(pkg, funcs, bodies, fset, file)
+	pw := newPkgWriter(pkg, funcs, bodies, fset, file, archives)
 
 	// A declaration the writer cannot encode is reported by panicking, the
 	// way the reader reports a stream it cannot decode: the refusal is found
@@ -221,6 +228,15 @@ type pkgWriter struct {
 	// fset resolves a declaration's position. It is nil for a package
 	// written without its source, and every position is then absent.
 	fset *syntax.FileSet
+
+	// archives are the compiled packages the build named, which is where a
+	// declaration this writer cannot re-encode is copied from (foreign.go).
+	archives *archiveSet
+
+	// byPath maps an import path to the checker's package for it, which is
+	// what resolves a package or an object a copied element names. It is
+	// built on the first such name and read by key.
+	byPath map[string]*types2.Package
 }
 
 // newPkgWriter returns a writer for one package.
@@ -229,7 +245,7 @@ type pkgWriter struct {
 // for inlining, and bodies is every body the caller built. The two are
 // separate because a generic declaration's body reaches an importer through
 // the declaration and never through the private root's list.
-func newPkgWriter(pkg *types2.Package, inline, bodies []InlineFunc, fset *syntax.FileSet, file func(string) string) *pkgWriter {
+func newPkgWriter(pkg *types2.Package, inline, bodies []InlineFunc, fset *syntax.FileSet, file func(string) string, archives []Archive) *pkgWriter {
 	pw := &pkgWriter{
 		PkgEncoder:  pkgbits.NewPkgEncoder(Version),
 		curpkg:      pkg,
@@ -242,6 +258,7 @@ func newPkgWriter(pkg *types2.Package, inline, bodies []InlineFunc, fset *syntax
 		lits:        make(map[*FuncLitExpr]*pkgbits.Encoder),
 		fileName:    file,
 		fset:        fset,
+		archives:    newArchiveSet(archives),
 	}
 	for i := range inline {
 		pw.inline[inline[i].Obj] = &inline[i]
@@ -659,6 +676,14 @@ func (pw *pkgWriter) objIdx(obj types2.Object) pkgbits.Index {
 		return idx
 	}
 
+	// A generic declaration of another package is copied out of an archive
+	// rather than written here, because its dictionary and its body were
+	// numbered together when its own package was compiled and the checker
+	// recorded neither (foreign.go).
+	if idx, ok := pw.copyObj(obj); ok {
+		return idx
+	}
+
 	dict := pw.dictOf(obj)
 
 	w := pw.newWriter(pkgbits.SectionObj, pkgbits.SyncObject1)
@@ -694,13 +719,14 @@ func (pw *pkgWriter) objIdx(obj types2.Object) pkgbits.Index {
 // dictionary holds are one allocation ([Dict]) and a second one would be a
 // second numbering.
 //
-// Two generic shapes are refused by name, and each is refused because its
-// dictionary is not the one a body carries:
+// A generic method is refused by name, because its dictionary holds its
+// receiver's type parameters ahead of its own and the body builder does not
+// build one.
 //
-//   - A generic method's dictionary holds its receiver's type parameters
-//     ahead of its own, and the body builder does not build one.
-//   - A generic declaration of another package needs the body that package's
-//     archive holds, and the dictionary that archive numbered it against.
+// A generic declaration of another package never reaches here. Its dictionary
+// is the one its own archive numbered its body against, so [pkgWriter.objIdx]
+// copies the declaration rather than writing it (foreign.go). The refusal
+// below stands for the case where it was reached and no archive held it.
 func (pw *pkgWriter) dictOf(obj types2.Object) *Dict {
 	tparams := objTypeParams(obj)
 	fn, isFunc := obj.(*types2.Func)
@@ -715,7 +741,7 @@ func (pw *pkgWriter) dictOf(obj types2.Object) *Dict {
 		pw.refuse(objName(obj), "the declaration is a method with type parameters, and its dictionary holds the receiver's type parameters ahead of its own")
 	}
 	if obj.Pkg() != pw.curpkg {
-		pw.refuse(objName(obj), "the declaration is generic and belongs to another package, whose body and dictionary this writer does not read back")
+		pw.refuse(objName(obj), "the declaration is generic and belongs to another package, and no archive the build named holds the body and the dictionary that package numbered for it")
 	}
 	fb := pw.bodies[obj]
 	if fb == nil || fb.Body == nil || fb.Body.Dict == nil {
@@ -748,9 +774,9 @@ func (pw *pkgWriter) dictOf(obj types2.Object) *Dict {
 //
 // The package the dictionary belongs to is the type's own and not the package
 // being written. A file's export data is the linked form, so a generic type
-// another package declares is written out here in full. Its method bodies
-// exist only in that package's archive, which this writer does not read back,
-// so a foreign generic type with methods is refused by name.
+// another package declares is written out in full, but not here: its method
+// bodies exist only in an archive, so [pkgWriter.objIdx] copies its elements
+// out of one (foreign.go) and this function is not reached for it.
 //
 // An alias gets a dictionary of its own even when it names a generic type
 // that declares methods. Its type parameters are objects of the alias
@@ -767,7 +793,7 @@ func (pw *pkgWriter) typeDict(obj *types2.TypeName, tparams []*types2.TypeParam)
 		return &Dict{Pkg: obj.Pkg(), TypeParams: tparams}
 	}
 	if obj.Pkg() != pw.curpkg {
-		pw.refuse(objName(obj), "the declaration is a generic type of another package and declares methods, whose bodies exist only in that package's archive, which this writer does not read back")
+		pw.refuse(objName(obj), "the declaration is a generic type of another package and declares methods, whose bodies exist only in that package's archive, and no archive the build named holds them")
 	}
 	var shared *Dict
 	for i := range named.NumMethods() {

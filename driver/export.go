@@ -33,8 +33,9 @@ import (
 // refused by name inside export.
 func exportBodies(cfg *Config, pkg *types2.Package, info *types2.Info, fset *syntax.FileSet, files []*syntax.File) *export.Source {
 	bodies := &export.Source{
-		Fset: fset,
-		File: func(name string) string { return TrimPath(cfg.TrimRewrites, name) },
+		Fset:     fset,
+		File:     func(name string) string { return TrimPath(cfg.TrimRewrites, name) },
+		Archives: archives(cfg.ImportCfg),
 	}
 	source := export.NewBodySource(pkg, info, fset)
 
@@ -82,6 +83,29 @@ func exportBodies(cfg *Config, pkg *types2.Package, info *types2.Info, fset *syn
 	}
 	bodies.Funcs = append(bodies.Funcs, genericTypeBodies(pkg, source, blocks)...)
 	return bodies
+}
+
+// archives lists the compiled packages -importcfg names.
+//
+// They are what the writer copies a generic declaration of another package out
+// of, because such a declaration reaches an importer as a dictionary and a
+// body its own package numbered and the checker records neither
+// (specs/015-export-data.md). Every packagefile entry is offered and not only
+// the declaring package's own: -importcfg names the direct imports, and a
+// generic declaration reaches this compilation through whichever of them
+// re-exported it. The writer opens a file only when it has to copy.
+//
+// A packageshlib entry is left out, for the reason [ImportCfg.PackageFile]
+// gives: it names a shared library and not an archive.
+func archives(cfg *ImportCfg) []export.Archive {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]export.Archive, 0, len(cfg.PackageFiles))
+	for _, e := range cfg.PackageFiles {
+		out = append(out, export.Archive{Path: e.Path, File: e.File})
+	}
+	return out
 }
 
 // genericTypeBodies builds the methods of every generic type the package

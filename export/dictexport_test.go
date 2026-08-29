@@ -246,29 +246,32 @@ func TestWriteNumbersAGenericTypeAsGcDoes(t *testing.T) {
 	}
 }
 
-// TestWriteRefusesAGenericTypeOfAnotherPackageWithMethods names the half of
-// the rule that needs the reader.
+// TestWriteCopiesAGenericTypeOfAnotherPackageWithMethods names the half of the
+// rule that needs the reader.
 //
 // A file's export data is the linked form, so a generic type another package
 // declares is written out here in full, methods and all. A method of a generic
 // type carries its body and nothing else: gc's reader records a definition for
 // a declaration with type parameters before it reads the extension data, and
 // the relocated form asserts there is none. The body exists only in the
-// declaring package's archive, and this writer builds bodies from source and
-// does not read one back, so the type is refused by name.
+// declaring package's archive, so the declaration is copied out of one rather
+// than written from what the checker recorded (foreign.go).
 //
-// sync/atomic.Pointer is the case that reaches nanogo's own packages: a
-// package holding one cannot write its export data until the body of Load can
-// be copied out of sync/atomic's archive.
-func TestWriteRefusesAGenericTypeOfAnotherPackageWithMethods(t *testing.T) {
+// sync/atomic.Pointer is the case that reaches nanogo's own packages. What the
+// file has to hold is the type, the four methods it declares and a body for
+// each of them, reached through the type's own extension data, which is the
+// only shape gc stencils an instantiation out of.
+func TestWriteCopiesAGenericTypeOfAnotherPackageWithMethods(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module nanogo.example/foreign\n\ngo 1.27\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	found := archives(t, dir, "sync/atomic")
 	files := make(map[string]string, len(found))
+	set := make([]Archive, 0, len(found))
 	for _, a := range found {
 		files[a[0]] = a[1]
+		set = append(set, Archive{Path: a[0], File: a[1]})
 	}
 	if files["sync/atomic"] == "" {
 		t.Skip("the go command built no archive for sync/atomic")
@@ -288,15 +291,26 @@ func TestWriteRefusesAGenericTypeOfAnotherPackageWithMethods(t *testing.T) {
 		t.Fatalf("check: %v", err)
 	}
 
-	_, _, err = Write(pkg, false, &Source{Fset: fset})
-	if err == nil {
-		t.Fatal("the writer wrote a generic type of another package that declares methods")
+	payload, _, err := Write(pkg, false, &Source{Fset: fset, Archives: set})
+	if err != nil {
+		t.Fatalf("the writer refused a generic type it was given the archive of: %v", err)
 	}
-	if !strings.Contains(err.Error(), "sync/atomic.Pointer") {
-		t.Errorf("the refusal is %q and does not name the type", err)
+
+	dec := pkgbits.NewPkgDecoder("xtest/foreign", string(payload))
+	_, bodies, err := ReadBodies(types2.NewContext(), map[string]*types2.Package{}, dec)
+	if err != nil {
+		t.Fatalf("ReadBodies: %v", err)
 	}
-	if !strings.Contains(err.Error(), "that package's archive") {
-		t.Errorf("the refusal is %q and does not say where the bodies are", err)
+	got := make(map[string]bool)
+	for _, b := range bodies {
+		if b.Path == "sync/atomic" && b.Generic {
+			got[b.Name] = true
+		}
+	}
+	for _, want := range []string{"(*Pointer).Load", "(*Pointer).Store", "(*Pointer).Swap", "(*Pointer).CompareAndSwap"} {
+		if !got[want] {
+			t.Errorf("the file carries no generic body for sync/atomic.%s; it carries %v", want, got)
+		}
 	}
 }
 

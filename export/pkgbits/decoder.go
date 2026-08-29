@@ -121,6 +121,21 @@ func (pr *PkgDecoder) Fingerprint() [8]byte {
 	return fp
 }
 
+// Version reports the version the elements were written at.
+//
+// nanogo restored this with the writer half. An element copied out of another
+// archive is copied as bytes, and a bitstream is only readable at the version
+// it was written at, so a writer that copies has to compare the two
+// (specs/015-export-data.md).
+func (pr *PkgDecoder) Version() Version { return pr.version }
+
+// SyncMarkers reports whether the elements carry sync markers.
+//
+// A copied element carries whatever markers it was written with, and the file
+// it lands in states once, in its header, whether markers are there. So a
+// writer that copies has to refuse a source that disagrees with it.
+func (pr *PkgDecoder) SyncMarkers() bool { return pr.sync }
+
 // NumElems returns the number of elements in section k.
 func (pr *PkgDecoder) NumElems(k SectionKind) int {
 	count := int(pr.elemEndsEnds[k])

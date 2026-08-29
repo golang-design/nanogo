@@ -50,6 +50,17 @@ func TestGcReadsWhatNanogoWrote(t *testing.T) {
 		t.Fatal("no archive was found, so the test proved nothing")
 	}
 
+	// The archives the writer may copy a declaration out of. A generic
+	// declaration of another package cannot be re-encoded from what the
+	// checker recorded, so a package whose surface reaches one is written
+	// only by copying elements out of an archive (foreign.go). gc reading the
+	// result is what says each copied element was relocated to the element
+	// this file holds for it.
+	set := make([]Archive, 0, len(list))
+	for _, a := range list {
+		set = append(set, Archive{Path: a[0], File: a[1]})
+	}
+
 	r := NewReader()
 	total, read, refused := len(list), 0, 0
 	var refusals []string
@@ -62,9 +73,16 @@ func TestGcReadsWhatNanogoWrote(t *testing.T) {
 		}
 		resolve(t, pkg)
 
-		payload, _, err := Write(pkg, false, nil)
+		payload, _, err := Write(pkg, false, &Source{Archives: set})
 		if err != nil {
 			if u, ok := err.(*UnsupportedError); ok {
+				// See the round trip: the writer holds every archive this
+				// sweep read, so a declaration it could not find is a
+				// search that does not reach it.
+				if strings.Contains(u.Reason, "no archive the build named") {
+					t.Errorf("%s: %v", path, u)
+					continue
+				}
 				refused++
 				refusals = append(refusals, u.Package+": "+u.Name)
 				continue

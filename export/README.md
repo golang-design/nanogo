@@ -43,6 +43,7 @@ format and the code that wrote it come from the same tree by construction.
 | `bodywrite.go` | the mirror of `bodyread.go`; see below |
 | `bodybuild.go` | `src/cmd/compile/internal/noder/writer.go`'s function body half, building a tree rather than a bitstream; see below |
 | `writer.go` | `src/cmd/compile/internal/noder/writer.go` and `linker.go`; see below |
+| `foreign.go` | `src/cmd/compile/internal/noder/linker.go`'s `relocObj` and `relocCommon`; see below |
 
 ## Which upstream reader, and why
 
@@ -183,7 +184,8 @@ comes from `writer.go` for the public part of a declaration and from
 | The public root lists every object in the file | This is `linker.go`'s list and not `writer.go`'s. `gc` builds its stub resolution table from it, so a root naming only nanogo's own declarations leaves `gc` unable to resolve, say, `io.Reader` in a `bufio` signature. |
 | `pos` writes an absent position | The mirror of the reader's gap. See below. |
 | No function body, and the private root lists none | `bodybuild.go` builds a body and `bodywrite.go` encodes one, and neither is reached from here: `export.Write` takes a `*types2.Package`, and a body needs the files and the `types2.Info` the driver holds. The resolver a built body is encoded through also has to be written, and has to refuse the element it cannot allocate. See [specs/015](../specs/015-export-data.md). |
-| A generic declaration is refused by name | See below. |
+| A generic declaration of another package is copied out of an archive | Its dictionary numbering and its body were an allocation the declaring package made, so there is nothing here to write them from. `foreign.go` is the copy; see below. |
+| A generic declaration of this package is refused by name unless a body was built for it | See below. |
 | `funcExt` writes no `//go:` directive | The driver records the fourteen verbs its handler recognises, and their positions (`driver/pragma.go`, [specs/016](../specs/016-directives-and-pragmas.md)), and nothing carries them this far: the flag bits there are nanogo's own numbering and this field is read with `gc`'s. |
 | `funcExt` writes no linkname | `//go:linkname` is not one of those fourteen verbs, so the driver records nothing for the writer to drop ([016](../specs/016-directives-and-pragmas.md)). |
 | `funcExt` writes `ABIInternal` and an empty escape note per receiver and parameter | Every function nanogo compiles is ABIInternal ([specs/030](../specs/030-abi.md)), and an empty note parses as "leaks to the heap", which is what a caller must assume when no escape analysis has run ([specs/023](../specs/023-escape-analysis.md) is unbuilt). |
@@ -203,7 +205,7 @@ name rather than letting the build fail at link time. The gap is
 [specs/032](../specs/032-type-descriptors-and-itabs.md) and not this package's;
 [specs/015](../specs/015-export-data.md) records the measurement.
 
-### Why a generic declaration is refused
+### Why a generic declaration needs a body
 
 A generic declaration cannot be written without a function body, and the
 format says so rather than the implementation guessing it. `linker.go` writes
@@ -219,11 +221,33 @@ branch, so a generic written that way fails on the first importer that
 instantiates it, with a message that names neither the generic nor the
 package.
 
-So the writer refuses, and the message names the declaration. 100 of the 375
-standard library packages are refused for it, and 4 of the 27 packages with
-export data in the closure of an empty `main`: `internal/abi`,
+Where the body comes from depends on whose declaration it is. For this
+package's own, the driver builds it from source and the writer refuses the
+declaration by name when it has none. 42 of the 375 standard library packages
+are refused for that when they are rewritten from `gc`'s archive alone, which
+is a rewrite with no source and therefore no body, and 4 of the 27 packages
+with export data in the closure of an empty `main`: `internal/abi`,
 `internal/bytealg`, `internal/runtime/atomic` and `runtime`. All four are
 refused by the driver for other reasons as well.
+
+### The copy, `foreign.go`
+
+For a declaration of *another* package there is no source to build a body
+from, and the dictionary its slots are numbered against was allocated when
+that package was compiled. `foreign.go` copies the declaration instead, which
+is what `linker.relocObj` does for every foreign object: the four elements are
+taken out of an archive as bytes and only the reference tables are rewritten,
+so the numbering a dictionary and a body agree on comes across untouched, and
+relocating the body reference in the extension data pulls the bodies with it.
+
+| Change | Why |
+| --- | --- |
+| Only a generic declaration is copied; everything else is re-encoded | `gc` copies every foreign object because it has a stub form to resolve. nanogo writes the linked form directly and re-encodes from the checker, which is complete for every declaration whose meaning the checker holds. |
+| A reference into the object section is routed back through `objIdx` rather than copied | `Write` lists every object element in the public root, and an importer resolves a stub through that list, so one declaration must be one element. `gc` cannot hit this, because it never mixes a copy with a re-encoding. |
+| A package element is resolved by path | A package states its own path as the empty string, so a copied one renames the package it stands for to the package being written. `relocPkg` resolves it for the same reason. |
+| A string is interned rather than copied | Otherwise the writer's own string table does not know about the copy and a later write of the same text adds a second element. |
+| Every archive the build named is searched, not only the declaring package's | `-importcfg` names the direct imports, and a generic declaration usually arrives inside a package that re-exported it. Each such archive holds the same elements, because each was copied out of the declaring one in turn. |
+| A source at another format version, or one carrying sync markers, is not searched | The copy is bytes, and a bitstream only means what it says at the version and the marker setting it was written with. |
 
 ### The archive, `read.go`
 

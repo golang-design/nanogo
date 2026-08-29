@@ -52,6 +52,16 @@ type Source struct {
 	// line table already holds: one compiler must not report two names for
 	// one file. See [pkgWriter.posBaseIdx].
 	File func(string) string
+
+	// Archives are the compiled packages -importcfg named, in any order.
+	//
+	// They are what the writer copies a generic declaration of another
+	// package out of. Such a declaration reaches an importer as a
+	// dictionary and a body that were numbered together when its own
+	// package was compiled, so it cannot be re-encoded from what the
+	// checker recorded and it is copied instead (foreign.go). Without them
+	// the writer refuses such a declaration by name.
+	Archives []Archive
 }
 
 // An InlineFunc is one declaration whose body gc can inline.
@@ -283,10 +293,16 @@ func (pw *pkgWriter) writeBodies(path string, funcs []InlineFunc) []bodyEntry {
 // time the writer refuses, it has claimed element indices it will never fill,
 // and a claimed index that holds nothing is exactly the declaration gc reads
 // as a different one. Here the holes are in the probe, which is thrown away.
-func writableBodies(pkg *types2.Package, fset *syntax.FileSet, file func(string) string, funcs []InlineFunc) []InlineFunc {
-	reached := surfaceObjects(pkg, fset, file, funcs)
+func writableBodies(pkg *types2.Package, fset *syntax.FileSet, file func(string) string, funcs []InlineFunc, archives []Archive) []InlineFunc {
+	if len(funcs) == 0 {
+		// Nothing to decide, and the probe below is a whole write of the
+		// package. A caller that offers no body is one written for its
+		// declarations alone, which is every round trip of an archive.
+		return nil
+	}
+	reached := surfaceObjects(pkg, fset, file, funcs, archives)
 	out := make([]InlineFunc, 0, len(funcs))
-	probe := newPkgWriter(pkg, nil, funcs, fset, file)
+	probe := newPkgWriter(pkg, nil, funcs, fset, file, archives)
 	for i := range funcs {
 		fn := funcs[i]
 		// A generic declaration's body is not offered here. It reaches an
@@ -303,7 +319,7 @@ func writableBodies(pkg *types2.Package, fset *syntax.FileSet, file func(string)
 		if !writesInto(probe, pkg.Path(), &fn, check) {
 			// The probe now holds elements it claimed and did not fill, so
 			// it cannot answer for the next body. Start a fresh one.
-			probe = newPkgWriter(pkg, nil, funcs, fset, file)
+			probe = newPkgWriter(pkg, nil, funcs, fset, file, archives)
 			continue
 		}
 		if check.reason != "" {
@@ -326,8 +342,8 @@ func writableBodies(pkg *types2.Package, fset *syntax.FileSet, file func(string)
 // [writableBodies] gives: the answer has to be known before the first
 // extension data is written, because that is where a declaration says whether
 // it has an inlinable body.
-func surfaceObjects(pkg *types2.Package, fset *syntax.FileSet, file func(string) string, funcs []InlineFunc) map[types2.Object]bool {
-	pw := newPkgWriter(pkg, nil, funcs, fset, file)
+func surfaceObjects(pkg *types2.Package, fset *syntax.FileSet, file func(string) string, funcs []InlineFunc, archives []Archive) map[types2.Object]bool {
+	pw := newPkgWriter(pkg, nil, funcs, fset, file, archives)
 	ok := func() (ok bool) {
 		defer func() {
 			switch v := recover().(type) {

@@ -207,24 +207,110 @@ Three consequences follow, and each is a refusal rather than a guess.
   every one of those type parameters to the position the type declared it at,
   which is what `gc`'s `writerDict.typeParamIndex` does.
 
-**What is refused, and why each.** Three generic shapes, each because its
+**A generic declaration of another package is copied, not written.** Its
+dictionary numbering and its body are an allocation the declaring package made,
+and nothing the checker recorded holds either, so there is nothing here to
+write them from. The next section is what the writer does instead.
+
+**What is refused, and why each.** Two generic shapes, each because its
 dictionary is not the one a body carries:
 
-- A generic type of another package that declares methods. A method of a
-  generic type carries its body and nothing else, for the reason the linked
-  form gives above, and the body exists only in the declaring package's
-  archive. This writer builds bodies from `syntax` and reads none back, so the
-  type is refused by name. `sync/atomic.Pointer` is the case that reaches
-  nanogo's own packages.
 - A method with type parameters of its own. The format writes it as a
   declaration of its own, whose dictionary holds the receiver's type
   parameters ahead of the method's.
-- A generic function of another package. Its body and the dictionary it was
-  numbered against live in that package's archive, and this writer does not
-  read either back.
 - A type declared inside a generic declaration. Every use of it carries the
   enclosing type parameters implicitly, and neither the builder nor the writer
   keeps a record of which declaration a local type was declared in.
+
+A generic declaration of another package is refused too, but only when no
+archive the build named holds it. The refusal then says so, because what a user
+has to change is the `-importcfg` and not the source.
+
+### Copying a generic declaration of another package
+
+`export/foreign.go` is `gc`'s `noder/linker.go` answered.
+
+The writer produces the linked form directly, so a declaration of another
+package that the exported surface reaches is written out in full. Everywhere
+else that is a re-encoding of what the checker recorded. A generic declaration
+is the one shape a re-encoding cannot produce: the body names dictionary slots
+by number, the numbering happened when the declaring package was compiled, and
+the checker's tree holds neither the numbering nor the body.
+
+`gc` never re-encodes a foreign object at all. `linker.relocObj` copies the
+object's four elements out of that object's own file with `relocCommon`, which
+takes the bitstream as bytes and rewrites only the reference table. For a
+generic declaration the extension data it copies verbatim is `Bool(false)`
+followed by a body reference, so relocating that reference pulls the body
+element across with the declaration.
+
+nanogo copies the same four elements the same way, and diverges in one place.
+
+```
+        the archive a declaration is copied from        the file being written
+
+        SectionObj      idx  ─── copied ──────────────▶ SectionObj      idx'
+        SectionName     idx  ─── copied ──────────────▶ SectionName     idx'
+        SectionObjDict  idx  ─── copied ──────────────▶ SectionObjDict  idx'
+        SectionObjExt   idx  ─── copied ──────────────▶ SectionObjExt   idx'
+                 │
+                 └─ reference table ─┬─ SectionBody  ─── copied ────────▶ ...
+                                     ├─ SectionType  ─── copied ────────▶ ...
+                                     ├─ SectionPosBase ─ copied ────────▶ ...
+                                     ├─ SectionString ── interned ──────▶ ...
+                                     ├─ SectionPkg  ──── resolved by path
+                                     └─ SectionObj  ──── resolved by name,
+                                                         written by objIdx
+```
+
+The four elements share one index, so the four encoders are claimed together
+and the index is recorded against the object before anything is copied. An
+element of a generic declaration names the declaration itself, because the
+receiver of each method is the type being copied, and a claim made after the
+copy would not stop that cycle.
+
+Three sections are resolved rather than copied, and each for a reason that is a
+wrong answer if it is skipped.
+
+- **`SectionString`** is interned through the writer's own string table, so
+  that one text is one element. Copying would leave the table not knowing about
+  the copy and a later write of the same text would add a second one.
+- **`SectionPkg`** states a package's own path as the empty string, and a
+  reader maps the empty path back to the file it is reading. Copying a package
+  element therefore renames the package it stands for to the package being
+  written. `gc`'s `relocPkg` resolves the path for the same reason, and nanogo
+  resolves it to the checker's package and writes it through `pkgIdx`.
+- **`SectionObj`** is routed back through `pkgWriter.objIdx`. `Write` lists
+  every element of the object section in the public root, and an importer
+  resolves a stub by looking a name up in the table that list builds, so two
+  elements for one declaration are two entries naming one symbol. `gc` has no
+  such risk because it copies every foreign object and re-encodes none. nanogo
+  copies only what it cannot re-encode, so the two paths have to meet at one
+  element per declaration.
+
+The rest carry no identity a reader resolves by name, so a position base, a
+type or a body reached twice is copied once per source element and no more.
+
+**Which archive.** A `-importcfg` names the direct imports, and a generic
+declaration usually reaches a compilation through a package that re-exported
+it: nothing in `golang.design/x/nanogo/ir` imports `sync/atomic`, and
+`atomic.Pointer` arrives inside `syntax`'s archive. Every archive holds the
+same elements for it, because each was copied out of the declaring archive in
+turn, so the writer searches the declaring package's own archive first and then
+every other archive in sorted import path order. The order is fixed by the
+paths and not by a map ([053](053-determinism.md)).
+
+**What is refused rather than copied.** A copy is bytes, so a source archive at
+another format version, or one carrying sync markers when the file being
+written carries none, is not searched. A copied element that names a package or
+a declaration this compilation never read is refused by name, because an index
+guessed there is a declaration an importer reads as a different one.
+
+**A generic type with no method is not copied.** Nothing it holds was numbered
+by a body, so the writer allocates its dictionary as it writes it and the
+re-encoded form is complete. A method of a generic type is not copied either:
+the format gives it no element of its own, and it comes across inside its
+type's.
 
 **A refusal reaches the user as a refusal.** `export.UnsupportedError` names
 the declaration, and `driver/compile.go` wraps it in `driver.UnsupportedError`
@@ -758,7 +844,10 @@ internal compiler error a long way from the package that wrote them:
 1. **A file has no stub left except the universe's and unsafe's.** So a
    declaration of another package that the exported surface reaches is written
    out in full. nanogo has no linker pass, so the writer does it at the point
-   the declaration is reached.
+   the declaration is reached. It is a re-encoding of what the checker
+   recorded, except for a generic declaration, which is copied out of an
+   archive the way `gc`'s linker copies it: see *Copying a generic declaration
+   of another package* above.
 2. **The public root lists every object in the file, not the package's own
    exported names.** `gc` builds its stub-resolution table from that list. A
    root naming only nanogo's own declarations left `gc` unable to resolve
@@ -894,21 +983,46 @@ What the writer has:
   declarations, written and read back and compared declaration by declaration
   (`export/writer_test.go`).
 - Round trip: every standard library package, read from `gc`'s archive,
-  written, read back, and compared surface line by surface line. 296 of 375
-  pass and 19,308 declarations are compared; the other 79 are refused by name
+  written, read back, and compared surface line by surface line. 332 of 375
+  pass and 22,964 declarations are compared; the other 43 are refused by name
   and counted. Both numbers are logged, and a refusal that is not the generic
-  one is a failure rather than a skip.
+  one is a failure rather than a skip. The writer is given the same archives
+  the sweep read, so every package whose surface reaches a generic declaration
+  of another package is written by copying it (`foreign.go`), and none of the
+  43 is refused for want of an archive.
 - **Cross-read: `gc` reads what nanogo wrote.** For each of the same 375
   packages, nanogo writes an archive carrying nothing but the export data and
   the installed toolchain compiles a file naming every exported declaration of
   it. That runs both of `gc`'s readers over nanogo's bytes: the object list
   walk in `noder` and the `types2` reader that resolves each name. `gc` reads
-  all 296 (`export/crossread_test.go`). This is the test that found the public
-  root defect above, which the round trip could not.
+  all 332 (`export/crossread_test.go`). This is the test that found the public
+  root defect above, which the round trip could not. It is also the broad check
+  on the copy: with every standard library archive in the set, a package
+  reaching a foreign generic declaration is written by relocating that
+  declaration's elements, and `gc` resolving each name is what says every
+  relocation landed on the element it meant.
+- **`gc` instantiates a generic declaration nanogo copied.** Package `a` holds
+  `sync/atomic.Pointer` in a field, package `b` holds `a`, and nanogo writes
+  `b` against `a`'s archive alone, which is the case every package on the
+  self-host gate hits: nothing in `b` imports `sync/atomic`, so the copy comes
+  out of a re-exporting archive. `gc` compiles a program that instantiates the
+  type and calls each of its four methods, links it against nanogo's export
+  data and no object at all, runs it, and its output is compared with the same
+  program built entirely by `gc` (`export/gcforeign_test.go`). A relocation
+  that landed on the wrong element is a value that differs, and a unit test
+  over nanogo's own bytes reads them with the numbering that wrote them and
+  cannot see one at all.
+- The refusal the copy replaces: a writer given no archive refuses the
+  declaration by name and says that no archive the build named holds it.
+- One element per declaration: every object element of a file that holds a
+  copied declaration names a different declaration, which is what the public
+  root's list requires.
 - Byte determinism: the same package written twice in one process, written
   again after a second read, and written by two separate processes, compared
   each time. The two-process case is the one that catches an order taken from
-  a pointer value, and it is the shape the G1 fixed point needs.
+  a pointer value, and it is the shape the G1 fixed point needs. Both run over
+  `go/token` as well, whose surface reaches `sync/atomic.Pointer`, so the
+  elements a copy allocates as it relocates are in what is compared.
 - The invariant underneath the format: the only declaration in the bytes
   without a definition is one from the universe or from unsafe, checked over
   every package of the corpus.
