@@ -304,7 +304,7 @@ package:
 | `ir` | 90% | [020](020-ir.md); builds 536 packages of the distribution |
 | `ssa` | 95% | [021](021-ssa-construction.md), with the verifier of that spec |
 | `ssa/rules` | 97% | [025](025-lowering-and-rules.md), [042](042-arm64-backend.md) |
-| `ssagen` | 91% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |
+| `ssagen` | 90% | [027](027-liveness-and-stackmaps.md), [041](041-instruction-encoding.md) |
 | `obj` | 98% | [040](040-object-format.md) |
 | `obj/arm64` | 99% | [041](041-instruction-encoding.md), [042](042-arm64-backend.md) |
 | `rtsym` | 100% | [031](031-runtime-lowering.md), [032](032-type-descriptors-and-itabs.md) |
