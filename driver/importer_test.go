@@ -432,3 +432,388 @@ func TestImportErrorMessages(t *testing.T) {
 		}
 	}
 }
+
+// stdImportCfg returns an ImportCfg naming the real archive of each package,
+// which is what a call into the standard library needs.
+//
+// The archives come from the installed toolchain through go list -export, so
+// the export data they hold is gc's own and not a fixture. That is the point:
+// a body read out of one is the shape nanogo must actually decode.
+func stdImportCfg(t *testing.T, dir string, paths ...string) *ImportCfg {
+	t.Helper()
+	var b strings.Builder
+	for _, p := range paths {
+		b.WriteString("packagefile " + p + "=" + gcArchive(t, dir, p) + "\n")
+	}
+	cfg, err := ParseImportCfg("importcfg", []byte(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// TestCompileStencilsAGenericOfAnotherPackage runs the foreign stencil inside
+// this process.
+//
+// internal/e2e covers the same path end to end and compares the program's
+// output against gc's, which is the evidence that the substitution is right.
+// It cannot cover this code, because it drives nanogo as a separate process
+// through go build -toolexec, so nothing it exercises appears in this
+// package's coverage and a walk with no in-process test would look tested and
+// not be.
+//
+// slices.Contains is the smallest instantiation that exercises the whole join:
+// the declaration is read out of the standard library's own archive, the body
+// carries the dictionary its slots were numbered against, and its call to
+// slices.Index reaches that dictionary through a subdictionary slot rather
+// than through any reference to Index.
+func TestCompileStencilsAGenericOfAnotherPackage(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		what string
+		src  string
+	}{
+		{"a generic function at one word", "package main\n\nimport \"slices\"\n\n" +
+			"func f(xs []int, v int) bool { return slices.Contains(xs, v) }\n\n" +
+			"func main() {\n\tif !f([]int{1, 2, 3}, 2) {\n\t\tpanic(\"no\")\n\t}\n}\n"},
+		{"a generic function at two words", "package main\n\nimport \"slices\"\n\n" +
+			"func f(xs []string, v string) bool { return slices.Contains(xs, v) }\n\n" +
+			"func main() {\n\tif !f([]string{\"a\"}, \"a\") {\n\t\tpanic(\"no\")\n\t}\n}\n"},
+		{"a method of a foreign generic type", "package main\n\nimport \"sync/atomic\"\n\n" +
+			"func main() {\n\tvar p atomic.Pointer[int]\n\tn := 3\n\tp.Store(&n)\n\t" +
+			"if *p.Load() != 3 {\n\t\tpanic(\"no\")\n\t}\n}\n"},
+		// Every method of one instantiation, so the walk meets a swap and a
+		// compare-and-swap beside the load and the store, and meets them
+		// against a receiver whose type argument is a pointer.
+		{"every method of a foreign generic type", "package main\n\nimport \"sync/atomic\"\n\n" +
+			"func main() {\n\tvar p atomic.Pointer[[]int]\n\ta, b := []int{1}, []int{2}\n" +
+			"\tp.Store(&a)\n\tp.Swap(&b)\n\tif !p.CompareAndSwap(&b, &a) {\n\t\tpanic(\"cas\")\n\t}\n" +
+			"\tif len(*p.Load()) != 1 {\n\t\tpanic(\"load\")\n\t}\n}\n"},
+		{"a generic returning a boolean comparison", "package main\n\nimport \"cmp\"\n\n" +
+			"func f(a, b string) bool { return cmp.Less(a, b) }\n\n" +
+			"func main() {\n\tif !f(\"a\", \"b\") {\n\t\tpanic(\"no\")\n\t}\n}\n"},
+		{"a generic reached through another generic", "package main\n\nimport \"slices\"\n\n" +
+			"func f(xs []string, v string) int { return slices.Index(xs, v) }\n\n" +
+			"func main() {\n\tif f([]string{\"a\", \"b\"}, \"b\") != 1 {\n\t\tpanic(\"no\")\n\t}\n}\n"},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			_, err := compileSource(t, tc.src, func(c *Config) {
+				c.ImportCfg = stdImportCfg(t, dir, "slices", "sync/atomic", "cmp")
+			})
+			if err != nil {
+				t.Errorf("%s was refused: %v", tc.what, err)
+			}
+		})
+	}
+}
+
+// TestCompileRefusesAForeignBodyItCannotMap is the boundary of the walk above,
+// measured against a real body rather than a written one.
+//
+// The mapping covers what the instantiations nanogo's own source reaches need
+// and refuses the rest by name. cmp.Compare is the smallest declaration in the
+// standard library that falls outside it: its body assigns, and an assignment
+// is a kind the walk does not build. The refusal has to name the declaration
+// and the kind, because that pair is the whole of what somebody extending the
+// mapping needs to know.
+//
+// A test that only asserted the compile would pass just as well if the walk
+// guessed at the assignment and produced a function that computes something
+// else, which is the failure this refusal exists to prevent.
+func TestCompileRefusesAForeignBodyItCannotMap(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	dir := t.TempDir()
+	src := "package main\n\nimport \"cmp\"\n\n" +
+		"func f(a, b int) int { return cmp.Compare(a, b) }\n\n" +
+		"func main() {\n\tif f(1, 2) != -1 {\n\t\tpanic(\"no\")\n\t}\n}\n"
+	_, err := compileSource(t, src, func(c *Config) {
+		c.ImportCfg = stdImportCfg(t, dir, "slices", "sync/atomic", "cmp")
+	})
+	if err == nil {
+		t.Fatal("a body holding a kind the walk does not map was built")
+	}
+	for _, want := range []string{"cmp.Compare[int]", "assignment"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+}
+
+// genericLibModule writes a module whose library declares generics covering
+// the constructs the foreign walk maps, and returns the module directory.
+//
+// The standard library is not enough on its own. Every generic in it that the
+// walk accepts reaches the same few nodes, so whole branches of the mapping
+// are built and never met: the unary operators beside the address and the
+// dereference, an index of an array rather than a slice, a field of a struct
+// parameter, a package-scope declaration read from inside a foreign body.
+// A body that meets none of them is a body that proves nothing about them.
+//
+// gc compiles this library, so its export data is gc's own and the bodies are
+// the shape nanogo must really decode, exactly as for a standard library
+// package. What it adds is the choice of what those bodies contain.
+func genericLibModule(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		full := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module nanogo.example/gen\n\ngo 1.27\n")
+	write("lib/lib.go", `package lib
+
+// Zero is the package-scope declaration a foreign body reads.
+const Zero = 0
+
+type Box[T any] struct {
+	V T
+	N int
+}
+
+// Field reads a field of a generic struct.
+func Field[T any](b Box[T]) int { return b.N }
+
+// Negate is the unary minus and the unary plus.
+func Negate[T ~int](v T) T { return -(+v) }
+
+// Complement is the unary xor.
+func Complement[T ~int](v T) T { return ^v }
+
+// Not is the unary not.
+func Not(v bool) bool { return !v }
+
+// Deref is the dereference, and Addr the address of a parameter.
+func Deref[T any](p *T) T { return *p }
+
+// ArrayAt indexes an array rather than a slice.
+func ArrayAt[T any](a [3]T, i int) T { return a[i] }
+
+// Arith is the binary operators that are not comparisons.
+func Arith[T ~int](a, b T) T { return a*b + a/b - a%b }
+
+// Shifted is the shifts and the bitwise binaries.
+func Shifted[T ~int](a, b T) T { return (a<<2 | b>>1) & (a ^ b) }
+
+// Global reads a package-scope constant from inside a generic body.
+func Global[T ~int](v T) T { return v + Zero }
+
+// Counter is the package-scope variable a foreign body reads, which reaches a
+// different arm of the walk from a constant: a constant is folded into the
+// tree and a variable is a symbol another package defines.
+var Counter = 11
+
+// ReadVar reads it.
+func ReadVar[T ~int](v T) int { return int(v) + Counter }
+
+// SliceAt indexes a slice at a value rather than at a constant, so the index
+// is an operand the walk has to build rather than a number it can fold.
+func SliceAt[T any](s []T, i int) T { return s[i] }
+
+// PtrField reads a field through a pointer, which is a dereference the walk
+// has to insert rather than one the body wrote.
+func PtrField[T any](b *Box[T]) int { return b.N }
+
+// Outer embeds Box, so a selection of N through it is a promoted field and
+// reaches the walk as a path of more than one step.
+type Outer[T any] struct {
+	Box[T]
+	M int
+}
+
+// Promoted reads the embedded field.
+func Promoted[T any](o Outer[T]) int { return o.N }
+
+// PtrArrayAt indexes a pointer to an array, which the specification
+// dereferences implicitly and the tree does not.
+func PtrArrayAt[T any](p *[3]T, i int) T { return p[i] }
+
+// StrAt indexes a string, which is neither a slice nor an array.
+func StrAt[T ~string](s T, i int) byte { return s[i] }
+
+// Addr takes the address of a parameter.
+func Addr[T any](v T) *T { return &v }
+
+// Variadic is a variadic generic, whose call site the walk has to build twice:
+// once packing the loose arguments into a slice and once passing a slice
+// straight through.
+func Variadic[T ~int](base T, vs ...T) T { return base + vs[0] }
+
+// CallVariadic calls it with loose arguments from inside a foreign body, and
+// SpreadVariadic with a slice, so both arms are met through an instantiation
+// rather than only from this test's own call site.
+func CallVariadic[T ~int](a, b T) T { return Variadic(a, b, a) }
+
+func SpreadVariadic[T ~int](vs []T) T { return Variadic(vs[0], vs...) }
+
+// Guarded is an if with an else, over a comparison chain.
+func Guarded[T ~int](v T) int {
+	if v < 0 {
+		return -1
+	} else if v > 0 {
+		return 1
+	}
+	return 0
+}
+`)
+	write("refuse/refuse.go", `package refuse
+
+// Each of these is one construct the foreign walk does not map. They live in
+// their own package so that a test can instantiate exactly one of them and see
+// the refusal that names it.
+
+func Len[T any](s []T) int { return len(s) }
+
+func MapAt[T comparable](m map[T]int, k T) int { return m[k] }
+
+func Slice[T any](s []T) []T { return s[1:] }
+
+func Assert[T any](v any) bool { _, ok := v.(T); return ok }
+
+func Lit[T any](v T) []T { return []T{v} }
+
+func Closure[T any](v T) func() T { return func() T { return v } }
+
+func Assign[T any](v T) T { x := v; x = v; return x }
+
+func Ranged[T comparable](m map[T]int) int {
+	n := 0
+	for range m {
+		n++
+	}
+	return n
+}
+
+func Switched[T ~int](v T) int {
+	switch v {
+	case 0:
+		return 1
+	}
+	return 0
+}
+
+func Deferred[T any](f func(T), v T) { defer f(v) }
+`)
+	return dir
+}
+
+// TestCompileRefusesEachForeignConstructItDoesNotMap is the boundary of the
+// walk, one construct at a time, against archives gc wrote.
+//
+// The mapping is partial on purpose and every kind outside it is refused by
+// name. A refusal that named the kind but not the declaration would leave the
+// reader of the message with nothing to open, and one that named neither would
+// be indistinguishable from the walk guessing, which is the failure this whole
+// design is arranged against.
+//
+// ir/foreign_test.go asserts the same property over trees written by hand.
+// This asserts it over trees gc encoded, which is where the kinds actually
+// come from.
+func TestCompileRefusesEachForeignConstructItDoesNotMap(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	dir := genericLibModule(t)
+	archive := gcArchive(t, dir, "./refuse")
+
+	cfgFile := filepath.Join(t.TempDir(), "importcfg")
+	if err := os.WriteFile(cfgFile, []byte("packagefile nanogo.example/gen/refuse="+archive+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		what string
+		call string
+	}{
+		{"a builtin", "refuse.Len([]int{1})"},
+		{"a map index", "refuse.MapAt(map[int]int{1: 2}, 1)"},
+		{"a slice expression", "len(refuse.Slice([]int{1, 2}))"},
+		{"a type assertion", "btoi(refuse.Assert[int](any(1)))"},
+		{"a composite literal", "len(refuse.Lit(1))"},
+		{"a function literal", "refuse.Closure(1)()"},
+		{"an assignment", "refuse.Assign(1)"},
+		{"a range", "refuse.Ranged(map[int]int{1: 2})"},
+		{"a switch", "refuse.Switched(1)"},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			src := "package main\n\nimport \"nanogo.example/gen/refuse\"\n\n" +
+				"func btoi(b bool) int {\n\tif b {\n\t\treturn 1\n\t}\n\treturn 0\n}\n\n" +
+				"func main() {\n\tif " + tc.call + " == 12345 {\n\t\tpanic(\"no\")\n\t}\n}\n"
+			_, err := compileSource(t, src, func(c *Config) {
+				c.ImportCfgFile = cfgFile
+				c.ImportCfg = mustReadImportCfg(t, cfgFile)
+			})
+			if err == nil {
+				t.Fatalf("%s was built rather than refused", tc.what)
+			}
+			// The declaration, because the body is in no file of this build.
+			if !strings.Contains(err.Error(), "nanogo.example/gen/refuse.") {
+				t.Errorf("the refusal does not name the declaration: %v", err)
+			}
+		})
+	}
+}
+
+// TestCompileStencilsTheConstructsTheForeignWalkMaps runs each mapped
+// construct through a real archive.
+//
+// internal/e2e proves the answers are gc's, and it drives nanogo as a separate
+// process, so none of the walk appears in this package's coverage. These build
+// in this process. Each line of the program below is one instantiation, and
+// each instantiation is one shape of body the walk has to substitute through.
+func TestCompileStencilsTheConstructsTheForeignWalkMaps(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	dir := genericLibModule(t)
+	archive := gcArchive(t, dir, "./lib")
+
+	cfgFile := filepath.Join(t.TempDir(), "importcfg")
+	if err := os.WriteFile(cfgFile, []byte("packagefile nanogo.example/gen/lib="+archive+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := `package main
+
+import "nanogo.example/gen/lib"
+
+func main() {
+	n := 3
+	d := lib.Field(lib.Box[int]{V: 1, N: 4}) - 4
+	d += lib.Negate(5) + 5
+	d += lib.Complement(^7) - 7
+	d += lib.Deref(&n) - 3
+	d += lib.ArrayAt([3]int{1, 2, 3}, 1) - 2
+	d += lib.Arith(6, 3) - 18
+	d += lib.Shifted(4, 2) - 16
+	d += lib.Global(9) - 9
+	d += lib.Guarded(-2) + 1
+	d += lib.ReadVar(4) - 15
+	d += lib.SliceAt([]int{7, 8}, 1) - 8
+	d += lib.PtrField(&lib.Box[int]{V: 1, N: 6}) - 6
+	d += lib.Promoted(lib.Outer[int]{Box: lib.Box[int]{V: 1, N: 5}, M: 2}) - 5
+	d += lib.PtrArrayAt(&[3]int{1, 2, 3}, 2) - 3
+	d += int(lib.StrAt("abc", 1)) - 98
+	d += *lib.Addr(4) - 4
+	d += lib.Variadic(1, 2, 3) - 3
+	d += lib.CallVariadic(2, 3) - 5
+	d += lib.SpreadVariadic([]int{1, 2}) - 2
+	if lib.Not(false) {
+		d += 0
+	}
+	if d != 0 {
+		d = d / (d - d)
+	}
+}
+`
+	if _, err := compileSource(t, src, func(c *Config) {
+		c.ImportCfgFile = cfgFile
+		c.ImportCfg = mustReadImportCfg(t, cfgFile)
+	}); err != nil {
+		t.Fatalf("a mapped construct was refused: %v", err)
+	}
+}
