@@ -46,9 +46,9 @@ The measured result:
 
 | Claim | Number |
 | --- | --- |
-| standard library packages whose surface round-trips through nanogo's own reader | 275 of 375, 18,122 declarations |
-| the same packages read back by `gc` | 275 of 275 |
-| packages refused, each by name | 100, every one for a generic declaration |
+| standard library packages whose surface round-trips through nanogo's own reader | 296 of 375, 19,308 declarations |
+| the same packages read back by `gc` | 296 of 296 |
+| packages refused, each by name | 79, every one for a generic declaration that carries a body |
 | packages with export data in the closure of an empty `main` that write | 23 of 27 |
 
 The allowlist can now grow in either direction, which is what the writer was
@@ -869,8 +869,8 @@ What the writer has:
   declarations, written and read back and compared declaration by declaration
   (`export/writer_test.go`).
 - Round trip: every standard library package, read from `gc`'s archive,
-  written, read back, and compared surface line by surface line. 275 of 375
-  pass and 18,122 declarations are compared; the other 100 are refused by name
+  written, read back, and compared surface line by surface line. 296 of 375
+  pass and 19,308 declarations are compared; the other 79 are refused by name
   and counted. Both numbers are logged, and a refusal that is not the generic
   one is a failure rather than a skip.
 - **Cross-read: `gc` reads what nanogo wrote.** For each of the same 375
@@ -878,7 +878,7 @@ What the writer has:
   the installed toolchain compiles a file naming every exported declaration of
   it. That runs both of `gc`'s readers over nanogo's bytes: the object list
   walk in `noder` and the `types2` reader that resolves each name. `gc` reads
-  all 275 (`export/crossread_test.go`). This is the test that found the public
+  all 296 (`export/crossread_test.go`). This is the test that found the public
   root defect above, which the round trip could not.
 - Byte determinism: the same package written twice in one process, written
   again after a second read, and written by two separate processes, compared

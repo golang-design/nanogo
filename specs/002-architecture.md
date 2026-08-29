@@ -206,7 +206,7 @@ whichever pass is made concurrent first.
 **`export/` was in both layout blocks at once.** It was listed as what exists,
 as a reader, and again as planned and not written. The package exists, reads
 `gc`'s export data and writes nanogo's, and `gc` reads back what it wrote for
-275 of the 375 standard library packages ([015](015-export-data.md)). The
+296 of the 375 standard library packages ([015](015-export-data.md)). The
 planned entry was a claim about a package that had already been built, so it is
 gone from that block and the surviving entry says the package does both
 directions. Nothing was removed to settle the contradiction: the reader half of
