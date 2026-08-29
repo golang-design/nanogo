@@ -12,7 +12,8 @@ import (
 )
 
 // Closure objects, which is the capture half of
-// specs/033-closures-defer-panic.md.
+// specs/033-closures-defer-panic.md, and the heap cell, which is also the
+// interim rule of specs/023-escape-analysis.md.
 //
 // A function literal that reads a variable of the function around it becomes
 // two things: a **closure object** on the heap, built where the literal is
@@ -27,7 +28,9 @@ import (
 //	| capture 1        |  C1
 //	+------------------+
 //
-// # Every capture is by reference, and a heap cell is what that costs
+// # Every capture is by reference, and so is every address the source takes
+//
+// A heap cell is what both cost.
 //
 // The language shares one variable between the function that declares it and
 // every literal that reads it: an assignment in either is seen by the other.
@@ -44,6 +47,13 @@ import (
 // same answer this compiler already gives everywhere else it needs a lifetime
 // it cannot prove.
 //
+// A variable whose address the source takes gets one for the same reason and
+// through the same code. "func f() *int { n := 1; return &n }" hands out a
+// pointer, and nothing here can prove where that pointer goes, so n cannot
+// stay in the frame: the pointer would name a frame that is gone. That was a
+// miscompile until this rule was taken, and it was the quiet kind, because the
+// memory reads correctly until something else writes it.
+//
 // # Why the object's type is per arity and not per closure
 //
 // The object is allocated through runtime.newobject, which takes a *_type, and
@@ -59,11 +69,20 @@ import (
 // fact about the object, which word holds a pointer, and unsafe.Pointer says
 // it: the code pointer stays a uintptr and every capture word is traced.
 //
+// # A named result is a variable like any other
+//
+// A literal may read and assign a named result, and the language shares it the
+// way it shares every other variable, so it gets a cell too. What is different
+// is that the result object is also the storage the ABI returns, so the two
+// have to be joined: every return writes the cell, and the single exit of
+// ir/lower.go copies the cell into the result object after the deferred
+// functions have run. A function that captures a result therefore gets that
+// exit whether or not it defers.
+//
 // # What is refused
 //
 // A method value, whose receiver is captured by value rather than through a
-// cell, and a named result read by a literal, whose storage the single exit of
-// a function that defers already owns. Both are named where they are refused.
+// cell. It is named where it is refused.
 
 // closureCodeField is the index of the code pointer in a closure object, and
 // closureFirstCapture is the index of the first capture after it.
@@ -167,16 +186,6 @@ func (l *lowerer) moveCapturedToHeap() {
 	l.cells = make(map[*Object]*Object, len(owned))
 	l.uncelled = make(map[*Object]bool)
 	for i, o := range owned {
-		if o.Class == ClassResult {
-			// A named result is read by the epilogue of a function that
-			// defers, which deferExit builds after this pass has run and out
-			// of the result object itself. Moving the result to a cell would
-			// leave that epilogue reading the frame slot the cell replaced.
-			l.refuse(at[i], "the closure captures the result "+o.Name+
-				", whose storage the single exit of a function that defers owns")
-			l.uncelled[o] = true
-			continue
-		}
 		if _, err := TypeSymbol(o.Type); err != nil {
 			// The cell is allocated through runtime.newobject, which takes a
 			// *_type, so a capture whose type specs/032 cannot name refuses
@@ -206,39 +215,101 @@ func (l *lowerer) moveCapturedToHeap() {
 	l.fn.Body = l.placeCells(l.fn.Body, owned)
 }
 
-// capturedHere returns the objects this function owns that a literal in it
-// captures, in the order the literals name them, and the literal that names
-// each one first.
+// capturedHere returns the objects this function owns that need a heap cell,
+// in the order the tree names them, and a node that names each one first.
+//
+// Two sets, and they are one set: a variable a literal captures, and a
+// variable whose address the source takes. Both are variables whose storage
+// may outlive the frame, and neither can be proved not to without
+// specs/023-escape-analysis.md.
 //
 // The order is the tree's and never a map's, which specs/053-determinism.md
 // requires of anything that reaches output: the cells become locals and the
-// locals become frame slots. The literal is carried so that a refusal names a
-// node the tree still holds, which is what lets construction report it too.
+// locals become frame slots. The node is carried so that a refusal names
+// something the tree still holds, which is what lets construction report it
+// too.
 func (l *lowerer) capturedHere() (objs []*Object, at []*Node) {
 	seen := make(map[*Object]bool)
+	take := func(o *Object, n *Node) {
+		if o == nil || seen[o] {
+			return
+		}
+		if _, ok := l.capIndex[o]; ok {
+			// A variable this function captures in turn. Its cell belongs to
+			// the function that declared it, and this one reaches the cell
+			// through its own context.
+			return
+		}
+		seen[o] = true
+		objs = append(objs, o)
+		at = append(at, n)
+	}
 	for _, s := range l.fn.Body {
 		Walk(s, func(n *Node) bool {
 			if n.Op != OClosure || n.Index != closureLiteral {
 				return true
 			}
 			for _, a := range n.Args {
-				if a == nil || a.Obj == nil || seen[a.Obj] {
-					continue
+				if a != nil {
+					take(a.Obj, n)
 				}
-				if _, ok := l.capIndex[a.Obj]; ok {
-					// A variable this function captures in turn. Its cell
-					// belongs to the function that declared it, and this one
-					// reaches the cell through its own context.
-					continue
-				}
-				seen[a.Obj] = true
-				objs = append(objs, a.Obj)
-				at = append(at, n)
 			}
 			return true
 		})
 	}
+	for _, o := range l.addressed() {
+		take(o, &Node{Op: OAddr, Pos: o.Pos, Type: l.ptrTo(o.Type)})
+	}
 	return objs, at
+}
+
+// addressed returns the variables of this function whose address the source
+// takes, in declaration order.
+//
+// # Why the address alone is enough
+//
+// A local whose address outlives its frame is the one site
+// specs/023-escape-analysis.md names as having no safe default, and until that
+// pass exists the sound rule it states is this one: a variable whose address
+// is taken goes to the heap. "func f() *int { n := 1; return &n }" is the
+// shape, and what it produced was a pointer into a frame that is gone. It read
+// correctly until something overwrote that memory, which is worse than a
+// crash: a short program agreed with gc and a collection between the call and
+// the read did not.
+//
+// The rule is blunter than the one this pass will make. gc moves a variable to
+// the heap only where its address reaches a result, a global or a call, and
+// keeps the rest in the frame. Every variable here is an allocation gc does
+// not make. That is the same trade every other row of specs/023 already takes:
+// the heap is correct and slower, and the frame is sometimes correct and
+// otherwise corrupts memory.
+//
+// # Which mark this reads
+//
+// Object.Escapes, which ir.Build sets from the source and nothing after
+// ir.Build sets. Addrtaken is the wrong field to read: ir/lower.go marks its
+// own temporaries with it, and a temporary whose address the compiler took
+// lives as long as the frame does. Reading it would put those in the heap and
+// would make a second run of this pass find work the first run created.
+func (l *lowerer) addressed() []*Object {
+	fn := l.fn
+	var out []*Object
+	add := func(o *Object) {
+		if o != nil && o.Escapes {
+			out = append(out, o)
+		}
+	}
+	add(fn.Recv)
+	for _, o := range fn.Params {
+		add(o)
+	}
+	for _, o := range fn.Results {
+		add(o)
+	}
+	for _, o := range fn.Locals {
+		add(o)
+	}
+	return out
 }
 
 // cellOf returns the expression that yields the address of the cell holding o,
@@ -328,8 +399,11 @@ func (l *lowerer) rewriteCaptured(n *Node) {
 //
 // A parameter's cell is allocated at the entry and the incoming value is
 // copied into it, because a parameter is declared by the signature and not by
-// a statement. A local's cell is allocated in the innermost statement list
-// that holds every mention of it, immediately before the first of them.
+// a statement. A named result's cell is allocated at the entry for the same
+// reason, and with no copy: the allocation is already zeroed and a named
+// result starts at the zero value. A local's cell is allocated in the
+// innermost statement list that holds every mention of it, immediately before
+// the first of them.
 //
 // The innermost list is not a tidiness choice. A variable declared in the body
 // of a loop is a fresh variable on every iteration, which is the Go 1.22 rule
@@ -350,6 +424,14 @@ func (l *lowerer) placeCells(body []Stmt, owned []*Object) []Stmt {
 			entry = append(entry, Assign(o.Pos,
 				&Node{Op: ODeref, Pos: o.Pos, Type: o.Type, X: ref(cell, o.Pos)},
 				ref(o, o.Pos)))
+			continue
+		}
+		if o.Class == ClassResult {
+			// A named result is declared by the signature too, and it starts
+			// at the zero value. runtime.newobject returns zeroed memory, so
+			// the allocation is the whole of it and no copy is needed: the
+			// result object is written only by the exit, out of this cell.
+			entry = append(entry, l.newCell(cell, o.Pos))
 			continue
 		}
 		want := 0

@@ -10,17 +10,18 @@ depends_on:
 
 # Escape analysis
 
-**Nothing in this spec is built.** There is no pass, no graph, no summary and no
-`-m` output. `ir/` holds a builder, a type layout, a node set, a converter, the
-lowering pass of [020](020-ir.md) and the descriptor naming of
-[032](032-type-descriptors-and-itabs.md), and no analysis over any of them. What
-exists is one reserved field, `ir.Object.Escapes`, which is assigned nowhere.
+**No analysis in this spec is built.** There is no pass, no graph, no summary
+and no `-m` output. `ir/` holds a builder, a type layout, a node set, a
+converter, the lowering pass of [020](020-ir.md) and the descriptor naming of
+[032](032-type-descriptors-and-itabs.md), and no analysis over any of them.
+What exists is `ir.Object.Escapes`, which now carries the interim answer rather
+than the analysis's: `ir.Build` sets it where the **source** takes a variable's
+address and where a literal captures one, and `ir/lower.go` moves every
+variable it names into a heap cell.
 
-The safe answer is being taken by default at every site that allocates, and
-that is what makes the absence tolerable there: the compiler allocates more
-than it needs to. It is not taken everywhere, and the one place it is not is a
-miscompile, stated below the table. Four sites act on the absence, and they do
-not all do the same thing:
+The safe answer is taken by default at every site that allocates, and that is
+what makes the absence tolerable: the compiler allocates more than it needs to.
+Five sites act on the absence, and they do not all do the same thing:
 
 | Site | What it does without this pass |
 | --- | --- |
@@ -28,28 +29,45 @@ not all do the same thing:
 | `ir/lower.go`, composite literals | Decides frame or heap by shape, not by this pass: a struct or array in an expression position is copied out by its reader and is built in the frame, and anything handing out a pointer to its elements goes to the heap |
 | `ssa/build.go` | Cannot put a string concatenation buffer in the frame, because it does not know which concatenation escapes, so the buffer is nil and the runtime allocates |
 | `ir/build.go` | Keeps a composite literal as one node, because a literal already scattered into element assignments is a decision this pass can no longer make |
+| `ir/closure.go`, a variable | Every variable whose address the source takes, and every variable a literal captures, goes to a heap cell. `gc` moves only the ones whose address reaches a result, a global or a call; every other cell here is an allocation `gc` does not make |
 
 The second row is the shape of answer this pass replaces: a rule sound for every
 program, taken where a per-allocation judgement is not available. Two rows of
 [020](020-ir.md)'s lowering table, the closure and the composite literal, name
 this spec as the thing that decides them.
 
-**A local whose address outlives its frame is the site with no safe default,
-and it is a miscompile today.** `func f() *int { n := 1; return &n }` compiles.
-`n` stays in `f`'s frame, the returned pointer is into a frame that is gone,
-and nothing says so at compile time or at run time. It reads correctly for as
-long as nothing overwrites that memory, which is what makes it worse than a
-crash: a short program prints `1` and agrees with `gc`. Put a `runtime.GC()`
-between the call and the read and the program prints a word of whatever the
-collector left there, against `12345` from the same source under `gc`. There is
-no fifth row for this in the table because it is not a site that chooses: it is
-a variable the compiler never considered moving, and moving it is exactly what
-this pass exists to decide.
+**A local whose address outlives its frame used to be the site with no safe
+default, and it was a miscompile.** `func f() *int { n := 1; return &n }`
+compiled, `n` stayed in `f`'s frame, and the returned pointer was into a frame
+that is gone. Nothing said so at compile time or at run time. It read correctly
+for as long as nothing overwrote that memory, which is what made it worse than
+a crash: a short program printed `1` and agreed with `gc`. A `runtime.GC()`
+between the call and the read printed a word of whatever the collector left
+there, against `12345` from the same source under `gc`.
 
-Until this pass is written, the sound rule for it is the same one the first row
-takes: a local whose address is taken and reaches a result, a global or a call
-goes to the heap. That is more heap than `gc` uses and it is correct, which is
-the trade every other row in this table already makes.
+The last row of the table is that site, and it now takes the sound rule this
+spec already stated: **a variable whose address is taken goes to the heap.**
+It is blunter than the rule above, which asked whether the address reaches a
+result, a global or a call. Answering that question is the analysis, so the
+question is not asked: the address alone decides. That is more heap than `gc`
+uses and it is correct, which is the trade every other row in this table
+already makes.
+
+**Which mark the rule reads, and why it is not `Addrtaken`.** `ir/lower.go`
+takes the address of its own temporaries, and a temporary whose address the
+compiler took lives exactly as long as the frame. `Addrtaken` holds both kinds
+of mark and cannot tell them apart, so reading it would put those temporaries
+in the heap and would make a second run of the lowering pass find work the
+first run created. `Object.Escapes` is set by `ir.Build` and by nothing after
+it, so it names the addresses the program wrote.
+
+**One cell per execution of the declaration.** The cell is allocated where the
+variable is declared and not at the function's entry, which is the Go 1.22 loop
+rule: a variable declared in a loop body is a fresh variable on every
+iteration, so `for i := range s { gp = &i }` hands out a different pointer each
+time round. `ir/closure.go`'s `placeCells` is where that is done, and a
+parameter's and a named result's cell is at the entry because the signature is
+where those are declared.
 
 The design below stands. It was reviewed and not disproved, only deferred.
 

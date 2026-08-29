@@ -300,3 +300,196 @@ func TestToolexecRecoversFromAWrappedDefer(t *testing.T) {
 		t.Fatalf("the program exited %d, want 7: the recover did not catch the panic", got)
 	}
 }
+
+const capturedResultProgram = `package main
+
+import "os"
+
+var saved func() int
+
+// boom is the panic path. The result is written before the panic, the
+// deferred literal recovers and reads it, and the exit loads it after
+// runtime.recovery has restored the stack pointer and no register.
+//
+//go:noinline
+func boom(xs []int) (n int) {
+	defer func() {
+		if recover() != nil {
+			n = n + 40
+		}
+	}()
+	n = 2
+	_ = xs[3]
+	n = 99
+	return n
+}
+
+// scaled is the ordinary path: "return 4" assigns the named result and the
+// deferred literal sees what it assigned.
+//
+//go:noinline
+func scaled(xs []int) (n int) {
+	defer func() { n = n * 3 }()
+	n = 1
+	if len(xs) == 0 {
+		return 4
+	}
+	return 5
+}
+
+// escape captures a result and defers nothing. The literal outlives the frame
+// and reads what the return assigned.
+//
+//go:noinline
+func escape() (n int) {
+	saved = func() int { return n }
+	n = 3
+	return 9
+}
+
+func main() {
+	if boom(nil) != 42 {
+		os.Exit(1)
+	}
+	if scaled(nil) != 12 {
+		os.Exit(2)
+	}
+	if escape() != 9 {
+		os.Exit(3)
+	}
+	if saved() != 9 {
+		os.Exit(4)
+	}
+	os.Exit(7)
+}
+`
+
+// TestToolexecCapturesANamedResult is the evidence for the join between a
+// captured result's cell and the storage the ABI returns.
+//
+// A named result a literal captures lives in a heap cell, because the literal
+// and the function share one variable. The result object is still what the
+// ABI returns, so every return writes the cell and the single exit copies the
+// cell into the result object after the deferred functions have run. Three
+// programs check three halves of that: the panic path, where runtime.recovery
+// restores the stack pointer and no register, so the cell has to be in the
+// frame; the ordinary path, where "return 4" has to be visible to the deferred
+// literal; and a function that captures a result and defers nothing, where the
+// literal outlives the frame.
+//
+// The exit status is the assertion, and gc's build of the same source exits 7.
+func TestToolexecCapturesANamedResult(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/capturedresult\n\ngo 1.27\n",
+		"main.go": capturedResultProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "capturedresult", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := exitCode(t, filepath.Join(h.mod, "capturedresult")); got != 7 {
+		t.Fatalf("the program exited %d, want 7: a captured result and the value the function returned disagreed", got)
+	}
+}
+
+const escapingLocalProgram = `package main
+
+import (
+	"os"
+	"runtime"
+)
+
+// Each of these hands out the address of one of its own variables. Two calls
+// at the same stack level must return different pointers, which is Go's own
+// test/escape.go stated in three lines.
+//
+//go:noinline
+func fromLocal(x int) *int {
+	n := x
+	return &n
+}
+
+//go:noinline
+func fromParam(x int) *int { return &x }
+
+//go:noinline
+func fromResult(x int) (n int) {
+	n = x
+	return
+}
+
+//go:noinline
+func addrOfResult(x int) *int {
+	n := fromResult(x)
+	return &n
+}
+
+//go:noinline
+func churn() {
+	for i := 0; i < 4096; i++ {
+		_ = &[16]int{i}
+	}
+}
+
+func main() {
+	p := fromLocal(1)
+	q := fromLocal(2)
+	if p == q {
+		os.Exit(1)
+	}
+	a := fromParam(3)
+	b := fromParam(4)
+	if a == b {
+		os.Exit(2)
+	}
+	c := addrOfResult(5)
+
+	// The frames those pointers came from are gone and the heap is walked
+	// twice with the world stopped. A pointer into a frame reads whatever is
+	// there now.
+	churn()
+	runtime.GC()
+	churn()
+	runtime.GC()
+
+	if *p != 1 || *q != 2 {
+		os.Exit(3)
+	}
+	if *a != 3 || *b != 4 {
+		os.Exit(4)
+	}
+	if *c != 5 {
+		os.Exit(5)
+	}
+	os.Exit(7)
+}
+`
+
+// TestToolexecKeepsAnEscapingLocalAlive is the interim rule
+// specs/023-escape-analysis.md states for the one site with no safe default: a
+// variable whose address the source takes lives in a heap cell.
+//
+// It used to stay in the frame. Two calls at one stack level then returned one
+// pointer, and the value read correctly for as long as nothing overwrote that
+// memory, which is what made it worse than a crash. The collection between the
+// calls and the reads is what makes this program say so rather than agree by
+// luck.
+func TestToolexecKeepsAnEscapingLocalAlive(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/escapinglocal\n\ngo 1.27\n",
+		"main.go": escapingLocalProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "escapinglocal", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := exitCode(t, filepath.Join(h.mod, "escapinglocal")); got != 7 {
+		t.Fatalf("the program exited %d, want 7: a pointer to a local outlived the frame it named", got)
+	}
+}

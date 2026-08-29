@@ -166,9 +166,11 @@ what is left to do.
 - Escape analysis was said to block the closure work. It does not.
   `ir/lower.go` already sends every allocation to the heap through
   `runtime.newobject`, which is correct and only slower than `gc`.
-  [023](023-escape-analysis.md) remains unbuilt, and the miscompile it owns, a
-  pointer to an address-taken local outliving its frame, is a separate defect
-  from anything the closure work touches.
+  [023](023-escape-analysis.md)'s analysis remains unbuilt, and the miscompile
+  it owned, a pointer to an address-taken local outliving its frame, is closed:
+  the interim rule that spec already stated is built, and a variable whose
+  address the source takes lives in a heap cell like a captured one. What is
+  still missing is the judgement that keeps such a variable in the frame.
 - **`ir.Type` was said not to carry method sets. It does**, at
   `ir/type.go:258`, for every defined type. What is missing is the signature on
   `ir.Method`, and the two ABI wrappers `rtype/uncommon.go:170` names.

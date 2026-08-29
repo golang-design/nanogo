@@ -1080,18 +1080,23 @@ func TestMapKeyMustBeHashable(t *testing.T) {
 	if !strings.Contains(err.Error(), "hash function") {
 		t.Errorf("the refusal is %q, want it to name the hash function", err)
 	}
-	// A key that needs a generated hash is refused by the generated-function
-	// gap and not by this one, and the message says which.
+	// A key that needs a generated hash is a key this compiler can describe.
+	// The check asks hashClosure, which is what the writer calls, so the two
+	// answer alike: a key with no hash at all is refused above and a key whose
+	// hash the compiler generates passes here and reaches the generator.
 	pair := lay2(t, &ir.Type{Kind: ir.Struct, Fields: []ir.Field{
 		{Name: "A", Type: tString(t)},
 		{Name: "B", Type: tString(t)},
 	}})
-	err = mapEmittable(mapOf(t, pair, tInt(t)))
-	if err == nil {
-		t.Fatal("a map with a key needing a generated hash was emittable")
+	if err := mapEmittable(mapOf(t, pair, tInt(t))); err != nil {
+		t.Fatalf("a map whose key needs a generated hash is not emittable: %v", err)
 	}
-	if !strings.Contains(err.Error(), "generated hash function") {
-		t.Errorf("the refusal is %q, want it to name the generated hash function", err)
+	name, _, err := hashClosure(pair)
+	if err != nil {
+		t.Fatalf("hashClosure: %v", err)
+	}
+	if want := "type:.hashfunc.struct { A string; B string }"; name != want {
+		t.Errorf("the Hasher points at %q, want %q", name, want)
 	}
 }
 
