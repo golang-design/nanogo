@@ -190,9 +190,9 @@ func TestWriteRefusesTheGenericShapesItHasNoDictionaryFor(t *testing.T) {
 		src  string
 		want string
 	}{{
-		name: "a generic type",
-		src:  "package p\n\ntype List[T any] struct{ Head T }\n",
-		want: "generic type",
+		name: "a method of a generic type",
+		src:  "package p\n\ntype List[T any] struct{ Head T }\n\nfunc (l List[T]) Get() T { return l.Head }\n",
+		want: "its dictionary is the type's rather than its own",
 	}, {
 		name: "a method with type parameters",
 		src:  "package p\n\ntype T struct{}\n\nfunc (T) M[X any](x X) X { return x }\n",
@@ -206,6 +206,34 @@ func TestWriteRefusesTheGenericShapesItHasNoDictionaryFor(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("the refusal is %q and does not name %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestWriteWritesAGenericTypeWithNoMethods is the half of the generic type
+// that the dictionary rule admits.
+//
+// A generic type's dictionary spans the type and every method it declares, so
+// it is allocated with the type and filled as the underlying type and then
+// each method's signature is written. A type with no method needs nothing but
+// the first of those, and it is what iter.Seq is: a program that names
+// iter.Seq[int] could not write its own export data while every generic type
+// was refused by name.
+func TestWriteWritesAGenericTypeWithNoMethods(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		src  string
+	}{
+		{"a struct", "package p\n\ntype List[T any] struct{ Head T }\n"},
+		{"a type whose underlying type is derived", "package p\n\ntype Slice[T any] []T\n"},
+		{"a function type", "package p\n\ntype Seq[V any] func(yield func(V) bool)\n"},
+		{"one named by an ordinary declaration", "package p\n\ntype List[T any] struct{ Head T }\n\nvar Ints List[int]\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pkg, fset, funcs := buildSource(t, "xtest/generictype", tt.src)
+			if _, _, err := Write(pkg, false, &Source{Fset: fset, Funcs: funcs}); err != nil {
+				t.Fatalf("Write: %v", err)
 			}
 		})
 	}

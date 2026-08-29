@@ -27,7 +27,7 @@ Both directions, for everything but a generic declaration.
 | The container's read half | `export/pkgbits/` | built |
 | The container's write half | `export/pkgbits/` | built |
 | The declaration reader | `export/read.go`, `export/reader.go` | built; produces the `*types2.Package` values nanogo's checker imports |
-| The declaration writer | `export/writer.go` | built; carries a generic function with its dictionary, and refuses a generic type, a generic method and a method of a generic type by name |
+| The declaration writer | `export/writer.go` | built; carries a generic function and a method-less generic type with its dictionary, and refuses a generic method and a method of a generic type by name |
 | The `__.PKGDEF` archive member | `driver/archive.go` | built; nanogo writes both members `gc` writes |
 | `-importcfg` parsing | `driver/importcfg.go` | built; all four directives, in separate tables, and an unknown directive is an error |
 | Function bodies, the reader | `export/body.go`, `export/bodyread.go`, `export/bodies.go` | built; every body of every standard library package decodes, and the decode is exact |
@@ -181,9 +181,17 @@ the dictionary while it builds the body, `Body.Dict` carries it, and
 **What is refused, and why each.** Four generic shapes, each because its
 dictionary is not the one a body carries:
 
-- A generic type declaration, and a method of one. Their dictionary is the
-  type's, and it spans the underlying type and every method the type declares
-  in the order they were declared. Nothing assembles it yet.
+- A method of a generic type. Its dictionary is the *type's*, which spans the
+  underlying type and every method the type declares, in the order they were
+  declared. The type declaration itself carries that dictionary now: it is
+  allocated empty with the type and each derived type takes its slot as the
+  underlying type and then each method's signature is written, which is the
+  order `gc` reads them back in. What is still missing is the body: a method's
+  body has to be numbered against the same dictionary, after the underlying
+  type and after every method declared before it, and `BuildBody` numbers one
+  dictionary per declaration. So a generic type with no method is written and
+  one with a method is refused by name. `iter.Seq` is the first kind, and
+  twenty-one more standard library packages reach `gc`'s reader because of it.
 - A method with type parameters of its own. The format writes it as a
   declaration of its own, whose dictionary holds the receiver's type
   parameters ahead of the method's.

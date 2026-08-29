@@ -712,7 +712,21 @@ func (pw *pkgWriter) dictOf(obj types2.Object) *Dict {
 		return &Dict{Pkg: pw.curpkg}
 	}
 	if !isFunc {
-		pw.refuse(objName(obj), "the declaration is a generic type, and its dictionary spans the type and every method it declares")
+		// A generic type declaration. Its dictionary spans the type and every
+		// method the type declares, which is why it is the type's and not one
+		// per method, and it is allocated empty here: doObj writes the
+		// underlying type and then each method's signature, in that order, and
+		// each derived type takes its slot as it is written. objDict runs
+		// after doObj, so the list it writes is complete.
+		//
+		// The package it belongs to is its own and not the package being
+		// written. A file's export data is the linked form, so a generic type
+		// another package declares is written out here in full, and its
+		// dictionary is that package's. Nothing is read back to build it: a
+		// type declaration has no body, and the methods that do have one are
+		// refused by writer.method until their bodies can be numbered against
+		// this dictionary.
+		return &Dict{Pkg: obj.Pkg(), TypeParams: tparams}
 	}
 	if rtparams {
 		pw.refuse(objName(obj), "the declaration is a method with type parameters, and its dictionary holds the receiver's type parameters ahead of its own")
