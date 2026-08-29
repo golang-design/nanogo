@@ -29,10 +29,11 @@ import (
 //	1<<2  a four-byte package-path offset follows the name and the tag
 //	1<<3  the name is an embedded field's
 //
-// Bit 2 is never set here. gc sets it for a method whose name belongs to a
-// different package from its type, which is only reachable through an embedded
-// type from another package, and a method is refused for a different reason
-// before it gets this far.
+// Bit 2 is set for a name that belongs to a different package from the type
+// carrying it, which is reachable by embedding a type from another package
+// that has an unexported method. Two unexported methods of one name from two
+// packages are different methods, and without the path reflect attributes both
+// to the type's own package and they become one.
 //
 // # The symbol name matters as much as the bytes
 //
@@ -45,15 +46,39 @@ import (
 // type:.namedata.Name.json:"name", unexported "changed" with no tag is
 // type:.namedata.changed- and an embedded "Ident" is
 // type:.namedata.Ident..embedded.
+//
+// A name that carries a package path is spelled differently and cannot be
+// spelled gc's way. gc names it type:.namedata."".N with a counter, so two
+// packages give one name two symbols and the linker merges them by content
+// rather than by name. A counter here would number by the order the writer
+// reaches types in, which specs/053-determinism.md does not allow, so the path
+// goes in the name instead: it is the one thing that makes these names differ,
+// so a name derived from it collides exactly when gc's content hash would
+// merge.
 
 // nameSymbol returns the symbol holding one encoded Name.
 func nameSymbol(name, tag string, exported, embedded bool) Symbol {
+	sym, _ := namePathSymbol(name, tag, "", exported, embedded)
+	return sym
+}
+
+// namePathSymbol returns the symbol holding one encoded Name, and the symbol
+// holding the package path it points at when it carries one.
+//
+// The second result is not optional for a caller that passes a path. The four
+// bytes after the name are an offset the linker resolves by name, so a Name
+// with bit 2 set and no such symbol in the object is a relocation against
+// nothing.
+func namePathSymbol(name, tag, pkgPath string, exported, embedded bool) (Symbol, Symbol) {
 	var bits byte
 	if exported {
 		bits |= 1 << 0
 	}
 	if tag != "" {
 		bits |= 1 << 1
+	}
+	if pkgPath != "" {
+		bits |= 1 << 2
 	}
 	if embedded {
 		bits |= 1 << 3
@@ -78,13 +103,29 @@ func nameSymbol(name, tag string, exported, embedded bool) Symbol {
 		// flag byte. gc appends the same suffix for the same reason.
 		sname += ".embedded"
 	}
-	return Symbol{
+	sym := Symbol{
 		Name:  sname,
 		Kind:  obj.SRODATA,
 		Align: 1,
 		Dupok: true,
 		Data:  data,
 	}
+	if pkgPath == "" {
+		return sym, Symbol{}
+	}
+	// The four bytes are written as zero and the relocation fills them in.
+	// They are the last thing in the encoding, after the name and the tag,
+	// which is where internal/abi.Name.PkgPath reads them from.
+	ip := importPathSymbol(pkgPath)
+	sym.Name += ".pkg." + pathToPrefix(pkgPath)
+	sym.Data = append(sym.Data, 0, 0, 0, 0)
+	sym.Relocs = append(sym.Relocs, Reloc{
+		Off:    int32(len(sym.Data) - 4),
+		Size:   4,
+		Type:   obj.R_ADDROFF,
+		Target: ip.Name,
+	})
+	return sym, ip
 }
 
 // importPathSymbol returns the symbol holding an import path.

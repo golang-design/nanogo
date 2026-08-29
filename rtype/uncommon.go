@@ -250,8 +250,16 @@ func uncommonMethods(t *ir.Type, base int) ([]byte, []Reloc, []Symbol, error) {
 			return nil, nil, nil, err
 		}
 		off := base + i*methodSize
-		n := nameSymbol(m.Name, "", isExportedName(m.Name), false)
+		// A method whose name belongs to another package carries that package's
+		// path, which is reachable by embedding a type from another package
+		// that has an unexported method. Without the path reflect attributes
+		// the method to the type's own package, and two unexported methods of
+		// one name from two packages become one.
+		n, ip := namePathSymbol(m.Name, "", methodNamePkg(t, m), isExportedName(m.Name), false)
 		syms = append(syms, n)
+		if ip.Name != "" {
+			syms = append(syms, ip)
+		}
 		relocs = append(relocs, Reloc{
 			Off: int32(off + methodOffName), Size: 4, Type: obj.R_ADDROFF, Target: n.Name,
 		})
@@ -295,18 +303,23 @@ func methodEmittable(t *ir.Type, m ir.Method) error {
 		// from an IR built below the type boundary by hand.
 		return fmt.Errorf("rtype: the method %s of %s has no signature, which its Mtyp is an offset to", m.Name, t)
 	}
-	if !isExportedName(m.Name) && m.Pkg != "" && m.Pkg != uncommonPkgPath(t) {
-		// gc encodes such a name with internal/abi.Name's bit 2 set and a
-		// package-path offset after the name, which rtype/name.go does not
-		// write. Without it reflect attributes the method to the type's own
-		// package, and two unexported methods of one name from two packages
-		// become one. It is reachable only by embedding a type from another
-		// package that has an unexported method.
-		return fmt.Errorf("rtype: the method %s of %s is unexported and declared in %s, "+
-			"so its name needs a package path, which the name encoder does not write",
-			m.Name, t, m.Pkg)
-	}
 	return nil
+}
+
+// methodNamePkg returns the package path a method's name carries, or "" when
+// the name needs none.
+//
+// A name carries a path when it is unexported and belongs to a package other
+// than the one the UncommonType names, which is gc's rule in
+// reflectdata.methodWrapper. An exported name needs none: reflect can name it
+// from any package, so there is nothing to disambiguate. A name from the type's
+// own package needs none either, because that is the path the UncommonType
+// already carries and reflect falls back to it.
+func methodNamePkg(t *ir.Type, m ir.Method) string {
+	if isExportedName(m.Name) || m.Pkg == "" || m.Pkg == uncommonPkgPath(t) {
+		return ""
+	}
+	return m.Pkg
 }
 
 // uncommonPkgPath returns the import path an UncommonType carries.

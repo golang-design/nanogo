@@ -417,26 +417,81 @@ func TestUncommonPkgPathOfAComposite(t *testing.T) {
 	}
 }
 
-// TestMethodRefusalQualifiesAnUnexportedName checks that the one refusal a
-// method row still has names the method the way the language names it.
+// TestMethodNamePkgIsTheDisambiguatingPathAndNothingElse covers which methods
+// carry a package path in their name.
 //
 // Two packages may declare an unexported method of the same name and they are
-// different methods, so the refusal has to say which package. The row is
-// refused because rtype/name.go writes no package-path offset, which is the
-// only thing that would tell the two apart in the descriptor.
-func TestMethodRefusalQualifiesAnUnexportedName(t *testing.T) {
+// different methods, so the descriptor has to say which package. Nothing else
+// does: reflect falls back to the path the UncommonType carries, so a name
+// without the offset is attributed to the type's own package and the two
+// become one.
+//
+// The other three rows are the ones that need no path, and each would cost a
+// symbol and a relocation for nothing. An exported name is nameable from any
+// package. A name from the type's own package is the fallback already. A
+// method with no package recorded has nothing to write.
+func TestMethodNamePkgIsTheDisambiguatingPathAndNothingElse(t *testing.T) {
 	typ := &ir.Type{Kind: ir.Int64, Name: "p.T", PkgPath: "p", Basic: "int"}
+	for _, tc := range []struct {
+		what string
+		m    ir.Method
+		want string
+	}{
+		{"unexported, from another package", ir.Method{Name: "hidden", Pkg: "other"}, "other"},
+		{"unexported, from the type's own package", ir.Method{Name: "hidden", Pkg: "p"}, ""},
+		{"exported, from another package", ir.Method{Name: "Shown", Pkg: "other"}, ""},
+		{"unexported, with no package recorded", ir.Method{Name: "hidden"}, ""},
+	} {
+		if got := methodNamePkg(typ, tc.m); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.what, got, tc.want)
+		}
+	}
+
+	// The row that used to be refused is written now.
 	sig := &ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}}
-	err := methodEmittable(typ, ir.Method{Name: "hidden", Pkg: "other", Sig: sig})
-	if err == nil {
-		t.Fatal("no refusal")
+	if err := methodEmittable(typ, ir.Method{Name: "hidden", Pkg: "other", Sig: sig}); err != nil {
+		t.Errorf("a method whose name carries a package path was refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "hidden") || !strings.Contains(err.Error(), "other") {
-		t.Errorf("the refusal is %q, want it to name the method and the package that declares it", err)
+}
+
+// TestNamePathSymbolWritesTheOffsetAfterTheNameAndTag covers the encoding.
+//
+// internal/abi.Name reads the four bytes after the name and the tag, so an
+// offset written anywhere else is read as part of whatever follows. Bit 2 is
+// what says the four bytes are there at all, and a Name with the bit and no
+// relocation is a relocation against nothing, which is why the path's own
+// symbol comes back with it.
+func TestNamePathSymbolWritesTheOffsetAfterTheNameAndTag(t *testing.T) {
+	sym, ip := namePathSymbol("hidden", "atag", "other/pkg", false, false)
+
+	if sym.Data[0]&(1<<2) == 0 {
+		t.Errorf("bit 2 is not set, so nothing reads the offset: flags %#02x", sym.Data[0])
 	}
-	// A method of the type's own package needs no offset and is written.
-	if err := methodEmittable(typ, ir.Method{Name: "hidden", Pkg: "p", Sig: sig}); err != nil {
-		t.Errorf("a method of the type's own package was refused: %v", err)
+	// One flag byte, the name with its length, the tag with its length, then
+	// the four bytes.
+	want := 1 + 1 + len("hidden") + 1 + len("atag") + 4
+	if len(sym.Data) != want {
+		t.Fatalf("the encoding is %d bytes and the offset belongs at %d", len(sym.Data), want)
+	}
+	if len(sym.Relocs) != 1 {
+		t.Fatalf("the name carries %d relocations, want the one that fills the offset in", len(sym.Relocs))
+	}
+	r := sym.Relocs[0]
+	if r.Off != int32(want-4) || r.Size != 4 {
+		t.Errorf("the relocation is %d bytes at %d, want 4 at %d", r.Size, r.Off, want-4)
+	}
+	if ip.Name == "" || r.Target != ip.Name {
+		t.Errorf("the relocation targets %q and the path symbol is %q; a name with bit 2 and no such symbol is a relocation against nothing", r.Target, ip.Name)
+	}
+
+	// A name with no path is unchanged: no bit, no bytes, no relocation, and
+	// the shared spelling every other package's copy has.
+	plain, none := namePathSymbol("hidden", "atag", "", false, false)
+	if plain.Data[0]&(1<<2) != 0 || len(plain.Relocs) != 0 || none.Name != "" {
+		t.Errorf("a name with no package path gained an offset: %#02x, %d relocations", plain.Data[0], len(plain.Relocs))
+	}
+	if plain.Name == sym.Name {
+		t.Errorf("both spellings are %q, so one symbol would hold two different encodings", plain.Name)
 	}
 }
 
