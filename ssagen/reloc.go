@@ -110,11 +110,6 @@ type symbols struct {
 	// produce no output order (specs/053-determinism.md).
 	index map[callee]obj.SymRef
 	data  map[string]obj.SymRef
-
-	// reflectMethod records that this function reaches a method through
-	// reflect. [reflectMethodNames] says what that means and why the flag it
-	// sets is not an optimisation.
-	reflectMethod bool
 }
 
 func newSymbols(p *obj.Package) *symbols {
@@ -125,39 +120,9 @@ func newSymbols(p *obj.Package) *symbols {
 	}
 }
 
-// reflectMethodNames are the reflect entry points that look a method up by a
-// name the compiler cannot see.
-//
-// A function that reaches one of them makes cmd/link give up on deciding which
-// methods are live and keep every exported method of every type that is
-// converted to an interface. The mark is what turns that on: deadcode reads
-// SymFlagReflectMethod off each reachable function, and without it a method
-// found only by reflect.Value.Method resolves to the sentinel -1 and the
-// runtime installs runtime.unreachableMethod in its place. That is a program
-// that links and then dies with "unreachable method called. linker bug?".
-//
-// gc decides the same thing in walk.usemethod, by the name of the selector and
-// the type of the first result. This is the same question asked of the symbol
-// the call resolved to, which is the form the answer survives in this far
-// down. gc has one case this does not: MethodByName with a constant argument
-// gets an R_USENAMEDMETHOD relocation naming the one method, and only a
-// non-constant argument sets the flag. nanogo always sets the flag, which
-// keeps more methods and never keeps fewer.
-//
-// reflect.Type's own Method and MethodByName are not here, because reflect.Type
-// is an interface and an interface call names no symbol. They belong here on
-// the day an interface call carries the interface and the method it selects.
-var reflectMethodNames = map[string]bool{
-	"reflect.Value.Method":       true,
-	"reflect.Value.MethodByName": true,
-}
-
 // ref returns the reference of a symbol, adding a reference to the object the
 // first time the name is seen.
 func (s *symbols) ref(c callee) obj.SymRef {
-	if reflectMethodNames[c.name] {
-		s.reflectMethod = true
-	}
 	if r, ok := s.index[c]; ok {
 		return r
 	}

@@ -281,18 +281,6 @@ func TestStencilRefusesWhatItDoesNotBuild(t *testing.T) {
 		want string
 	}{
 		{
-			"a method of a generic type",
-			"type L[T any] struct{ v T }\n\nfunc (l L[T]) Get() T { return l.v }\n\n" +
-				"func user() { sink(L[int]{1}.Get()) }\n",
-			"an instantiation of a generic type is not built",
-		},
-		{
-			"a method value of a generic type",
-			"type L[T any] struct{ v T }\n\nfunc (l L[T]) Get() T { return l.v }\n\n" +
-				"func user() { sink(L[int]{1}.Get) }\n",
-			"an instantiation of a generic type is not built",
-		},
-		{
 			"a type declared inside a generic body",
 			"func z[T any](x T) int { type S []T; return len(S{x}) }\n\n" +
 				"func user() { sink(z(1)); sink(z(\"s\")) }\n",
@@ -316,6 +304,130 @@ func TestStencilRefusesWhatItDoesNotBuild(t *testing.T) {
 				t.Errorf("the refusal is %q, want it to hold %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestStencilBuildsTheMethodsOfAnInstantiatedType is specs/013-generics.md's
+// generic type, in the package that declares it.
+//
+// The type and not the call site is the unit of discovery, because a method of
+// an instantiation is reached by more than a call: an itab holds it and a
+// descriptor names it in the Method array reflect indexes. So the method set
+// of every instantiation the package names is built whole, which is what
+// Set below is here to show: nothing calls it.
+//
+// The symbols are gc's own. gc writes a method of an instantiated type as
+// xpkg/lib.(*Box[int]).Get, with the arguments inside the parentheses and each
+// written by the link string's rule.
+func TestStencilBuildsTheMethodsOfAnInstantiatedType(t *testing.T) {
+	p := buildSource(t, "type Box[T any] struct{ v T }\n\n"+
+		"func (b *Box[T]) Get() T  { return b.v }\n"+
+		"func (b *Box[T]) Set(x T) { b.v = x }\n"+
+		"func (b Box[T]) Copy() T  { return b.v }\n\n"+
+		"type Pair[K comparable, V any] struct {\n\tk K\n\tv V\n}\n\n"+
+		"func (q Pair[K, V]) Key() K { return q.k }\n\n"+
+		"func user() {\n"+
+		"\tsink((&Box[int]{1}).Get())\n"+
+		"\tsink((&Box[string]{\"s\"}).Get())\n"+
+		"\tsink(Pair[string, int]{\"k\", 1}.Key())\n"+
+		"}\n")
+	want := []string{
+		"p.(*Box[int]).Get",
+		"p.(*Box[int]).Set",
+		"p.Box[int].Copy",
+		"p.(*Box[string]).Get",
+		"p.(*Box[string]).Set",
+		"p.Box[string].Copy",
+		"p.Pair[string,int].Key",
+	}
+	got := stencilSyms(p)
+	if len(got) != len(want) {
+		t.Fatalf("the instantiations are %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("instantiation %d is %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// Each body is the instantiated one, so the two Get methods return two
+	// different types and no object is shared between them.
+	// The name a diagnostic and a traceback use carries the arguments on the
+	// receiver, where the language writes them.
+	for _, tt := range []struct{ name, res string }{
+		{"Box[int].Get", "int"},
+		{"Box[string].Get", "string"},
+	} {
+		fn := buildFuncOf(t, p, tt.name)
+		if fn.Recv == nil {
+			t.Fatalf("%s has no receiver", tt.name)
+		}
+		if len(fn.Results) != 1 || fn.Results[0].Type.String() != tt.res {
+			t.Errorf("%s returns %v, want one %s", tt.name, fn.Results, tt.res)
+		}
+	}
+	if a, b := buildFuncOf(t, p, "Box[int].Get"), buildFuncOf(t, p, "Box[string].Get"); a.Recv == b.Recv {
+		t.Error("the two instantiations share one receiver object")
+	}
+}
+
+// TestStencilBuildsAMethodOfAnInstantiationNothingCalls is the reason
+// discovery is at the type.
+//
+// A descriptor's Method array names every method of the type and an itab holds
+// the ones the interface asks for, and neither is a call site the builder
+// walks. A value of the instantiation existing anywhere is what makes the
+// whole method set owed.
+func TestStencilBuildsAMethodOfAnInstantiationNothingCalls(t *testing.T) {
+	p := buildSource(t, "type Box[T any] struct{ v T }\n\n"+
+		"func (b Box[T]) Get() T { return b.v }\n\n"+
+		"func user() { sink(Box[int]{1}) }\n")
+	if got, want := stencilSyms(p), []string{"p.Box[int].Get"}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("the instantiations are %v, want %v", got, want)
+	}
+}
+
+// TestStencilFollowsAnInstantiationOutOfAMethodBody is the worklist across the
+// two queues: an instantiation reached through another one is built too, and
+// its own methods are owed with it.
+//
+// The order is the order the converter finished the types in, which is the
+// order the type graph unwinds: Cell[int] is a field of Outer[int], so it is
+// converted first and its methods are queued first. It is an order and not a
+// preference, and specs/053-determinism.md asks only that it be the same on
+// every build.
+func TestStencilFollowsAnInstantiationOutOfAMethodBody(t *testing.T) {
+	p := buildSource(t, "type Cell[T any] struct{ v T }\n\n"+
+		"func (c Cell[T]) Get() T { return c.v }\n\n"+
+		"type Outer[T any] struct{ c Cell[T] }\n\n"+
+		"func (o Outer[T]) Get() T { return o.c.Get() }\n\n"+
+		"func user() { sink(Outer[int]{}.Get()) }\n")
+	got := stencilSyms(p)
+	want := []string{"p.Cell[int].Get", "p.Outer[int].Get"}
+	if len(got) != len(want) {
+		t.Fatalf("the instantiations are %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("instantiation %d is %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestStencilRefusesAMethodOfAnotherPackagesGenericType is the line the
+// generic type stops at, and it is the same line the generic function stops
+// at: the body is in that package's archive.
+func TestStencilRefusesAMethodOfAnotherPackagesGenericType(t *testing.T) {
+	pkg, files, info := buildTypecheckWithImports(t, "package p\n\nimport \"sync/atomic\"\n\n"+
+		"func user(p *atomic.Pointer[int], v *int) { p.Store(v) }\n")
+	_, err := Build(pkg, files, info)
+	if err == nil {
+		t.Fatal("a method of another package's generic type was accepted")
+	}
+	for _, want := range []string{"sync/atomic.Pointer[int]", "another package declares"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal is %q, want it to hold %q", err, want)
+		}
 	}
 }
 

@@ -62,7 +62,11 @@ func buildSource(t *testing.T, path, src string) (*types2.Package, *syntax.FileS
 		obj := info.Defs[fd.Name].(*types2.Func)
 		body, err := source.BuildBody(path+"."+name, obj.Signature(), fd.Body)
 		if err != nil {
-			t.Fatalf("BuildBody(%s): %v", name, err)
+			// The builder refuses a shape by name and the driver skips it,
+			// because a generic declaration whose body is refused is refused
+			// by the writer too. A harness that stopped here could not reach
+			// the writer's own refusal at all.
+			continue
 		}
 		funcs = append(funcs, InlineFunc{Obj: obj, Name: name, Cost: MaxInlineCost, Body: body})
 	}

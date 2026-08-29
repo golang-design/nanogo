@@ -348,8 +348,8 @@ and is imported by nothing; the writer came second and closed the loop, so an
 archive nanogo produces now carries a `__.PKGDEF` and can be imported.
 
 The gate is still not met, and what is left of it is narrower than it was and
-is measured: 275 of the 375 standard library packages round-trip, and `gc`
-reads all 275 of them back. The other 100 are refused by name for a generic
+is measured: 296 of the 375 standard library packages round-trip, and `gc`
+reads all 296 of them back. The other 79 are refused by name for a generic
 declaration, which cannot be written without a function body.
 [013](013-generics.md) owns that. The two other parts of the gate, type
 checking the distribution and matching `errorcheck`, are met and gated.

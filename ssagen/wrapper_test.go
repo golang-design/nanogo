@@ -296,10 +296,11 @@ func methodNamed(t *testing.T, c *checked, typ, name string) ir.Method {
 func emitFunc(t *testing.T, c *compiled, p *obj.Package) *Result {
 	t.Helper()
 	r, err := Emit(c.f, c.a, p, Options{
-		Sym:  c.fn.Sym,
-		File: c.file,
-		Line: 1,
-		Fset: c.fset,
+		Sym:           c.fn.Sym,
+		File:          c.file,
+		Line:          1,
+		Fset:          c.fset,
+		ReflectMethod: c.fn.ReflectMethod,
 	})
 	if err != nil {
 		t.Fatalf("Emit %s: %v", c.fn.Sym, err)

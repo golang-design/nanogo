@@ -81,6 +81,16 @@ type instance struct {
 	// own.
 	sig *types2.Signature
 
+	// recv is the instantiated receiver of a method of a generic type, and is
+	// nil for an instantiation of a generic function.
+	//
+	// It is what says which type parameters the substitution replaces. A
+	// generic function binds them on its signature and a method of a generic
+	// type binds them on its receiver, and the two lists are different
+	// *TypeParam values even when they are spelled alike: the checker gives a
+	// method its own copy, and the body's recorded types name that copy.
+	recv *types2.Named
+
 	// obj is the one IR object every call site of this instantiation names.
 	obj *Object
 }
@@ -127,14 +137,7 @@ type instance struct {
 func instanceSym(origin *types2.Func, targs []types2.Type) string {
 	var b strings.Builder
 	b.WriteString(funcSym(origin))
-	b.WriteByte('[')
-	for i, a := range targs {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(types2.TypeString(a, nil))
-	}
-	b.WriteByte(']')
+	writeTypeArgs(&b, targs)
 	return b.String()
 }
 
@@ -142,10 +145,26 @@ func instanceSym(origin *types2.Func, targs []types2.Type) string {
 //
 // It is the source name with the type arguments after it, and it is not the
 // symbol: the symbol qualifies the name by the import path and this does not,
-// exactly as Func.Name and Func.Sym differ for an ordinary declaration.
-func instanceName(origin *types2.Func, targs []types2.Type) string {
+// exactly as Func.Name and Func.Sym differ for an ordinary declaration. A
+// method of a generic type carries the arguments on the receiver, where the
+// language writes them and where its symbol carries them.
+func instanceName(in *instance) string {
 	var b strings.Builder
-	b.WriteString(origin.Name())
+	if in.recv != nil {
+		b.WriteString(in.recv.Obj().Name())
+		writeTypeArgs(&b, in.targs)
+		b.WriteByte('.')
+		b.WriteString(in.origin.Name())
+		return b.String()
+	}
+	b.WriteString(in.origin.Name())
+	writeTypeArgs(&b, in.targs)
+	return b.String()
+}
+
+// writeTypeArgs writes a bracketed type argument list, which is the spelling
+// both names use.
+func writeTypeArgs(b *strings.Builder, targs []types2.Type) {
 	b.WriteByte('[')
 	for i, a := range targs {
 		if i > 0 {
@@ -154,7 +173,6 @@ func instanceName(origin *types2.Func, targs []types2.Type) string {
 		b.WriteString(types2.TypeString(a, nil))
 	}
 	b.WriteByte(']')
-	return b.String()
 }
 
 // collectGenericDecls records the source of every generic function this
@@ -312,12 +330,134 @@ func (b *builder) subst(t types2.Type) types2.Type {
 // check rejects a package whose instantiation graph has a cycle that grows a
 // type, and it runs before this pass does.
 func (b *builder) drainInstances() {
-	for i := 0; i < len(b.todo); i++ {
-		if fn := b.buildInstance(b.todo[i]); fn != nil {
-			b.out.Funcs = append(b.out.Funcs, fn)
+	// Two queues, because the two feed each other: a type's method is built
+	// from the notice the converter sent, and building it converts the types
+	// that body names, which is where the next instantiation is found. Both
+	// are slices in discovery order, so the output is the same on every build.
+	for i, j := 0, 0; i < len(b.types) || j < len(b.todo); {
+		for ; i < len(b.types); i++ {
+			b.instantiateType(b.types[i])
+		}
+		for ; j < len(b.todo); j++ {
+			if fn := b.buildInstance(b.todo[j]); fn != nil {
+				b.out.Funcs = append(b.out.Funcs, fn)
+			}
 		}
 	}
-	b.todo = nil
+	b.todo, b.types = nil, nil
+}
+
+// instantiateType queues every method of one instantiation of a generic type
+// this package declares.
+//
+// The type and not the call site is the unit, because a method of an
+// instantiation is reached by more than a call. An itab holds it, a descriptor
+// names it in the Method array reflect indexes, and neither is a call site the
+// builder walks. So the method set of the instantiation is built whole,
+// exactly as gc builds it: gc stencils the shape body and emits one wrapper
+// per method per instantiation, both dupok, in the package that instantiates.
+//
+// An instantiation of a generic type another package declares is left alone.
+// Its bodies are in that package's archive, specs/015-export-data.md reads one
+// and specs/020-ir.md has no entry point that takes one, so there is no tree
+// here to substitute through. The type itself still converts and still gets a
+// descriptor, which is right for a generic type with no methods: iter.Seq[int]
+// needs no body at all.
+func (b *builder) instantiateType(named *types2.Named) {
+	n := named.TypeArgs()
+	if n.Len() == 0 {
+		return
+	}
+	obj := named.Origin().Obj()
+	if obj == nil || obj.Pkg() != b.tpkg {
+		return
+	}
+	targs := make([]types2.Type, n.Len())
+	for i := range targs {
+		targs[i] = n.At(i)
+	}
+	for i := 0; i < named.NumMethods(); i++ {
+		b.methodInstance(named, named.Method(i), targs)
+	}
+}
+
+// methodInstance queues one method of one instantiation, and returns the
+// object every use of it names.
+//
+// m is the instantiated method, which the checker produced by substituting the
+// receiver's type arguments through the declared one. Its origin is the
+// declaration, and the declaration is what has a body here.
+func (b *builder) methodInstance(named *types2.Named, m *types2.Func, targs []types2.Type) *Object {
+	origin := m.Origin()
+	sig, _ := m.Type().(*types2.Signature)
+	osig, _ := origin.Type().(*types2.Signature)
+	if sig == nil || osig == nil || osig.Recv() == nil {
+		b.errorf("ir: %s is not a method of %s", m.Name(), types2.TypeString(named, nil))
+		return nil
+	}
+	_, ptr := unalias(osig.Recv().Type()).(*types2.Pointer)
+	sym, err := MethodSymbol(b.irType(named), Method{Name: m.Name()}, ptr)
+	if err != nil {
+		b.errorf("ir: the method %s of %s: %v", m.Name(), types2.TypeString(named, nil), err)
+		return nil
+	}
+	if have, ok := b.instances[sym]; ok {
+		return have.obj
+	}
+
+	decl := b.generic[origin]
+	switch {
+	case osig.RecvTypeParams().Len() != len(targs):
+		// NewSubstitution panics on a count mismatch rather than returning an
+		// error. The checker cannot record one, so this is a guard against a
+		// broken Info and not against a program: a compiler that crashes has
+		// replaced a diagnostic with a stack trace.
+		b.errorf("ir: %s has %d receiver type parameters and the instantiation names %d",
+			sym, osig.RecvTypeParams().Len(), len(targs))
+		return nil
+	case osig.TypeParams().Len() > 0:
+		// A method with type parameters of its own. Instantiating the receiver
+		// does not instantiate the method, so the key of the instantiation is
+		// not this type argument list. specs/013-generics.md leaves that
+		// question open.
+		b.errorf("ir: %s is a generic method and an instantiation of one is not built", sym)
+		return nil
+	case decl == nil:
+		b.errorf("ir: %s has no declaration in this package", sym)
+		return nil
+	case decl.Body == nil:
+		b.errorf("ir: %s has no body", sym)
+		return nil
+	}
+
+	in := &instance{sym: sym, origin: origin, decl: decl, targs: targs, sig: sig, recv: named}
+	in.obj = &Object{
+		Name:  sym,
+		Class: ClassFunc,
+		Type:  b.irType(sig),
+		Pos:   decl.Pos(),
+	}
+	b.instances[sym] = in
+	b.todo = append(b.todo, in)
+	return in.obj
+}
+
+// instanceTypeParams returns the type parameters the instantiation replaces.
+//
+// A generic function binds them on its signature and a method of a generic
+// type binds them on its receiver. The receiver's list is the method's own
+// copy, which is the list the body's recorded types name, so it is read off
+// the declared signature rather than off the type the method belongs to.
+func instanceTypeParams(in *instance, origin *types2.Signature) []*types2.TypeParam {
+	if in.recv == nil {
+		return types2.TypeParamsOf(origin)
+	}
+	list := origin.RecvTypeParams()
+	out := make([]*types2.TypeParam, list.Len())
+	for i := range out {
+		out[i] = list.At(i)
+	}
+	return out
 }
 
 // buildInstance builds one instantiation as an ordinary function.
@@ -340,7 +480,7 @@ func (b *builder) buildInstance(in *instance) *Func {
 	}
 
 	fn := &Func{
-		Name:   instanceName(in.origin, in.targs),
+		Name:   instanceName(in),
 		Sym:    in.sym,
 		Pos:    in.decl.Pos(),
 		Pragma: in.decl.Pragma,
@@ -351,10 +491,13 @@ func (b *builder) buildInstance(in *instance) *Func {
 	b.fn, b.sig, b.sinks, b.free = fn, in.sig, nil, nil
 	b.stencil = &stencil{
 		sym:   in.sym,
-		subst: types2.NewSubstitution(b.ctxt, types2.TypeParamsOf(origin), in.targs),
+		subst: types2.NewSubstitution(b.ctxt, instanceTypeParams(in, origin), in.targs),
 	}
 
 	fn.Type = b.irType(in.sig)
+	if recv := origin.Recv(); recv != nil {
+		fn.Recv = b.declare(recv, fn)
+	}
 	for i := 0; i < origin.Params().Len(); i++ {
 		fn.Params = append(fn.Params, b.declare(origin.Params().At(i), fn))
 	}
@@ -485,26 +628,22 @@ func (b *builder) resolveSelection(x *syntax.SelectorExpr, sel *types2.Selection
 // answer, so the diagnostic here is what turns a link failure with no source
 // position into a message that names the declaration.
 //
-// A method of a generic type is declared once, with the type's parameters on
-// its receiver, and buildFunc skips it for the same reason it skips a generic
-// function: it has no run-time representation of its own. What is missing is
-// the other half. This pass instantiates a generic function and it does not
-// instantiate a generic type, so nothing produces the body of L[int].Get.
-//
 // A method with type parameters of its own is the third place the language
 // binds one, beside a function and a type. Instantiating the receiver does not
 // instantiate the method, so the key of the instantiation is not the list on
 // the selector alone, and specs/013-generics.md leaves that question open.
 //
-// funcSym says the same thing from the naming side: it spells the method of
-// every instantiation with the origin's name, so L[int].Get and L[string].Get
-// are one symbol and two functions. rtype refuses a descriptor for an
-// instantiation for that reason already (Type.Instantiated), and this is the
-// same refusal one level up, where the caller is.
+// A method of an instantiation of a generic type another package declares has
+// its body in that package's archive. specs/015-export-data.md reads one and
+// specs/020-ir.md has no entry point that takes one, so there is no tree here
+// to substitute through. gc has the same obligation and discharges it from the
+// export data: it emits the method of every instantiation, dupok, in the
+// package that instantiates.
 //
-// A generic type used for its fields alone is not refused, and is correct: the
-// field types are substituted by the checker and the IR type is an ordinary
-// struct.
+// A method of an instantiation this package declares is built, by
+// instantiateType, and is not refused here. A generic type used for its fields
+// alone is not refused either, and is correct: the field types are substituted
+// by the checker and the IR type is an ordinary struct.
 func (b *builder) checkMethodIsBuilt(fn *types2.Func) {
 	sig, _ := fn.Type().(*types2.Signature)
 	if sig == nil || sig.Recv() == nil {
@@ -522,7 +661,10 @@ func (b *builder) checkMethodIsBuilt(fn *types2.Func) {
 	if !ok || named.TypeArgs().Len() == 0 {
 		return
 	}
-	b.errorf("ir: %s is a method of %s and an instantiation of a generic type is not built",
+	if obj := named.Origin().Obj(); obj != nil && obj.Pkg() == b.tpkg {
+		return
+	}
+	b.errorf("ir: %s is a method of %s and an instantiation of a generic type another package declares is not built",
 		funcSym(fn), types2.TypeString(named, nil))
 }
 

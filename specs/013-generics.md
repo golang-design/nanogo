@@ -80,10 +80,27 @@ replaces an undefined symbol carrying no source position.
 
 | Refused | Why |
 | --- | --- |
-| a method of a generic type | The stenciler instantiates a generic function and not a generic type, so nothing produces the body of `L[int].Get`. `funcSym` also spells `L[int].Get` and `L[string].Get` alike, so the two would be one symbol and two functions. A generic type used for its fields alone compiles and is correct. |
 | a method with type parameters of its own | The third place the language binds a type parameter. Instantiating the receiver does not instantiate the method, so the key of the instantiation is not the list on the selector alone. The Methods section below states the question and does not close it. |
-| an instantiation of a generic another package declared | The body is in that package's archive. [015](015-export-data.md) reads one and [020](020-ir.md) has no entry point that takes one, so there is no tree here to substitute through. |
-| a type declared inside a generic body that holds a type parameter | Substitution rebuilds a type literal and stops at a name, so `type S []T` inside `f[T any]` comes back unchanged and every instantiation of `f` would share one `S`. Instantiating `S` is instantiating a generic type. The export writer refuses the same declaration for the same reason. |
+| an instantiation of a generic another package declared, function or type | The body is in that package's archive. [015](015-export-data.md) reads one and [020](020-ir.md) has no entry point that takes one, so there is no tree here to substitute through. `gc` has the same obligation and discharges it from the export data: it emits the method of every instantiation, `dupok`, in the package that instantiates. |
+| a type declared inside a generic body that holds a type parameter | Substitution rebuilds a type literal and stops at a name, so `type S []T` inside `f[T any]` comes back unchanged and every instantiation of `f` would share one `S`. Instantiating `S` is instantiating a type the stenciler has no declaration to key by. The export writer refuses the same declaration for the same reason. |
+
+**A method of a generic type this package declares is built.** The unit of
+discovery is the *type* and not the call site, because a method of an
+instantiation is reached by more than a call: an itab holds it, and a
+descriptor names it in the `Method` array `reflect` indexes. So `ir/convert.go`
+tells the stenciler about every instantiation it converts, which is the one
+place every type a package names comes through, and the whole method set of
+the instantiation is built.
+
+Two things had to be true first. The symbol had to spell the receiver's type
+arguments, or `L[int].Get` and `L[string].Get` would be one symbol and two
+functions, and `ir.MethodSymbol` does that now
+([032](032-type-descriptors-and-itabs.md)) for the stenciler and for the
+descriptor row alike, so the two cannot disagree. And the substitution had to
+be built from the *method's own copy* of the receiver's type parameters,
+`Signature.RecvTypeParams`, which is the list the body's recorded types name.
+The type's own list is a different set of `*TypeParam` values spelled the same
+way.
 
 Substitution stopping at a name is the one place the substitution is not total,
 and it is why the refusal is checked rather than assumed:
@@ -353,13 +370,22 @@ a defined type, gets a descriptor like any other, and satisfies interfaces by
 the same rules, so that half of the language reaches
 [032](032-type-descriptors-and-itabs.md) as no special case at all.
 
-A method on a generic *type* is instantiated with the type in the design above,
-and the built stenciler does not instantiate a generic type, so it refuses one.
-The reason is in the refusal table: nothing produces the body of `L[int].Get`,
-and `funcSym` spells `L[int].Get` and `L[string].Get` alike, so the two would be
-one symbol and two functions. Lifting that refusal is instantiating a generic
-type, which is naming the type, converting it, giving it a descriptor and
-building each of its methods, and it is the next piece of this spec.
+That is built now for a generic type this package declares. Naming the type,
+converting it, giving it a descriptor and building each of its methods are the
+four pieces, and all four are in place: `ir.Type.TypeArgs` carries the
+arguments, `ir.MethodSymbol` spells them, the descriptor is written under the
+name that holds them, and `ir/stencil.go` builds the method set of every
+instantiation the converter meets.
+
+**What no program can use yet is the export data.** A package's own
+declarations reach a file, and a method of a generic type is written into the
+type's dictionary, after the underlying type and after every method declared
+before it. `export.BodySource` numbers one dictionary per declaration, so it
+refuses a method of a generic type by name and the writer refuses with it
+([015](015-export-data.md)). A generic type with **no** method is written and a
+generic type with one is not, so a package that declares `L[T]` with a method
+does not compile, even though its bodies are built and correct. That is the one
+piece left, and it is [015](015-export-data.md)'s rather than this file's.
 
 A method may also declare its own type parameters. `types2/resolver.go` gates
 the declaration on `go1_27` and names the feature "generic method",

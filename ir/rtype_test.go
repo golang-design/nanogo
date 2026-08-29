@@ -527,19 +527,22 @@ func TestTypeNameIsAFunctionOfTheTypeAlone(t *testing.T) {
 	}
 }
 
-// TestNameRefusesAGenericInstantiation covers the case
-// specs/032-type-descriptors-and-itabs.md records as refused by neither half.
+// TestNameSpellsAGenericInstantiation covers the case
+// specs/032-type-descriptors-and-itabs.md recorded as refused by neither half.
 //
-// Converter's name for an instantiation is the generic type's, without the
-// arguments, so two instantiations of one generic type share one name. The
-// linker deduplicates by name, so a descriptor under that name would be one
+// Converter's Name for an instantiation is the generic type's, without the
+// arguments, so two instantiations of one generic type share it. The linker
+// deduplicates by name, so a descriptor under that name alone would be one
 // symbol for two different types and the runtime would read one
-// instantiation's descriptor for the other's values.
+// instantiation's descriptor for the other's values. Type.TypeArgs carries
+// the arguments beside the name and the two spellings write them, which is
+// what makes the two symbols two.
 //
-// It was unreachable while every defined type was refused for having a method
-// set the IR did not carry. It is reachable now, which is why the refusal is
-// explicit rather than incidental.
-func TestNameRefusesAGenericInstantiation(t *testing.T) {
+// gc spells them the same way in both strings, as main.pair[string,int], and
+// this test is against that spelling rather than against a shape: a separator
+// or a bracket that differs from gc's is a second symbol for a type that
+// already has one.
+func TestNameSpellsAGenericInstantiation(t *testing.T) {
 	pkg, _, _ := buildTypecheck(t, `package p
 
 type Box[T any] struct{ V T }
@@ -570,17 +573,129 @@ var (
 	for _, tc := range []struct {
 		what string
 		typ  *Type
+		link string
 	}{
-		{"Box[int]", a},
-		{"Box[string]", b},
-		{"a pointer to one", layOut(t, &Type{Kind: Ptr, Elem: a})},
-		{"a slice of one", layOut(t, &Type{Kind: Slice, Elem: a})},
+		{"Box[int]", a, "type:p.Box[int]"},
+		{"Box[string]", b, "type:p.Box[string]"},
+		{"a pointer to one", layOut(t, &Type{Kind: Ptr, Elem: a}), "type:*p.Box[int]"},
+		{"a slice of one", layOut(t, &Type{Kind: Slice, Elem: a}), "type:[]p.Box[int]"},
 	} {
-		if _, err := TypeSymbol(tc.typ); err == nil {
-			t.Errorf("%s was given a symbol", tc.what)
-		} else if !strings.Contains(err.Error(), "generic instantiation") {
-			t.Errorf("%s: the refusal is %q", tc.what, err)
+		got, err := TypeSymbol(tc.typ)
+		if err != nil {
+			t.Errorf("%s: %v", tc.what, err)
+			continue
 		}
+		if got != tc.link {
+			t.Errorf("%s is %q, want %q", tc.what, got, tc.link)
+		}
+	}
+
+	// An instantiation that says it is one and carries no arguments is a type
+	// built below the type boundary, because Converter fills the flag and the
+	// slice together. Naming it by the generic type's name is the merge this
+	// guards, so it is refused rather than shortened.
+	bare := layOut(t, &Type{Kind: Struct, Name: "p.Box", Instantiated: true})
+	if _, err := TypeSymbol(bare); err == nil {
+		t.Error("an instantiation carrying no type arguments was given a symbol")
+	} else if !strings.Contains(err.Error(), "generic instantiation") {
+		t.Errorf("the refusal is %q", err)
+	}
+}
+
+// TestNameOfAGenericInstantiationDeclaredInAFunction pins the order of the
+// two suffixes a name can carry.
+//
+// gc writes a generic type declared inside a function as type:main.L[int]·1:
+// the arguments, then the number that separates two declarations of one name.
+// The other order is a second symbol for a type that already has one.
+func TestNameOfAGenericInstantiationDeclaredInAFunction(t *testing.T) {
+	int64Type := &Type{Kind: Int64, Name: "int", Basic: "int"}
+	if err := Layout(int64Type); err != nil {
+		t.Fatal(err)
+	}
+	local := layOut(t, &Type{
+		Kind:         Struct,
+		Name:         "main.L",
+		PkgPath:      "main",
+		Gen:          1,
+		Instantiated: true,
+		TypeArgs:     []*Type{int64Type},
+		Fields:       []Field{{Name: "v", Type: int64Type}},
+		Methods:      []Method{},
+	})
+	got, err := TypeSymbol(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "type:main.L[int]·1"; got != want {
+		t.Errorf("the link string is %q, want %q", got, want)
+	}
+	// The name string carries the arguments and not the number, which is what
+	// reflect prints and what gc writes into the descriptor's name data.
+	name, err := TypeNameString(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "main.L[int]"; name != want {
+		t.Errorf("the name string is %q, want %q", name, want)
+	}
+}
+
+// TestMethodSymbolSpellsTheReceiversTypeArguments is the naming half of
+// specs/013-generics.md's generic type.
+//
+// gc names a method of an instantiated type xpkg/lib.(*Box[int]).Get, with the
+// arguments inside the parentheses and each written by the link string's rule.
+// Spelled with the generic type's name alone, Box[int].Get and Box[string].Get
+// are one symbol and two functions, and the linker keeps one of them.
+func TestMethodSymbolSpellsTheReceiversTypeArguments(t *testing.T) {
+	pkg, _, _ := buildTypecheck(t, `package p
+
+type Box[T any] struct{ V T }
+
+func (b *Box[T]) Get() T { return b.V }
+
+var (
+	ints    Box[int]
+	strings Box[string]
+)
+`)
+	c := NewConverter()
+	conv := func(name string) *Type {
+		t.Helper()
+		out, err := c.Convert(pkg.Scope().Lookup(name).Type())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		what string
+		typ  *Type
+		ptr  bool
+		want string
+	}{
+		{"a pointer receiver", conv("ints"), true, "p.(*Box[int]).Get"},
+		{"a value receiver", conv("ints"), false, "p.Box[int].Get"},
+		{"the other instantiation", conv("strings"), true, "p.(*Box[string]).Get"},
+	} {
+		got, err := MethodSymbol(tc.typ, Method{Name: "Get"}, tc.ptr)
+		if err != nil {
+			t.Errorf("%s: %v", tc.what, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s is %q, want %q", tc.what, got, tc.want)
+		}
+	}
+
+	// An instantiation with no arguments is a type built below the boundary,
+	// and a method of it is refused for the reason its name is.
+	bare := layOut(t, &Type{Kind: Struct, Name: "p.Box", PkgPath: "p", Instantiated: true})
+	if _, err := MethodSymbol(bare, Method{Name: "Get"}, true); err == nil {
+		t.Error("a method of an instantiation carrying no type arguments was given a symbol")
+	} else if !strings.Contains(err.Error(), "generic instantiation") {
+		t.Errorf("the refusal is %q", err)
 	}
 }
 

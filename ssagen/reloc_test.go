@@ -374,26 +374,29 @@ func TestAddressOfNoSymbolIsRefused(t *testing.T) {
 // runtime.getitab installs runtime.unreachableMethod, and the program dies
 // with "unreachable method called. linker bug?" the first time reflect calls
 // the method. Go's own test/reflectmethod4.go is exactly that program.
+//
+// The decision is ir.Func.ReflectMethod's, because the question is about the
+// selection and an interface call names no symbol this far down. What is
+// checked here is that the answer reaches the text symbol.
 func TestReflectMethodMarksTheCallingFunction(t *testing.T) {
 	c := check(t, wrapperSource)
 	for _, tc := range []struct {
-		what   string
-		callee string
-		want   bool
+		what string
+		want bool
 	}{
-		{"a lookup by index", "reflect.Value.Method", true},
-		{"a lookup by name", "reflect.Value.MethodByName", true},
-		{"an ordinary call", "main.somewhere", false},
+		{"a function that asks reflect for a method", true},
+		{"a function that does not", false},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			sig := &ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}}
 			if err := ir.Layout(sig); err != nil {
 				t.Fatal(err)
 			}
-			target := &ir.Object{Name: tc.callee, Type: sig, Class: ir.ClassFunc}
+			target := &ir.Object{Name: "main.somewhere", Type: sig, Class: ir.ClassFunc}
 			fn := &ir.Func{
-				Name: "caller",
-				Sym:  "main.caller",
+				Name:          "caller",
+				Sym:           "main.caller",
+				ReflectMethod: tc.want,
 				Body: []ir.Stmt{
 					&ir.Node{Op: ir.OCall, Type: voidType(), X: &ir.Node{Op: ir.OGlobal, Type: sig, Obj: target}},
 					&ir.Node{Op: ir.OReturn, Type: voidType()},
@@ -402,7 +405,7 @@ func TestReflectMethodMarksTheCallingFunction(t *testing.T) {
 			r := emitFunc(t, c.build(t, fn), newMainPackage())
 			got := r.Text.Flag&obj.SymFlagReflectMethod != 0
 			if got != tc.want {
-				t.Errorf("a function that calls %s is marked %v, want %v", tc.callee, got, tc.want)
+				t.Errorf("the text symbol is marked %v, want %v", got, tc.want)
 			}
 		})
 	}

@@ -848,6 +848,12 @@ func addDescriptors(cfg *Config, out *obj.Package, types []*ir.Type, itabs []ir.
 			if s.Dupok {
 				d.Flag |= obj.SymFlagDupok
 			}
+			if s.Typelink {
+				// reflect searches the module's typelink table before it
+				// builds a descriptor of its own, and two descriptors of one
+				// type are two types. rtype says which symbols carry it.
+				d.Flag |= obj.SymFlagTypelink
+			}
 			if s.UsedInIface {
 				// rtype says which symbols carry it and why. Without it
 				// cmd/link prunes every method of the type and the runtime
@@ -1102,11 +1108,12 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 		{"ssagen.Emit", func() (err error) {
 			file, line := fileAndLine(cfg, fset, fn.Pos)
 			r, err = ssagen.Emit(f, a, out, ssagen.Options{
-				Sym:  fn.Sym,
-				ABI:  obj.ABIInternal,
-				File: file,
-				Line: line,
-				Fset: fset,
+				Sym:           fn.Sym,
+				ABI:           obj.ABIInternal,
+				File:          file,
+				Line:          line,
+				Fset:          fset,
+				ReflectMethod: fn.ReflectMethod,
 			})
 			return err
 		}},
@@ -1248,6 +1255,19 @@ func writeOutput(cfg *Config, p *obj.Package, pkg *types2.Package, hasInit bool,
 	}
 	payload, fingerprint, err := export.Write(pkg, hasInit, bodies)
 	if err != nil {
+		// A declaration the writer has no encoding for is a construct nanogo
+		// cannot compile, and it is reported as one. The package is on the
+		// allowlist, so its export data is owed: a message that did not say
+		// "nanogo cannot compile" would read as a compiler bug rather than as
+		// the named gap it is (specs/015-export-data.md).
+		var unsupported *export.UnsupportedError
+		if errors.As(err, &unsupported) {
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "a declaration its export data must carry",
+				Detail:  unsupported.Name + ": " + unsupported.Reason,
+			}
+		}
 		return err
 	}
 	p.Fingerprint = fingerprint

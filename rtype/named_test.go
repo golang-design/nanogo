@@ -1203,10 +1203,36 @@ func TestReferencedFollowsAChannel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", c.src, err)
 		}
+		got = withoutPointerToThis(t, types[i], got)
 		if len(got) != 1 || got[0] != types[i].Elem {
 			t.Errorf("%s reaches %v, want its element", c.src, got)
 		}
 	}
+}
+
+// withoutPointerToThis takes the PtrToThis entry off a reference list.
+//
+// Every defined type reaches the descriptor of a pointer to it, because that
+// is the symbol its PtrToThis field names, and it is the last entry. A test
+// about the edges of one kind checks those edges and not this one, which
+// rtype_test.go's TestReferencedFollowsPointerToThis owns.
+func withoutPointerToThis(t *testing.T, of *ir.Type, got []*ir.Type) []*ir.Type {
+	t.Helper()
+	want, err := rtype.PointerToThis(of)
+	if err != nil {
+		t.Fatalf("%s: %v", of, err)
+	}
+	if want == nil {
+		return got
+	}
+	if len(got) == 0 {
+		t.Fatalf("%s reaches nothing and owes the descriptor of a pointer to it", of)
+	}
+	last := got[len(got)-1]
+	if last.Kind != ir.Ptr || last.Elem != of {
+		t.Fatalf("the last type %s reaches is %s, want a pointer to it", of, last)
+	}
+	return got[:len(got)-1]
 }
 
 // TestFuncTypeHeaderAgainstReflect checks the FuncType header and the array
@@ -1336,6 +1362,7 @@ func TestReferencedFollowsAFunction(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", c.src, err)
 		}
+		got = withoutPointerToThis(t, types[i], got)
 		if len(got) != c.rt.NumIn()+c.rt.NumOut() {
 			t.Errorf("%s reaches %d types, want %d", c.src, len(got), c.rt.NumIn()+c.rt.NumOut())
 		}
@@ -1517,6 +1544,7 @@ func TestReferencedFollowsAnInterface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	got = withoutPointerToThis(t, reader, got)
 	if len(got) != 2 {
 		t.Fatalf("Reader reaches %d types, want one per method", len(got))
 	}
@@ -1527,7 +1555,7 @@ func TestReferencedFollowsAnInterface(t *testing.T) {
 			t.Errorf("entry %d is %s, want the signature of %s", i, got[i].Kind, want)
 		}
 	}
-	// An empty interface reaches nothing.
+	// An empty interface reaches no method, so what is left is its PtrToThis.
 	types, _ := namedTypes(t)
 	for i, c := range namedCorpus {
 		if c.src != "NamedEmpty" {
@@ -1537,6 +1565,7 @@ func TestReferencedFollowsAnInterface(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		got = withoutPointerToThis(t, types[i], got)
 		if len(got) != 0 {
 			t.Errorf("an empty interface reaches %v", got)
 		}

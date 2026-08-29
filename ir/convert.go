@@ -46,6 +46,30 @@ type Converter struct {
 	// own number, so specs/053-determinism.md's rule about maps is met by the
 	// walk that built it rather than by this lookup.
 	gens map[*types2.TypeName]int
+
+	// instance is told about each instantiation of a generic defined type
+	// this converter converted, once, and notified is the set already told.
+	//
+	// The stenciler of specs/013-generics.md needs the notice: a method of
+	// L[int] is compiled because a value of L[int] exists somewhere in the
+	// package, and this walk is the one place every type a package names comes
+	// through. Discovery at a call site would miss the method an itab holds
+	// and nothing calls.
+	//
+	// The set is not the cache. A conversion that fails deletes its cache
+	// entry, so a type that cannot be converted is converted again by the next
+	// caller that names it, and a notice sent from inside the fill would be
+	// sent again each time. L[P] inside a generic body is exactly that type:
+	// its argument is a type parameter, which has no run-time representation,
+	// and the stenciler asking for the type again is what sends the next
+	// notice. The queue then never empties.
+	//
+	// So the notice is sent after the fill and only when it succeeded, and the
+	// set makes it at most one notice per type. The set is never ranged over.
+	// The order the stenciler sees is the order of the calls, which is the
+	// order the type graph unwinds (specs/053-determinism.md).
+	instance func(*types2.Named)
+	notified map[*types2.Named]bool
 }
 
 // NewConverter returns a Converter with an empty cache.
@@ -72,6 +96,15 @@ func NewConverter() *Converter {
 // the package's source, and the converter sees a type graph, whose walk order
 // is neither the source's nor stable across the types that reach it first.
 func (c *Converter) Locals(gens map[*types2.TypeName]int) { c.gens = gens }
+
+// Instances asks to be told about every instantiation of a generic defined
+// type this converter converts, once per type, in the order the type graph
+// unwinds.
+//
+// It is the stenciler's door. A converter that is never told notices nothing,
+// which is what every caller outside ir.Build wants: driver converts the types
+// a package owes its importers and has no worklist to put an instantiation on.
+func (c *Converter) Instances(f func(*types2.Named)) { c.instance = f }
 
 // Convert returns the IR type of t, with Size, Align, PtrBits and every field
 // offset already computed.
@@ -176,7 +209,29 @@ func (c *Converter) convert(t types2.Type) (*Type, error) {
 		delete(c.cache, t)
 		return nil, err
 	}
+	c.notify(t)
 	return out, nil
+}
+
+// notify tells the listener about an instantiation of a generic defined type,
+// once, and only after the type converted.
+//
+// A type that fails to convert is not one the stenciler can build a method of,
+// and it is the type the cache does not keep, so it is the one a notice from
+// inside the fill would announce over and over. See Converter.instance.
+func (c *Converter) notify(t types2.Type) {
+	if c.instance == nil {
+		return
+	}
+	named, ok := t.(*types2.Named)
+	if !ok || named.TypeArgs().Len() == 0 || c.notified[named] {
+		return
+	}
+	if c.notified == nil {
+		c.notified = make(map[*types2.Named]bool)
+	}
+	c.notified[named] = true
+	c.instance(named)
 }
 
 // fill sets out from t. out is already in the cache, so a recursive reference
@@ -224,8 +279,24 @@ func (c *Converter) fill(out *Type, t types2.Type) error {
 			out.Gen = c.gens[obj]
 		}
 		// The name above is the generic type's, without the arguments, so an
-		// instantiation has to be marked as one. See the field's comment.
-		out.Instantiated = t.TypeArgs().Len() > 0
+		// instantiation carries them beside it. See the field's comment.
+		//
+		// The arguments are converted before the underlying type is filled in
+		// below, and that is not an ordering preference: a recursive
+		// instantiation reaches this type again through its own argument, and
+		// the cache entry is already installed, so the recursion stops on the
+		// entry rather than on a name that is not spelled yet.
+		if n := t.TypeArgs(); n.Len() > 0 {
+			out.Instantiated = true
+			out.TypeArgs = make([]*Type, 0, n.Len())
+			for i := 0; i < n.Len(); i++ {
+				a, err := c.convert(n.At(i))
+				if err != nil {
+					return fmt.Errorf("ir: %s: type argument %d: %w", out.Name, i+1, err)
+				}
+				out.TypeArgs = append(out.TypeArgs, a)
+			}
+		}
 		ms, err := c.methodSet(t)
 		if err != nil {
 			return err

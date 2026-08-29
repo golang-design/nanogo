@@ -167,6 +167,23 @@ type Symbol struct {
 	// program that dies at run time, and the two are not comparable.
 	UsedInIface bool
 
+	// Typelink asks the caller to put the symbol in the module's typelink
+	// table, which is the table reflect searches when it is asked for a type
+	// it has to build.
+	//
+	// reflect.FuncOf, PointerTo, SliceOf and the rest look the spelling up in
+	// that table before they construct a descriptor of their own, because two
+	// descriptors of one type are two types: the runtime compares the pointer
+	// and reports "types from different scopes" on an assertion between them.
+	// Go's own test/reflectmethod2.go is that program, through
+	// m.Func.Interface().(func(main.M)).
+	//
+	// gc marks the same set, in writeType: a type with no name whose kind is a
+	// pointer, an array, a channel, a function, a map, a slice or a struct. A
+	// defined type is not marked, because reflect never builds one, and a
+	// synthesised type is not marked either (issue 22605).
+	Typelink bool
+
 	// Gotype is the linker name of the descriptor of this symbol's own Go
 	// type, or "" when the symbol needs none.
 	//
@@ -399,10 +416,27 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 	out = append(out, nd)
 	relocs = append(relocs, Reloc{Off: offStr, Size: 4, Type: obj.R_ADDROFF, Target: nd.Name})
 
-	// PtrToThis is left zero. The field is documented as optional, and the
-	// alternative is a weak offset relocation, which obj does not declare
-	// (specs/041 stops at the arm64 group). The cost is that reflect.PointerTo
-	// builds a descriptor at run time rather than finding the linked one.
+	// PtrToThis names the descriptor of *T, which is how reflect.PointerTo
+	// finds the linked one instead of building a descriptor of its own. A
+	// built one carries no method set, so reflect.PointerTo(T).NumMethod()
+	// answered zero for a T with methods, and Go's own test/reflectmethod7.go
+	// is the program that showed it.
+	//
+	// gc writes the field for every type and makes the reference weak unless
+	// the type has a name or *T has methods. This writes it only in the case
+	// gc makes strong, because a weak reference does not keep its target
+	// alive: the linker would drop the descriptor this object emits and the
+	// field would be zero again. What is left out is the weak half, where a
+	// dropped reference and no reference are the same zero.
+	if pt, err := PointerToThis(t); err != nil {
+		return nil, err
+	} else if pt != nil {
+		sym, err := ir.TypeSymbol(pt)
+		if err != nil {
+			return nil, err
+		}
+		relocs = append(relocs, Reloc{Off: offPtrToThis, Size: 4, Type: obj.R_ADDROFF, Target: sym})
+	}
 	out[0] = Symbol{
 		Name:        name,
 		Kind:        obj.SRODATA,
@@ -411,6 +445,7 @@ func Descriptor(t *ir.Type) ([]Symbol, error) {
 		Data:        data,
 		Relocs:      relocs,
 		UsedInIface: true,
+		Typelink:    typelink(t),
 	}
 	return out, nil
 }
@@ -448,7 +483,46 @@ func Referenced(t *ir.Type) ([]*ir.Type, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(out, more...), nil
+	out = append(out, more...)
+	// The descriptor of *T, which this type's PtrToThis names. It is a
+	// reference and not a root: whoever writes T's descriptor owes the symbol
+	// the field points at.
+	pt, err := PointerToThis(t)
+	if err != nil {
+		return nil, err
+	}
+	if pt != nil {
+		out = append(out, pt)
+	}
+	return out, nil
+}
+
+// PointerToThis returns the type a descriptor's PtrToThis names, and nil for a
+// type whose field is left zero.
+//
+// The rule is gc's dcommontype, restricted to the half gc makes a strong
+// reference. gc writes *T for every type that is not a pointer, weakly unless
+// T has a name or *T has methods, and a weak reference does not keep its
+// target alive. So the weak half would be a symbol this object emits, the
+// linker drops, and the field then reads as zero, which is where the field
+// started.
+//
+// A pointer is left out because gc leaves it out: **T is a type nothing asks
+// reflect for, and writing it would make the closure of one descriptor grow
+// without end.
+//
+// A type the runtime owns is left out too. Its descriptor is the runtime's and
+// so is its PtrToThis, so a second answer here would be a reference to a
+// symbol nobody in this link is obliged to define.
+func PointerToThis(t *ir.Type) (*ir.Type, error) {
+	if t == nil || t.Kind == ir.Ptr || t.Name == "" || RuntimeOwned(t) {
+		return nil, nil
+	}
+	pt := &ir.Type{Kind: ir.Ptr, Elem: t}
+	if err := ir.Layout(pt); err != nil {
+		return nil, err
+	}
+	return pt, nil
 }
 
 // kindDataOffset is where the kind-specific data of a descriptor starts, which
@@ -543,6 +617,29 @@ func referencedByKind(t *ir.Type) ([]*ir.Type, error) {
 		return out, nil
 	}
 	return nil, nil
+}
+
+// typelink reports whether t's descriptor belongs in the module's typelink
+// table.
+//
+// It is gc's rule in writeType. reflect builds a descriptor for a composite
+// type it is asked for and searches the table first, so a type the program
+// already holds must be findable there: two descriptors of one type are two
+// types, and the runtime says so as "types from different scopes".
+//
+// A defined type is not in the table, because reflect never builds one. A
+// synthesised type is not either, which is issue 22605: its descriptor has no
+// algorithms, and reflect handing one out for a comparable type gives a map a
+// key it cannot hash.
+func typelink(t *ir.Type) bool {
+	if t == nil || t.Name != "" || ir.NoAlgType(t) {
+		return false
+	}
+	switch t.Kind {
+	case ir.Ptr, ir.Array, ir.Chan, ir.FuncKind, ir.Map, ir.Slice, ir.Struct:
+		return true
+	}
+	return false
 }
 
 // RuntimeOwned reports whether the runtime already defines t's descriptor.

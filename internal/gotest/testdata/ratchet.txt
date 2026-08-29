@@ -183,7 +183,9 @@ pass matched range3.go
 pass matched recover2.go
 pass matched recover3.go
 pass rejected recover5.go
+pass matched reflectmethod2.go
 pass matched reflectmethod4.go
+pass matched reflectmethod7.go
 pass compiled reflectmethod8.go
 pass matched rename.go
 pass rejected rename1.go

@@ -178,11 +178,29 @@ The two spellings differ here more than anywhere else, and both halves are
 A **defined** type is exempt from every row, because its name is its identity:
 `type S func(int)` is `type:p.S` and no signature is needed to say so.
 
-One case is refused by neither and is wrong: a **generic instantiation**.
-`ir/convert.go` names `atomic.Pointer[os.dirInfo]` as `sync/atomic.Pointer`,
-dropping the type arguments, so two instantiations of one generic type share
-one name. Nothing in an `ir.Type` can detect it. The fix is in `convert.go`'s
-`namedString`, not here.
+A **generic instantiation** is the one defined type whose name is not its
+identity, and it was refused by neither half. `ir/convert.go` names
+`atomic.Pointer[os.dirInfo]` as `sync/atomic.Pointer`, dropping the type
+arguments, so two instantiations of one generic type shared one name and the
+linker merged their descriptors.
+
+`ir.Type.TypeArgs` carries the arguments beside the name now, and both
+spellings write them exactly as `gc` does: the qualified name, a bracket, each
+argument by the rule of the string it is in, a comma with no space between
+them, and a closing bracket. `main.pair[string,int]` and
+`main.box[main.box[int]]`, in the link string and in the name string alike,
+because `reflect` prints the second. A type declared inside a function carries
+the arguments *before* the number that separates two declarations of one name,
+which is `type:main.L[int]·1`.
+
+A method of an instantiation is spelled the same way, by the same function:
+`ir.MethodSymbol` writes `xpkg/lib.(*Box[int]).Get`, with the arguments inside
+the parentheses. One naming function, so the symbol the descriptor's `Tfn`
+names and the symbol the stenciler defines cannot disagree.
+
+An `ir.Type` that says it is an instantiation and carries no arguments is one
+built by hand below the type boundary, because `Converter` fills the flag and
+the slice together. It is refused rather than shortened.
 
 ### What `rtype` can fill in
 
@@ -245,14 +263,43 @@ function. nanogo collects no such fact, so `rtype.Symbol.UsedInIface` is set on
 every descriptor and `driver/compile.go` puts the flag on the symbol. The cost
 is a method of a type nothing converts staying in the binary.
 
+**A descriptor `reflect` could rebuild asks to be in the typelink table.**
+`reflect.FuncOf`, `PointerTo`, `SliceOf` and the rest search
+`runtime.typelinks` before they construct a descriptor of their own, because
+two descriptors of one type are two types: the runtime compares the pointer and
+reports "types from different scopes" on an assertion between them. Go's own
+`test/reflectmethod2.go` asserts `m.Func.Interface().(func(main.M))` and died
+there, because `reflect` built a second `func(main.M)` rather than finding the
+one the program held. `rtype.Symbol.Typelink` marks the set `gc` marks in
+`writeType`: a type with **no name** whose kind is a pointer, an array, a
+channel, a function, a map, a slice or a struct. A defined type is not marked,
+because `reflect` never builds one, and a synthesised type is not marked
+either, which is Go issue 22605.
+
 **A function that asks `reflect` for a method says so.** A method found by
 `reflect.Value.Method` is reached by no call, so `cmd/link` cannot decide it is
 live. `SymFlagReflectMethod` is what tells the linker to stop deciding and keep
-every exported method of every type used in an interface, and `ssagen/reloc.go`
-sets it where every symbol a function references is resolved. `gc` asks the same
-question of the syntax tree in `walk.usemethod`, and it has one case this does
-not: `MethodByName` with a constant argument gets an `R_USENAMEDMETHOD`
-relocation naming the one method instead of the flag.
+every exported method of every type used in an interface.
+
+The question is asked in `ir/build.go`, over the selection, and the answer is
+`ir.Func.ReflectMethod`. `gc` asks it in the same place, `walk.usemethod`, and
+by the same test: the selector is `Method` or `MethodByName`, it takes one
+argument of the kind that name implies, it returns one or two values, and the
+first of them is `reflect.Method` or `reflect.Value`. The three call shapes
+`gc` covers are covered: through an interface, on a concrete value, and as a
+method expression that is called.
+
+It was asked one level down before, over the symbols a compiled function
+references, and that rule could not see the case that matters most.
+`reflect.Type.MethodByName` is an interface method and an interface call names
+no symbol at all, so `test/reflectmethod7.go` linked and then jumped into
+`runtime.unreachableMethod`. A rule that reads a reference list cannot answer a
+question about a selection.
+
+One case of `gc`'s is still not reproduced: `MethodByName` with a constant
+argument gets an `R_USENAMEDMETHOD` relocation naming the one method, and only
+a non-constant argument sets the flag. nanogo always sets the flag, which keeps
+more methods alive and never keeps fewer.
 
 A struct with an unexported field is **not** a stop, and it is worth saying
 because the shape looks like one. `gc` puts the declaring package's path in the
@@ -505,12 +552,25 @@ Four fields are worth calling out because each has a way of being subtly wrong:
   at the code: pointing it at the function makes the runtime call whatever the
   first instruction encodes.
 
-`PtrToThis` is left zero, which the field permits. The cost is that
-`reflect.PointerTo` builds a descriptor at run time instead of finding the
-linked one. Emitting it is open work rather than a blocked one: `obj` declares
-`R_WEAKADDROFF`, the weak offset relocation `gc` uses for this field, so what
-is missing is a writer that names the descriptor of `*T` and a decision about
-which package owes it.
+`PtrToThis` names the descriptor of `*T` for a defined type this package owns,
+and is zero for everything else. `rtype.PointerToThis` is the one rule and
+`rtype.Referenced` reads it as well, so the symbol the field points at is in
+the closure and the object that writes `T` writes `*T` too.
+
+The field is what `reflect.PointerTo` reads. Without it `reflect` builds a
+descriptor for `*T` at run time, and a built one carries no method set, so
+`reflect.PointerTo(T).NumMethod()` answered zero for a `T` that has methods.
+Go's own `test/reflectmethod7.go` is that program.
+
+Half of `gc`'s rule is left out on purpose. `gc` writes the field for every
+type that is not a pointer and makes the reference *weak* unless the type has a
+name or `*T` has methods. A weak reference does not keep its target alive, so
+the weak half would be a descriptor this object emits, the linker drops, and a
+field that reads as zero again, which is where the field started. A pointer is
+left out because `gc` leaves it out: `**T` is a type nothing asks `reflect`
+for, and writing it would make the closure of one descriptor grow without end.
+A type the runtime owns is left out because its descriptor is the runtime's and
+so is its `PtrToThis`.
 
 **Where `GCData` diverges from `gc`.** `ir.scalarPtrBits` marks both words
 of an interface as pointers and `cmd/compile/internal/typebits` marks only the
@@ -1434,14 +1494,16 @@ differ, so a row built for that name would write past the end of the frame slot.
 contradicted it. [020](020-ir.md)'s row table still names `mapiterinit` and
 `mapiternext` and is not corrected here.
 
-### `PtrToThis` was blamed on a relocation that exists
+### `PtrToThis` was blamed on a relocation that exists, and then written
 
 This spec said the field is left zero because "the alternative is a weak offset
 relocation, and `obj` declares no weak type". `obj/obj.go` declares `R_WEAK`,
-`R_WEAKADDR` and `R_WEAKADDROFF`. Zero is still what the field carries and the
-cost is unchanged, but the reason above is a writer that does not exist, not a
-relocation type that does not exist. `rtype/rtype.go`'s comment on the same
-line repeats the old reason and has not been corrected.
+`R_WEAKADDR` and `R_WEAKADDROFF`, so the reason was a writer that does not
+exist and not a relocation type that does not exist.
+
+The writer exists now, and it needs no weak relocation at all: the half of
+`gc`'s rule that a weak reference serves is the half where a dropped reference
+and no reference are the same zero. The section above states the rule.
 
 ### One spelling was two
 

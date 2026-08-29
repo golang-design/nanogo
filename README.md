@@ -249,7 +249,7 @@ nanogo: main: nanogo cannot compile for this target: nanogo emits arm64 machine 
 against.
 
 **It compiles one package at a time in a build.** The archive nanogo writes
-does carry export data, and `gc` reads back all 275 of the 375 standard library
+does carry export data, and `gc` reads back all 296 of the 375 standard library
 packages whose surface round-trips through it
 ([`specs/015-export-data.md`](specs/015-export-data.md)), so a package nanogo
 compiled can be imported: `gc` compiles a package that imports one, and the

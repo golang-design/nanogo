@@ -219,8 +219,8 @@ executable the tests run. Two things have been added under that rung without
 moving a gate:
 
 - **Export data goes both ways** ([015](015-export-data.md)). nanogo reads
-  `gc`'s and writes its own, and `gc` reads back what nanogo wrote for 275 of
-  the 375 standard library packages, refusing none of the 275. The 100 it will
+  `gc`'s and writes its own, and `gc` reads back what nanogo wrote for 296 of
+  the 375 standard library packages, refusing none of the 296. The 79 it will
   not write are refused for a generic declaration. So a nanogo-compiled package
   and a `gc`-compiled one can import each other, which is what hosted mode
   needs.

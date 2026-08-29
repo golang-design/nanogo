@@ -934,9 +934,11 @@ func TestCompileSkipsAGenericDeclaration(t *testing.T) {
 // naming the construct cannot silently become an undefined symbol with no
 // source position on it.
 //
-// The other line, a generic another package declared, needs an importcfg and
-// is pinned in ir where the importer is
-// (TestStencilRefusesAGenericOfAnotherPackage).
+// The two lines that need an importcfg are pinned in ir where the importer is:
+// a generic function another package declared
+// (TestStencilRefusesAGenericOfAnotherPackage) and a method of an
+// instantiation of another package's generic type
+// (TestStencilRefusesAMethodOfAnotherPackagesGenericType).
 func TestCompileRefusesWhatTheStencilerDoesNotBuild(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -944,11 +946,11 @@ func TestCompileRefusesWhatTheStencilerDoesNotBuild(t *testing.T) {
 		want string
 	}{
 		{
-			"a method of a generic type",
-			"package main\n\ntype L[T any] struct{ v T }\n\n" +
-				"func (l L[T]) Get() T { return l.v }\n\n" +
-				"func main() { println(L[int]{1}.Get()) }\n",
-			"an instantiation of a generic type is not built",
+			"a method with type parameters of its own",
+			"package main\n\ntype H struct{}\n\n" +
+				"func (H) Do[T any](x T) T { return x }\n\n" +
+				"func main() { println(H{}.Do(1)) }\n",
+			"an instantiation of one is not built",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -960,6 +962,34 @@ func TestCompileRefusesWhatTheStencilerDoesNotBuild(t *testing.T) {
 				t.Errorf("the message does not carry %q:\n%v", tt.want, err)
 			}
 		})
+	}
+}
+
+// TestCompileRefusesADeclarationTheExportWriterCannotEncode checks the channel
+// an export refusal arrives on.
+//
+// export.UnsupportedError names the declaration the writer has no encoding
+// for, and the package is on the allowlist, so its export data is owed and the
+// build has failed for a construct nanogo cannot compile. Reported as anything
+// else it reads as a compiler bug: internal/gotest classifies a message that
+// does not say "nanogo cannot compile" as nanogo rejecting legal Go.
+func TestCompileRefusesADeclarationTheExportWriterCannotEncode(t *testing.T) {
+	arm64Only(t)
+	needGoCommand(t)
+	_, err := compileSource(t, "package main\n\ntype Box[T any] struct{ V T }\n\n"+
+		"func (b Box[T]) Get() T { return b.V }\n\nfunc main() {}\n", nil)
+	if err == nil {
+		t.Fatal("the package was accepted")
+	}
+	var ue *UnsupportedError
+	if !errors.As(err, &ue) {
+		t.Fatalf("the failure is not an UnsupportedError: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nanogo cannot compile ") {
+		t.Errorf("the message does not name a construct nanogo cannot compile:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), "main.Get") {
+		t.Errorf("the message does not name the declaration:\n%v", err)
 	}
 }
 

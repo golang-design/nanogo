@@ -95,6 +95,16 @@ type Options struct {
 	// a type descriptor to a global variable and not to a text symbol, so an
 	// empty reference here is what gc produces as well.
 	Gotype obj.SymRef
+
+	// ReflectMethod marks the text symbol as a function that asks reflect for
+	// a method by a name no relocation carries.
+	//
+	// ir.Func.ReflectMethod is the answer and ir/build.go is where the
+	// question is asked, over the selection, as gc asks it in walk.usemethod.
+	// It cannot be asked here: reflect.Type.MethodByName is an interface
+	// method and an interface call names no symbol, so a rule that read the
+	// reference list of this function would see nothing.
+	ReflectMethod bool
 }
 
 // A Result is one compiled function.
@@ -1778,10 +1788,10 @@ func (e *emitter) result() (*Result, error) {
 	if e.frame.leaf {
 		text.Flag |= obj.SymFlagLeaf
 	}
-	if e.syms.reflectMethod {
+	if e.opt.ReflectMethod {
 		// The function reaches a method through reflect, so cmd/link cannot
-		// decide which methods are live by following calls. reloc.go's
-		// reflectMethodNames says what happens without the mark.
+		// decide which methods are live by following calls.
+		// ir.Func.ReflectMethod says what happens without the mark.
 		text.Flag |= obj.SymFlagReflectMethod
 	}
 	// SymFlagNoSplit is not set even for a function that emits no check.

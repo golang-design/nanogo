@@ -283,6 +283,12 @@ func Build(pkg *types2.Package, files []*syntax.File, info *types2.Info) (*Packa
 			Name: pkg.Name(),
 		},
 	}
+	// The converter tells the builder about every instantiation of a generic
+	// defined type it meets, and the methods of one are stencilled from that
+	// notice. It is set after the builder exists and before anything is
+	// converted, so no instantiation is missed and none is built while the
+	// converter is halfway through a type.
+	conv.Instances(func(n *types2.Named) { b.types = append(b.types, n) })
 	b.buildPackage(files)
 	if len(b.errs) > 0 {
 		return b.out, b.errs[0]
@@ -314,6 +320,7 @@ type builder struct {
 	generic   map[*types2.Func]*syntax.FuncDecl
 	instances map[string]*instance
 	todo      []*instance
+	types     []*types2.Named
 	stencil   *stencil
 	ctxt      *types2.Context
 
@@ -483,7 +490,7 @@ func (b *builder) obj(o types2.Object) *Object {
 		}
 	case *types2.Func:
 		out.Class = ClassFunc
-		out.Name = funcSym(o)
+		out.Name = b.funcSym(o)
 	case *types2.Const:
 		out.Class = ClassConst
 	case *types2.TypeName:
@@ -576,6 +583,39 @@ func funcSym(fn *types2.Func) string {
 		return name
 	}
 	return pkgPath + "." + name
+}
+
+// funcSym is funcSym with the receiver's type arguments spelled.
+//
+// A method of an instantiated generic type is one symbol per instantiation,
+// and the free function above has no way to write the arguments: they are in
+// the type and not in the name. So the receiver crosses the type boundary and
+// the name comes from MethodSymbol, which is the same function rtype uses for
+// the Tfn a descriptor's Method array names.
+//
+// One naming function is the whole point. The body this pass stencils and the
+// descriptor row that points at it are written by two packages, and a
+// disagreement between them is a relocation to a symbol nothing defines.
+func (b *builder) funcSym(fn *types2.Func) string {
+	sig, _ := fn.Type().(*types2.Signature)
+	if sig == nil || sig.Recv() == nil {
+		return funcSym(fn)
+	}
+	recv := sig.Recv().Type()
+	_, ptr := unalias(recv).(*types2.Pointer)
+	if ptr {
+		recv = unalias(recv).(*types2.Pointer).Elem()
+	}
+	named, ok := unalias(recv).(*types2.Named)
+	if !ok || named.TypeArgs().Len() == 0 {
+		return funcSym(fn)
+	}
+	sym, err := MethodSymbol(b.irType(named), Method{Name: fn.Name()}, ptr)
+	if err != nil {
+		b.errorf("ir: the method %s of %s: %v", fn.Name(), types2.TypeString(named, nil), err)
+		return funcSym(fn)
+	}
+	return sym
 }
 
 // The statement sink.
@@ -2186,6 +2226,18 @@ func (b *builder) selector(x *syntax.SelectorExpr) Expr {
 			b.errorf("ir: the method %s has no object", x.Sel.Value)
 			return b.badExpr(x.Pos())
 		}
+		if fsig, _ := fn.Type().(*types2.Signature); fsig != nil && fsig.Recv() != nil && isInterface(fsig.Recv().Type()) {
+			// An interface method is declared by nobody, so there is no
+			// symbol to name. gc generates a wrapper of its own, which takes
+			// the interface value and calls the method through the itab, and
+			// this pass generates none. funcSym says the same thing from the
+			// naming side: the receiver of an interface method is not a
+			// defined type, so it spells reflect.?.Method, and nothing
+			// defines that.
+			b.errorf("ir: %s.%s is a method expression on an interface, and the wrapper that calls the method through the itab is not generated",
+				types2.TypeString(sel.Recv(), nil), x.Sel.Value)
+			return b.badExpr(x.Pos())
+		}
 		io := b.obj(fn)
 		return &Node{Op: OGlobal, Pos: x.Pos(), Type: b.irType(sel.Type()), Obj: io}
 	}
@@ -2531,8 +2583,21 @@ func (b *builder) call(x *syntax.CallExpr) Expr {
 		}
 	}
 	if sel, ok := fun.(*syntax.SelectorExpr); ok {
-		if s := b.info.Selections[sel]; s != nil && s.Kind() == types2.MethodVal {
-			return b.methodCall(x, sel, s)
+		if s := b.info.Selections[sel]; s != nil {
+			switch s.Kind() {
+			case types2.MethodVal:
+				b.noteReflectMethod(sel, s)
+				return b.methodCall(x, sel, s)
+			case types2.MethodExpr:
+				// The same question of a called method expression, because
+				// reflect.Value.MethodByName(v, name) reaches the entry point
+				// v.MethodByName(name) reaches. gc's typecheck rewrites the
+				// second into the first before it asks.
+				b.noteReflectMethod(sel, s)
+				if isInterface(s.Recv()) {
+					return b.interfaceMethodExprCall(x, sel, s)
+				}
+			}
 		}
 	}
 	sig, _ := coreType(b.typeOf(fun)).(*types2.Signature)
@@ -2541,6 +2606,56 @@ func (b *builder) call(x *syntax.CallExpr) Expr {
 	if x.HasDots {
 		n.Index = spread
 	}
+	return n
+}
+
+// interfaceMethodExprCall builds I.M(x, args...), where I is an interface.
+//
+// The expression names a function whose first parameter is the interface
+// value, and calling it is calling the method on that value. So it is built as
+// the interface call it is: the receiver is the first argument and the callee
+// is read out of the itab, which is what methodCall does for x.M(args...).
+//
+// gc reaches the same place by another road. It generates a wrapper named
+// after the interface, p.I.M, which takes the interface value and makes the
+// indirect call, and it calls the wrapper. The wrapper exists because a method
+// expression is a function value in general, and a value needs a symbol. A
+// call site needs none, so none is generated here.
+//
+// The method expression that is not called is refused in selector, because a
+// value of it does need that symbol.
+func (b *builder) interfaceMethodExprCall(x *syntax.CallExpr, sel *syntax.SelectorExpr, s *types2.Selection) Expr {
+	rs := b.resolveSelection(sel, s)
+	fn, _ := rs.obj.(*types2.Func)
+	if fn == nil {
+		b.errorf("ir: the method %s has no object", sel.Sel.Value)
+		return b.badExpr(x.Pos())
+	}
+	// The selection's own type carries the receiver as the first parameter, so
+	// one walk over the argument list converts the receiver and the arguments
+	// against the parameters they are assigned to, in the order they are
+	// written.
+	esig, _ := s.Type().(*types2.Signature)
+	args := b.callArgs(x, esig)
+	if len(args) == 0 {
+		b.errorf("ir: the method expression %s.%s is called with no receiver",
+			types2.TypeString(s.Recv(), nil), sel.Sel.Value)
+		return b.badExpr(x.Pos())
+	}
+	fsig, _ := fn.Type().(*types2.Signature)
+	n := &Node{Op: OCall, Pos: x.Pos(), Type: b.resultType(fsig)}
+	if x.HasDots {
+		n.Index = spread
+	}
+	n.X = &Node{
+		Op:    OField,
+		Pos:   sel.Pos(),
+		Type:  b.irType(fsig),
+		X:     b.ordered(args[0]),
+		Index: rs.methodIndex(),
+		Obj:   b.obj(fn),
+	}
+	n.Args = args[1:]
 	return n
 }
 
@@ -2585,6 +2700,85 @@ func (b *builder) methodCall(x *syntax.CallExpr, sel *syntax.SelectorExpr, s *ty
 	n.X = &Node{Op: OGlobal, Pos: sel.Pos(), Type: io.Type, Obj: io}
 	n.Args = append([]Expr{b.recvArg(recv, recvType, fn)}, b.callArgs(x, fsig)...)
 	return n
+}
+
+// reflectLookups are the functions of package reflect whose own body asks for
+// a method by name, and which must not mark themselves.
+//
+// The four are alive through an itab whoever calls them, so marking them would
+// keep every method of every type in every program that links reflect. gc
+// names the same four in walk.usemethod, by the name the symbol carries in
+// that package.
+var reflectLookups = map[string]bool{
+	"reflect.(*rtype).Method":               true,
+	"reflect.(*rtype).MethodByName":         true,
+	"reflect.(*interfaceType).Method":       true,
+	"reflect.(*interfaceType).MethodByName": true,
+	"reflect.Value.Method":                  true,
+	"reflect.Value.MethodByName":            true,
+}
+
+// noteReflectMethod records that the function being built asks reflect for a
+// method by a name no relocation carries.
+//
+// It is gc's walk.usemethod, and it is the same four entry points read the
+// same way: the selector is Method or MethodByName, it takes one argument of
+// the kind that name implies, it returns one or two values, and the first of
+// them is reflect.Method or reflect.Value. The receiver is not part of the
+// test, because reflect.Type.MethodByName and reflect.Value.MethodByName are
+// two entry points to one lookup and gc marks a caller of either, through an
+// interface, on a concrete value, or as a method expression that is called.
+//
+// Func.ReflectMethod says what the mark costs and what its absence costs.
+//
+// One case of gc's is not reproduced. MethodByName with a constant argument
+// gets an R_USENAMEDMETHOD relocation naming that one method, and only a
+// non-constant argument sets the flag. This always sets the flag, which keeps
+// more methods alive and never keeps fewer.
+func (b *builder) noteReflectMethod(sel *syntax.SelectorExpr, s *types2.Selection) {
+	if b.fn == nil || b.fn.ReflectMethod {
+		return
+	}
+	name := sel.Sel.Value
+	want := types2.String
+	switch name {
+	case "Method":
+		want = types2.Int
+	case "MethodByName":
+	default:
+		return
+	}
+	fn, _ := s.Obj().(*types2.Func)
+	if fn == nil {
+		return
+	}
+	// The method's own signature and not the selection's type: the selection
+	// of a method expression carries the receiver as its first parameter, and
+	// the shape gc tests is the one without it.
+	sig, _ := fn.Type().(*types2.Signature)
+	if sig == nil || sig.Params().Len() != 1 {
+		return
+	}
+	if n := sig.Results().Len(); n != 1 && n != 2 {
+		return
+	}
+	arg, _ := unalias(sig.Params().At(0).Type()).(*types2.Basic)
+	if arg == nil || arg.Kind() != want {
+		return
+	}
+	res, _ := unalias(sig.Results().At(0).Type()).(*types2.Named)
+	if res == nil || res.Obj() == nil || res.Obj().Pkg() == nil || res.Obj().Pkg().Path() != "reflect" {
+		return
+	}
+	switch res.Obj().Name() {
+	case "Method", "Value":
+	default:
+		return
+	}
+	if reflectLookups[b.fn.Sym] {
+		return
+	}
+	b.fn.ReflectMethod = true
 }
 
 // resultType is the type of the value a call produces.
