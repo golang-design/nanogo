@@ -541,6 +541,61 @@ func TestAssignABIWritesALargeResultIntoTheResultArea(t *testing.T) {
 	}
 }
 
+// TestAssignABIKeepsTheMemoryChainWhenAReturnBothCopiesAndSplits is the
+// invariant a pass may not break.
+//
+// A return of two results, one the registers hold and one they do not, makes
+// this pass do both of its rewrites ahead of the same value. rewriteResults
+// copies the second into the result area, which puts a newer memory live at
+// the return, and splitOperands then splits the first into one load per
+// register. A load that reads the memory the load it replaces read is two
+// memory values live at one point, which is InvMemChain, and below the
+// verifier it is a load a later pass may move across a store.
+func TestAssignABIKeepsTheMemoryChainWhenAReturnBothCopiesAndSplits(t *testing.T) {
+	tg := NewArm64Target()
+	small := abiStruct("s5", 5, abiTInt)
+	large := abiStruct("s20", 20, abiTInt)
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+
+	load := func(typ *ir.Type, name string) *Value {
+		o := &ir.Object{Name: name, Type: typ, Class: ir.ClassLocal}
+		f.Frame = append(f.Frame, o)
+		addr := b.NewValue(0, OpLocalAddr, abiPtrTo(typ), mem)
+		addr.Aux = o
+		return b.NewValue(0, OpLoad, typ, addr, mem)
+	}
+	b.Control = b.NewValue(0, OpMakeResult, MemType, load(small, "a"), load(large, "c"), mem)
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	// The shape the invariant is about: the copy of the large result is
+	// ahead of the loads of the small one, so the loads read what it wrote.
+	var move *Value
+	for _, v := range b.Values {
+		switch {
+		case v.Op == OpMove:
+			move = v
+		case v.Op == OpLoad && !Multiword(v.Type):
+			if move == nil {
+				t.Fatalf("v%d loads a part before the copy of the large result\n%s", v.ID, f)
+			}
+			if v.Args[1] != move {
+				t.Errorf("v%d reads memory v%d, and v%d is live\n%s", v.ID, v.Args[1].ID, move.ID, f)
+			}
+		}
+	}
+	if move == nil {
+		t.Fatalf("the large result was not copied into the result area\n%s", f)
+	}
+}
+
 // TestAssignABIRejectsNoTarget covers the guards.
 func TestAssignABIRejectsNoTarget(t *testing.T) {
 	if err := AssignABI(nil, NewArm64Target()); err == nil {
@@ -978,19 +1033,15 @@ func TestAssignABIReadsAResultTheRegistersCannotHold(t *testing.T) {
 	}
 }
 
-// TestAssignABIRefusesAFrameResultWithNowhereToPutIt covers a result in the
-// argument area that the call site does not read into one place.
+// TestAssignABISpillsAFrameResultWithNowhereToPutIt covers a result the
+// registers could not hold that the call site hands straight to another call.
 //
-// The move needs a destination and there is none, so the pass refuses the
-// function rather than leave a value the code generator meets as a register.
-//
-// The function is wrong twice over and the pass reports the first of the two.
-// The result is also the operand of a second call, which the registers cannot
-// hold either and which names no storage to copy out of, and rewriteBoundaries
-// runs before rewriteCallResults. So the assertion is that the refusal names
-// the type: which of the two directions it names is a property of the pass
-// order and not of the program.
-func TestAssignABIRefusesAFrameResultWithNowhereToPutIt(t *testing.T) {
+// The callee wrote it into the call's result area, which is the outgoing
+// argument area the second call is about to write over, and nothing in the
+// graph names a place to copy it to. The pass makes one: a frame slot, filled
+// by a move out of the result area ahead of everything else, and the second
+// call copies its outgoing area out of that slot.
+func TestAssignABISpillsAFrameResultWithNowhereToPutIt(t *testing.T) {
 	tg := NewArm64Target()
 	typ := abiStruct("s20", 20, abiTInt)
 	f := NewFunc("f")
@@ -1006,23 +1057,71 @@ func TestAssignABIRefusesAFrameResultWithNowhereToPutIt(t *testing.T) {
 	b.Control = b.NewValue(0, OpMakeResult, MemType, use)
 
 	Decompose(f)
-	err := AssignABI(f, tg)
-	if err == nil {
-		t.Fatalf("a result with nowhere to go was accepted\n%s", f)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatalf("a result the registers could not hold was refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "s20") {
-		t.Errorf("the refusal is %q and does not name the type it could not place", err)
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	// The slot is a local: it holds the value across the second call, so the
+	// collector reads it through the locals bitmap.
+	var slot *ir.Object
+	for _, o := range f.Frame {
+		if o.Type == typ {
+			slot = o
+		}
+	}
+	if slot == nil {
+		t.Fatalf("the forwarded result got no frame slot\n%s", f)
+	}
+	// Two moves, in this order: out of the call's result area into the slot,
+	// then out of the slot into the second call's outgoing area. The first has
+	// to come first, because the second writes the area the first reads.
+	var moves []*Value
+	for _, v := range b.Values {
+		if v.Op == OpMove {
+			moves = append(moves, v)
+		}
+	}
+	if len(moves) != 2 {
+		t.Fatalf("the function makes %d block moves, want two\n%s", len(moves), f)
+	}
+	out := f.ABI.Homes
+	homeOf := func(v *Value) (ABIHome, bool) {
+		o, _ := v.Aux.(*ir.Object)
+		for _, h := range out {
+			if h.Obj == o {
+				return h, true
+			}
+		}
+		return ABIHome{}, false
+	}
+	if o, _ := moves[0].Args[0].Aux.(*ir.Object); o != slot {
+		t.Errorf("the first move does not write the frame slot\n%s", f)
+	}
+	if h, ok := homeOf(moves[0].Args[1]); !ok || h.Incoming {
+		t.Errorf("the first move does not read the call's result area\n%s", f)
+	}
+	if o, _ := moves[1].Args[1].Aux.(*ir.Object); o != slot {
+		t.Errorf("the second move does not read the frame slot\n%s", f)
+	}
+	if h, ok := homeOf(moves[1].Args[0]); !ok || h.Incoming {
+		t.Errorf("the second move does not write the second call's outgoing area\n%s", f)
+	}
+	// The second call no longer carries the value as an operand: it is in the
+	// area, and the record is what says so.
+	if c := f.ABI.CallAt(use.ID); c == nil || len(c.Vals) != 1 || !c.Vals[0].Copied {
+		t.Errorf("the second call still passes the value as an operand\n%s", f)
 	}
 }
 
-// TestAssignABIRefusesAWideResultWithNowhereToPutIt covers a wide result the
-// call site does not write to one place, which is the forwarding return
-// "return g()".
+// TestAssignABISpillsAForwardedResult covers a wide result the call site does
+// not write to one place, which is the forwarding return "return g()".
 //
-// The words come back in five registers and the pass has no destination to
-// write them to, so it refuses rather than leaving a value the code generator
-// meets as one register.
-func TestAssignABIRefusesAWideResultWithNowhereToPutIt(t *testing.T) {
+// The words come back in five registers and no value of the graph names a
+// place to put them, so the pass makes one, writes the result into it, and the
+// return reads its five registers back out of it.
+func TestAssignABISpillsAForwardedResult(t *testing.T) {
 	tg := NewArm64Target()
 	typ := abiStruct("s5", 5, abiTInt)
 	f := NewFunc("f")
@@ -1034,12 +1133,104 @@ func TestAssignABIRefusesAWideResultWithNowhereToPutIt(t *testing.T) {
 	sel := b.NewValue(0, OpSelectN, typ, call)
 	b.Control = b.NewValue(0, OpMakeResult, MemType, sel, call)
 
-	err := AssignABI(f, tg)
-	if err == nil {
-		t.Fatalf("a forwarded wide result was accepted\n%s", f)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatalf("a forwarded wide result was refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "does not write it to one place") {
-		t.Errorf("the refusal is %q, and it has to say why", err)
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	var slot *ir.Object
+	for _, o := range f.Frame {
+		if o.Type == typ {
+			slot = o
+		}
+	}
+	if slot == nil {
+		t.Fatalf("the forwarded result got no frame slot\n%s", f)
+	}
+	// Both halves are one word at a time: five results read out of five
+	// registers into the slot, five loads out of the slot into the return.
+	var sels, stores, loads int
+	for _, v := range b.Values {
+		switch v.Op {
+		case OpSelectN:
+			sels++
+			if Multiword(v.Type) {
+				t.Errorf("v%d is still %v, which no register holds", v.ID, v.Type)
+			}
+		case OpStore:
+			stores++
+		case OpLoad:
+			loads++
+		}
+	}
+	if sels != 5 || stores != 5 || loads != 5 {
+		t.Errorf("the split made %d results, %d stores and %d loads, want five of each\n%s",
+			sels, stores, loads, f)
+	}
+	mr := b.Control
+	if len(mr.Args) != 6 {
+		t.Fatalf("the return passes %d operands, want five words and the memory\n%s", len(mr.Args), f)
+	}
+	for i, arg := range mr.Args[:5] {
+		if arg.Op != OpLoad || Multiword(arg.Type) {
+			t.Errorf("operand %d of the return is %v <%v>\n%s", i, arg.Op, arg.Type, f)
+		}
+	}
+}
+
+// TestAssignABIRenumbersPastADiscardedWideResult covers "_, err := g()" with a
+// first result wider than a register.
+//
+// The words come back in the registers the convention names whether or not the
+// call site wants them, so the result that follows starts at the word after
+// the last of them. A discarded result needs no place to be written to, which
+// is what separates it from a forwarded one, and it may not be left whole:
+// ssagen indexes a call's results by the word each reads and refuses a list
+// with a hole in it.
+func TestAssignABIRenumbersPastADiscardedWideResult(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiStruct("s5", 5, abiTInt)
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	call := b.NewValue(0, OpStaticCall, MemType, mem)
+	call.Aux = &ir.Object{Name: "main.g"}
+	// The wide result is read by nobody, which is what makes it discarded.
+	b.NewValue(0, OpSelectN, typ, call)
+	tail := b.NewValue(0, OpSelectN, abiTInt, call)
+	tail.AuxInt = 1
+	b.Control = b.NewValue(0, OpMakeResult, MemType, tail, call)
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatalf("a discarded wide result was refused: %v", err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	if len(f.Frame) != 0 {
+		t.Errorf("a discarded result was given a frame slot, and nothing reads it\n%s", f)
+	}
+	words := map[int64]*ir.Type{}
+	for _, v := range b.Values {
+		if v.Op != OpSelectN {
+			continue
+		}
+		if Multiword(v.Type) {
+			t.Errorf("v%d is still %v, which no register holds\n%s", v.ID, v.Type, f)
+		}
+		if _, seen := words[v.AuxInt]; seen {
+			t.Errorf("two results read word %d\n%s", v.AuxInt, f)
+		}
+		words[v.AuxInt] = v.Type
+	}
+	// Five words of the discarded result, then the one the return passes.
+	if len(words) != 6 {
+		t.Fatalf("the call reads %d words, want six\n%s", len(words), f)
+	}
+	if tail.AuxInt != 5 {
+		t.Errorf("the second result reads word %d, and the first occupies five\n%s", tail.AuxInt, f)
 	}
 }
 

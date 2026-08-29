@@ -718,10 +718,22 @@ type abiPass struct {
 	before  map[ID][]*Value
 	dead    []bool
 	touched []bool
+
+	// spills counts the frame slots spillResults has made, so that each one
+	// has a name of its own in a dump.
+	spills int
 }
 
 func (a *abiPass) run() error {
 	a.index()
+	if a.spillResults() {
+		// The spill rewrote operand lists and added values, so the block
+		// lists and the reader lists are rebuilt before the walks below read
+		// them. Rebuilding is cheaper to be sure of than maintaining, and the
+		// spill is the only rewrite this pass makes before the placement.
+		a.compact()
+		a.index()
+	}
 	a.collectArgs()
 
 	types := make([]*ir.Type, 0, len(a.objs))
@@ -1158,7 +1170,7 @@ func (a *abiPass) splitOperands(v *Value) error {
 		arg := v.Args[lo+i]
 		switch {
 		case av.InReg && len(av.Parts) >= 2 && Multiword(arg.Type):
-			parts := a.loadParts(v, arg, av)
+			parts := a.loadParts(v, arg, av, mem)
 			if parts == nil {
 				args = append(args, arg)
 				rec.Vals = append(rec.Vals, *av)
@@ -1239,12 +1251,32 @@ func (a *abiPass) memArgs(v *Value) int {
 
 // loadParts returns one load per register of a whole aggregate operand, or nil
 // when the operand cannot be split.
-func (a *abiPass) loadParts(user, arg *Value, av *ABIValue) []*Value {
+//
+// The loads are scheduled at the boundary and read the memory that is live
+// there, which is mem, and not the memory the load they replace read. The two
+// differ as soon as this pass has already put a block move ahead of the same
+// boundary: rewriteResults copies a result the registers cannot hold into the
+// result area ahead of the return, and splitOperands copies an argument into
+// the outgoing area ahead of the call, and either leaves a newer memory live
+// where these loads go. A load placed there reading the older memory is two
+// memory values live at one point, which is the InvMemChain of ssa/verify.go,
+// and below the verifier it is a load the scheduler may move across a store.
+//
+// Reading the newer memory moves no read across a store the program wrote. The
+// only memory this pass inserts at a boundary writes an argument-area slot,
+// which is a slot the convention owns and no value of the function names.
+//
+// mem is nil for a boundary that carries no memory operand, which a return
+// built by hand can be. There is then no chain to hold and the load's own
+// memory is the only answer.
+func (a *abiPass) loadParts(user, arg *Value, av *ABIValue, mem *Value) []*Value {
 	base := a.addressOf(user, arg)
 	if base == nil {
 		return nil
 	}
-	mem := arg.Args[1]
+	if mem == nil {
+		mem = arg.Args[1]
+	}
 	out := make([]*Value, 0, len(av.Parts))
 	for i := range av.Parts {
 		p := &av.Parts[i]
@@ -1252,6 +1284,180 @@ func (a *abiPass) loadParts(user, arg *Value, av *ABIValue) []*Value {
 		out = append(out, a.mk(user, user.Block, arg.Pos, OpLoad, p.Type, addr, mem))
 	}
 	a.kill(arg)
+	return out
+}
+
+// spillResults gives every call result that is wider than a register and that
+// the call site writes nowhere a place in memory.
+//
+// It closes the third bound of specs/030-abi.md: the forwarding return
+// "return g()" and the forwarding call "h(g())". The words come back in
+// registers, or in the call's result area when the registers could not hold
+// them, and the value they make up is handed straight to another boundary
+// without ever being written down.
+//
+// Every other rewrite in this pass reaches a value at a boundary through the
+// address of the place it lives in: rewriteResults and splitOperands copy out
+// of that place, rewriteCallResults writes each word into it. A forwarded
+// result lives in no place, which is why the pass had nothing to write into
+// and nothing to read out of. This makes the place. The store into it is the
+// destination rewriteCallResults needs, and the load out of it is the address
+// the boundary below needs, so both halves become the rewrite that exists.
+//
+// The slot is an ordinary local and goes into Func.Frame. It holds a live
+// value across a boundary, so the collector has to find it, and it finds a
+// local through the locals bitmap of specs/027-liveness-and-stackmaps.md. That
+// is what separates it from the argument-area slots ABIHome names, which hold
+// a value only for the instant of a call and which the callee describes.
+//
+// It runs ahead of every other rewrite, so that the placement and the walks
+// below see a graph in which no boundary reads a call result directly.
+func (a *abiPass) spillResults() bool {
+	changed := false
+	for _, b := range a.f.Blocks {
+		for _, v := range b.Values {
+			if !v.Op.IsCall() {
+				continue
+			}
+			if a.spillCallResults(v) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// spillCallResults spills the results of one call.
+//
+// The placement is the walk rewriteCallResults makes, because the two have to
+// agree on which results are wide: one that gives a result a slot the other
+// then leaves whole would write a value nobody reads.
+func (a *abiPass) spillCallResults(call *Value) bool {
+	sel, ok := a.resultReads(call)
+	if !ok {
+		return false
+	}
+	types := make([]*ir.Type, 0, len(sel))
+	for _, v := range sel {
+		types = append(types, v.Type)
+	}
+	args, _, _, err := ABICallArgs(a.t, call)
+	if err != nil {
+		return false
+	}
+	place, _, err := ABIResults(a.t, ABIStackEnd(args), types)
+	if err != nil || len(place) != len(sel) {
+		return false
+	}
+
+	// mem is the memory the call left, threaded through the spills so that a
+	// reader that takes two wide results of one call gets one chain.
+	mem := call
+	changed := false
+	for i := range place {
+		v := sel[i]
+		if !a.wideResult(v, &place[i]) || a.resultStore(v) != nil {
+			continue
+		}
+		reader := a.soleReader(v)
+		if reader == nil || reader.Block != v.Block || a.memoryOf(reader) != mem {
+			// Nothing reads the result, or it is read where this pass cannot
+			// put the store: in another block, or behind a memory this call
+			// did not leave.
+			//
+			// The memory is the condition that matters and it is not a
+			// convenience. A result the registers could not hold sits in the
+			// call's outgoing argument area, and the next call this function
+			// makes writes over that area, so a copy out of it that is not
+			// ahead of every other call reads what the later call left.
+			// Requiring the reader to read the memory the call produced puts
+			// the store where the call ended.
+			continue
+		}
+		mem = a.spillResult(v, reader, mem)
+		changed = true
+	}
+	return changed
+}
+
+// wideResult reports whether a call result occupies more than one machine word
+// and therefore needs a place in memory at the call site.
+//
+// A result of one word never needs one. It travels in one register, or it is
+// one word of the area the code generator reads directly, and a store of it is
+// a store the machine has.
+func (a *abiPass) wideResult(sel *Value, av *ABIValue) bool {
+	if !Multiword(sel.Type) {
+		return false
+	}
+	if !av.InReg {
+		return av.Type != nil && av.Type.Size > 0
+	}
+	return len(av.Parts) >= 2
+}
+
+// spillResult writes one call result into a frame slot and points its reader
+// at a load out of that slot. It returns the memory the store produced.
+func (a *abiPass) spillResult(sel, reader, mem *Value) *Value {
+	o := &ir.Object{
+		Name:  fmt.Sprintf("~f%d", a.spills),
+		Type:  sel.Type,
+		Class: ir.ClassLocal,
+	}
+	a.spills++
+	a.f.Frame = append(a.f.Frame, o)
+
+	b := reader.Block
+	dst := a.mk(reader, b, sel.Pos, OpLocalAddr, abiPtrTo(sel.Type), mem)
+	dst.Aux = o
+	st := a.mk(reader, b, sel.Pos, OpStore, MemType, dst, sel, mem)
+	st.AuxInt = sel.Type.Size
+	src := a.mk(reader, b, sel.Pos, OpLocalAddr, abiPtrTo(sel.Type), st)
+	src.Aux = o
+	ld := a.mk(reader, b, sel.Pos, OpLoad, sel.Type, src, st)
+
+	for i, arg := range reader.Args {
+		if arg == sel {
+			reader.SetArg(i, ld)
+		}
+	}
+	reader.SetArg(len(reader.Args)-1, st)
+	return st
+}
+
+// unread reports that nothing live reads v.
+//
+// A call result nobody reads is the discarded result of "_, err := g()". The
+// words still come back where the convention says, so it still occupies them,
+// but it needs no place to be written to.
+func (a *abiPass) unread(v *Value) bool {
+	if int(v.ID) >= len(a.users) {
+		return false
+	}
+	for _, u := range a.users[v.ID] {
+		if !a.isDead(u) {
+			return false
+		}
+	}
+	return true
+}
+
+// soleReader returns the one live value that reads v, or nil when v has none
+// or has more than one.
+func (a *abiPass) soleReader(v *Value) *Value {
+	if int(v.ID) >= len(a.users) {
+		return nil
+	}
+	var out *Value
+	for _, u := range a.users[v.ID] {
+		if a.isDead(u) {
+			continue
+		}
+		if out != nil {
+			return nil
+		}
+		out = u
+	}
 	return out
 }
 
@@ -1319,6 +1525,16 @@ func (a *abiPass) callResults(call *Value) error {
 	split, framed := false, false
 	for i := range place {
 		av := &place[i]
+		if a.unread(sel[i]) {
+			// Nothing reads it, so it needs no place at all: the words come
+			// back where the convention says and are dropped. It still
+			// occupies them, so a result after it is still renumbered, which
+			// is what the loop below does with the width recorded here.
+			if av.InReg && len(av.Parts) >= 2 {
+				split = true
+			}
+			continue
+		}
 		if !av.InReg && av.Type != nil && av.Type.Size > 0 {
 			// The registers could not hold it, so the callee wrote it into
 			// the area and the call site reads it back from there.
@@ -1361,7 +1577,11 @@ func (a *abiPass) callResults(call *Value) error {
 		av := &place[i]
 		v := sel[i]
 		if Multiword(v.Type) && av.InReg && len(av.Parts) >= 2 {
-			a.splitResult(v, a.resultStore(v), av, word)
+			if st := a.resultStore(v); st != nil {
+				a.splitResult(v, st, av, word)
+			} else {
+				a.dropResult(v, av, word)
+			}
 			word += int64(len(av.Parts))
 			continue
 		}
@@ -1371,6 +1591,23 @@ func (a *abiPass) callResults(call *Value) error {
 		word++
 	}
 	return nil
+}
+
+// dropResult replaces a call result nothing reads by one result per register.
+//
+// The words arrive whether or not the call site wants them, so the split is
+// the same one splitResult makes and only the stores are absent. It is not an
+// optimisation to leave the value whole instead: ssagen names a call's results
+// by walking the SelectN values and indexing them by the word each reads, so a
+// list with a fifteen-word hole in it is a list it refuses.
+func (a *abiPass) dropResult(sel *Value, av *ABIValue, base int64) {
+	call := sel.Args[0]
+	for i := range av.Parts {
+		p := &av.Parts[i]
+		part := a.mk(sel, sel.Block, sel.Pos, OpSelectN, p.Type, call)
+		part.AuxInt = base + int64(i)
+	}
+	a.kill(sel)
 }
 
 // resultReads returns a call's results in index order, or false when the list
@@ -1447,19 +1684,7 @@ func (a *abiPass) readFromArea(call, sel, st *Value, av *ABIValue, mem *Value) {
 // has exactly one reader, that reader is a store of the whole value, and the
 // two are in one block so that the words are written where the result is read.
 func (a *abiPass) resultStore(sel *Value) *Value {
-	if int(sel.ID) >= len(a.users) {
-		return nil
-	}
-	var st *Value
-	for _, u := range a.users[sel.ID] {
-		if a.isDead(u) {
-			continue
-		}
-		if st != nil {
-			return nil
-		}
-		st = u
-	}
+	st := a.soleReader(sel)
 	if st == nil || st.Op != OpStore || len(st.Args) != 3 || st.Args[1] != sel {
 		return nil
 	}
