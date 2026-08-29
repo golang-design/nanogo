@@ -256,28 +256,32 @@ that is written into the instruction stream.
   [042](042-arm64-backend.md) records the move from the back end's side. The
   save order is stated above because the other order loses an argument.
 
-## Two symptoms that are open, and are not flakes
+## Two symptoms, one with a cause and one without
 
-Both appeared on 27 August 2026, both only under load, and neither reproduces
+Both appeared on 27 August 2026, both only under load, and neither reproduced
 on demand. They are written down because "it passed on retry" is not an
-explanation, and because a collector or a stack bug that appears once in
-twenty runs is exactly the shape that a green suite hides.
+explanation, and because a collector or a stack bug that appears once in twenty
+runs is exactly the shape that a green suite hides.
 
-**A closure's captures rejected by the collector.**
-`internal/e2e`'s `TestToolexecKeepsCapturesThroughACollection` runs a program
-whose only reference to a heap object is a capture, under
+**A closure's captures rejected by the collector. The cause is identified and
+the entry stays open.** `internal/e2e`'s `TestToolexecKeepsCapturesThroughACollection` runs
+a program whose only reference to a heap object is a capture, under
 `GODEBUG=gccheckmark=1,clobberfree=1` with `GOGC=1`. It failed twice: once
-locally with a checkmark error, and once on CI's `macos-latest` runner with
-`the collector or the program rejected what the closure held: exit status 2`.
-It has since passed fifteen consecutive runs here, including under six
-artificial busy loops, and under `GOGC=1` and the same `GODEBUG` pair.
+locally with a checkmark error, and once on CI's `macos-latest` runner.
 
-A checkmark error is the collector saying it found a pointer the map did not
-describe, so the two candidates are a pointer map that is wrong on a path the
-test reaches rarely, and a pointer map that is right against a stack that
-moved under it.
+A checkmark error is the collector reporting an object that was reachable and
+was not marked, which is what a store the collector did not observe produces
+and is the same measurement [034](034-write-barriers.md) records against Go's
+own `test/gcgort.go`. The object it named was a capture of a two-capture
+closure whose descriptor and pointer mask were both correct, and a mask that is
+right while the object is still lost is the store and not the description. The
+barrier is built and removes that store, which is a cause and not a proof. This
+entry stays open until a run under load confirms it, because counting passes
+cannot: the test passed fifteen consecutive runs before the barrier existed and
+twelve after it, and neither number distinguishes a fixed defect from a
+sleeping one.
 
-**A stack span far larger than the limit.**
+**A stack span far larger than the limit. This one is open.**
 A corpus run reported `MISCOMPILATION in peano.go`, a stack overflow, printing
 `stack=[0x6ac20b60000, 0x6ac40b60000]`. That span is 8.6 GB under a 1 GB
 limit, so `g.stack` held something that is not a stack rather than the
@@ -285,8 +289,14 @@ recursion running deep. The lane that saw it disassembled all nine of the
 file's functions at two commits and found them byte-identical, and the program
 runs clean standalone eight times out of eight.
 
-The two share a shape: a `g` whose stack bounds or whose frame contents are
-not what the compiler described, seen only when the machine is busy. Whether
-they are one defect is unknown. The next person to see either should capture
-the failing binary and its `GODEBUG` output before retrying, because a retry
-is what has destroyed the evidence both times.
+The next person to see it should capture the failing binary and its `GODEBUG`
+output before retrying, because a retry is what destroyed the evidence both
+times.
+
+The write barrier does not explain this one. A missing barrier frees a
+reachable object and does not put a value that is not a stack into `g.stack`.
+The claim is also measured rather than reasoned: on the tree that emits the
+barrier, `peano.go` passed 20 runs in 20 under `GOGC=1` and 20 in 20 again
+under `GOGC=1` with `GODEBUG=gccheckmark=1`. That is the same kind of count
+this section refuses to read as a fix, so it says only that the barrier did not
+make this worse.
