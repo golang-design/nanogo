@@ -205,7 +205,29 @@ func (e *LowerError) Error() string {
 // It panics with a *LowerError when an operation has no rule, when a rule
 // leaves a target-neutral operation behind, or when a block does not converge.
 // specs/025 requires the crash and names the operation in it.
-func Lower(f *Func, rs *RuleSet) {
+func Lower(f *Func, rs *RuleSet) (err error) {
+	// The deferred recover is not defensive. Selection is a walk over every
+	// block and every value with a failure site in each rule, so l.fail
+	// panics rather than threading an error back through all of them, and
+	// this is the frame that knows the walk is over. Every other stage of the
+	// compiler reports a construct it cannot handle as a refusal naming the
+	// function, and a stage that panics instead takes the compiler down where
+	// the others print a reason: specs/052-diagnostics.md asks for the
+	// reason. driver/compile.go's checkFiles recovers the export reader's
+	// panics for the same reason and says so in the same words.
+	//
+	// Only a LowerError is recovered. Anything else is a defect in this pass
+	// rather than a construct it has no rule for, and swallowing it here
+	// would report a missing rule for a nil dereference.
+	defer func() {
+		if v := recover(); v != nil {
+			le, ok := v.(*LowerError)
+			if !ok {
+				panic(v)
+			}
+			err = le
+		}
+	}()
 	// Decomposition first, so that selection only ever sees a value that fits
 	// one register. Every rule below assumes that, and specs/025's multi-word
 	// section says why it cannot be done any later: a store of a wide value
@@ -214,6 +236,7 @@ func Lower(f *Func, rs *RuleSet) {
 	Decompose(f)
 	l := &lowerer{f: f, rs: rs}
 	l.run()
+	return nil
 }
 
 type lowerer struct {

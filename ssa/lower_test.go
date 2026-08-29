@@ -56,26 +56,33 @@ func lowRules(rules map[Op]ValueRule) *RuleSet {
 	}
 }
 
-// lowPanic runs Lower and returns the LowerError it panicked with.
-func lowPanic(t *testing.T, f *Func, rs *RuleSet) *LowerError {
+// lowFail runs Lower over a function it cannot lower and returns the refusal.
+//
+// Lower reports through its result and never panics past its own frame, so a
+// construct with no rule is a refusal naming the function rather than a
+// compiler that dies. A panic reaching here is a defect in the pass, which is
+// why the two are told apart rather than both accepted.
+func lowFail(t *testing.T, f *Func, rs *RuleSet) *LowerError {
 	t.Helper()
 	var out *LowerError
 	func() {
 		defer func() {
-			e := recover()
-			if e == nil {
-				return
+			if e := recover(); e != nil {
+				t.Fatalf("Lower panicked with %T rather than returning it: %v", e, e)
 			}
-			le, ok := e.(*LowerError)
-			if !ok {
-				t.Fatalf("Lower panicked with %T: %v", e, e)
-			}
-			out = le
 		}()
-		Lower(f, rs)
+		err := Lower(f, rs)
+		if err == nil {
+			return
+		}
+		le, ok := err.(*LowerError)
+		if !ok {
+			t.Fatalf("Lower returned %T: %v", err, err)
+		}
+		out = le
 	}()
 	if out == nil {
-		t.Fatal("Lower did not crash")
+		t.Fatal("Lower accepted a function it has no rule for")
 	}
 	return out
 }
@@ -134,7 +141,7 @@ func TestLowerFlagsType(t *testing.T) {
 func TestLowerMissingRule(t *testing.T) {
 	p := lowNew()
 	f := p.ret(p.b.NewValue(0, OpAdd, lowI64, p.b.NewValue(0, OpArg, lowI64), p.b.NewValue(0, OpArg, lowI64)))
-	err := lowPanic(t, f, lowRules(map[Op]ValueRule{OpMakeResult: retRule}))
+	err := lowFail(t, f, lowRules(map[Op]ValueRule{OpMakeResult: retRule}))
 	if err.Op != OpAdd {
 		t.Errorf("the crash names %v, want Add", err.Op)
 	}
@@ -166,7 +173,7 @@ func TestLowerIterationCap(t *testing.T) {
 			return true
 		},
 	})
-	err := lowPanic(t, f, rules)
+	err := lowFail(t, f, rules)
 	if !strings.Contains(err.Error(), "fixed point") {
 		t.Errorf("the crash does not say what happened: %v", err)
 	}
@@ -187,7 +194,7 @@ func TestLowerRuleMustLower(t *testing.T) {
 			return true
 		},
 	})
-	err := lowPanic(t, f, rules)
+	err := lowFail(t, f, rules)
 	if !strings.Contains(err.Detail, "left a target-neutral operation") {
 		t.Errorf("the crash says %q", err.Detail)
 	}
@@ -207,7 +214,7 @@ func TestLowerRuleMustNotCreateNeutral(t *testing.T) {
 			return true
 		},
 	})
-	err := lowPanic(t, f, rules)
+	err := lowFail(t, f, rules)
 	if !strings.Contains(err.Detail, "created a target-neutral operation") {
 		t.Errorf("the crash says %q", err.Detail)
 	}

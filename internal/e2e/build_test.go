@@ -380,3 +380,68 @@ func main() { os.Exit(sum([]int{1, 2, 3, 4, 5, 6})) }
 		t.Errorf("the program exited %d, want 21: the loop summed wrongly", code)
 	}
 }
+
+// The program whose lowering has no rule for one of its values.
+//
+// Equality over a struct with a string field is the shape: ssa/decompose.go's
+// comparableByParts refuses to split it, because string equality is
+// runtime.memequal and not a word compare, so the whole 24-byte Load reaches
+// selection and no arm64 rule takes it.
+//
+// The construct matters less than where it fails. Every other stage reports a
+// construct it cannot handle as a refusal naming the function, and lowering is
+// the one that used to take the compiler down instead.
+const noLoweringRuleProgram = `package main
+
+type pair struct {
+	n int
+	s string
+}
+
+//go:noinline
+func same(a, b pair) bool { return a == b }
+
+func main() {
+	d := 0
+	if same(pair{1, "x"}, pair{1, "y"}) {
+		d = 1
+	}
+	if d != 0 {
+		d = d / (d - d)
+	}
+}
+`
+
+// TestBuildRefusesAValueWithNoLoweringRuleAndDoesNotCrash is the failure mode
+// specs/052-diagnostics.md asks for, at the one stage that did not have it.
+//
+// ssa.Lower reports through l.fail, which panics rather than threading an
+// error back through every rule, and that panic used to escape the compiler.
+// The user saw a Go runtime panic and a stack trace where every other stage
+// prints the function, the position and the construct. Go's own corpus carried
+// two files in the crashed class for it and nanogo's own export package
+// carried a third.
+//
+// The panic is still how the pass reports internally. What changed is that
+// Lower recovers its own LowerError, so nothing above it has to know that.
+func TestBuildRefusesAValueWithNoLoweringRuleAndDoesNotCrash(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/norule\n\ngo 1.27\n",
+		"main.go": noLoweringRuleProgram,
+	}, nil)
+
+	out, err := h.nanogoBuild(t, ".")
+	if err == nil {
+		t.Fatalf("nanogo build succeeded over a value it has no rule for:\n%s", out)
+	}
+	if strings.Contains(out, "goroutine 1 [running]") || strings.Contains(out, "panic: ") {
+		t.Fatalf("nanogo panicked rather than refusing:\n%s", out)
+	}
+	// The three things a refusal owes: which function, where it is, and what
+	// stopped it.
+	for _, want := range []string{"same", "main.go", "no arm64 rule lowered this operation"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the refusal does not name %q:\n%s", want, out)
+		}
+	}
+}

@@ -1107,7 +1107,7 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 			c.Types = append(c.Types, ts...)
 			return err
 		}},
-		{"lowering", func() error { ssa.Lower(f, rules.ARM64); return nil }},
+		{"lowering", func() error { return ssa.Lower(f, rules.ARM64) }},
 		{"verification after lowering", func() error { return verify(f) }},
 		// The barrier is inserted after selection, because the values it
 		// inserts are machine operations, and before allocation, so that the
