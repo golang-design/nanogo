@@ -18,6 +18,9 @@ interactions are where the bugs are.
 
 Closures are built, captures and all, and so are `defer` and `go` with
 arguments: an argument is a capture and the capture mechanism is the same one.
+That mechanism, the heap cell, is what [023](023-escape-analysis.md) also takes
+for a variable whose address the source writes. This spec owns the capture and
+that one owns the address; `ir/closure.go` holds one cell for both.
 `panic` and `recover` are built and are gated by a different thing: an
 interface. `ir/lower.go` performs the rows and `internal/e2e` runs each one as
 a program.
