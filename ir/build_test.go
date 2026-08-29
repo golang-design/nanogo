@@ -788,12 +788,30 @@ func TestBuildLoweringTable(t *testing.T) {
 			},
 		},
 		{
+			// The one range row that is not an ORange. A range over a
+			// function is a call taking the body as a closure
+			// (ir/rangefunc.go), so the row is built here rather than
+			// lowered, and what the table asserts is the call.
 			row:  "range over function",
 			body: `func f(seq func(func(int) bool)) { for v := range seq { sink(v) } }`,
-			op:   ORange,
+			op:   OCall,
 			check: func(t *testing.T, p *Package, fn *Func, n *Node) {
-				if n.X.Type.Kind != FuncKind {
-					t.Errorf("the range operand is %s", n.X.Type)
+				if n.X == nil || n.X.Obj == nil || n.X.Obj.Name != "seq" {
+					t.Fatalf("the call is not to the iterator:\n%s", buildDump(fn))
+				}
+				if len(n.Args) != 1 || n.Args[0].Op != OClosure {
+					t.Fatalf("the iterator is not called with a closure:\n%s", buildDump(fn))
+				}
+				if len(buildFind(fn, ORange)) != 0 {
+					t.Errorf("a range survived the row:\n%s", buildDump(fn))
+				}
+				lit := buildFuncOf(t, p, "f.func1")
+				if len(lit.Params) != 1 || len(lit.Results) != 1 || lit.Results[0].Type.Kind != Bool {
+					t.Fatalf("the yield function is not func(int) bool:\n%s", buildDump(lit))
+				}
+				last := lit.Body[len(lit.Body)-1]
+				if last.Op != OReturn || len(last.Args) != 1 || last.Args[0].Val == nil || last.Args[0].Val.String() != "true" {
+					t.Errorf("the body does not end in return true:\n%s", buildDump(lit))
 				}
 			},
 		},

@@ -1792,7 +1792,6 @@ type W struct{ P *int }
 
 func f(v any) W { return v.(W) }`, OTypeAssert, "its own data word"},
 		{"min of floats", `func f(a, b float64) float64 { return min(a, b) }`, OMin, "NaN"},
-		{"range over a function", `func f(it func(func(int) bool)) { for v := range it { use(v) } }`, ORange, "range over func"},
 		{"println of a struct", `
 type S struct{ A, B int }
 

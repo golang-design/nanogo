@@ -360,6 +360,13 @@ type builder struct {
 	closgen   map[*Func]int
 	isLiteral map[*Func]bool
 
+	// yield is the range-over-func body being built, and nil everywhere
+	// else. A return inside such a body returns from the function around
+	// the loop and not from the body, so ir/rangefunc.go reads this to
+	// build one. A function literal saves and clears it: a return the
+	// source wrote inside a literal is that literal's own.
+	yield *yieldFrame
+
 	errs []error
 }
 
@@ -1398,6 +1405,26 @@ func (b *builder) newLiteral(pos syntax.Pos) *Func {
 	return fn
 }
 
+// sortedCaptures returns the objects of a free set in a fixed order.
+//
+// The keys are collected and sorted rather than ranged over into the
+// output, which specs/053-determinism.md requires: this order becomes the
+// order of the words in a closure object, and a map's order would put them in
+// a different one on every build.
+func sortedCaptures(free map[*Object]bool) []*Object {
+	caps := make([]*Object, 0, len(free))
+	for o := range free {
+		caps = append(caps, o)
+	}
+	sort.Slice(caps, func(i, j int) bool {
+		if caps[i].Pos != caps[j].Pos {
+			return caps[i].Pos < caps[j].Pos
+		}
+		return caps[i].Name < caps[j].Name
+	})
+	return caps
+}
+
 // closureNode builds the OClosure of a literal and its capture list, and adds
 // the literal to the package.
 //
@@ -1455,6 +1482,13 @@ func (b *builder) freeIn(n *Node) []*Object {
 }
 
 func (b *builder) returnStmt(s *syntax.ReturnStmt) {
+	if b.yield != nil {
+		// Inside the body of a range over a function this returns from
+		// the function around the loop, which is two frames away
+		// (ir/rangefunc.go).
+		b.yieldReturn(s)
+		return
+	}
 	n := &Node{Op: OReturn, Pos: s.Pos(), Type: voidType}
 	results := syntax.UnpackListExpr(s.Results)
 	if len(results) == 0 {
@@ -1624,6 +1658,20 @@ func (b *builder) initDecls(init syntax.SimpleStmt) []*Object {
 // iteration variables. A variable the clause declares gets its own instance
 // per iteration, which perIteration explains.
 func (b *builder) rangeStmt(s *syntax.ForStmt, rc *syntax.RangeClause) {
+	if yield := rangeFuncYield(b.typeOf(rc.X)); yield != nil {
+		// A range over a function is a call and not a loop, so it is built
+		// whole in ir/rangefunc.go rather than through the ORange below.
+		why, returns := scanRangeFunc(s, rc)
+		if why == "" {
+			b.rangeFunc(s, rc, yield, returns)
+			return
+		}
+		// A shape that row does not carry. The error is reported here and
+		// the statement is built as an ORange all the same, so that the
+		// tree still holds the statement the error is about and
+		// ir/lower.go refuses it a second time.
+		b.errorf("ir: a range over a function %s, which specs/020-ir.md's range over function row does not carry", why)
+	}
 	n := &Node{Op: ORange, Pos: s.Pos(), Type: voidType}
 	b.push()
 	// The checker records the range expression of an array as the constant
@@ -2614,7 +2662,11 @@ func (b *builder) closure(x *syntax.FuncLit) Expr {
 	b.isLiteral[fn] = true
 
 	saveFn, saveSig, saveSinks, saveFree := b.fn, b.sig, b.sinks, b.free
-	b.fn, b.sig, b.sinks, b.free = fn, sig, nil, nil
+	// A return the source wrote inside this literal is this literal's own,
+	// even where the literal is written inside the body of a range over a
+	// function, so the frame ir/rangefunc.go reads is put away here.
+	saveYield := b.yield
+	b.fn, b.sig, b.sinks, b.free, b.yield = fn, sig, nil, nil, nil
 	if sig != nil {
 		for i := 0; i < sig.Params().Len(); i++ {
 			fn.Params = append(fn.Params, b.declare(sig.Params().At(i), fn))
@@ -2626,20 +2678,9 @@ func (b *builder) closure(x *syntax.FuncLit) Expr {
 	b.free = make(map[*Object]bool)
 	fn.Body = b.block(x.Body.List)
 	free := b.free
-	b.fn, b.sig, b.sinks, b.free = saveFn, saveSig, saveSinks, saveFree
+	b.fn, b.sig, b.sinks, b.free, b.yield = saveFn, saveSig, saveSinks, saveFree, saveYield
 
-	// The keys are collected and sorted rather than ranged over into the
-	// output, which specs/053-determinism.md requires.
-	caps := make([]*Object, 0, len(free))
-	for o := range free {
-		caps = append(caps, o)
-	}
-	sort.Slice(caps, func(i, j int) bool {
-		if caps[i].Pos != caps[j].Pos {
-			return caps[i].Pos < caps[j].Pos
-		}
-		return caps[i].Name < caps[j].Name
-	})
+	caps := sortedCaptures(free)
 
 	// Index is -1 rather than a method index. A method value of an interface
 	// and a literal with one capture are otherwise the same node, and a
