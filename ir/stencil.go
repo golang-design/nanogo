@@ -407,6 +407,14 @@ func (b *builder) methodInstance(named *types2.Named, m *types2.Func, targs []ty
 
 	decl := b.generic[origin]
 	switch {
+	case osig.RecvTypeParams().Len() != len(targs):
+		// NewSubstitution panics on a count mismatch rather than returning an
+		// error. The checker cannot record one, so this is a guard against a
+		// broken Info and not against a program: a compiler that crashes has
+		// replaced a diagnostic with a stack trace.
+		b.errorf("ir: %s has %d receiver type parameters and the instantiation names %d",
+			sym, osig.RecvTypeParams().Len(), len(targs))
+		return nil
 	case osig.TypeParams().Len() > 0:
 		// A method with type parameters of its own. Instantiating the receiver
 		// does not instantiate the method, so the key of the instantiation is
