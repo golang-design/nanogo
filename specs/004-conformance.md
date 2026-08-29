@@ -180,18 +180,16 @@ structural numbers this document does state are gated against that file by
 `TestTheSpecStatesWhatTheRatchetRecords`, so they cannot rot in silence:
 
 - the corpus is **356** files.
-- **196** of them pass.
+- **198** of them pass.
 
-Two more compile and run and are still not recorded. `chanlinear.go` and
-`gcgort.go` pass only when the collector does not run concurrently with a
-pointer store, because [034](034-write-barriers.md) is not built: under
-`GOGC=1` each deadlocks in about one run of two, under
-`GODEBUG=gcstoptheworld=2` neither ever does, and `gccheckmark=1` names the
-object the mark phase loses. A ratchet entry for either would make this gate
-fail on machine load rather than on a change, and the ratchet's own header says
-why that is refused. They go in when the barrier does.
+The last two to go in were `chanlinear.go` and `gcgort.go`. Both compiled and
+ran for two batches before they were recorded, because both passed only when
+the collector did not run concurrently with a pointer store and
+[034](034-write-barriers.md) was not built. A ratchet entry for either would
+have made this gate fail on machine load rather than on a change. They went in
+with the barrier.
 
-The remaining 160 are not failures. They are refusals with a reason, kinds this
+The remaining 158 are not failures. They are refusals with a reason, kinds this
 harness does not carry out, recipes whose compiler flags nanogo has no
 equivalent of, and files this platform excludes. Every one of them is counted
 and named in the report.
@@ -314,7 +312,7 @@ produce correct output with all three broken and fail a week later.
 | Property | How it is checked | State |
 | --- | --- | --- |
 | GC stack maps | Allocation stress with `GOGC=1`, plus `GODEBUG=gccheckmark=1` which makes the collector verify its own marking. The [`stackmap` spike](../spikes/stackmap) is the shape of the test. | built, `ssagen/gc_test.go`, under `gccheckmark=1,clobberfree=1` and `GOGC=1`; the corpus maps every one of the 20,812 functions it lowers |
-| Write barriers | `GODEBUG=gccheckmark=1` under concurrent mutation, and a targeted corpus of the elision cases [034](034-write-barriers.md) allows. | not built; nanogo emits no write barrier, so there is nothing to check |
+| Write barriers | `GODEBUG=gccheckmark=1` under concurrent mutation, and a targeted corpus of the elision cases [034](034-write-barriers.md) allows. | built; `gcgort.go` under `GOGC=1` with `gccheckmark=1` goes from 14 runs in 20 to 20 in 20. The elision corpus is not written and the three directives are parsed and unread |
 | Stack growth | Deep recursion with large frames, forcing `morestack` at every frame size class, with pointers live across the growth. | built for one shape, a 200,000 frame recursion in `ssagen/ssagen_test.go`; the frame size classes are not swept |
 
 These get their own tests because nothing else will produce them.

@@ -209,16 +209,18 @@ behaves the way the same program compiled by `gc` behaves. That is a
 measurement over 97 programs compiled twice and run twice, and a corpus is a
 sample, so it is not a proof.
 
-Two costs the corpus cannot sample for, both silent and neither a refusal:
+One cost the corpus cannot sample for, silent and not a refusal:
 
 | What you write | What happens |
 | --- | --- |
 | a pointer to a local whose address escapes its frame | the pointer outlives the frame, because escape analysis is unbuilt |
-| any pointer store | no write barrier is emitted, so a collection concurrent with the store may free memory that is still reachable |
 
-Neither shows up in a short program that does not collect, which is why the
-corpus does not carry them. Do not put a nanogo-compiled package into a
-program you care about.
+It does not show up in a short program, which is why the corpus does not carry
+it. Do not put a nanogo-compiled package into a program you care about.
+
+Pointer stores now emit a write barrier, so a collection concurrent with a
+store no longer frees memory that is still reachable. That was the second row
+of this table until the barrier was built.
 
 ## What nanogo does not do
 

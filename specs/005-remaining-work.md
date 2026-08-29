@@ -227,16 +227,28 @@ directive is refused by name now. The hole that remains is recorded in
 imported `//go:uintptrescapes` function is still miscompiled, and the refusal
 reads the declaration, so it cannot see that call.
 
-## Write barriers are a defect, not a missing feature
+## Write barriers are built
 
-[034](034-write-barriers.md) records its own correction: the spec first claimed
-the gap was unreachable because the assignment forms that need a barrier were
-all refused. All of those forms compile. Assignment to a local, to a global, to
-a struct field, to a slice element and through a pointer each lower today, and
-none emits a barrier. That is a collector correctness bug that no counter in the
-table above reports, because every probe it would break is refused for some
-other reason first. It belongs with the miscompiles and not with the unbuilt
-rows.
+[034](034-write-barriers.md) records two corrections, and both were found by
+running programs rather than by reading the spec.
+
+The first: the spec claimed the gap was unreachable because every assignment
+form that needs a barrier was refused. All of those forms compile. Assignment
+to a local, to a global, to a struct field, to a slice element and through a
+pointer each lower, and for as long as none emitted a barrier that was a
+collector correctness bug no counter in the table above reported, because every
+probe it would break was refused for some other reason first.
+
+The second: the spec described `gc`'s *older* barrier, the one that performs
+the store itself. Implementing that shape would have stored twice on one path
+or not at all on the other. `gc`'s barrier is buffered, the store is
+unconditional and stands on both paths, and the spec now takes the shape from
+`gc`'s own disassembly.
+
+`ssa/writebarrier.go` is the pass. Go's `test/gcgort.go` goes from 14 runs in
+20 to 20 in 20 under `GOGC=1` with `GODEBUG=gccheckmark=1`. What remains is the
+directive check: `//go:nowritebarrier` and its two relatives are parsed and
+nothing reads them.
 
 ## The critical path to G1, which is longer than the graph suggests
 
@@ -268,8 +280,7 @@ One caveat [001](001-bootstrap-gates.md) states about its own gate, repeated
 here because it decides how much G1 is worth: $N_2 = N_3$ is necessary and not
 sufficient. A compiler that miscompiles a construct it does not itself use
 reaches the fixed point while being wrong, and so does one whose miscompile
-reproduces stably. The three `wrong` probes are exactly that failure mode, and
-so is every missing write barrier.
+reproduces stably. The three `wrong` probes are exactly that failure mode.
 
 ## What is not decided
 

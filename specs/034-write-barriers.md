@@ -18,55 +18,67 @@ those stores observable.
 A missing write barrier does not fail a test. It frees a live object under
 concurrent marking, some of the time.
 
-## Nothing here is built, and the absence is a defect
+## What is built
 
-**nanogo emits no write barrier.** Not one, anywhere, under any condition. No
-pass reads `runtime.writeBarrier` and no rule builds the diamond.
+`ssa/writebarrier.go` is the pass. It runs between instruction selection and
+register allocation (`driver/compile.go`), walks every block, and replaces each
+pointer store into memory the collector may own with the diamond below.
 
-Two of the pieces exist. `rtsym` carries all eight `runtime.gcWriteBarrier`
-entry points and the flag, each checked against the runtime's own source, and
-`ssa.OpARM64LoweredWB` is the operation with its encoder. What is missing is
-the pass: the walk that decides which stores need a barrier, and the block
-surgery that turns one store into the diamond above. `ssa.Edit.Guard` is the
-primitive for the cut, and the join needs a memory phi, which is the part no
-existing pass in this compiler builds.
+The position in the pipeline is the whole of the design and both sides of it
+are forced. It runs **after** selection because the values it inserts are
+machine operations, and a target-neutral barrier would need a rule to select
+with nothing to choose between. It runs **before** allocation so that the call
+it makes is a safepoint like any other: the allocator spills what is live
+across it and [027](027-liveness-and-stackmaps.md) describes the frame at it.
+Critical-edge splitting runs after the pass and repairs the edges the diamond
+creates.
 
-Go's own `test/chanlinear.go` samples the gap. Under `GOGC=1` with the
-collector concurrent it deadlocks in about one run of two; under
-`GODEBUG=gcstoptheworld=2` it never does; and `gccheckmark=1` names the object
-it loses, a capture of a two-capture closure whose descriptor and pointer mask
-are both correct. The mask being right and the object still being lost is the
-whole of this spec in one measurement.
-
-The three directives reach no check. `driver/pragma.go` recognises
+The three directives still reach no check. `driver/pragma.go` recognises
 `//go:nowritebarrier`, `//go:nowritebarrierrec` and `//go:yeswritebarrierrec`
-and stores a bit for each, with `nowritebarrierrec` implying `nowritebarrier`.
-Nothing reads those bits, which is consistent: a check that rejects a barrier
-has nothing to reject.
+and stores a bit for each. Nothing reads those bits, so a function that
+forbids a barrier is not told when it gets one. That check is the remaining
+work in this spec, and it matters only for runtime code, which nanogo does not
+compile.
 
-The condition this spec sets for itself is the first pointer store to a heap
-location that nanogo emits, and **nanogo emits them today**. Two rows of the
-table below that the design marks *required* are already reachable:
+The elision rules at the end have one analysis behind them and not two. A
+destination that is provably `ADDframe` is a frame slot and gets no barrier.
+The "freshly allocated and not yet published" row needs
+[023](023-escape-analysis.md), which is `draft`, so that row is unavailable and
+the barrier is emitted there.
 
-- **A pointer into a global.** `var sink []int` with `sink = make([]int, 3)`
-  compiles, and the header's pointer word reaches `main.sink` as a plain `MOVD`
-  into the symbol's address, with no flag test before it.
-- **A pointer into a heap object.** `make([]*int, 2)` lowers to
-  `runtime.makeslice` (`ir/lower.go`), and `ps[0] = &n` stores the pointer into
-  the memory it returned, again unconditionally. `new(T)` and the address of a
-  composite literal lower to `runtime.newobject` in the same file, and nothing
-  elides either call.
+### How it was measured
 
-So this spec is a plan for the design and a record of a live defect for the
-code. Every program nanogo compiles that allocates and then stores a pointer
-runs with the barrier missing. What hides it is the size of the programs nanogo
-compiles: the failure needs a collection to run concurrently with such a store,
-and a program small enough to compile at all rarely reaches one. The absence is
-silent, not harmless.
+Go's own `test/gcgort.go` is the program that samples the gap, under `GOGC=1`
+with `GODEBUG=gccheckmark=1`:
 
-The elision rules at the end of this spec have no analysis behind them either.
-[023](023-escape-analysis.md) is `draft`, so nothing decides whether a variable
-escapes, and both provable cases below are unavailable.
+| | without the barrier | with it |
+| --- | --- | --- |
+| `gcgort.go`, 20 runs | 14 pass | 20 pass |
+| `gcgort.go`, 20 runs, no checkmark | 18 pass | 20 pass |
+
+`test/chanlinear.go` samples the same gap and samples it by machine load: it
+deadlocked in about one run of two on a busy machine and passed 20 of 20 on a
+quiet one, with and without the barrier. A file that only fails under load is
+evidence when it fails and is not evidence when it passes, which is why the
+table above is `gcgort.go`.
+
+### The defect this pass introduced, and what now catches it
+
+The first version of the pass made its own `OpSB` rather than reusing the one
+lowering had already put in the entry block, and typed it with the pointer
+type an interface's data word carries. The two spellings of a machine word
+differ in their pointer map and in nothing else, so the frame then had a spill
+slot that the locals bitmap called a pointer and that held the static base.
+`runtime.adjustpointers` reads exactly those words when a stack grows under
+the frame, and Go's own `test/linkmain_run.go` stopped with `bad pointer in
+frame main.main` on every run.
+
+Two things close it. `ssa/decompose.go` now writes both machine-word pointer
+types in one place, `unsafePtrType` and `machinePtrType`, with the reason they
+differ next to them. And `ssa/verify.go` gains `InvOneBase`: a function has at
+most one `OpSP` and one `OpSB`, and neither may carry a type that holds a
+pointer. Any future pass that makes a second base fails verification in the
+compiler rather than in the collector.
 
 ## When a barrier is required
 
