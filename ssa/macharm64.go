@@ -431,7 +431,12 @@ var arm64Ops = [opARM64End - OpARM64ADD]arm64Op{
 	// A call by the allocator's reckoning, so that every value live across it
 	// is spilled. gcWriteBarrier2 clobbers less than that, and the difference
 	// is instructions and never correctness.
-	OpARM64LoweredWB - OpARM64ADD: ai("ARM64LoweredWB", -1, encWB).takes().makes().callop().w64(),
+	// It takes memory and does not make it. The barrier writes into the P's
+	// own buffer, which no part of the program can read, so there is nothing
+	// for a later load to be ordered against. The two stores that fill the
+	// buffer take the pointer this returns as an argument, so they cannot move
+	// in front of it either way.
+	OpARM64LoweredWB - OpARM64ADD: ai("ARM64LoweredWB", -1, encWB).takes().callop().w64(),
 
 	OpARM64FADD - OpARM64ADD:  ai("ARM64FADD", 2, encFArith).comm(),
 	OpARM64FSUB - OpARM64ADD:  ai("ARM64FSUB", 2, encFArith),

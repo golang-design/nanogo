@@ -187,8 +187,21 @@ func TestARM64OpTable(t *testing.T) {
 		if row.info.constant && row.info.argLen != 0 {
 			t.Errorf("%v is constant and takes %d arguments", op, row.info.argLen)
 		}
-		if row.info.call && !(row.info.takesMem && row.info.makesMem) {
-			t.Errorf("%v is a call and does not thread memory", op)
+		// A call takes memory: the callee reads what the caller wrote.
+		//
+		// A call makes memory too, with one exception, and the exception is
+		// the whole of the difference between a call that returns a value and
+		// a call that returns memory. A value has one result. The write
+		// barrier's call returns the address of the pair of words the barrier
+		// fills, so it cannot also return memory, and it does not need to:
+		// what it writes is the P's own buffer, which no part of the program
+		// can load, so no later value has anything to be ordered against it
+		// for. gc's own ARM64 LoweredWB has this shape and for this reason.
+		if row.info.call && !row.info.takesMem {
+			t.Errorf("%v is a call and does not take memory", op)
+		}
+		if row.info.call && !row.info.makesMem && op != OpARM64LoweredWB {
+			t.Errorf("%v is a call, makes no memory, and is not the write barrier", op)
 		}
 		if row.info.commutative && row.info.argLen != 2 {
 			t.Errorf("%v is commutative with %d arguments", op, row.info.argLen)

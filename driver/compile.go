@@ -1100,6 +1100,11 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 		{"verification after the ABI assignment", func() error { return verify(f) }},
 		{"lowering", func() error { ssa.Lower(f, rules.ARM64); return nil }},
 		{"verification after lowering", func() error { return verify(f) }},
+		// The barrier is inserted after selection, because the values it
+		// inserts are machine operations, and before allocation, so that the
+		// call it makes is a safepoint like any other.
+		{"write barriers", func() error { ssa.WriteBarriers(f); return nil }},
+		{"verification after the write barriers", func() error { return verify(f) }},
 		{"register allocation", func() (err error) {
 			ssa.SplitCriticalEdges(f)
 			a, err = ssa.Allocate(f, target)

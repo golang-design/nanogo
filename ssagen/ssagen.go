@@ -1364,6 +1364,22 @@ func (e *emitter) callValue(v *ssa.Value) {
 		w, ok := arm64.Bl(0)
 		e.wordIf(w, ok, "BL %s", c.name)
 	}
+	if v.Op == ssa.OpARM64LoweredWB {
+		// The barrier returns its buffer pointer in R25 and follows no Go
+		// convention, so the value is not a result the placement walk knows
+		// about. The move is here rather than in the operation's own encoder
+		// because a call is emitted by this function and never reaches one.
+		//
+		// It is the instruction after the branch and nothing may come between:
+		// R25 is also the third reload register specs/026 reserves, so a spill
+		// placed between the two would destroy the pointer.
+		dst, ok := e.reg(e.a.Result[v.ID])
+		if !ok {
+			return
+		}
+		e.word(arm64.MovRegReg(arm64.Size64, dst, arm64.RegWBBuf))
+		return
+	}
 	e.results(v)
 }
 
