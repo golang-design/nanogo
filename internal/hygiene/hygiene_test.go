@@ -69,8 +69,7 @@ func TestNoAccidentalPlatformConstraint(t *testing.T) {
 		}
 		name := d.Name()
 		if d.IsDir() {
-			if name == ".git" || name == "spikes" || name == "testdata" ||
-				name == "upstream" || strings.HasPrefix(name, "_") {
+			if skipDir(name) {
 				return filepath.SkipDir
 			}
 			return nil
