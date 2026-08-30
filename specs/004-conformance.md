@@ -104,10 +104,29 @@ with the message, and the sweep continues. What fails the build is narrower and
 sharper:
 
 $$
-\mathrm{fail} \iff \exists P:\; \mathrm{run}(\mathrm{compile}(\mathrm{nanogo}, P)) \neq \mathrm{run}(\mathrm{compile}(gc, P))
+\mathrm{fail} \iff \exists P \in C:\; \mathrm{class}(P) \in \{\texttt{mismatched}, \texttt{crashed}, \texttt{false-error}\}
 $$
 
 and, separately, any file that passed yesterday and does not today.
+
+The three are one rule and not three: each says nanogo did something wrong,
+where every other class says nanogo has not built something yet. A mismatch is
+a program whose behaviour is not `gc`'s, a crash is a panic, and a false error
+is a diagnostic against a program `gc` accepts.
+
+The ratchet below does not cover the second and third on its own. It records
+passes, so it catches a file that was `matched` and now panics. It records
+nothing about a file it never passed, so a file that was `refused` and now
+panics moves between two classes it does not hold and the build stays green.
+Most of the corpus is refusals, so most of the corpus sits in that blind spot,
+which is what this rule closes.
+
+`timed-out` is deliberately not in the set. A timeout is either an infinite
+loop nanogo generated or a corpus program slower than the budget, and the
+harness cannot tell the two apart, so gating it would fail the build on machine
+load rather than on a change. `missed` is not in it either: a checker that does
+not report an error yet is a thing unbuilt, which is the class this rule is
+defined against.
 
 #### Every file lands in exactly one class
 

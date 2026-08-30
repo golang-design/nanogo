@@ -118,9 +118,28 @@ func (c Class) IsPass() bool {
 // IsFailure reports whether a class fails the build on its own, with no
 // ratchet involved.
 //
-// Only a mismatch does. Everything else is either a pass, an honest refusal,
-// or a gap that the ratchet catches when it moves backwards.
-func (c Class) IsFailure() bool { return c == ClassMismatched }
+// Three classes do, and they are the three that say nanogo is wrong rather
+// than incomplete: it miscompiled a program, it panicked, or it rejected legal
+// Go. A refusal is none of those and never becomes a failure.
+//
+// The ratchet does not cover these on its own. It records passes, so it
+// catches a file that used to be [ClassMatched] and is now [ClassCrashed]. It
+// records nothing about a file it never passed, so a file that was
+// [ClassRefused] and now panics moves between two unrecorded classes and the
+// build stays green. That is the regression this gate catches and the ratchet
+// cannot: the corpus is mostly refusals, so most of it sits in the blind spot.
+//
+// All three classes were empty when this was written, which is the only time
+// such a gate can be added without freezing a known bug in place.
+//
+// [ClassTimedOut] and [ClassMissed] are left out on purpose and are not
+// oversights. A timeout is either an infinite loop nanogo generated or a
+// corpus program slower than the budget, and this package cannot tell the two
+// apart, so gating it would fail the build on machine load. A miss is a gap in
+// the checker, which is a thing not yet built rather than a thing done wrong.
+func (c Class) IsFailure() bool {
+	return c == ClassMismatched || c == ClassCrashed || c == ClassFalseError
+}
 
 // Refusal detection.
 //

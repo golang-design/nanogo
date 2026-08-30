@@ -91,16 +91,17 @@ func TestCorpus(t *testing.T) {
 	checkRatchet(t, rep)
 }
 
-// reportFailures fails the build for every miscompilation, in full.
+// reportFailures fails the build for every file nanogo got wrong, in full.
 //
-// A file nanogo refuses is not a failure and never becomes one. A file nanogo
-// compiled into a program that behaves differently from gc's build of the same
-// source is a miscompilation, and it is the most valuable thing this corpus
-// can find, so all of it is printed rather than a count.
+// A file nanogo refuses is not a failure and never becomes one. Three classes
+// are, and [gotest.Class.IsFailure] names them: a program that behaves
+// differently from gc's build of the same source, a panic, and a diagnostic
+// against legal Go. Each is printed whole rather than counted, because a count
+// tells a reader that something is wrong and not what.
 func reportFailures(t *testing.T, rep *gotest.Report) {
 	t.Helper()
 	for _, v := range rep.Failures() {
-		t.Errorf("MISCOMPILATION in %s (%s)\n%s", v.File, v.Kind, v.Detail)
+		t.Errorf("%s in %s (%s)\n%s", strings.ToUpper(string(v.Class)), v.File, v.Kind, v.Detail)
 	}
 }
 

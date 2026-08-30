@@ -7,6 +7,7 @@ package gotest
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -367,5 +368,74 @@ func TestNormalizeStderrDropsATemporaryDirectorysName(t *testing.T) {
 	plain := "/usr/local/go/test/x.go:3: bad"
 	if got := NormalizeStderr(plain); got != plain {
 		t.Errorf("an ordinary path became %q", got)
+	}
+}
+
+// TestAClassThatSaysNanogoIsWrongFailsTheBuild pins the three classes that
+// fail on their own against the ones that do not.
+//
+// The distinction is not severity, it is what the class asserts. A failure
+// class says nanogo did something wrong: it miscompiled, it panicked, or it
+// rejected legal Go. Every other class says nanogo has not built something
+// yet, or says nothing about nanogo at all.
+//
+// It is written as the full set rather than as three assertions so that a new
+// class cannot be added without a decision being recorded here. A class this
+// table does not name fails the test.
+func TestAClassThatSaysNanogoIsWrongFailsTheBuild(t *testing.T) {
+	fails := map[Class]bool{
+		ClassMismatched: true,
+		ClassCrashed:    true,
+		ClassFalseError: true,
+
+		ClassMatched:              false,
+		ClassCompiled:             false,
+		ClassRejected:             false,
+		ClassRefused:              false,
+		ClassWrongPosition:        false,
+		ClassMissed:               false,
+		ClassTimedOut:             false,
+		ClassOracleFailed:         false,
+		ClassPlatformExcluded:     false,
+		ClassNoRecipe:             false,
+		ClassKindNotImplemented:   false,
+		ClassRecipeNotImplemented: false,
+		ClassRecipeSaysSkip:       false,
+	}
+	for _, c := range Classes {
+		want, named := fails[c]
+		if !named {
+			t.Errorf("class %q is not in this table, so nothing decided whether it fails the build", c)
+			continue
+		}
+		if got := c.IsFailure(); got != want {
+			t.Errorf("%q.IsFailure() = %v, want %v", c, got, want)
+		}
+	}
+	if len(fails) != len(Classes) {
+		t.Errorf("the table names %d classes and Classes holds %d", len(fails), len(Classes))
+	}
+}
+
+// TestFailuresCarriesEveryClassThatSaysNanogoIsWrong reads the same rule
+// through the report, which is what the corpus test calls.
+//
+// The two are not the same check. IsFailure is the rule and Failures is the
+// only path that reaches the corpus gate, and a report that dropped a class on
+// the way would leave the rule true and the build green.
+func TestFailuresCarriesEveryClassThatSaysNanogoIsWrong(t *testing.T) {
+	rep := &Report{Files: 4, Verdicts: []Verdict{
+		{File: "a.go", Kind: "run", Class: ClassMatched},
+		{File: "b.go", Kind: "run", Class: ClassCrashed, Reason: "panic"},
+		{File: "c.go", Kind: "run", Class: ClassFalseError, Reason: "c.go:1:1: undefined: x"},
+		{File: "d.go", Kind: "run", Class: ClassRefused, Reason: "nanogo cannot compile x"},
+	}}
+	var got []string
+	for _, v := range rep.Failures() {
+		got = append(got, v.File)
+	}
+	want := []string{"b.go", "c.go"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Failures() named %v, want %v", got, want)
 	}
 }
