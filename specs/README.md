@@ -23,7 +23,7 @@ reader knows before opening a spec whether it describes code or a plan:
 | `in progress` | part of it is built, and the spec says which part |
 | `draft` | nothing in it is built |
 
-43 specs, and the index below is the only place their statuses are counted, so
+44 specs, and the index below is the only place their statuses are counted, so
 that no second copy can drift from it. A third of the deck is still `draft`,
 which is to say still a plan, and now says so.
 
@@ -127,6 +127,7 @@ believed.
 | [044](044-plan9-assembler.md) | Plan 9 assembler | `draft` | G3; not written |
 | [045](045-linker.md) | Linker | `in progress` | G2; the object reader and reachability agree with `cmd/link`; addresses, `pclntab` and `moduledata` not written |
 | [046](046-debug-info.md) | Debug information | `in progress` | tracebacks built, DWARF not |
+| [047](047-abi-wrappers.md) | ABI wrappers | `draft` | G3; ABI0, `-symabis`, `-asmhdr` and `args_stackmap`; not written |
 
 ### Driver
 
