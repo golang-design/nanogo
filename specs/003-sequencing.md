@@ -233,20 +233,20 @@ reach for no construct nanogo refuses. [060](060-selfhost.md) owns that census
 and the refusal each of the others gives.
 
 The corpus says how much narrower. The IR builder produces a typed tree for
-536 packages of the Go distribution, 41,802 functions and 4,255,234 nodes. The
+536 packages of the Go distribution, 41,984 functions and 4,257,445 nodes. The
 reach past that point is two numbers, not one, because the driver runs
 [020](020-ir.md)'s lowering pass before SSA construction and the corpus
 measures both orders:
 
 | Measurement | Functions |
 | --- | --- |
-| reach SSA construction with no lowering pass | 21,380 |
-| get past construction once the lowering pass has run, which is what the driver does | 41,500 |
-| lower completely to arm64 machine operations | 21,324 |
-| carry a stack map | 21,324 |
+| reach SSA construction with no lowering pass | 21,487 |
+| get past construction once the lowering pass has run, which is what the driver does | 41,893 |
+| lower completely to arm64 machine operations | 21,438 |
+| carry a stack map | 21,438 |
 
-**21,380 of those functions reach SSA construction** without the pass. 21,324
-of the 21,380 carry a stack map, over 120,493 safepoints, and 10,727 of them
+**21,487 of those functions reach SSA construction** without the pass. 21,438
+of the 21,487 carry a stack map, over 120,493 safepoints, and 10,727 of them
 have a pointer bit set. 162 have a stack object.
 
 Construction refuses the rest by name. The causes below are measured without
@@ -380,8 +380,8 @@ the remainder is values wider than a machine register, went with it.
 **Then construction learned the assignment statement and both numbers moved
 again.** `ssa/build.go` had no case for `ir.OAssign`, none for `ir.OCase`, and
 read a `for` statement's post list out of `Else` rather than `Post`. The three
-were 25,036 refusals and one miscompile. The corpus now reports 21,380 reaching
-SSA and 21,324 lowering, so the identity that held while the accepted set was
+were 25,036 refusals and one miscompile. The corpus now reports 21,487 reaching
+SSA and 21,438 lowering, so the identity that held while the accepted set was
 small is gone: what is left undecomposed is 14 functions holding a wide
 `SelectN`, 6 holding an array and 31 holding a struct, and 57 of them do not
 lower.
