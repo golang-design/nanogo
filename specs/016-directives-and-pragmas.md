@@ -213,8 +213,15 @@ The G1 requirement rests on the distribution and not on nanogo's own source.
 nanogo compiles the standard library and the runtime, which use `unsafe`
 throughout, and five intrinsics are already IR nodes: `ir/build.go` builds
 `unsafe.Add`, `Slice`, `SliceData`, `String` and `StringData`. `Sizeof`,
-`Alignof` and `Offsetof` never reach the builder at all, because the checker
-folds them to constants.
+`Alignof` and `Offsetof` reach the builder in one case. The checker folds them
+to constants everywhere else, and the specification leaves them non-constant
+when the type of the operand is a type parameter, which is where
+`internal/strconv` and `internal/runtime/gc/scan` write them.
+[013](013-generics.md) stencils in full, so the type argument is already in
+place when the body is built and `ir/build.go` folds the three there, from this
+compiler's own layout rather than from the checker's `Sizes`. They add no node
+to [020](020-ir.md): the result is a `uintptr` constant, and the operand is not
+evaluated.
 
 ## Testing
 

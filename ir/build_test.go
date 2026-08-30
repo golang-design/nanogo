@@ -1396,6 +1396,105 @@ func TestBuildLoweringTable(t *testing.T) {
 	}
 }
 
+// TestBuildFoldsTheUnsafeLayoutBuiltinsOfAnInstantiation is the one case in
+// which unsafe.Sizeof, unsafe.Alignof and unsafe.Offsetof reach the builder.
+//
+// The three are constant expressions and the checker folds them, except when
+// the type of the operand is a type parameter. The specification says the
+// result is not constant there, and types2 decides it in hasVarSize: the call
+// is recorded with type uintptr and no value. internal/strconv and
+// internal/runtime/gc/scan both write such a call and both stopped here.
+//
+// specs/013-generics.md stencils in full, so the type argument is already in
+// place when the body is built and every number below is known. The test pins
+// the numbers and not only that the build was accepted, because a fold that
+// returns zero also builds.
+func TestBuildFoldsTheUnsafeLayoutBuiltinsOfAnInstantiation(t *testing.T) {
+	p := buildSource(t, `type Pad struct {
+		h byte
+		w int64
+	}
+
+	type Wrap[T any] struct {
+		h byte
+		f T
+	}
+
+	func sizeOf[T any](x T) uintptr  { return unsafe.Sizeof(x) }
+	func alignOf[T any](x T) uintptr { return unsafe.Alignof(x) }
+	func offOf[T any](w Wrap[T]) uintptr { return unsafe.Offsetof(w.f) }
+	func offPtr[T any](w *Wrap[T]) uintptr { return unsafe.Offsetof(w.f) }
+	func embedded[T any](e struct{ h byte; Wrap[T] }) uintptr { return unsafe.Offsetof(e.f) }
+
+	func user() {
+		sink(sizeOf(int32(0)), sizeOf(Pad{}), sizeOf([3]int16{}), sizeOf("s"))
+		sink(alignOf(int32(0)), alignOf(Pad{}), alignOf(byte(0)))
+		sink(offOf(Wrap[int64]{}), offOf(Wrap[byte]{}))
+		sink(offPtr(&Wrap[int64]{}))
+		sink(embedded(struct{ h byte; Wrap[int32] }{}))
+	}`)
+
+	// Pad is byte then int64, so it is 8-aligned and 16 bytes with the
+	// padding. [3]int16 is 6 bytes at alignment 2, and a string is two words.
+	// Wrap[T] puts one byte before T, so the offset of f is the alignment of
+	// T rounded up from 1. The embedded case adds one more byte in front of
+	// Wrap[int32], whose own alignment is 4, so the field is at 4+1 rounded
+	// up to 4, which is 8.
+	for _, tc := range []struct {
+		fn   string
+		want int64
+	}{
+		{"sizeOf[int32]", 4},
+		{"sizeOf[p.Pad]", 16},
+		{"sizeOf[[3]int16]", 6},
+		{"sizeOf[string]", 16},
+		{"alignOf[int32]", 4},
+		{"alignOf[p.Pad]", 8},
+		{"alignOf[byte]", 1},
+		{"offOf[int64]", 8},
+		{"offOf[byte]", 1},
+		{"offPtr[int64]", 8},
+		{"embedded[int32]", 8},
+	} {
+		fn := buildFuncOf(t, p, tc.fn)
+		n := buildFirst(t, fn, OConst)
+		if n.Type.Kind != Uintptr {
+			t.Errorf("%s folds to a %s, want uintptr", tc.fn, n.Type)
+		}
+		cv, ok := n.Val.(ConstValue)
+		if !ok {
+			t.Fatalf("%s folds to %v, which is not a numeric constant", tc.fn, n.Val)
+		}
+		got, exact := cv.Int64()
+		if !exact || got != tc.want {
+			t.Errorf("%s folds to %v, want %d", tc.fn, n.Val, tc.want)
+		}
+	}
+}
+
+// TestBuildDoesNotEvaluateTheOperandOfAnUnsafeLayoutBuiltin is the second half
+// of the rule: the result depends on the type alone, so the operand is not
+// evaluated. gc's writer records the type of the operand and never walks the
+// expression, so unsafe.Sizeof(g()) does not call g, and a builder that read
+// the operand would emit the call.
+func TestBuildDoesNotEvaluateTheOperandOfAnUnsafeLayoutBuiltin(t *testing.T) {
+	p := buildSource(t, `func effect[T any](x T) T { sink(x); return x }
+
+	func size[T any](x T) uintptr { return unsafe.Sizeof(effect(x)) }
+
+	func user() { sink(size(int32(0))) }`)
+
+	fn := buildFuncOf(t, p, "size[int32]")
+	if calls := buildFind(fn, OCall); len(calls) != 0 {
+		t.Errorf("the operand of unsafe.Sizeof was evaluated:\n%s", buildDump(fn))
+	}
+	for _, sym := range stencilSyms(p) {
+		if strings.HasPrefix(sym, "p.effect[") {
+			t.Errorf("%s was instantiated for an operand nothing evaluates", sym)
+		}
+	}
+}
+
 // TestBuildPackageInitialisation is the table's last row: one init function,
 // ordered by specs/012-type-checking.md.
 func TestBuildPackageInitialisation(t *testing.T) {

@@ -3279,14 +3279,141 @@ func (b *builder) builtin(x *syntax.CallExpr, fun syntax.Expr) Expr {
 		return &Node{Op: OUnsafeString, Pos: pos, Type: t, X: arg(0), Y: arg(1)}
 	case "unsafe.StringData":
 		return &Node{Op: OUnsafeStringData, Pos: pos, Type: t, X: arg(0)}
+
+	// unsafe.Sizeof, unsafe.Alignof and unsafe.Offsetof are constant in a
+	// program that declares no generic, and the checker folded those before
+	// this pass saw them. The specification leaves one case non-constant: an
+	// operand whose type is a type parameter, because the size of a type
+	// parameter is not known where the generic is written. types2 decides that
+	// in hasVarSize and records the result as a value rather than as a
+	// constant, and a probe of "func f[T any](x T) uintptr { return
+	// unsafe.Sizeof(x) }" confirms it: Info.Types has type uintptr and a nil
+	// Value for the call.
+	//
+	// specs/013-generics.md stencils a generic in full, one body per list of
+	// type arguments, so the type parameter has already been substituted by
+	// the time an operand type reaches here. The size, the alignment and the
+	// offset are known numbers, and the node is that number rather than a
+	// computation the program runs.
+	//
+	// The layout is this compiler's own, taken from irType, and not the
+	// checker's Sizes. Two sources for one number is two answers whenever they
+	// disagree, and the number the program must see is the layout the code
+	// generator emits. gc reaches the same three the same way and at the same
+	// point: writer.go records only the type of the operand, and reader.go
+	// turns that into ir.NewUintptr of Size, of Alignment, and of the sum of
+	// the field offsets along the selection.
+	//
+	// The operand is not evaluated. The result depends on the type alone, and
+	// gc's writer walks the type and never the expression, so
+	// unsafe.Sizeof(g()) does not call g. That is why these cases read typeOf
+	// and never arg.
+	//
+	// A type parameter that survived substitution has no size to read. It does
+	// not reach a wrong constant, because irType refuses it by name in
+	// convert.go and the build fails with that error.
+	case "unsafe.Sizeof":
+		lt, ok := b.layoutOf(x, name)
+		if !ok {
+			return b.badExpr(pos)
+		}
+		return b.uintptrConst(pos, t, lt.Size)
+	case "unsafe.Alignof":
+		lt, ok := b.layoutOf(x, name)
+		if !ok {
+			return b.badExpr(pos)
+		}
+		return b.uintptrConst(pos, t, lt.Align)
+	case "unsafe.Offsetof":
+		return b.offsetof(x, pos, t)
 	}
 
-	// Every builtin the language has is a case above, and the ones that are
-	// always constant were folded by the checker before this pass saw them.
-	// Reaching here is a builtin the language grew, and naming it is better
-	// than encoding it as something it is not.
+	// Every builtin the language has is a case above. Reaching here is a
+	// builtin the language grew, and naming it is better than encoding it as
+	// something it is not.
 	b.errorf("ir: no node for the builtin %s", name)
 	return b.badExpr(pos)
+}
+
+// uintptrConst is the result of one of the three unsafe operations that read
+// a layout. The type is the checker's, which is uintptr for all three.
+func (b *builder) uintptrConst(pos syntax.Pos, t *Type, v int64) Expr {
+	return &Node{Op: OConst, Pos: pos, Type: t, Val: Const{Val: constant.MakeInt64(v)}}
+}
+
+// layoutOf is the laid-out type of the single operand of unsafe.Sizeof and
+// unsafe.Alignof.
+//
+// The checker accepts exactly one operand and rejects every other arity, so a
+// call with another one is a tree this walk did not come from. It is refused
+// rather than indexed, because a compiler that panics reports nothing about
+// the program it was given.
+func (b *builder) layoutOf(x *syntax.CallExpr, name string) (*Type, bool) {
+	if len(x.ArgList) != 1 {
+		b.errorf("ir: %s with %d operands", name, len(x.ArgList))
+		return nil, false
+	}
+	return b.irType(b.typeOf(x.ArgList[0])), true
+}
+
+// offsetof folds unsafe.Offsetof.
+//
+// The checker already rejected an operand that is not a selector and one whose
+// field is reached through a pointer, so the selection here is a chain of
+// direct fields. Selection.Index is that chain, one index per struct on the
+// way down, and the offset is the sum of the field offsets along it. The base
+// is the type of the operand of the selector with one pointer removed, because
+// unsafe.Offsetof(p.f) is written on a pointer as often as on a value and the
+// checker accepts both.
+//
+// The field order of an IR struct is the declaration order of the checker's
+// struct, which convert.go keeps for this reason, so one index selects the
+// same field in both.
+func (b *builder) offsetof(x *syntax.CallExpr, pos syntax.Pos, t *Type) Expr {
+	if len(x.ArgList) != 1 {
+		b.errorf("ir: unsafe.Offsetof with %d operands", len(x.ArgList))
+		return b.badExpr(pos)
+	}
+	selx, _ := syntax.Unparen(x.ArgList[0]).(*syntax.SelectorExpr)
+	if selx == nil {
+		b.errorf("ir: the operand of unsafe.Offsetof is not a selector")
+		return b.badExpr(pos)
+	}
+	sel := b.info.Selections[selx]
+	if sel == nil {
+		b.errorf("ir: unsafe.Offsetof has no selection for %s", selx.Sel.Value)
+		return b.badExpr(pos)
+	}
+	cur := b.typeOf(selx.X)
+	if p, ok := coreType(cur).(*types2.Pointer); ok {
+		cur = p.Elem()
+	}
+	var off int64
+	for _, i := range sel.Index() {
+		st := b.irType(cur)
+		if st.Kind != Struct || i >= len(st.Fields) {
+			b.errorf("ir: unsafe.Offsetof reaches field %d of %s, which is not a struct field", i, st)
+			return b.badExpr(pos)
+		}
+		off += st.Fields[i].Offset
+		cur = fieldType(cur, i)
+		if cur == nil {
+			b.errorf("ir: unsafe.Offsetof cannot follow field %d of %s", i, st)
+			return b.badExpr(pos)
+		}
+	}
+	return b.uintptrConst(pos, t, off)
+}
+
+// fieldType is the type of field i of a struct type, and is how offsetof walks
+// down an embedded chain. It reads the checker's type rather than the IR type
+// so that the next step down converts and lays out the same way the first did.
+func fieldType(t types2.Type, i int) types2.Type {
+	st, ok := coreType(t).(*types2.Struct)
+	if !ok || i >= st.NumFields() {
+		return nil
+	}
+	return st.Field(i).Type()
 }
 
 // anyType is the empty interface, which is the type of the operand of panic
