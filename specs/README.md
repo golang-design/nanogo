@@ -23,7 +23,7 @@ reader knows before opening a spec whether it describes code or a plan:
 | `in progress` | part of it is built, and the spec says which part |
 | `draft` | nothing in it is built |
 
-44 specs, and the index below is the only place their statuses are counted, so
+45 specs, and the index below is the only place their statuses are counted, so
 that no second copy can drift from it. A third of the deck is still `draft`,
 which is to say still a plan, and now says so.
 
@@ -91,6 +91,7 @@ believed.
 | [014](014-package-loader.md) | Package loader | `in progress` | `go list` at G1, direct resolution at G2 |
 | [015](015-export-data.md) | Export data | `in progress` | `gc`-compatible; both directions work and `gc` inlines a body nanogo wrote, a generic declaration is refused |
 | [016](016-directives-and-pragmas.md) | Directives and pragmas | `in progress` | the complete `//go:` table; fourteen verbs are recorded and no pass reads one |
+| [017](017-export-data-reading.md) | Export data reading | `in progress` | compiling against dependencies nanogo built; the reader takes nanogo's own archives and G1 stops at the linker |
 
 ### Middle end
 
