@@ -210,7 +210,7 @@ compiles however many of them it takes.
 
 Nothing the probe corpus reaches. Every program in it that nanogo compiles
 behaves the way the same program compiled by `gc` behaves. That is a
-measurement over 97 programs compiled twice and run twice, and a corpus is a
+measurement over 98 programs compiled twice and run twice, and a corpus is a
 sample, so it is not a proof.
 
 One cost the corpus cannot sample for, silent and not a refusal:
@@ -408,8 +408,17 @@ above is what stops the rest, and each entry is a row of that lowering table
 that no pass performs, or the type descriptor those rows need.
 
 So the back half of the compiler is real and the front of the middle end is not
-finished. What stands between here and
-[`specs/060`](specs/060-selfhost.md)'s fixed point is the language itself.
+finished.
+
+What stands between here and [`specs/060`](specs/060-selfhost.md)'s fixed point
+is no longer the language. Every one of nanogo's own 19 library packages now
+compiles, each measured on its own against dependencies `gc` built, and
+`internal/selfhost` runs that measurement so a package leaving the set fails
+the build. Two things are left and neither is a construct. nanogo has to read
+export data nanogo wrote, because today every package it compiles imports
+archives `gc` produced, and it has to write the wrapper between an assembly
+definition and a Go call, which is what refuses 8 of the 27 standard library
+packages the smallest program needs.
 
 ## Specs
 

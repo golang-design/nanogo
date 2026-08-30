@@ -163,6 +163,12 @@ What nanogo compiles:
 	so gc stencils each of them out of the archive nanogo wrote
 	(specs/013-generics.md).
 
+	A generic another package declares, instantiated here. Both a function
+	and a type with methods, so a package that names sync/atomic.Pointer
+	compiles. The body is in the declaring package's archive, and nanogo
+	reads it and walks it into its own tree, refusing by name any node
+	kind it does not map (specs/015-export-data.md).
+
 What nanogo refuses, by name, with the reason:
 
 	Taking the address of a variable the compiler keeps in a register.
@@ -170,16 +176,6 @@ What nanogo refuses, by name, with the reason:
 	A method with type parameters of its own, such as (T).M[X any].
 	Instantiating the receiver does not instantiate the method, so the
 	key of the instantiation is not the list on the selector alone.
-
-	A package that names a generic type another package declared that has
-	methods, such as sync/atomic.Pointer. A file's export data is the
-	linked form, so the foreign type goes into it whole, and the body of
-	each of its methods is in that package's archive
-	(specs/015-export-data.md).
-
-	An instantiation of a generic function another package declared. The
-	body is in that package's archive, and nanogo has no path from a
-	decoded body to its own tree yet.
 
 	A type declared inside a generic function that holds a type
 	parameter, such as type S []T. Substitution stops at a name, so every
@@ -208,7 +204,7 @@ What nanogo does not announce:
 	Nothing the probe corpus reaches. Every program in it that nanogo
 	compiles behaves the way the same program compiled by gc behaves. A
 	corpus is a sample, so this is a measurement and not a proof, and the
-	sample is 95 programs compiled twice and run twice.
+	sample is 98 programs compiled twice and run twice.
 
 	Two limits it cannot sample for you. A pointer to a local whose
 	address escapes its frame outlives that frame, because escape

@@ -257,10 +257,16 @@ func (r *Report) String() string {
 	return b.String()
 }
 
+// goModFile is the file that makes a probe a module of its own.
+const goModFile = "go.mod"
+
 // ReadProbes returns the names of the probe directories, sorted.
 //
 // A probe is a directory holding a main.go. Anything else in the corpus
 // directory, run.sh and go.mod included, is not a probe.
+//
+// A probe that also holds a go.mod is a module and is built from inside
+// itself, which is what lets it import a package beside it. See [build].
 func ReadProbes(dir string) ([]string, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -368,10 +374,31 @@ func build(opts Options, compiler, name, tag string) Result {
 	if err := os.MkdirAll(opts.Work, 0o700); err != nil {
 		return Result{Build: err.Error()}
 	}
+	if !filepath.IsAbs(out) {
+		// The build below runs inside the probe when the probe is a module,
+		// so a relative output path would be written relative to that
+		// directory rather than to the work directory.
+		if abs, err := filepath.Abs(out); err == nil {
+			out = abs
+		}
+	}
+	dir, target := opts.Probes, "./"+name
+	if _, err := os.Stat(filepath.Join(opts.Probes, name, goModFile)); err == nil {
+		// A probe that carries its own go.mod is a module, and it is built
+		// from inside itself.
+		//
+		// Every other probe is one main package, built as a directory of the
+		// corpus. That works and it cannot hold two packages: the corpus
+		// lives under testdata, which the go command leaves out of the module,
+		// so a probe importing a package beside it is told that no module
+		// provides it. A probe that has to import something needs a module of
+		// its own, and that is the only thing this branch changes.
+		dir, target = filepath.Join(opts.Probes, name), "."
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, compiler, "build", "-o", out, "./"+name)
-	cmd.Dir = opts.Probes
+	cmd := exec.CommandContext(ctx, compiler, "build", "-o", out, target)
+	cmd.Dir = dir
 	cmd.Env = env(opts)
 	cmd.WaitDelay = waitDelay
 	text, err := cmd.CombinedOutput()
