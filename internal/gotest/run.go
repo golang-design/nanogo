@@ -321,12 +321,33 @@ type result struct {
 }
 
 // run executes one command in dir, under the sweep's cache and timeout.
+//
+// The corpus program itself runs through here, with the temporary directory it
+// inherited. Only a build is contained, by [runBuild]: a corpus program can
+// print a path it made under TMPDIR, and moving that path moves the program's
+// output, which is the thing this sweep compares between the two compilers.
+// linkmain_run.go does exactly that and it read as a miscompilation the first
+// time the containment covered it.
 func run(opts Options, dir string, timeout time.Duration, argv ...string) result {
+	return runIn(opts, dir, timeout, "", argv...)
+}
+
+// runBuild executes a compiler, with its temporary directory inside the
+// sweep's own.
+//
+// A build that passes its deadline is killed, and a killed process runs no
+// deferred cleanup, so nanogo's scratch directory outlives it and only the
+// parent can remove it. The parent chooses the name for that reason.
+func runBuild(opts Options, dir string, timeout time.Duration, argv ...string) result {
+	return runIn(opts, dir, timeout, opts.Work, argv...)
+}
+
+func runIn(opts Options, dir string, timeout time.Duration, tmp string, argv ...string) result {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
-	cmd.Env = sweepEnv(opts.Cache, opts.Work)
+	cmd.Env = sweepEnv(opts.Cache, tmp)
 	b, err := cmd.CombinedOutput()
 	r := result{out: string(b), timedOut: ctx.Err() != nil}
 	if err != nil {
@@ -419,7 +440,7 @@ func firstLine(s string) string {
 // same source twice, run both, compare.
 func judgeRun(opts Options, v Verdict, dir string, names, argv []string) Verdict {
 	gcBin := filepath.Join(dir, "gc.bin")
-	if r := run(opts, dir, opts.Timeout, append([]string{opts.Go, "build", "-o", gcBin}, names...)...); r.code != 0 {
+	if r := runBuild(opts, dir, opts.Timeout, append([]string{opts.Go, "build", "-o", gcBin}, names...)...); r.code != 0 {
 		v.Class, v.Reason, v.Detail = ClassOracleFailed, "gc did not build the file", r.out
 		return v
 	}
@@ -430,7 +451,7 @@ func judgeRun(opts Options, v Verdict, dir string, names, argv []string) Verdict
 	}
 
 	nanogoBin := filepath.Join(dir, "nanogo.bin")
-	if r := run(opts, dir, opts.Timeout, append([]string{opts.Nanogo, "build", "-o", nanogoBin}, names...)...); r.code != 0 {
+	if r := runBuild(opts, dir, opts.Timeout, append([]string{opts.Nanogo, "build", "-o", nanogoBin}, names...)...); r.code != 0 {
 		return judgeBuildFailure(v, r)
 	}
 	ngRun := run(opts, dir, opts.Timeout, append([]string{nanogoBin}, argv...)...)
@@ -508,7 +529,7 @@ const bodylessReason = "the file declares a function with no body, which needs a
 // judgeCompile carries out a "compile" recipe: the file must build, and is not
 // run.
 func judgeCompile(opts Options, v Verdict, dir string, names []string) Verdict {
-	if r := run(opts, dir, opts.Timeout, append([]string{opts.Go, "build"}, names...)...); r.code != 0 {
+	if r := runBuild(opts, dir, opts.Timeout, append([]string{opts.Go, "build"}, names...)...); r.code != 0 {
 		if strings.Contains(r.out, "missing function body") {
 			v.Class, v.Reason, v.Detail = ClassRecipeNotImplemented, bodylessReason, r.out
 			return v
@@ -516,7 +537,7 @@ func judgeCompile(opts Options, v Verdict, dir string, names []string) Verdict {
 		v.Class, v.Reason, v.Detail = ClassOracleFailed, "gc did not build the file", r.out
 		return v
 	}
-	r := run(opts, dir, opts.Timeout, append([]string{opts.Nanogo, "build"}, names...)...)
+	r := runBuild(opts, dir, opts.Timeout, append([]string{opts.Nanogo, "build"}, names...)...)
 	if r.code != 0 {
 		return judgeBuildFailure(v, r)
 	}
@@ -538,12 +559,12 @@ func judgeErrorcheck(opts Options, v Verdict, dir string, names []string, src []
 		v.Class, v.Reason = ClassRecipeNotImplemented, "an errorcheck file with no ERROR annotation"
 		return v
 	}
-	if r := run(opts, dir, opts.Timeout, append([]string{opts.Go, "build"}, names...)...); r.code == 0 {
+	if r := runBuild(opts, dir, opts.Timeout, append([]string{opts.Go, "build"}, names...)...); r.code == 0 {
 		v.Class, v.Reason, v.Detail = ClassOracleFailed, "gc accepted a file the recipe says it must reject", r.out
 		return v
 	}
 
-	r := run(opts, dir, opts.Timeout, append([]string{opts.Nanogo, "build"}, names...)...)
+	r := runBuild(opts, dir, opts.Timeout, append([]string{opts.Nanogo, "build"}, names...)...)
 	switch {
 	case r.timedOut:
 		v.Class, v.Reason, v.Detail = ClassTimedOut, "nanogo did not finish compiling", r.out

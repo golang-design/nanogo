@@ -47,3 +47,35 @@ func TestSweepEnvPointsTheChildAtTheSweepsOwnTemporaryDirectory(t *testing.T) {
 		t.Errorf("with no work directory TMPDIR is %v, want the inherited one", none)
 	}
 }
+
+// TestOnlyABuildIsContained keeps the corpus program's own temporary directory
+// where it was.
+//
+// The containment exists for a build, because a build that passes its deadline
+// is killed and leaves its scratch directory behind. A corpus program is a
+// different thing: it can make a directory under TMPDIR and print the path,
+// and this sweep compares the output of the two compilers' programs. Moving
+// that path moves the output.
+//
+// linkmain_run.go does exactly that. Containing its run made the two outputs
+// differ and the sweep reported a miscompilation in a file that had none,
+// which is the worst way for a harness to be wrong: it accuses the compiler.
+func TestOnlyABuildIsContained(t *testing.T) {
+	tmpdirOf := func(env []string) string {
+		var last string
+		for _, kv := range env {
+			if v, ok := strings.CutPrefix(kv, "TMPDIR="); ok {
+				last = v
+			}
+		}
+		return last
+	}
+	if got := tmpdirOf(sweepEnv("/cache", "/work")); got != "/work" {
+		t.Errorf("a build runs with TMPDIR %q, want the sweep's work directory", got)
+	}
+	// The empty work directory is what run passes, and it means "inherit".
+	t.Setenv("TMPDIR", "/inherited")
+	if got := tmpdirOf(sweepEnv("/cache", "")); got != "/inherited" {
+		t.Errorf("a program runs with TMPDIR %q, want the inherited one", got)
+	}
+}
