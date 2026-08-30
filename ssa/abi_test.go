@@ -149,9 +149,30 @@ func TestABIWalkPlacesTheSpecShapes(t *testing.T) {
 		// A string is a pointer and a length, an interface is two pointers.
 		{"a string and an interface", []*ir.Type{abiTStr, abiTIface},
 			[][]Reg{{r(0), r(1)}, {r(2), r(3)}}, []int64{0, 16}, 32},
-		// A value of no width takes no register and no word.
+		// A value of no width takes no register and no word. It takes a
+		// stack slot, which is step 2 of gc's assignment algorithm, and the
+		// slot is what makes the next value's offset gc's.
 		{"nothing at all", []*ir.Type{abiTEmpty, abiTInt},
 			[][]Reg{{}, {r(0)}}, []int64{0, 0}, 8},
+		// The shape the rule exists for. Neither [3]int8 fits a register, so
+		// both take the area, and the [0]int64 between them takes no space and
+		// aligns the area to 8 before the second is placed. gc puts c at
+		// FP+8. Placing the zero-size value in registers, which is what a
+		// value with no parts falls into by accident, put it at FP+3, and a
+		// caller nanogo compiled then disagreed with a callee gc compiled.
+		{"a zero-size value aligns what follows it",
+			[]*ir.Type{abiArray("a3i8", 3, abiTI8), abiArray("a0i64", 0, abiTInt), abiArray("c3i8", 3, abiTI8)},
+			[][]Reg{nil, nil, nil}, []int64{0, 8, 8}, 16},
+		// The same value with nothing after it still pads the area, because
+		// the area's size is rounded to the alignment its members ask for.
+		{"a zero-size value at the end",
+			[]*ir.Type{abiArray("a3i8b", 3, abiTI8), abiArray("a0i64b", 0, abiTInt)},
+			[][]Reg{nil, nil}, []int64{0, 8}, 8},
+		// A [1]int is trivial and does take a register, which is the edge the
+		// rule above is stated against.
+		{"a one-element array still fits",
+			[]*ir.Type{abiArray("a1i64", 1, abiTInt), abiTInt},
+			[][]Reg{{r(0)}, {r(1)}}, []int64{0, 8}, 16},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -169,16 +190,37 @@ func TestABIWalkPlacesTheSpecShapes(t *testing.T) {
 	}
 }
 
+// checkValue asserts one value's placement.
+//
+// A nil regs means the value travels in the argument area. Its parts are still
+// returned, because the arguments bitmap of
+// specs/027-liveness-and-stackmaps.md is built from them, so only the offset
+// and the absence of registers are checked. An empty non-nil regs means the
+// value has no parts at all, which is a zero-size value.
 func checkValue(t *testing.T, i int, av *ABIValue, regs []Reg, off int64) {
 	t.Helper()
 	if av.Off != off {
 		t.Errorf("value %d is at %d, want %d", i, av.Off, off)
 	}
+	if regs == nil {
+		if av.InReg {
+			t.Errorf("value %d travels in registers, want the argument area", i)
+		}
+		for j := range av.Parts {
+			if av.Parts[j].Reg != NoReg {
+				t.Errorf("value %d part %d is in %d, want no register", i, j, av.Parts[j].Reg)
+			}
+		}
+		return
+	}
 	if len(av.Parts) != len(regs) {
 		t.Errorf("value %d has %d parts, want %d", i, len(av.Parts), len(regs))
 		return
 	}
-	if want := len(regs) > 0 || av.Type.Size == 0; av.InReg != want {
+	// A zero-size value is not in registers. It has no parts, so nothing
+	// fails to fit and the register path would take it by accident, which is
+	// the bug this helper used to encode.
+	if want := len(regs) > 0; av.InReg != want {
 		t.Errorf("value %d travels in registers (%v), want %v", i, av.InReg, want)
 	}
 	for j, want := range regs {

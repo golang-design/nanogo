@@ -513,6 +513,31 @@ func (as *abiAssigner) place(typ *ir.Type, obj *ir.Object) (ABIValue, bool, erro
 	parts, complete := ABILeaves(typ)
 	av := ABIValue{Obj: obj, Type: typ, Parts: parts, Off: -1}
 
+	if typ.Size == 0 {
+		// A zero-size value takes a stack slot and no register. It is step 2
+		// of gc's assignment algorithm and it comes before every register
+		// rule, so it is written here rather than left to the loop below.
+		//
+		// The loop would otherwise place it in registers by accident. A
+		// zero-size type has no parts, so nothing fails to fit, and the value
+		// would be marked InReg having consumed no register at all.
+		//
+		// It takes no space. What it takes is alignment. abi-internal.md
+		// states the reason: the rule exists to keep the internal ABI
+		// equivalent to ABI0, where a zero-size value still pads the stack to
+		// its own alignment, and without it an architecture with no argument
+		// registers would lay the same signature out two ways.
+		//
+		// This was a miscompile and not a missing feature. gc puts c at FP+8
+		// in f(a [3]int8, b [0]int64, c [3]int8), because b aligns the area to
+		// 8 before c is placed. nanogo put c at FP+3, so a program whose
+		// caller nanogo compiled and whose callee gc compiled read the wrong
+		// argument and returned a wrong answer with no diagnostic.
+		as.stack = abiAlign(as.stack, typ)
+		av.Off = as.stack
+		return av, false, nil
+	}
+
 	// A trial set of counters, copied back only when every part found a
 	// register.
 	try := as.next
