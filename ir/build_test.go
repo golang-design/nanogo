@@ -979,17 +979,45 @@ func TestBuildLoweringTable(t *testing.T) {
 			body: `func f(i I) func() int { return i.M }`,
 			op:   OClosure,
 			check: func(t *testing.T, p *Package, fn *Func, n *Node) {
-				if n.Obj == nil || n.Obj.Name != "p.I.M" {
-					t.Errorf("the method value names %v", n.Obj)
+				// One capture shape and one node shape. The receiver is saved
+				// where the value is written and the literal captures the
+				// saved copy, exactly as for a concrete receiver: what
+				// differs is inside the body, where the callee is the
+				// selection and the entry point is read out of the itab.
+				if n.Index != closureLiteral {
+					t.Errorf("the method value of an interface is marked with index %d", n.Index)
 				}
 				if len(n.Args) != 1 {
-					t.Fatalf("the method value holds %d values, want the receiver", len(n.Args))
+					t.Fatalf("the method value captures %d values, want the saved receiver", len(n.Args))
 				}
-				// The receiver stays inside the selection, because no symbol
-				// names the function the itab holds. The method index is what
-				// carries that to the refusal.
-				if n.Index == closureLiteral {
-					t.Error("the method value of an interface is marked a function literal")
+				saved := n.Args[0].Obj
+				if saved == nil || !strings.HasPrefix(saved.Name, ".autotmp_") {
+					t.Errorf("the method value captures %v and not a temporary holding the receiver", saved)
+				}
+				lit := buildFuncOf(t, p, "f.func1")
+				if !lit.Wrapper {
+					t.Error("the literal of a method value is not marked a wrapper, so recover would count its frame")
+				}
+				call := buildFirst(t, lit, OCall)
+				if call.X == nil || call.X.Op != OField || call.X.X == nil || call.X.X.Obj != saved {
+					t.Fatalf("the literal does not call the method on the saved receiver:\n%s", buildDump(lit))
+				}
+				if call.X.X.Type == nil || call.X.X.Type.Kind != Interface {
+					t.Errorf("the callee's receiver is %v and not an interface value", call.X.X.Type)
+				}
+				if call.X.Obj == nil || call.X.Obj.Name != "p.I.M" {
+					t.Errorf("the callee names %v", call.X.Obj)
+				}
+				if len(call.Args) != 0 {
+					t.Errorf("the call takes %d arguments, and the receiver stays inside the selection", len(call.Args))
+				}
+				// The language evaluates the receiver here, so a receiver
+				// holding nothing panics here. Without this the panic moves
+				// into the call made later, and a value nobody calls would
+				// not panic at all.
+				chk := buildFirst(t, fn, ONilCheck)
+				if chk.X == nil || chk.X.Obj != saved {
+					t.Errorf("the nil check reads %s and not the saved receiver:\n%s", buildStr(chk.X), buildDump(fn))
 				}
 			},
 		},
@@ -2296,6 +2324,50 @@ func buildTypecheckWithImports(t *testing.T, src string) (*types2.Package, []*sy
 	return pkg, files, info
 }
 
+// TestBuildMethodValueOfAnInterfaceSelectsByMethodIndex checks the offset the
+// entry point is read from.
+//
+// An itab holds the concrete type's methods in the interface's own order
+// (specs/032-type-descriptors-and-itabs.md), so the index in the selection is
+// a position in the interface's method set and not a position in the source.
+// The interface below declares its methods in an order that is neither, so a
+// builder that carried the source position, or zero, selects a method with the
+// wrong signature and the program calls it. The check is against the method
+// set the type boundary produced, which is the same list rtype writes the itab
+// from and ssa.Build bounds-checks against.
+func TestBuildMethodValueOfAnInterfaceSelectsByMethodIndex(t *testing.T) {
+	pkg, files, info := buildTypecheck(t, `package p
+
+type I interface {
+	C() int
+	A() int
+	B() int
+}
+
+func c(i I) func() int { return i.C }
+func a(i I) func() int { return i.A }
+func b(i I) func() int { return i.B }
+`)
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, want := range []string{"A", "B", "C"} {
+		lit := buildFuncOf(t, out, strings.ToLower(want)+".func1")
+		call := buildFirst(t, lit, OCall)
+		if call.X == nil || call.X.Op != OField || call.X.X == nil || call.X.X.Type == nil {
+			t.Fatalf("the literal of i.%s does not call through a selection:\n%s", want, buildDump(lit))
+		}
+		set := call.X.X.Type.Methods
+		if call.X.Index < 0 || call.X.Index >= len(set) {
+			t.Fatalf("i.%s reads slot %d of a method set of %d", want, call.X.Index, len(set))
+		}
+		if got := set[call.X.Index].Name; got != want {
+			t.Errorf("i.%s reads slot %d, which is %s", want, call.X.Index, got)
+		}
+	}
+}
+
 // TestBuildRefusesAMethodExpressionOnAnInterface names the symbol that was
 // emitted and never defined.
 //
@@ -2908,9 +2980,26 @@ func f(x int, g func(int)) {
 		t.Errorf("the concrete receiver is %s, want a temporary:\n%s", buildStr(recv), buildDump(fn))
 	}
 	// An interface receiver stays inside the selection, so the call takes no
-	// operand and is not wrapped.
-	if recv := defers[1].X.X.X; recv.Op != OLocal || !strings.HasPrefix(recv.Obj.Name, ".autotmp_") {
-		t.Errorf("the interface receiver is %s, want a temporary:\n%s", buildStr(recv), buildDump(fn))
+	// operand and the receiver is what travels: the call is wrapped and the
+	// temporary is the literal's capture.
+	wrapped := defers[1].X.X
+	if wrapped.Op != OClosure || len(wrapped.Args) != 1 {
+		t.Fatalf("the deferred interface method call is not wrapped: %s", buildStr(wrapped))
+	}
+	saved := wrapped.Args[0].Obj
+	if saved == nil || !strings.HasPrefix(saved.Name, ".autotmp_") {
+		t.Errorf("the interface receiver is %v, want a temporary:\n%s", saved, buildDump(fn))
+	}
+	inner = buildFuncOf(t, p, "f.func2")
+	call := buildFirst(t, inner, OCall)
+	if call.X == nil || call.X.Op != OField || call.X.X == nil || call.X.X.Obj != saved {
+		t.Errorf("the wrapped call does not read the method out of the saved receiver's itab:\n%s", buildDump(inner))
+	}
+	// The entry point is read where the statement stands, so a receiver
+	// holding nothing panics there and not when the deferred call runs.
+	chk := buildFirst(t, fn, ONilCheck)
+	if chk.X == nil || chk.X.Obj != saved {
+		t.Errorf("the nil check reads %s and not the saved receiver:\n%s", buildStr(chk.X), buildDump(fn))
 	}
 }
 

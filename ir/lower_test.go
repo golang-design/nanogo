@@ -1784,8 +1784,6 @@ func TestLowerRefusals(t *testing.T) {
 		// specs/020-ir.md's type boundary drops, so that a count by cause says
 		// which field is holding the row back rather than only that a name was
 		// wanted.
-		{"a method value of an interface", `func f(i I) func() int { return i.M }`, OClosure, "reads its function out of the itab"},
-		{"defer of an interface method", `func f(c interface{ Close() }) { defer c.Close() }`, ODefer, "a method of an interface"},
 		{"a select with no clauses", `func f() { select {} }`, OSelect, "runtime.block"},
 		{"an assertion to a one-word struct", `
 type W struct{ P *int }
@@ -2776,6 +2774,87 @@ func TestLowerClosureIsCallable(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("the call through the value is not an indirect call:\n%s", buildDump(fn))
+	}
+}
+
+// TestLowerMethodValueOfAnInterface checks the row that was refused until the
+// literal held the receiver.
+//
+// The value is a closure object like any other: the receiver is saved where
+// the value is written, the temporary holding it gets a heap cell, and the
+// literal's body reads the entry point out of the itab when the call runs. The
+// nil check is the part a later pass cannot put back, so it is asserted here
+// as well as at the boundary: the language evaluates the receiver at the
+// statement, so a receiver holding nothing panics at the statement
+// (specs/033-closures-defer-panic.md).
+func TestLowerMethodValueOfAnInterface(t *testing.T) {
+	for _, tc := range []struct{ row, body, sym string }{
+		{"a method value used as a value", `func f(i I) func() int { return i.M }`, "runtime.newobject"},
+		{"a deferred method of an interface", `func f(i I) { defer i.M() }`, "runtime.deferproc"},
+		{"a method of an interface started as a goroutine", `func f(i I) { go i.M() }`, "runtime.newproc"},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if !lowerCalled(fn, tc.sym) {
+				t.Errorf("the row did not reach %s: %v\n%s", tc.sym, lowerCalls(fn), buildDump(fn))
+			}
+			if n := lowerOps(fn, ONilCheck); n != 1 {
+				t.Errorf("the row holds %d nil checks, want the one at the receiver:\n%s", n, buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerMethodValueIsCheckedWhereItIsFormed checks the three contexts that
+// evaluate an expression somewhere other than the statement holding it.
+//
+// The right operand of && and ||, a loop condition and a case expression each
+// run conditionally, so their statements go into the expression's own Init and
+// not into the enclosing list. The check travels with the value for that
+// reason: hoisted out, "c && i.M != nil" would panic on a nil interface where
+// the language evaluates nothing, and dropped, the panic would move into the
+// call. One check per row is what says it went with the value and stayed one.
+func TestLowerMethodValueIsCheckedWhereItIsFormed(t *testing.T) {
+	for _, tc := range []struct{ row, body string }{
+		{"the right operand of &&", `func f(i I, c bool) bool { return c && i.M != nil }`},
+		{"a loop condition", `func f(i I) { for i.M != nil { return } }`},
+		{"a case expression", `func f(i I) { switch { case i.M != nil: } }`},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			if n := lowerOps(fn, ONilCheck); n != 1 {
+				t.Errorf("the row holds %d nil checks, want the one at the receiver:\n%s", n, buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerMethodValueChecksTheReceiverThroughItsCell checks that the nil
+// check reads the same storage the literal does.
+//
+// The receiver is captured, so lowering moves it into a heap cell and every
+// reference to it becomes a load through the cell pointer. A check left
+// reading the frame slot would test a word nothing writes.
+func TestLowerMethodValueChecksTheReceiverThroughItsCell(t *testing.T) {
+	fn := lowerOK(t, `func f(i I) func() int { return i.M }`)
+	var chk *Node
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == ONilCheck {
+				chk = n
+			}
+			return true
+		})
+	}
+	if chk == nil {
+		t.Fatalf("the nil check did not survive lowering:\n%s", buildDump(fn))
+	}
+	if chk.X == nil || chk.X.Op != ODeref || chk.X.Type == nil || chk.X.Type.Kind != Interface {
+		t.Fatalf("the nil check reads %s, want the interface out of its cell:\n%s", buildStr(chk.X), buildDump(fn))
+	}
+	cell := chk.X.X
+	if cell == nil || cell.Obj == nil || !strings.HasPrefix(cell.Obj.Name, ".cell_") {
+		t.Errorf("the nil check reads %s and not a heap cell:\n%s", buildStr(cell), buildDump(fn))
 	}
 }
 

@@ -138,6 +138,23 @@ const (
 	// writes the value and needs no zero.
 	ODeclare
 
+	// ONilCheck is "X must hold something where this statement stands". It
+	// panics with the fault an ordinary dereference of nil makes, and it is
+	// gc's OCHECKNIL.
+	//
+	// The operand is an interface value and the method table is the word
+	// tested, because the one program that needs the node is the method value
+	// of an interface: the language evaluates the receiver where the value is
+	// written, so a nil receiver has to panic there and not inside the call
+	// made later (specs/033-closures-defer-panic.md). gc writes the same test
+	// as OCHECKNIL(OITAB(i)), in two nodes, because its IR has a node for the
+	// table. This one has none, and ssa.Build's OpITab is the operation that
+	// reads one, so the two are one node here.
+	//
+	// It is not Go-specific. It survives to specs/021-ssa-construction.md,
+	// which turns it into the nil check every dereference already gets.
+	ONilCheck
+
 	opCount
 )
 
@@ -201,6 +218,7 @@ var opNames = [...]string{
 	OUnsafeString:     "unsafe.String",
 	OUnsafeStringData: "unsafe.StringData",
 	ODeclare:          "declare",
+	ONilCheck:         "nilcheck",
 }
 
 func (o Op) String() string {

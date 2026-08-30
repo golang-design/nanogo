@@ -741,6 +741,9 @@ func (b *builder) stmt(n ir.Stmt) {
 	case ir.ODeclare:
 		b.stmts(n.Init)
 		b.declareStmt(n)
+	case ir.ONilCheck:
+		b.stmts(n.Init)
+		b.nilCheckStmt(n)
 	default:
 		b.unsupported(n, "statement")
 	}
@@ -1607,6 +1610,34 @@ func (b *builder) indexAddr(n ir.Expr) *Value {
 // nilCheck inserts the check a dereference needs.
 func (b *builder) nilCheck(ptr *Value, pos syntax.Pos) *Value {
 	return b.value(OpNilCheck, ptr.Type, pos, ptr, b.memory())
+}
+
+// nilCheckStmt builds the check ir.ONilCheck asks for.
+//
+// The operand is an interface value and the word tested is its method table,
+// which is what the one program that needs the node is about: a method value
+// of an interface reads its entry point out of the itab, and the language
+// reads it where the value is written, so a receiver holding nothing panics
+// there (ir/build.go's methodValue). gc spells the same test OCHECKNIL(OITAB),
+// in two nodes, because its IR has a node for the table.
+//
+// Nothing reads the result. The check is the effect: OpNilCheck faults on a
+// nil pointer, ssa/rules/arm64.go lowers it to a load into the zero register,
+// and arm64Essential keeps that load although no value uses it.
+func (b *builder) nilCheckStmt(n ir.Stmt) {
+	if n.X == nil || n.X.Type == nil {
+		b.errorf(InvNone, "a nil check of nothing")
+		return
+	}
+	if n.X.Type.Kind != ir.Interface {
+		b.errorf(InvNone, "a nil check of %v, and the node tests the method table of an interface", n.X.Type)
+		return
+	}
+	x := b.expr(n.X)
+	if b.err != nil {
+		return
+	}
+	b.nilCheck(b.value(OpITab, unsafePtrType, n.Pos, x), n.Pos)
 }
 
 func (b *builder) unary(n ir.Expr) *Value {

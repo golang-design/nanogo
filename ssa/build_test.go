@@ -2771,6 +2771,66 @@ func TestBuildCallsThroughAnItab(t *testing.T) {
 	}
 }
 
+// TestBuildChecksTheMethodTableOfAnInterface pins ir.ONilCheck.
+//
+// The node exists for one program: a method value of an interface reads its
+// entry point out of the itab, and the language reads it where the value is
+// written, so a receiver holding nothing has to panic there rather than inside
+// the call made later (specs/033-closures-defer-panic.md). What is tested is
+// the method table and not the data word, because a value holding a nil
+// pointer of a concrete type has a table and must not panic.
+//
+// Nothing reads the check. It is the fault that matters, and ssa/rules
+// keeps a nil check that no value uses.
+func TestBuildChecksTheMethodTableOfAnInterface(t *testing.T) {
+	sig := mkType(&ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{tInt}})
+	tPair := mkType(&ir.Type{Kind: ir.Interface, Name: "main.pair", PkgPath: "main", Methods: []ir.Method{
+		{Name: "first", Sig: sig, Pkg: "main"},
+	}})
+	iface := obj("i", tPair, ir.ClassLocal)
+	f := build(t, fun("check", []*ir.Object{iface},
+		&ir.Node{Op: ir.ONilCheck, Type: tVoid, X: local(iface)}))
+
+	chk := findOp(f, OpNilCheck)
+	if chk == nil {
+		t.Fatalf("the statement built no nil check:\n%s", f)
+	}
+	if chk.Args[0].Op != OpITab {
+		t.Errorf("the check tests %v, want the interface's method table", chk.Args[0].Op)
+	}
+	if findOp(f, OpIData) != nil {
+		t.Errorf("the check reads the data word, which a nil pointer of a concrete type fills:\n%s", f)
+	}
+}
+
+// TestBuildRefusesACheckOfSomethingOtherThanAnInterface guards the node's one
+// operand shape.
+//
+// ir.ONilCheck reads the method table, so an operand that is not an interface
+// has none to read and the IR that produced it is wrong. It is an error and
+// not a refusal, for the reason a call through the empty interface is one.
+func TestBuildRefusesACheckOfSomethingOtherThanAnInterface(t *testing.T) {
+	p := obj("p", tIntPtr, ir.ClassLocal)
+	for _, tc := range []struct {
+		row, want string
+		x         ir.Expr
+	}{
+		{"a pointer", "method table", local(p)},
+		{"nothing", "a nil check of nothing", nil},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			_, err := Build(fun("check", []*ir.Object{p},
+				&ir.Node{Op: ir.ONilCheck, Type: tVoid, X: tc.x}))
+			if err == nil {
+				t.Fatal("the check built, and the node reads the method table of an interface")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the error is %q", err)
+			}
+		})
+	}
+}
+
 // TestBuildRefusesACallThroughTheEmptyInterface guards the one interface with
 // no table.
 //

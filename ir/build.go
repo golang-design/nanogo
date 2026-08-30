@@ -67,14 +67,12 @@ import (
 //   - A type operand, in a type switch clause, is an OGlobal whose Obj has
 //     class ClassType. A case nil in a type switch is an OConst with a nil
 //     value.
-//   - An OClosure names its function in Obj and holds its values in Args.
-//     Index tells the two forms apart, because they differ in a way
-//     specs/023-escape-analysis.md cares about: it is the method index for a
-//     method value of an interface, whose one Arg is the receiver and whose
-//     function no symbol names, and -1 for a function literal, whose Args are
-//     captured objects shared with the function that made it. A method value
-//     of a concrete type is the second form: methodValue saves the receiver in
-//     a temporary and captures that.
+//   - An OClosure names its function in Obj and holds its captured objects in
+//     Args, and Index is -1 for every one of them. There is one form because
+//     there is one mechanism: a method value saves its receiver in a temporary
+//     and captures the temporary, whether the receiver is a concrete type or
+//     an interface, and the difference between the two is inside the literal's
+//     body rather than in this node (methodValue).
 //   - fallthrough is an OGoto labelled "fallthrough". A source label cannot
 //     collide with it, because fallthrough is a keyword.
 //   - OFor keeps its init statements in Init, its condition in X, its body in
@@ -132,8 +130,10 @@ func define(pos syntax.Pos, dst, src Expr) Stmt {
 // spread marks a call whose final argument was written with ... .
 const spread = 1
 
-// closureLiteral is the Index of an OClosure that is a function literal. A
-// method value carries the method's index there instead.
+// closureLiteral is the Index of an OClosure, which is a function literal and
+// nothing else. It is a constant rather than a zero because Index means a
+// field or a case elsewhere, and a reader that saw zero would read this node
+// as a selection of field zero.
 const closureLiteral = -1
 
 // voidType is the type of a statement and of an expression with no value.
@@ -1229,8 +1229,20 @@ func (b *builder) callStmt(s *syntax.CallStmt) {
 		case call.X == nil:
 		case isInterfaceMethod(call.X):
 			// An interface method call keeps the receiver inside the
-			// selection, so the receiver is what is snapshotted.
-			call.X.X = b.snapshot(call.X.X)
+			// selection, so the receiver is what is snapshotted. A temporary
+			// and not deferOperand's test: the value the runtime is given is
+			// a closure holding this receiver, and the check below names the
+			// object it is held in.
+			saved := b.temp(call.X.X)
+			call.X.X = saved
+			// The entry point is read out of the itab, and the language reads
+			// it where the statement stands. A receiver holding nothing
+			// therefore panics here rather than when the deferred call runs,
+			// which is where gc panics too: its defer of an interface call
+			// loads the entry point at the statement. The check stands after
+			// the arguments, because they are evaluated where they are
+			// written and gc runs them before the load.
+			b.emit(&Node{Op: ONilCheck, Pos: s.Pos(), Type: voidType, X: ref(saved.Obj, s.Pos())})
 		case !isFuncSymbol(call.X):
 			// Everything else, a field of function type and a package-level
 			// variable of function type included. The value the call uses is what
@@ -1335,11 +1347,17 @@ var builtinStmtOps = map[Op]bool{
 // word to hand the runtime until a literal holds it. "defer recover()" is the
 // case with no operands, and gc wraps it too (typecheck's
 // normalizeGoDeferCall lists ORECOVER beside OPRINT and OCLOSE).
+//
+// A method of an interface is wrapped for that same reason. Its receiver
+// stays inside the selection and the entry point is read out of the itab, so
+// there is no symbol and no value to hand the runtime until a literal holds
+// the receiver: the wrapped call is the method value of an interface, built
+// where methodValue builds one for a selection the source used as a value.
 func (b *builder) wrapCallStmt(pos syntax.Pos, call Expr) Expr {
 	if call == nil {
 		return call
 	}
-	if !builtinStmtOps[call.Op] && (call.Op != OCall || len(call.Args) == 0) {
+	if !builtinStmtOps[call.Op] && (call.Op != OCall || (len(call.Args) == 0 && !isInterfaceMethod(call.X))) {
 		return call
 	}
 	fn := b.newLiteral(pos)
@@ -2336,21 +2354,14 @@ func (b *builder) selector(x *syntax.SelectorExpr) Expr {
 		}
 		recv, recvType := b.fieldPath(b.expr(x.X), b.typeOf(x.X), rs.index[:len(rs.index)-1])
 		recv = b.recvArg(recv, recvType, fn)
+		index := methodValueDirect
 		if isInterface(recvType) {
-			// The receiver stays inside the selection, because the function
-			// the value calls is read out of the itab and not named by a
-			// symbol. specs/033-closures-defer-panic.md refuses that row, and
-			// the method index is what carries it to the refusal.
-			return &Node{
-				Op:    OClosure,
-				Pos:   x.Pos(),
-				Type:  b.irType(sel.Type()),
-				Obj:   b.obj(fn),
-				Args:  []Expr{recv},
-				Index: rs.methodIndex(),
-			}
+			// The function the value calls is read out of the itab at this
+			// index, because an interface method is declared by nobody and no
+			// symbol names it.
+			index = rs.methodIndex()
 		}
-		return b.methodValue(x.Pos(), sel, fn, recv)
+		return b.methodValue(x.Pos(), sel, fn, recv, index)
 
 	case types2.MethodExpr:
 		// A method expression is the method's function symbol. Its first
@@ -2682,14 +2693,14 @@ func (b *builder) closure(x *syntax.FuncLit) Expr {
 
 	caps := sortedCaptures(free)
 
-	// Index is -1 rather than a method index. A method value of an interface
-	// and a literal with one capture are otherwise the same node, and a
-	// consumer that could not tell them apart would read a receiver that stays
-	// inside the selection as a captured object.
 	return b.closureNode(fn, x.Pos(), caps)
 }
 
-// methodValue builds x.M, a method of a concrete type used as a value.
+// methodValueDirect is the index of a method value whose receiver is a
+// concrete type, whose method a symbol names.
+const methodValueDirect = -1
+
+// methodValue builds x.M, a method used as a value.
 //
 // The language evaluates the receiver where the method value is written and
 // the call made later uses that saved copy, so
@@ -2725,7 +2736,26 @@ func (b *builder) closure(x *syntax.FuncLit) Expr {
 // runtime.gorecover counts the frames between itself and runtime.gopanic, so
 // "f := x.M; defer f()" where M recovers keeps recovering only because this
 // frame is not counted.
-func (b *builder) methodValue(pos syntax.Pos, sel *types2.Selection, fn *types2.Func, recv Expr) Expr {
+//
+// # A receiver that is an interface
+//
+// index is the method's position in the interface's method set, and
+// methodValueDirect when the receiver is a concrete type. It changes one thing
+// and only one: the callee inside the literal is the selection on the saved
+// receiver, so the entry point is read out of the itab at that index when the
+// call runs, which is the shape methodCall already builds for "i.M()". The
+// saved receiver is the interface value itself, which is what gc's
+// MethodValueType saves too: its closure struct holds the whole two-word
+// value.
+//
+// The nil check is the second half of the row and it is not an optimisation
+// the other direction is missing. The language evaluates the receiver here, so
+// a receiver holding nothing has to panic here. Without the check the panic
+// would happen inside the call made later, which is a moved panic and not a
+// slower one: a program that forms the value and never calls it would not
+// panic at all. gc emits OCHECKNIL(OITAB(i)) at this point for the same
+// reason, and walkMethodValue says so in its own comment.
+func (b *builder) methodValue(pos syntax.Pos, sel *types2.Selection, fn *types2.Func, recv Expr, index int) Expr {
 	msig, _ := sel.Type().(*types2.Signature)
 	if msig == nil {
 		b.errorf("ir: the method value %s has no signature", fn.Name())
@@ -2741,11 +2771,24 @@ func (b *builder) methodValue(pos syntax.Pos, sel *types2.Selection, fn *types2.
 	}
 	saved := b.temp(recv)
 	io := b.obj(fn)
+	sigType := b.irType(sel.Type())
+
+	// The callee, and with it the receiver's place. A method of a concrete
+	// type is a symbol and the receiver is the call's first argument. A method
+	// of an interface is read out of the itab, so the callee is the selection
+	// and the receiver stays inside it.
+	callee := &Node{Op: OGlobal, Pos: pos, Type: io.Type, Obj: io}
+	var args []Expr
+	if index == methodValueDirect {
+		args = append(args, saved)
+	} else {
+		b.emit(&Node{Op: ONilCheck, Pos: pos, Type: voidType, X: ref(saved.Obj, pos)})
+		callee = &Node{Op: OField, Pos: pos, Type: sigType, X: saved, Index: index, Obj: io}
+	}
 
 	lit := b.newLiteral(pos)
-	lit.Type = b.irType(sel.Type())
+	lit.Type = sigType
 	lit.Wrapper = true
-	args := []Expr{saved}
 	for i := 0; i < msig.Params().Len(); i++ {
 		o := &Object{
 			Name:  fmt.Sprintf(".p%d", i),
@@ -2771,7 +2814,7 @@ func (b *builder) methodValue(pos syntax.Pos, sel *types2.Selection, fn *types2.
 		Op:   OCall,
 		Pos:  pos,
 		Type: b.resultType(msig),
-		X:    &Node{Op: OGlobal, Pos: pos, Type: io.Type, Obj: io},
+		X:    callee,
 		Args: args,
 	}
 	if msig.Variadic() {

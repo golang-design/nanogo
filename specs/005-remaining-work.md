@@ -273,28 +273,31 @@ can exist, and nanogo's own `types2` fork is full of generic declarations.
 
 ### What actually blocks G1, measured
 
-Each of nanogo's own 19 packages is compiled on its own, with an allowlist
-holding that package alone, so that a failure upstream cannot hide one
-downstream. A whole-tree build stops at the first failure and reports nothing
-about the rest, which is why the numbers below were wrong before they were
-measured this way.
+Each of nanogo's own 19 library packages is compiled on its own, with an
+allowlist holding that package alone, so that a failure upstream cannot hide
+one downstream. A whole-tree build stops at the first failure and reports
+nothing about the rest, which is why the numbers below were wrong before they
+were measured this way. The two commands are not in the count: the harness
+delegates them.
 
-**Sixteen compile**: the root package, `dist`, `driver`, `export`,
+**All 19 compile**: the root package, `dist`, `driver`, `export`,
 `export/pkgbits`, `ir`, `link`, `loader`, `obj`, `obj/arm64`, `rtsym`, `rtype`,
-`ssa`, `ssa/rules`, `ssagen` and `syntax`. Two are commands the harness
-delegates. One fails:
+`ssa`, `ssa/rules`, `ssagen`, `syntax`, `types2`, `types2/errors` and
+`types2/gen`. No package fails.
 
-| Blocker | Packages | Owner |
-| --- | --- | --- |
-| a method value of an interface, which reads its function out of the itab | 1: `types2` | [033](033-closures-defer-panic.md) |
+`types2` was the last, and it cleared three blockers to get there. The foreign
+walk carries the statement forms its instantiations reach, and a range over a
+function is built. The third and last was a method value whose receiver is an
+interface, at `types2/sizes.go`'s `alignof`: it has no symbol to name, because
+the function is read out of the itab at run time. It is built now, as a literal
+holding the receiver whose body makes the interface call, and it took Go's own
+`recover.go` with it ([033](033-closures-defer-panic.md)).
 
-`types2` has cleared two blockers and stopped on a third, which is the shape
-this section keeps recording. The foreign walk carries the statement forms its
-instantiations reach, and a range over a function is built, so neither is what
-stops it now. What does is a row that was already in the table for a different
-reason: a method value whose receiver is an interface has no symbol to name,
-because the function is read out of the itab at run time, and it is the same
-row `defer i.M()` and Go's own `recover.go` wait on.
+**Compiling every package is not G1.** Each package is compiled on its own,
+against `gc`-built dependencies, and what G1 asks for is a compiler that builds
+itself and then builds itself again to the same bytes. The critical path above
+is what stands between the two, and the export data reader is the largest row
+in it.
 
 An earlier version of this table said a *method of a generic type* owned three
 of these. That was wrong, and the way it was wrong is worth keeping. The
@@ -309,7 +312,9 @@ G1 does not close until the reader exists. The writing half is done: a generic
 type this package declares is written with its methods numbered against one
 dictionary in gc's own order, and gc reads it back, instantiates it and runs it
 (`export`'s `TestGcInstantiatesAGenericTypeNanogoWrote`). The reading half has
-not started, and it is what all four packages above wait on.
+not started, and a build of nanogo by nanogo is what needs it: a package
+compiled here reads its dependencies' export data, and today that data is
+gc's.
 
 A closed blocker is not a compiled package, and the table reshapes every time
 one closes. Closing the method-value receiver moved `link` and `loader` to

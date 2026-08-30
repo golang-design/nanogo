@@ -755,3 +755,215 @@ func TestToolexecDoesNotRecoverFromADeferredRecover(t *testing.T) {
 		t.Fatalf("the program exited %d, want 2: \"defer recover()\" caught the panic", got)
 	}
 }
+
+// The method value of an interface, which reads its entry point out of the
+// itab (specs/033-closures-defer-panic.md).
+//
+// Four claims the program separates, each of which is a wrong program rather
+// than a build failure when it breaks:
+//
+//   - a value formed from an interface and called later calls the method the
+//     dynamic type declares;
+//   - the receiver is bound where the value is formed, so a later assignment
+//     to the variable is not visible through it;
+//   - the entry point is read at the method's own index, so an interface with
+//     several methods calls the one that was selected. The methods are
+//     declared in an order that is not the method set's, so a wrong offset
+//     picks a different method and the numbers say which;
+//   - "defer i.M()" runs the method with the receiver the statement saw.
+const ifaceMethodValueProgram = `package main
+
+type I interface {
+	C() int
+	A() int
+	B() int
+	D(int) int
+}
+
+type T struct{ n int }
+
+func (t T) A() int      { println("A", t.n); return t.n + 1 }
+func (t T) B() int      { println("B", t.n); return t.n + 2 }
+func (t T) C() int      { println("C", t.n); return t.n + 3 }
+func (t T) D(k int) int { println("D", t.n, k); return t.n + k }
+
+type U struct{ n int }
+
+func (u U) A() int      { println("uA", u.n); return u.n * 2 }
+func (u U) B() int      { println("uB", u.n); return u.n * 3 }
+func (u U) C() int      { println("uC", u.n); return u.n * 4 }
+func (u U) D(k int) int { println("uD", u.n, k); return u.n * k }
+
+func deferred(i I) {
+	defer i.B()
+	defer i.D(4)
+	println("body of deferred")
+}
+
+func call(g func() int) { println("call", g()) }
+
+func main() {
+	var i I = T{10}
+	a, b, c := i.A, i.B, i.C
+	println(a(), b(), c())
+
+	// The receiver is the value the expression saw, so the assignment below
+	// is not visible through f.
+	f := i.A
+	i = U{100}
+	println(f(), i.A())
+
+	// The same site with a different dynamic type, so the entry point comes
+	// out of a second itab.
+	println(i.C(), i.D(5))
+
+	deferred(T{7})
+	deferred(U{7})
+
+	// A method value passed to a function and called there.
+	call(i.B)
+}
+`
+
+// TestToolexecRunsAMethodValueOfAnInterface runs it and compares against an
+// all-gc build.
+func TestToolexecRunsAMethodValueOfAnInterface(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/ifacemethodvalue\n\ngo 1.27\n",
+		"main.go": ifaceMethodValueProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "ifacemethodvalue", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "ifacemethodvalue"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}
+
+// The panic a nil interface makes, which the language puts where the method
+// value is formed and not where it is called.
+//
+// The entry point is read out of the itab, and the language reads it where the
+// value is written, so a receiver holding nothing panics there. A compiler
+// that deferred the fault to the call would move an observable panic, and a
+// value nobody calls would not panic at all: form prints "after" and returns
+// true in that case, and both are in the output this compares against gc.
+//
+// The panic is recovered so that the exit status is zero and the whole of the
+// output can be compared. The two shapes are run again with a receiver that
+// holds something, so the program says the check is a check and not an
+// unconditional panic.
+const ifaceMethodValueNilProgram = `package main
+
+type I interface {
+	A() int
+	B() int
+}
+
+type T struct{}
+
+func (T) A() int { println("A"); return 1 }
+func (T) B() int { println("B"); return 2 }
+
+func form(i I) (reached bool) {
+	defer func() { recover(); println("recovered a formation") }()
+	println("before")
+	f := i.A
+	println("after")
+	_ = f
+	return true
+}
+
+func statement(i I) (reached bool) {
+	defer func() { recover(); println("recovered a statement") }()
+	defer i.B()
+	println("statement done")
+	return true
+}
+
+func main() {
+	var nothing I
+	println(form(nothing))
+	println(statement(nothing))
+	println(form(T{}))
+	println(statement(T{}))
+}
+`
+
+// TestToolexecPanicsWhereAMethodValueOfANilInterfaceIsFormed runs it and
+// compares against an all-gc build.
+func TestToolexecPanicsWhereAMethodValueOfANilInterfaceIsFormed(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/ifacemethodvaluenil\n\ngo 1.27\n",
+		"main.go": ifaceMethodValueNilProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "ifacemethodvaluenil", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "ifacemethodvaluenil"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}
+
+// A deferred method of an interface whose method recovers.
+//
+// ir.Build wraps the statement in a literal that holds the receiver, and
+// runtime.gorecover recovers only when exactly one non-wrapper frame stands
+// between it and runtime.gopanic. The literal is marked FuncIDWrapper, so the
+// method below is that one frame. Without the mark the recover returns nil,
+// the process dies, and nothing says so at compile time.
+const ifaceDeferRecoverProgram = `package main
+
+import "os"
+
+var code = 1
+
+type I interface{ Handle(int) }
+
+type T struct{}
+
+func (T) Handle(n int) {
+	recover()
+	code = n
+}
+
+func boom(i I, xs []int) {
+	defer i.Handle(7)
+	_ = xs[3]
+}
+
+func main() {
+	boom(T{}, nil)
+	os.Exit(code)
+}
+`
+
+// TestToolexecRecoversFromADeferredInterfaceMethod runs it.
+func TestToolexecRecoversFromADeferredInterfaceMethod(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":  "module nanogo.example/ifacedeferrecover\n\ngo 1.27\n",
+		"main.go": ifaceDeferRecoverProgram,
+	}, []string{"main"})
+
+	if out, err := h.build(t, "-o", "ifacedeferrecover", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", out, err)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	// The exit status is the operand the deferred method was given, and the
+	// program reaches os.Exit only if the recover caught the panic.
+	if got := exitCode(t, filepath.Join(h.mod, "ifacedeferrecover")); got != 7 {
+		t.Fatalf("the program exited %d, want 7: the recover did not catch the panic", got)
+	}
+}

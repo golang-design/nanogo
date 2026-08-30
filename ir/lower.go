@@ -1107,6 +1107,15 @@ func (l *lowerer) stmt(s Stmt) {
 		// where the zero is written.
 		l.emit(s)
 
+	case ONilCheck:
+		// The operand and nothing else. specs/021-ssa-construction.md turns
+		// the node into the fault, because the word tested is the method
+		// table of an interface value and OpITab is the operation that reads
+		// one.
+		l.flush(s)
+		s.X = l.expr(s.X)
+		l.emit(s)
+
 	case OSelect:
 		l.selectStmt(s)
 
@@ -4012,11 +4021,12 @@ const exitLabel = ".exit"
 // closureExpr lowers a function literal.
 func (l *lowerer) closureExpr(n Expr) Expr {
 	if n.Index != closureLiteral {
-		// A method value of an interface, which ir.Build leaves in this form
-		// because the function it calls is read out of the itab and no symbol
-		// names it. A method value of a concrete type arrives as a literal
-		// capturing the saved receiver and never reaches here.
-		l.refuse(n, "a method value of an interface reads its function out of the itab, and a closure object holds a symbol")
+		// ir.Build gives every OClosure this Index, a method value included:
+		// the receiver of one is saved in a temporary and captured like any
+		// other variable. A node with another Index was built by hand, and
+		// ir/closure.go's capture analysis skips it, so it would be a closure
+		// object with no cell behind its words.
+		l.refuse(n, fmt.Sprintf("a closure whose index is %d and not that of a function literal", n.Index))
 		return n
 	}
 	if n.Obj == nil || n.Obj.Class != ClassFunc {
@@ -4160,14 +4170,9 @@ func (l *lowerer) deferredValue(n Expr) Expr {
 		// value the statement saw, so it is copied here.
 		return ref(l.spill(fun), fun.Pos)
 	case OField:
-		if fun.X != nil && fun.X.Type != nil && fun.X.Type.Kind == Interface {
-			// A method of an interface keeps its receiver inside the
-			// selection, so the value the runtime would be given is a method
-			// value whose function is read out of the itab. closureExpr
-			// refuses one for the same reason.
-			l.refuse(n, "a method of an interface is a method value, which reads its function out of the itab, and a closure object holds a symbol")
-			return nil
-		}
+		// A method of an interface does not reach here. ir.Build wraps that
+		// call in a literal holding the receiver, which is the method value
+		// of an interface, so the callee is the OClosure above.
 		l.refuse(n, "a call through a field of a "+fun.X.Type.Kind.String()+", which the builder does not snapshot")
 		return nil
 	}

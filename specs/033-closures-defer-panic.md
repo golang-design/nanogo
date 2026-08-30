@@ -31,12 +31,12 @@ a program.
 | a **declared** function used as a func value | built; the same static one-word `funcval` |
 | a literal with a capture list | built; a heap closure object holding the code pointer and one heap cell per capture |
 | a method value of a concrete type | built; the receiver is saved in a temporary where the value is written and a literal captures the temporary, marked `FuncIDWrapper` |
-| a method value of an interface | **refused**; the function is read out of the itab and a closure object holds a symbol |
+| a method value of an interface | built; the same shape, and the literal's body reads the entry point out of the itab at the method's index. A nil check of the method table stands where the value is formed |
 | a named result a literal captures | built; the result gets a cell like any other capture, and the single exit copies the cell into the result object |
 | `defer f()` with no arguments and no captures | built; `runtime.deferproc`, plus the single exit below |
 | `defer f(x)`, with arguments | built; `ir.Build` puts the call in a literal that captures the operands, marked `FuncIDWrapper` |
 | `defer x.M()`, a method of a concrete type | built; the receiver is the call's first operand and travels the same way |
-| `defer i.M()`, a method of an interface | **refused**; the value the runtime is given would be a method value of an interface, which is the row above |
+| `defer i.M()`, a method of an interface | built; `ir.Build` wraps the call in a literal that captures the receiver, which is the method value of the row above, and the nil check stands at the statement |
 | `defer println(x)`, `defer close(c)`, a builtin | built; a builtin is an operation and not a func value, so it travels inside the same literal, whether or not it has operands |
 | `defer recover()` | built, and it does not recover; the literal is marked, so `runtime.gorecover` counts no non-wrapper frame, which is what the language asks of a `recover` no deferred function called directly |
 | `go f()` and `go f(x)` | built; `runtime.newproc` takes the same one word, on the same terms |
@@ -185,10 +185,13 @@ operand and reads nothing else, and so is a declared function, which nothing
 can reassign. gc leaves the same operands where they are, and for the same
 reason its `visit` returns for a literal, for nil and for a function name.
 
-**A method of an interface is the row that is left.** Its receiver stays inside
-the selection, so the value the runtime would be given is a method value whose
-function is read out of the itab. `closureExpr` refuses one for the same
-reason, and both wait on the same work.
+**A method of an interface is wrapped although the call takes no operand.**
+Its receiver stays inside the selection, so the receiver is the operand that
+has to travel and the literal is what carries it. The wrapped call is the
+method value of an interface, and the nil check of the method table stands at
+the statement, because the entry point is read where the statement runs: `gc`
+loads it there too, so `defer i.M()` on a nil interface panics at the statement
+under both compilers and not when the deferred call runs.
 
 **A capture whose type has no canonical name refuses the closure.** The cell is
 allocated through `runtime.newobject`, which takes a `*_type`, so a capture of
@@ -244,10 +247,38 @@ duplicate-tolerant symbol, which only the generated functions of
 [032](032-type-descriptors-and-itabs.md) have. The literal costs one function
 symbol per site and one cell, and needs neither.
 
-`gc` also emits a nil check of the itab at a method value whose receiver is an
-interface, so that the panic happens where the value is formed rather than
-inside the wrapper. That row is refused here for the reason above, so the
-question does not arise yet, and it is part of the same work.
+#### A receiver that is an interface
+
+An interface method is declared by nobody, so no symbol names the function the
+value calls: it is read out of the itab at the method's index, which is the
+order [032](032-type-descriptors-and-itabs.md) writes the array in. That
+changes one thing in the rewrite above and only one, the callee:
+
+```
+i.M   becomes   t := i
+                nilcheck(t)
+                func(a ...) (r ...) { return t.M(a...) }
+```
+
+`t.M(a...)` inside the literal is the interface call `ir/build.go`'s
+`methodCall` already builds: the callee is the selection, the receiver stays
+inside it, and `ssa/rules/arm64.go` loads the entry point from the table plus
+the slot. So the capture, the cell and the closure object are the row above
+unchanged, and there is no second closure shape.
+
+**The nil check is where the panic goes, and moving it is a miscompile.** The
+language evaluates the receiver where the value is written, so a receiver
+holding nothing panics there. A compiler that let the fault happen inside the
+call made later would move an observable panic, and a program that forms the
+value and never calls it would not panic at all. `gc` writes the same test as
+`OCHECKNIL(OITAB(i))` at the statement, in two nodes, because its IR has a node
+for the table; `ir.ONilCheck` takes the interface itself, because this IR has
+none and `ssa.Build`'s `OpITab` is the operation that reads one. Nothing reads
+the check: the fault is the effect, and `arm64Essential` keeps a nil check that
+no value uses.
+
+`gc` saves the whole two-word interface value in its closure struct too, which
+its `MethodValueType` spells as `struct{F uintptr; R I}`.
 
 ### A captured named result
 
@@ -493,16 +524,21 @@ ordinary tests do not take.
   Go 1.22 and later, where each iteration has a fresh variable.
 
 None of the four bullets is reached in full. Of the corpus files the first
-bullet names, four run and match `gc`'s own build: `deferprint.go`,
-`print.go`, `goprint.go` and `recover1.go`, each of which the deferred-builtin
-row unblocked. `recover.go` is still refused, on `defer i.M()`, which is the
-interface method value row above. `recover5.go` reaches
-`internal/gotest/testdata/ratchet.txt` as `rejected`, which proves the type
-checker and not the back end. No `closure*.go` file runs.
+bullet names, five run and match `gc`'s own build: `deferprint.go`, `print.go`,
+`goprint.go`, `recover1.go` and `recover.go`. The first four the
+deferred-builtin row unblocked and the last the interface method value row
+did, on `defer i.M()`. `method5.go` is the other file that row moved, and it
+stops at the link rather than at a refusal now: it embeds through a pointer,
+and the wrapper a promoted method needs in the itab, `main.T3.M`, is not
+generated. That gap is `ssagen`'s and it is reachable without any method value.
+`recover5.go` reaches `internal/gotest/testdata/ratchet.txt` as `rejected`,
+which proves the type checker and not the back end. No `closure*.go` file
+runs.
 
 What else runs is `internal/e2e`'s programs: a closure, a `defer`, a `go`, a
-`defer` that runs while panicking, a `recover`, a `print`, a deferred builtin
-and a `defer recover()`. [004](004-conformance.md) counts them under L3, and
+`defer` that runs while panicking, a `recover`, a `print`, a deferred builtin,
+a `defer recover()`, a method value of an interface with the receiver reassigned
+under it, and the panic a nil interface makes where such a value is formed. [004](004-conformance.md) counts them under L3, and
 its own caution about the link-and-run cases applies to them as well: the
 oracle is expected output written in the test, except for the deferred builtin,
 whose oracle is the same program built by `gc`.

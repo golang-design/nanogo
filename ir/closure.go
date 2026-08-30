@@ -90,10 +90,15 @@ import (
 // makes for the operands of a defer, and it is why there is one capture shape
 // here and not two.
 //
-// # What is refused
+// # A receiver that is an interface is a capture like any other
 //
-// A method value of an interface, whose function is read out of the itab and
-// named by no symbol. It is refused where the closure object would be built.
+// The function a method value of an interface calls is read out of the itab
+// and named by no symbol, so the literal ir.Build writes for it holds the
+// interface value and makes the interface call inside its own body. That is
+// the same one capture, the same cell and the same closure object, and the
+// difference between the two receivers is inside the literal rather than here.
+// The nil check the row also needs stands where the value is formed, which is
+// ir/build.go's methodValue and not this file.
 
 // closureCodeField is the index of the code pointer in a closure object, and
 // closureFirstCapture is the index of the first capture after it.
