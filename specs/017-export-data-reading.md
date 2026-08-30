@@ -25,13 +25,26 @@ Everything below was measured with commands, and each measurement is quoted
 where it is claimed. The one number this spec does not have is the one G1 is
 graded on, because the executable does not link yet and $N_2$ does not exist.
 
+Two conventions in the quoted output. `$fresh` stands for a `GOCACHE` directory
+created for that run, because a cached compile action means `-toolexec` never
+ran and the run proved nothing ([060](060-selfhost.md)). And a long symbol name
+or a long temporary path is shortened with an ellipsis where the shortening
+cannot be misread. Every other byte is what the command printed.
+
+The measurements were taken against the working tree at the time of writing.
+`ir/foreign.go` was under edit in that tree, so the coverage numbers below move
+with it, and the `Sizeof` row in particular is expected to move: `ir/build.go`
+folds `unsafe.Sizeof` for an instantiation now ([016](016-directives-and-pragmas.md))
+and the foreign walk does not have that case yet.
+
 ## The finding that changes the shape of the work
 
 Stage 1 runs. All 19 packages compile against nanogo-built dependencies, and
 the reader reads every archive nanogo wrote.
 
+`allow19.txt` holds the 19 library packages, one import path per line.
+
 ```console
-$ cat allow19.txt                # the 19 library packages, one per line
 $ GOCACHE=$fresh NANOGO_ALLOWLIST=allow19.txt NANOGO_LOG=log19.txt \
       go build -toolexec=./nanogo $(cat allow19.txt)
 $ echo $?
@@ -60,6 +73,8 @@ the `cmd/nanogo` build produced, which is every package in that binary's
 closure:
 
 ```
+golang.design/x/nanogo/cmd/nanogo      decls=0    bodies=0   generic=0  ok
+golang.design/x/nanogo/dist            decls=35   bodies=19  generic=0  ok
 golang.design/x/nanogo/driver          decls=65   bodies=32  generic=4  ok
 golang.design/x/nanogo/export          decls=189  bodies=81  generic=4  ok
 golang.design/x/nanogo/export/pkgbits  decls=142  bodies=72  generic=0  ok
@@ -70,13 +85,17 @@ golang.design/x/nanogo/obj/arm64       decls=291  bodies=136 generic=0  ok
 golang.design/x/nanogo/rtsym           decls=23   bodies=5   generic=0  ok
 golang.design/x/nanogo/rtype           decls=43   bodies=15  generic=0  ok
 golang.design/x/nanogo/ssa             decls=394  bodies=184 generic=0  ok
+golang.design/x/nanogo/ssa/rules       decls=2    bodies=0   generic=0  ok
 golang.design/x/nanogo/ssagen          decls=35   bodies=14  generic=4  ok
 golang.design/x/nanogo/syntax          decls=153  bodies=66  generic=4  ok
 golang.design/x/nanogo/types2          decls=323  bodies=492 generic=4  ok
 golang.design/x/nanogo/types2/errors   decls=153  bodies=1   generic=0  ok
 ```
 
-17 archives, 0 read failures, 0 body decode failures. The container's read
+17 archives, 0 read failures, 0 body decode failures. `cmd/nanogo` is on the
+list at zero declarations, which is what a `main` package owes an importer and
+is [015](015-export-data.md)'s own reason the reader was built before the
+writer. The container's read
 half, the declaration reader and the body decoder all take nanogo's own bytes.
 Nothing in `export/pkgbits`, `export/read.go`, `export/reader.go`,
 `export/body.go` or `export/bodyread.go` is on the critical path to G1.
@@ -188,27 +207,19 @@ $ go tool nm syntax/_pkg_.a | grep 'atomic.(\*Pointer\[\[\]\*.*SrcFile\])'
 `syntax` calls `Load` and `Store` and stencils exactly those two.
 
 **Why this never surfaced before.** `gc` emits the whole instantiation,
-methods included, in every package that reaches it, `dupok`. In the build
-where nanogo compiles `syntax` alone, six `gc`-compiled importers of `syntax`
-each supply all four:
+methods included, in every package that reaches it, `dupok`. Running
+`go tool nm` over every archive the link configuration names, in the build
+where nanogo compiles `syntax` alone and `gc` compiles the rest:
 
-```console
-$ for each package in the link, nm | grep 'R type:*sync/atomic.Pointer[[]*…SrcFile]'
-golang.design/x/nanogo/driver: 1
-golang.design/x/nanogo/export: 1
-golang.design/x/nanogo/ir: 1
-golang.design/x/nanogo/loader: 1
-golang.design/x/nanogo/ssagen: 1
-golang.design/x/nanogo/syntax: 1
-golang.design/x/nanogo/types2: 1
-$ … | grep 'T sync/atomic.(*Pointer[[]*…SrcFile]).CompareAndSwap'
-golang.design/x/nanogo/driver: 1
-golang.design/x/nanogo/export: 1
-golang.design/x/nanogo/ir: 1
-golang.design/x/nanogo/loader: 1
-golang.design/x/nanogo/ssagen: 1
-golang.design/x/nanogo/types2: 1
-```
+| package, in that build | defines the descriptor | defines `CompareAndSwap` |
+| --- | --- | --- |
+| `syntax`, compiled by nanogo | yes | no |
+| `driver`, compiled by `gc` | yes | yes |
+| `export`, compiled by `gc` | yes | yes |
+| `ir`, compiled by `gc` | yes | yes |
+| `loader`, compiled by `gc` | yes | yes |
+| `ssagen`, compiled by `gc` | yes | yes |
+| `types2`, compiled by `gc` | yes | yes |
 
 Six of the seven definitions are `gc`'s and the seventh, `syntax`, is
 nanogo's and is the incomplete one. Put every importer on the allowlist and
@@ -334,7 +345,7 @@ is about reading.
 own 19 packages declare three generic declarations in total:
 
 ```console
-$ grep -E '^(func|type) [A-Za-z_]+\[[A-Za-z_]+ ' over the 19 packages
+$ grep -rEn '^(func|type) [A-Za-z_]+\[[A-Za-z_]+ ' <the 19 package directories>
 types2/predicates.go:566:func clone[P *T, T any](p P) P {
 types2/subst.go:395:func substList[T comparable](in []T, subst func(T) T) (out []T) {
 types2/trie.go:16:type trie[V any] map[int]any
@@ -453,6 +464,12 @@ guessed:
   `__.PKGDEF`. A harness that compares whole archives rather than the export
   data member has to allow for it. The measurement above did not have to,
   because both runs read the same source and the same toolchain.
+- **A miscompile of nanogo's own source that reproduces stably.** This one is
+  in neither the reader nor the writer. $N_2 = N_3$ needs $N_1$, which `gc`
+  built, and $N_2$, which nanogo built, to write the same bytes from the same
+  source. A construct nanogo compiles wrongly but consistently passes the
+  19-of-19 check above and still breaks stage 5.
+  [001](001-bootstrap-gates.md) states the same caveat about its own gate.
 
 The comparison G1 needs is not the one above. It is
 
@@ -590,16 +607,25 @@ directions.** For `types2`, read back through nanogo's own reader:
 
 The 100 extra are unexported names, and the plausible cause is that nanogo
 offers more bodies for inlining and an offered body drags its unexported
-references into the file. One object goes the other way: `gcArchSizes` is in
-`gc`'s file and not in nanogo's. Neither direction is a defect on the evidence
-here, because both files are internally consistent and both are read without
-complaint.
+references into the file. **The divergence is not one-directional and it is not
+uniform.** `gcArchSizes` is in `gc`'s file for `types2` and not in nanogo's.
+`ssa/rules` is 17 bodies in `gc`'s file and 0 in nanogo's. `types2/errors` is 0
+in `gc`'s and 1 in nanogo's. So no single rule explains the difference and none
+of it is a defect on the evidence here, because both files are internally
+consistent and both are read without complaint.
 
-**What would settle it is `gc` reading nanogo's own 19 archives.**
-`export/crossread_test.go`'s `TestGcReadsWhatNanogoWrote` does exactly that for
-the standard library and has never been pointed at nanogo's own packages. Until
-it is, "nanogo's archive is complete" is a claim resting on nanogo's reader
-agreeing with nanogo's writer.
+**`gc` does read nanogo's own archives, and it has done so twice.** With
+`syntax` alone on the allowlist, `gc` compiled `types2`, `ir`, `loader`,
+`driver`, `export` and `ssagen` against nanogo's `syntax` archive. With
+`syntax` and `types2` on it, `gc` compiled the rest against both. Both builds
+linked and both executables answered `nanogo version`. That is more than
+nanogo's reader agreeing with nanogo's writer.
+
+**What is still owed is the wide version of that check.**
+`export/crossread_test.go`'s `TestGcReadsWhatNanogoWrote` compiles a file naming
+every exported declaration of a package, which is what finds a declaration a
+file omits rather than one a build happens not to reach. It runs over the
+standard library and has never been pointed at nanogo's own 19 packages.
 
 **Whether stage 3's cost is acceptable is not measured.** `instantiateType`'s
 comment asserts that building the method set of every foreign instantiation

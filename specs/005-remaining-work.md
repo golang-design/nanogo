@@ -365,13 +365,17 @@ foreign object. The local half is built now, and closing it moved nothing:
 not move at all. A refusal names what stopped first, not what a package needs,
 and a message that names a foreign object does not say so.
 
-G1 does not close until the reader exists. The writing half is done: a generic
-type this package declares is written with its methods numbered against one
-dictionary in gc's own order, and gc reads it back, instantiates it and runs it
-(`export`'s `TestGcInstantiatesAGenericTypeNanogoWrote`). The reading half has
-not started, and a build of nanogo by nanogo is what needs it: a package
-compiled here reads its dependencies' export data, and today that data is
-gc's.
+This paragraph used to say that G1 does not close until the reader exists, and
+that the reading half had not started. Both halves of that were false and
+neither had been measured. [017](017-export-data-reading.md) ran stage 1: all
+19 packages compile against dependencies nanogo built, in one build with a
+fresh cache, and the reader reads every archive nanogo writes.
+
+What G1 waits on is one class of symbol the back end does not emit, and it is
+in the graph above. The correction is kept here rather than replaced, because
+the claim that was wrong is the same kind of claim as the ones still in this
+document: a statement about what is unbuilt, written once, taken on trust, and
+never re-run.
 
 A closed blocker is not a compiled package, and the table reshapes every time
 one closes. Closing the method-value receiver moved `link` and `loader` to
