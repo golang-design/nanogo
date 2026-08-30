@@ -203,13 +203,17 @@ func wrappable(sym string, m ir.Method) error {
 	if m.Sig == nil {
 		return fmt.Errorf("ssagen: the wrapper %s needs the signature of %s, which the IR does not carry", sym, m.Name)
 	}
-	if m.Sig.Variadic {
-		// The wrapper passes its parameters through unchanged, so the packed
-		// slice arrives already packed and the call must not pack it again.
-		// ir.Build spells that with an OCall index it does not export, so a
-		// variadic method is refused rather than silently repacked.
-		return fmt.Errorf("ssagen: the wrapper %s is for a variadic method, and passing a packed slice through is not built", sym)
-	}
+	// A variadic method needs nothing special here, and the refusal that used
+	// to sit at this line was written from a wrong reading.
+	//
+	// The worry was that the wrapper would pack its last parameter into a
+	// second slice. It cannot. Packing happens once, in ir.Build's callArgs,
+	// which reads the ... from the syntax of a call; [ir.Type.Params] is what
+	// comes out of it, and for func(...int) the last entry is already []int.
+	// A wrapper built from that list forwards a slice to a parameter that is a
+	// slice, which is the same pass-through every other parameter gets, and
+	// nothing below OCall reads [ir.Type.Variadic] except the descriptor
+	// writer.
 	return nil
 }
 

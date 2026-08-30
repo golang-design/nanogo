@@ -162,6 +162,14 @@ func (c counter) get() int { return c.n }
 
 func (c counter) add(x, y int) int { return c.n + x + y }
 
+func (c counter) sum(xs ...int) int {
+	t := c.n
+	for _, x := range xs {
+		t += x
+	}
+	return t
+}
+
 func (c *counter) bump() { c.n++ }
 `
 
@@ -174,7 +182,7 @@ func TestMethodWrappersNamesTheGeneratedFunction(t *testing.T) {
 	}
 	// One wrapper per value receiver method and none for the pointer receiver
 	// one, which the front end already spells with a pointer.
-	want := []string{"main.(*counter).add", "main.(*counter).get"}
+	want := []string{"main.(*counter).add", "main.(*counter).get", "main.(*counter).sum"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("the wrappers are %v, want %v", got, want)
 	}
@@ -198,7 +206,7 @@ func TestMethodWrappersCoverBothDescriptors(t *testing.T) {
 		t.Fatal(err)
 	}
 	fns := c.wrappers(t, base, ptr)
-	if len(fns) != 2 {
+	if len(fns) != 3 {
 		var got []string
 		for _, fn := range fns {
 			got = append(got, fn.Sym)
@@ -253,6 +261,22 @@ func TestMethodWrapperRuns(t *testing.T) {
 		// their register places while the receiver takes the first one.
 		{"parameters", "main.(*counter).add",
 			"func (c *counter) add(x, y int) int", "(&counter{n: 100}).add(20, 3)", 123},
+		// A variadic method. The caller packs the arguments into a slice
+		// before the call, so the wrapper's last parameter is an ordinary
+		// slice and forwarding it must not pack it a second time. This case
+		// was a refusal until the reading behind it was checked: ir.Build
+		// packs from the syntax of a call, and a wrapper has no syntax.
+		{"variadic", "main.(*counter).sum",
+			"func (c *counter) sum(xs ...int) int", "(&counter{n: 100}).sum(1, 2, 3)", 106},
+		// The same method with the arguments already in a slice. The two
+		// forms reach the wrapper identically, and a wrapper that repacked
+		// would differ between them.
+		{"variadic spread", "main.(*counter).sum",
+			"func (c *counter) sum(xs ...int) int", "(&counter{n: 100}).sum([]int{4, 5, 6}...)", 115},
+		// No variadic arguments at all, which is the empty slice rather than
+		// a missing parameter.
+		{"variadic empty", "main.(*counter).sum",
+			"func (c *counter) sum(xs ...int) int", "(&counter{n: 100}).sum()", 100},
 	}
 	for _, tc2 := range tests {
 		t.Run(tc2.name, func(t *testing.T) {
