@@ -297,6 +297,10 @@ func TestTheUnpackedNanogoBuildsAndRunsAProgram(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s build in %s: %v\n%s", nanogo, prog, err, out)
 	}
+	// -work asked the build to keep its scratch directory, so this test owns
+	// it. Everything else here is under a t.TempDir; this one is not, because
+	// nanogo chose the path.
+	defer os.RemoveAll(scratchDir(t, string(out)))
 
 	// The closure is measured rather than written down, for the reason the
 	// tally test measures it: it moves between Go releases.
