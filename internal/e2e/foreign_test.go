@@ -593,3 +593,155 @@ func TestToolexecRunsEachConstructTheForeignWalkMaps(t *testing.T) {
 		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
 	}
 }
+
+// The module whose library is a generic slice expression at every operand
+// class and every bound form.
+//
+// Only main is on the allowlist, so gc compiles lib and nanogo reads each body
+// below out of the archive gc wrote. That is what makes this the end-to-end
+// check on ir/foreign.go's slice expression: no syntax tree of any of these
+// bodies exists in the build that stencils them.
+//
+// The element types are one word, two words and three words with a pointer in
+// the middle, because a bound the lowering scaled by the wrong element size
+// points at the wrong element rather than off the object, and prints a wrong
+// answer rather than crashing.
+//
+// The array class is the one that has to take an address, so ArrWrite and
+// PtrArrWrite write through the result. A build that sliced a copy of the
+// array returns the element the caller passed in and not the one it wrote,
+// which no length or capacity would show.
+func foreignSliceModule() map[string]string {
+	return map[string]string{
+		"go.mod": "module nanogo.example/foreignslice\n\ngo 1.27\n",
+		"lib/lib.go": `package lib
+
+func All[T any](s []T) []T  { return s[:] }
+func Lo[T any](s []T) []T   { return s[2:] }
+func Hi[T any](s []T) []T   { return s[:2] }
+func LoHi[T any](s []T) []T { return s[1:3] }
+func Max[T any](s []T) []T  { return s[1:2:4] }
+
+// Var takes its bounds from parameters, so every bounds check the lowering
+// emits is reached with a value rather than with a number it can fold.
+func Var[T any](s []T, lo, hi, max int) []T { return s[lo:hi:max] }
+
+func StrAll[T ~string](s T) T  { return s[:] }
+func StrLo[T ~string](s T) T   { return s[2:] }
+func StrHi[T ~string](s T) T   { return s[:2] }
+func StrLoHi[T ~string](s T) T { return s[1:3] }
+
+func ArrAll[T any](a [4]T) []T { return a[:] }
+func ArrMax[T any](a [4]T) []T { return a[1:2:4] }
+
+// ArrWrite writes through the slice of its array parameter and reads the
+// array back, which the copy a wrong build would slice does not show.
+func ArrWrite[T any](a [4]T, v T) T {
+	s := a[1:]
+	s[0] = v
+	return a[1]
+}
+
+func PtrArrAll[T any](p *[4]T) []T { return p[:] }
+func PtrArrMax[T any](p *[4]T) []T { return p[1:2:4] }
+
+// PtrArrWrite writes into the caller's array, so the caller reads the write.
+func PtrArrWrite[T any](p *[4]T, v T) {
+	s := p[1:]
+	s[0] = v
+}
+
+// Rec holds an array field, so Field takes the address of a field through a
+// pointer rather than the address of a variable.
+type Rec[T any] struct{ A [4]T }
+
+func Field[T any](r *Rec[T]) []T { return r.A[1:] }
+
+// Local slices an array the body itself declares, which is the array that has
+// no address until the walk takes one.
+func Local[T any](v T) []T {
+	var a [4]T
+	a[3] = v
+	return a[1:4:4]
+}
+`,
+		"main.go": `package main
+
+import "nanogo.example/foreignslice/lib"
+
+type trio struct {
+	n    int
+	name string
+	m    int
+}
+
+func show(s []int) { println(len(s), cap(s), s[0]) }
+
+func main() {
+	ints := []int{10, 20, 30, 40}
+	show(lib.All(ints))
+	show(lib.Lo(ints))
+	show(lib.Hi(ints))
+	show(lib.LoHi(ints))
+	show(lib.Max(ints))
+	show(lib.Var(ints, 1, 3, 4))
+
+	// A two-word element, so a bound scaled by the wrong size reads half of
+	// one string and half of the next.
+	strs := []string{"a", "bb", "ccc", "dddd"}
+	ss := lib.LoHi(strs)
+	println(len(ss), cap(ss), ss[0], ss[1])
+
+	// A three-word element with a pointer in the middle.
+	trios := []trio{{1, "one", 2}, {3, "three", 4}, {5, "five", 6}, {7, "seven", 8}}
+	ts := lib.Max(trios)
+	println(len(ts), cap(ts), ts[0].n, ts[0].name, ts[0].m)
+
+	println(lib.StrAll("hello"), lib.StrLo("hello"), lib.StrHi("hello"), lib.StrLoHi("hello"))
+
+	arr := [4]int{1, 2, 3, 4}
+	println(lib.ArrWrite(arr, 9), arr[1])
+	show(lib.ArrAll(arr))
+	show(lib.ArrMax(arr))
+
+	show(lib.PtrArrAll(&arr))
+	show(lib.PtrArrMax(&arr))
+	lib.PtrArrWrite(&arr, 7)
+	println(arr[0], arr[1], arr[2])
+
+	r := lib.Rec[int]{A: [4]int{5, 6, 7, 8}}
+	show(lib.Field(&r))
+
+	// The array the body itself declares. It has no address until the walk
+	// takes one, and it escapes because the slice outlives the call, so the
+	// element the caller reads is the evidence the base pointer is right.
+	sl := lib.Local(11)
+	println(len(sl), cap(sl), sl[0], sl[2])
+}
+`,
+	}
+}
+
+// TestToolexecRunsAForeignGenericThatSlices is the evidence for ir/foreign.go's
+// slice expression.
+//
+// A stencil compiles whatever it computes, so the claim is agreement with the
+// program gc builds from the same source, and it is answered by running both.
+// The lengths, the capacities and the elements are all printed, because the
+// three parts of the lowering fail apart: a wrong length is a wrong len, a
+// wrong capacity is a wrong cap, and a wrong base pointer is a wrong element.
+func TestToolexecRunsAForeignGenericThatSlices(t *testing.T) {
+	h := setup(t, foreignSliceModule(), []string{"# gc owns lib, nanogo owns main", "main"})
+
+	if out, err := h.build(t, "-o", "foreignslice", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	got := runProgram(t, filepath.Join(h.mod, "foreignslice"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

@@ -1051,6 +1051,8 @@ func (b *builder) foreignExpr(e export.Expr) Expr {
 		return b.foreignField(e)
 	case *export.IndexExpr:
 		return b.foreignIndex(e)
+	case *export.SliceExpr:
+		return b.foreignSlice(e)
 	case *export.UnaryExpr:
 		return b.foreignUnary(e)
 	case *export.BinaryExpr:
@@ -1258,6 +1260,90 @@ func (b *builder) foreignIndex(e *export.IndexExpr) Expr {
 	}
 	idx := b.assignConv(b.foreignOperand(e.Index), b.foreignTypeOf(e.Index), types2.Typ[types2.Int])
 	return &Node{Op: OIndex, Type: b.irType(et), X: base, Y: idx}
+}
+
+// foreignSlice builds x[lo:hi] and x[lo:hi:max].
+//
+// Args holds the three bounds in the order the language writes them, and a
+// bound the body left out stays nil, which is what tells
+// specs/021-ssa-construction.md that the default applies rather than that a
+// zero was written. The list is made at three entries and filled in place,
+// because ir/lower.go refuses a node whose Args has any other length and that
+// refusal names no declaration for the reader to open.
+//
+// The operand is where the classes part, and they part here for the reason
+// ir/build.go's sliceExpr parts them. A slice, a string and a pointer to an
+// array reach ir/lower.go as they stand: it reads a header out of the first
+// two and an array length out of the third. An array does not. The result
+// points into the array's storage and a value has no storage to point into, so
+// the operand becomes the array's address, which also moves the array out of a
+// register and into a frame slot.
+//
+// The address of the array is taken with no question asked about the operand,
+// the same way [builder.foreignRecv] takes the address of a receiver. The
+// specification requires the operand of a slice expression to be addressable
+// when it is an array, so gc's own compile of the declaring package rejected
+// every body where it is not, and there is no archive holding one to refuse.
+// A tree that carried one anyway stops in ssa/build.go, which has no address
+// for a value, so the failure is still a refusal and not a pointer into a
+// temporary.
+//
+// Three shapes are refused by name instead of built. An operand whose class is
+// none of the four has no lowering at all. A three-index slice of a string has
+// no capacity to give the result, and is a type error for that reason, so an
+// archive that carried one was not written from Go the checker accepted. And a
+// node with no type in the stream leaves the result's type unknown, which is
+// the same refusal [builder.foreignIndex] gives for an index.
+func (b *builder) foreignSlice(e *export.SliceExpr) Expr {
+	xt := b.foreignTypeOf(e.X)
+	if xt == nil {
+		b.refuseForeign("a slice expression over an operand with no type")
+		return b.badExpr(syntax.NoPos)
+	}
+	base := b.foreignOperand(e.X)
+	switch core := coreType(xt).(type) {
+	case *types2.Slice:
+		// A header the operand already holds, and every bound form applies.
+
+	case *types2.Basic:
+		if core.Info()&types2.IsString == 0 {
+			b.refuseForeign("a slice expression over %s", types2.TypeString(xt, nil))
+			return b.badExpr(syntax.NoPos)
+		}
+		if e.Index[2] != nil {
+			b.refuseForeign("a three-index slice of the string %s", types2.TypeString(xt, nil))
+			return b.badExpr(syntax.NoPos)
+		}
+
+	case *types2.Pointer:
+		if _, ok := coreType(core.Elem()).(*types2.Array); !ok {
+			b.refuseForeign("a slice expression over %s", types2.TypeString(xt, nil))
+			return b.badExpr(syntax.NoPos)
+		}
+
+	case *types2.Array:
+		base = b.addrOf(base, xt)
+
+	default:
+		b.refuseForeign("a slice expression over %s", types2.TypeString(xt, nil))
+		return b.badExpr(syntax.NoPos)
+	}
+	t := b.foreignTypeOf(e)
+	if t == nil {
+		b.refuseForeign("a slice expression whose type the stream does not carry")
+		return b.badExpr(syntax.NoPos)
+	}
+	n := &Node{Op: OSlice, Type: b.irType(t), X: base}
+	n.Args = make([]Expr, 3)
+	for i, x := range &e.Index {
+		if x == nil {
+			continue
+		}
+		// Every bound is an integer index, and one written at any other
+		// integer type is converted the way an index is.
+		n.Args[i] = b.assignConv(b.foreignOperand(x), b.foreignTypeOf(x), types2.Typ[types2.Int])
+	}
+	return n
 }
 
 // foreignUnary builds a unary operation, an address or a dereference.

@@ -657,6 +657,80 @@ func Promoted[T any](o Outer[T]) int { return o.N }
 // dereferences implicitly and the tree does not.
 func PtrArrayAt[T any](p *[3]T, i int) T { return p[i] }
 
+// The slice expression. It is the one node whose lowering is decided by the
+// class of its operand, so each of the four classes is met at every bound form
+// the language gives it. A slice, a string and a pointer to an array are read
+// through a header or a length; an array is the class whose address the walk
+// has to take, because the result points into the array's storage.
+
+func SliceAll[T any](s []T) int { return len(s[:]) }
+
+func SliceLo[T any](s []T) int { return len(s[1:]) }
+
+func SliceHi[T any](s []T) int { return len(s[:2]) }
+
+func SliceLoHi[T any](s []T) int { return len(s[1:3]) }
+
+func SliceMax[T any](s []T) int { return cap(s[1:2:4]) }
+
+// SliceVar takes its bounds from parameters, so each bound is an operand the
+// walk builds rather than a number the tree already folded.
+func SliceVar[T any](s []T, lo, hi int) int { return len(s[lo:hi]) }
+
+// SliceVarMax is the three-index form at bounds that are not constants, which
+// is the shape every bounds check of ir/lower.go is emitted for.
+func SliceVarMax[T any](s []T, lo, hi, max int) int { return cap(s[lo:hi:max]) }
+
+func SliceStrAll[T ~string](s T) int { return len(s[:]) }
+
+func SliceStrLo[T ~string](s T) int { return len(s[2:]) }
+
+func SliceStrHi[T ~string](s T) int { return len(s[:2]) }
+
+func SliceStrLoHi[T ~string](s T) int { return len(s[1:3]) }
+
+func SliceArrAll[T any](a [4]T) int { return len(a[:]) }
+
+func SliceArrLoHi[T any](a [4]T) int { return len(a[1:3]) }
+
+func SliceArrMax[T any](a [4]T) int { return cap(a[1:2:4]) }
+
+func SlicePtrArrAll[T any](p *[4]T) int { return len(p[:]) }
+
+func SlicePtrArrLoHi[T any](p *[4]T) int { return len(p[1:3]) }
+
+func SlicePtrArrMax[T any](p *[4]T) int { return cap(p[1:2:4]) }
+
+// Arr holds an array field, so SliceField takes the address of a field of a
+// variable rather than of the variable.
+type Arr[T any] struct{ A [4]T }
+
+func SliceField[T any](v Arr[T]) int { return len(v.A[1:]) }
+
+// SliceLocal slices an array the body itself declares, which is the array that
+// has no address until this walk takes one.
+func SliceLocal[T any](v T) int {
+	var a [4]T
+	a[0] = v
+	return len(a[1:]) + cap(a[:2:3])
+}
+
+// SliceValue returns the slice rather than its length, so the pointer the
+// lowering computes is read and not only measured.
+func SliceValue[T any](s []T) T { return s[1:][0] }
+
+// SliceStrValue is the same for a string, whose result is a string and not a
+// slice of one.
+func SliceStrValue[T ~string](s T) byte { return s[1:][0] }
+
+// SliceArrValue is the same for an array, where a wrong build gives the caller
+// a pointer into a copy and the write below is then lost.
+func SliceArrValue[T any](a [4]T, v T) T {
+	s := a[1:]
+	s[0] = v
+	return a[1]
+}
+
 // StrAt indexes a string, which is neither a slice nor an array.
 func StrAt[T ~string](s T, i int) byte { return s[i] }
 
@@ -807,8 +881,6 @@ func Nested[T ~int](v T) T {
 
 func MapAt[T comparable](m map[T]int, k T) int { return m[k] }
 
-func Slice[T any](s []T) []T { return s[1:] }
-
 func Assert[T any](v any) bool { _, ok := v.(T); return ok }
 
 func Lit[T any](v T) []T { return []T{v} }
@@ -882,7 +954,6 @@ func TestCompileRefusesEachForeignConstructItDoesNotMap(t *testing.T) {
 		want string
 	}{
 		{"a map index", "refuse.MapAt(map[int]int{1: 2}, 1)", "an index of a map"},
-		{"a slice expression", "len(refuse.Slice([]int{1, 2}))", `the expression "slice"`},
 		{"a type assertion", "btoi(refuse.Assert[int](any(1)))", `the expression "type assertion"`},
 		{"a composite literal", "len(refuse.Lit(1))", `the expression "composite literal"`},
 		{"a builtin that needs a descriptor", "refuse.Appended([]int{1}, 2)", "a call of the builtin append"},
@@ -959,6 +1030,28 @@ func main() {
 	d += lib.Promoted(lib.Outer[int]{Box: lib.Box[int]{V: 1, N: 5}, M: 2}) - 5
 	d += lib.PtrArrayAt(&[3]int{1, 2, 3}, 2) - 3
 	d += int(lib.StrAt("abc", 1)) - 98
+	d += lib.SliceAll([]int{1, 2, 3, 4}) - 4
+	d += lib.SliceLo([]int{1, 2, 3, 4}) - 3
+	d += lib.SliceHi([]int{1, 2, 3, 4}) - 2
+	d += lib.SliceLoHi([]int{1, 2, 3, 4}) - 2
+	d += lib.SliceMax([]int{1, 2, 3, 4}) - 3
+	d += lib.SliceVar([]int{1, 2, 3, 4}, 1, 4) - 3
+	d += lib.SliceVarMax([]int{1, 2, 3, 4}, 1, 2, 4) - 3
+	d += lib.SliceStrAll("abcd") - 4
+	d += lib.SliceStrLo("abcd") - 2
+	d += lib.SliceStrHi("abcd") - 2
+	d += lib.SliceStrLoHi("abcd") - 2
+	d += lib.SliceArrAll([4]int{1, 2, 3, 4}) - 4
+	d += lib.SliceArrLoHi([4]int{1, 2, 3, 4}) - 2
+	d += lib.SliceArrMax([4]int{1, 2, 3, 4}) - 3
+	d += lib.SlicePtrArrAll(&[4]int{1, 2, 3, 4}) - 4
+	d += lib.SlicePtrArrLoHi(&[4]int{1, 2, 3, 4}) - 2
+	d += lib.SlicePtrArrMax(&[4]int{1, 2, 3, 4}) - 3
+	d += lib.SliceField(lib.Arr[int]{A: [4]int{1, 2, 3, 4}}) - 3
+	d += lib.SliceLocal(7) - 6
+	d += lib.SliceValue([]int{5, 6, 7, 8}) - 6
+	d += int(lib.SliceStrValue("abcd")) - 98
+	d += lib.SliceArrValue([4]int{1, 2, 3, 4}, 9) - 9
 	d += *lib.Addr(4) - 4
 	d += lib.Variadic(1, 2, 3) - 3
 	d += lib.CallVariadic(2, 3) - 5

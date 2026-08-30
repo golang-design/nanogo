@@ -398,6 +398,32 @@ func foreignConst(v int64) export.Expr {
 	return &export.ConstExpr{Type: intUse, Value: constant.MakeInt64(v)}
 }
 
+// foreignSliceOfDeclared is a body that declares one variable of a given type
+// and then slices it.
+//
+// The operand of a slice expression has to have a type, and the only
+// expression a written body can give one to is a use of a local: a constant
+// and a call carry the type in a field this package cannot set. A declaration
+// with no value on the right is "var x T", so the type is the test's to pick.
+// The variable takes the number after the three the body opens with.
+func foreignSliceOfDeclared(typ types2.Type, index [3]export.Expr) export.Stmt {
+	return &export.BlockStmt{Body: []export.Stmt{
+		&export.AssignStmt{Lhs: []export.Assignee{{
+			Kind:  export.AssignDef,
+			Name:  "x",
+			Type:  export.TypeUse{Type: typ},
+			Local: export.Local{DictRType: -1},
+		}}},
+		&export.AssignStmt{
+			Lhs: []export.Assignee{{Kind: export.AssignBlank}},
+			Rhs: export.MultiExpr{Exprs: []export.Expr{&export.SliceExpr{
+				X:     foreignLocalUse(3),
+				Index: index,
+			}}},
+		},
+	}}
+}
+
 // foreignLocalUse is a use of one local of a written body.
 func foreignLocalUse(i int) export.Expr { return &export.LocalExpr{Index: i} }
 
@@ -901,6 +927,60 @@ func TestForeignBodyRefusesTheShapesItCannotBuild(t *testing.T) {
 				Fun: &export.FuncLitExpr{Decoded: &export.Body{HasBlock: true}},
 			}},
 			"a call of an operand with no signature",
+		},
+		// The slice expression. The walk builds it over a slice, a string,
+		// an array and a pointer to an array, and the three rows below are
+		// the shapes outside that set. Each names the operand, because the
+		// operand is what decides the lowering.
+		{
+			"a slice of an operand with no type",
+			&export.AssignStmt{
+				Lhs: []export.Assignee{{Kind: export.AssignBlank}},
+				Rhs: export.MultiExpr{Exprs: []export.Expr{&export.SliceExpr{X: foreignConst(1)}}},
+			},
+			"a slice expression over an operand with no type",
+		},
+		{
+			"a slice of a value that is no slice, string or array",
+			&export.AssignStmt{
+				Lhs: []export.Assignee{{Kind: export.AssignBlank}},
+				Rhs: export.MultiExpr{Exprs: []export.Expr{&export.SliceExpr{X: foreignLocalUse(1)}}},
+			},
+			"a slice expression over int",
+		},
+		{
+			// A string has no capacity to give the result, so the language
+			// has no three-index slice of one. gc rejects it, which means an
+			// archive carrying one was not written from Go the checker
+			// accepted, and building it would need a capacity invented here.
+			"a three-index slice of a string",
+			foreignSliceOfDeclared(types2.Typ[types2.String], [3]export.Expr{
+				foreignConst(0), foreignConst(1), foreignConst(2),
+			}),
+			"a three-index slice of the string string",
+		},
+		{
+			// A pointer is an operand class only when it points at an array,
+			// which is the one shape whose length the lowering can read.
+			"a slice of a pointer to something that is no array",
+			foreignSliceOfDeclared(types2.NewPointer(types2.Typ[types2.Int]), [3]export.Expr{}),
+			"a slice expression over *int",
+		},
+		{
+			"a slice of a map",
+			foreignSliceOfDeclared(types2.NewMap(types2.Typ[types2.Int], types2.Typ[types2.Int]), [3]export.Expr{}),
+			"a slice expression over map[int]int",
+		},
+		{
+			// The bounds are built and the operand is a slice, so the only
+			// thing missing is the type of the result, which decides the
+			// element size every bound is scaled by.
+			"a slice expression the stream carries no type for",
+			&export.AssignStmt{
+				Lhs: []export.Assignee{{Kind: export.AssignBlank}},
+				Rhs: export.MultiExpr{Exprs: []export.Expr{&export.SliceExpr{X: foreignLocalUse(0)}}},
+			},
+			"a slice expression whose type the stream does not carry",
 		},
 		{
 			"a function literal that names a capture it does not list",
