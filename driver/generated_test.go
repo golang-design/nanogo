@@ -49,7 +49,7 @@ func mustLayout(t *testing.T, x *ir.Type) *ir.Type {
 func TestAddGeneratedCompilesTheMethodWrapper(t *testing.T) {
 	cfg := &Config{Package: "main"}
 	out := obj.NewPackage("main")
-	fns, err := ssagen.MethodWrappers([]*ir.Type{counterType(t)})
+	fns, err := ssagen.MethodWrappers([]*ir.Type{counterType(t)}, "main", nil)
 	if err != nil {
 		t.Fatalf("MethodWrappers: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestAddGeneratedSkipsAPointerReceiver(t *testing.T) {
 	base.Methods[0].PtrOnly = true
 	cfg := &Config{Package: "main"}
 	out := obj.NewPackage("main")
-	fns, err := ssagen.MethodWrappers([]*ir.Type{base})
+	fns, err := ssagen.MethodWrappers([]*ir.Type{base}, "main", nil)
 	if err != nil {
 		t.Fatalf("MethodWrappers: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestGeneratedFuncsReportsARefusalByName(t *testing.T) {
 	base := counterType(t)
 	base.Methods[0].Sig = nil
 	cfg := &Config{Package: "main"}
-	_, err := generatedFuncs(cfg, []*ir.Type{base})
+	_, err := generatedFuncs(cfg, []*ir.Type{base}, nil)
 	if err == nil {
 		t.Fatal("a method with no signature produced a wrapper")
 	}
@@ -308,7 +308,7 @@ func TestGeneratedFuncsWritesTheKeysHashForAMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("descriptorSet: %v", err)
 	}
-	fns, err := generatedFuncs(cfg, types)
+	fns, err := generatedFuncs(cfg, types, nil)
 	if err != nil {
 		t.Fatalf("generatedFuncs: %v", err)
 	}

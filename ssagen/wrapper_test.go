@@ -117,6 +117,29 @@ func (c *checked) build(t *testing.T, fn *ir.Func) *compiled {
 	return &compiled{fn: fn, f: f, a: a, fset: c.fset, file: c.file}
 }
 
+// declaredSyms is the symbol of every function the checked package declares.
+//
+// It is driver.declaredSyms, built from the same field, because
+// [MethodWrappers] reads it to tell a method declared on a type from one
+// promoted into it and the two owe different wrappers.
+func (c *checked) declaredSyms() map[string]bool {
+	out := make(map[string]bool, len(c.ir.Funcs))
+	for _, fn := range c.ir.Funcs {
+		out[fn.Sym] = true
+	}
+	return out
+}
+
+// wrappers is MethodWrappers for the checked package.
+func (c *checked) wrappers(t *testing.T, types ...*ir.Type) []*ir.Func {
+	t.Helper()
+	fns, err := MethodWrappers(types, "main", c.declaredSyms())
+	if err != nil {
+		t.Fatalf("MethodWrappers: %v", err)
+	}
+	return fns
+}
+
 // declared returns a function the front end built, by name.
 func (c *checked) declared(t *testing.T, sym string) *ir.Func {
 	t.Helper()
@@ -144,10 +167,7 @@ func (c *counter) bump() { c.n++ }
 
 func TestMethodWrappersNamesTheGeneratedFunction(t *testing.T) {
 	c := check(t, wrapperSource)
-	fns, err := MethodWrappers([]*ir.Type{c.namedType(t, "counter")})
-	if err != nil {
-		t.Fatalf("MethodWrappers: %v", err)
-	}
+	fns := c.wrappers(t, c.namedType(t, "counter"))
 	var got []string
 	for _, fn := range fns {
 		got = append(got, fn.Sym)
@@ -177,10 +197,7 @@ func TestMethodWrappersCoverBothDescriptors(t *testing.T) {
 	if err := ir.Layout(ptr); err != nil {
 		t.Fatal(err)
 	}
-	fns, err := MethodWrappers([]*ir.Type{base, ptr})
-	if err != nil {
-		t.Fatalf("MethodWrappers: %v", err)
-	}
+	fns := c.wrappers(t, base, ptr)
 	if len(fns) != 2 {
 		var got []string
 		for _, fn := range fns {
@@ -240,10 +257,7 @@ func TestMethodWrapperRuns(t *testing.T) {
 	for _, tc2 := range tests {
 		t.Run(tc2.name, func(t *testing.T) {
 			c := check(t, wrapperSource)
-			fns, err := MethodWrappers([]*ir.Type{c.namedType(t, "counter")})
-			if err != nil {
-				t.Fatalf("MethodWrappers: %v", err)
-			}
+			fns := c.wrappers(t, c.namedType(t, "counter"))
 			p := newMainPackage()
 			var wrapper *ir.Func
 			for _, fn := range fns {

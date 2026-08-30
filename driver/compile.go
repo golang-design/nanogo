@@ -531,7 +531,7 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	if err != nil {
 		return nil, false, err
 	}
-	fns, err := generatedFuncs(cfg, types)
+	fns, err := generatedFuncs(cfg, types, declaredSyms(p))
 	if err != nil {
 		return nil, false, err
 	}
@@ -557,6 +557,20 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	// orders its own record after this one only when the export data says
 	// there is one to order after (specs/015-export-data.md).
 	return out, addInitTask(out, imports, initFns), nil
+}
+
+// declaredSyms returns the symbol of every function the package declares.
+//
+// A bodyless declaration counts. Its definition is in an assembly file rather
+// than in this object, but the symbol is defined and no wrapper is owed for
+// it, which is the question ssagen.MethodWrappers asks this set.
+func declaredSyms(p *ir.Package) map[string]bool {
+	// A lookup table, never ranged over (specs/053-determinism.md).
+	out := make(map[string]bool, len(p.Funcs))
+	for _, fn := range p.Funcs {
+		out[fn.Sym] = true
+	}
+	return out
 }
 
 // isPackageInit reports whether fn is the function ir.Build synthesised to run
@@ -654,8 +668,13 @@ func addGenerated(cfg *Config, out *obj.Package, target *ssa.Target, fset *synta
 // the decision being made a second time: rtype chose the type's algorithm and
 // wrote the closure that names the function, so the closure's relocation is
 // rtype's own answer, and a second decision could disagree with it.
-func generatedFuncs(cfg *Config, types []*ir.Type) ([]*ir.Func, error) {
-	fns, err := ssagen.MethodWrappers(types)
+//
+// declared is declaredSyms of the package. A method promoted from an embedded
+// field owes a wrapper and a method declared on the type does not, and
+// ir.Type.Methods is one method set that does not separate them, so the set
+// this package declares is what tells them apart.
+func generatedFuncs(cfg *Config, types []*ir.Type, declared map[string]bool) ([]*ir.Func, error) {
+	fns, err := ssagen.MethodWrappers(types, cfg.Package, declared)
 	if err != nil {
 		return nil, &UnsupportedError{
 			Package: cfg.Package,

@@ -632,6 +632,58 @@ symbol may be spelled and `panicwrap` is not in it, so the deref of a nil
 pointer faults into the ordinary nil-pointer panic instead. The behaviour is
 the same and the message is shorter.
 
+### The promoted method wrapper
+
+The table above is a method the type declares. A struct type also promotes the
+methods of an embedded field, so a defined type that declares nothing can have
+a method set, and a promoted `M` is declared on the embedded type. Neither
+`T.M` nor `(*T).M` then names a function the front end compiled, and both are
+names the `Method` array and the itab's `Fun` array write. Generating none of
+them is `relocation target main.T3.M not defined` at link.
+
+The body is the path the source leaves implicit, written out:
+
+```go
+func (p *T) M(a ...) (r ...) { return (*E).M(&(*p).e.f, a...) }
+```
+
+`gc` writes the same function, in `noder.methodWrapper`, and its body is
+`typecheck.XDotMethod` on the receiver: the selector expansion inserts the
+embedded fields and an `OTAILCALL` enters the declaration. Three properties of
+that path are decisions and not detail:
+
+- **A step through an embedded pointer field loads it**, and that load is where
+  a nil embedded pointer faults. `gc`'s wrapper faults in the same place,
+  because the deref its expansion inserts is the same load.
+- **A pointer receiver reached through an embedded value field needs the
+  address of the field.** It is available exactly when the walk has already
+  passed through a pointer, so the address is an offset from a pointer the
+  wrapper loaded rather than the address of a parameter. The language promotes
+  a pointer receiver method into a *value's* method set only through an
+  embedded pointer, so the case with no pointer to offset from cannot arise.
+- **`ir.Method` carries no path**, because `ir.Type.Methods` is one method set
+  and holds a promoted entry and a declared one the same way. `ssagen` walks
+  the embedded fields to recover the path, and the shallowest declaration wins,
+  which is the language's own rule. Two embedded fields the same distance away
+  are not selectable by the language either and are refused.
+
+**Which package owes it.** Not the rule the deref wrapper follows. A promoted
+wrapper is generated only for a type the package being compiled declares, which
+is `gc`'s rule: `noder.needWrapper` puts an imported type in
+`haveWrapperTypes` and generates nothing for it. The reason is that a promoted
+entry and a declaration of the same name are indistinguishable in an imported
+type's method set, so a wrapper generated for one would forward past the other.
+Nothing is lost by stopping: `driver.checkExportedTypes` owes a descriptor for
+every type a non-`main` package declares, so that package generates the wrapper
+whether its own code converts the type or not, and a `main` package is the one
+package nothing imports. `driver.declaredSyms` is what tells the two apart
+inside the package being compiled.
+
+**A method promoted from an embedded interface is refused by name.** The
+interface's method is declared by nobody, so there is no symbol for the call to
+name. [020](020-ir.md) refuses the sibling case, a method expression on an
+interface, for the same reason.
+
 ### The equality and hash functions
 
 They are one decision made twice. Two values that compare equal must hash alike
