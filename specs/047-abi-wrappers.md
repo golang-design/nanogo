@@ -1,6 +1,6 @@
 ---
 title: "ABI wrappers: ABI0, symabis, the assembly header, and the argument map"
-status: draft
+status: in progress
 layer: back end
 gate: G3
 depends_on:
@@ -540,9 +540,13 @@ happened the last time one boundary had two placements is the argument.
 | a function's own ABI | `ir.Func` | not built; a new field |
 | a call's callee ABI | `ssa.Value` beside `Sig` | not built; see below |
 | building the wrapper as IR | `ssagen/wrapper.go` | the machinery is built; `finishWrapper` is the shape |
-| reading the symabis file | `driver` | not built |
-| writing the assembly header | `driver` | not built |
-| `<sym>.args_stackmap` and `<sym>.arginfo0` | `ssagen` beside `stackmap.go` | not built |
+| the runtime-package property | `driver/runtimepkg.go` | built, stage 0; checked against `GOROOT` |
+| the per-function directive gate | `driver.RuntimeDirective` | built, stage 0 |
+| reading the symabis file | `driver/symabis.go` | built, stage 1 |
+| writing the assembly header | `driver/asmhdr.go` | built, stage 1; byte-identical to `gc` over all eight packages |
+| refusing a package that owes a wrapper | `driver.checkABIWrappers` | built, stage 1; the decision is taken and refused |
+| the `//go:linkname` model | `driver`, `ir` | not built; refused by name in a package with assembly |
+| `<sym>.args_stackmap` and `<sym>.arginfo0` | `ssagen` beside `stackmap.go` | not built; inseparable from the stage 2 wrapper, see stage 1 |
 | the ABI on the emitted text symbol | `ssagen.Options.ABI` | **declared and ignored** |
 | ABI0 references to runtime symbols | `rtsym`, `ssagen/reloc.go` | built |
 
@@ -673,12 +677,20 @@ files each package actually builds on `darwin/arm64`:
 | --- | --- | --- |
 | `internal/abi` | 2 | 0 |
 | `internal/bytealg` | 0 | 0 |
-| `internal/chacha8rand` | 2 | 0 |
+| `internal/chacha8rand` | 1 | 0 |
 | `internal/cpu` | 0 | 0 |
 | `internal/runtime/atomic` | 50 | 0 |
 | `internal/runtime/maps` | 1 | 0 |
-| `internal/runtime/sys` | 3 | 0 |
+| `internal/runtime/sys` | 1 | 0 |
 | `runtime` | 418 | 204 |
+
+Two rows were re-counted while stage 0 was built and were wrong in the first
+draft. `internal/chacha8rand` has one directive and not two, and
+`internal/runtime/sys` has one and not three. The extra counts were prose:
+`chacha8.go` writes "Next is //go:nosplit to allow its use in the runtime" in
+a comment above the directive, and `intrinsics.go` writes an indented
+`//go:nosplit` inside an example. A count over lines holding the text is not a
+count of directives, and only the second is what the gate reads.
 
 The cut is clean. `runtime` is the only package that carries a write barrier or
 `systemstack` directive, and it is out of scope for every stage of this spec
@@ -727,6 +739,27 @@ something other than assembly. Five of the seven are gated by `//go:nosplit`,
 and closing that is [035](035-goroutines-and-stack-growth.md)'s work rather
 than this spec's.
 
+**Built.** `driver/runtimepkg.go` holds the transcribed list and
+`Config.RuntimeRules`, which is `gc`'s own disjunction of `-+` and `-std` with
+the path. `TestRuntimePkgsMatchesTheToolchain` parses
+`objabi.runtimePkgs` out of `GOROOT` with `go/parser` and fails on drift.
+`checkSupported` refuses `runtime` by name, and `driver.RuntimeDirective`
+refuses a function in a runtime package that carries `//go:nosplit`,
+`//go:systemstack` or one of the three write-barrier directives. The gate is
+applied in `emitPackage`, after the bodyless branch: a bodyless declaration
+carrying `//go:nosplit` needs nothing, because nanogo emits no code for it and
+`cmd/asm` honours `NOSPLIT` on the definition the assembly file writes.
+
+One clause of the property this gate does **not** cover, and it is worth
+recording rather than leaving implicit. `liveness.IsUnsafe` is
+`base.Flag.CompilingRuntime || f.NoSplit`, so `gc` marks every point in every
+function of a runtime package unsafe, and not only the ones that carry the
+directive. The per-directive gate is therefore narrower than the property, and
+the thirteen runtime packages that compile today compile with ordinary safe
+points where `gc` would emit none. Nothing links yet, so nothing observes it.
+Closing it belongs with [035](035-goroutines-and-stack-growth.md)'s nosplit
+budget, which is the same clause read the other way round.
+
 ### Stage 1: symabis, the header, and the argument map
 
 Read `-symabis` into a def and ref table. Write `-asmhdr` from the package's
@@ -746,11 +779,53 @@ Build `internal/abi` and `internal/chacha8rand` under a real
 which need no wrapper. Both carry `//go:nosplit`, so both still wait on
 [035](035-goroutines-and-stack-growth.md).
 
+**Built, with two of the three pieces and not three.** `driver/symabis.go`
+reads the file, `driver/asmhdr.go` writes the header, and
+`driver.checkABIWrappers` takes `GenABIWrappers`'s decision and refuses where
+`need` is not empty instead of making the wrapper. `TestAsmHdrMatchesGc`
+compares the header byte for byte against `go tool compile -asmhdr` for all
+eight packages, `runtime`'s 2622 lines included, and all eight match. The
+oracle needs the assembler's first pass as well as the compiler:
+`internal/abi.FuncPCABI0` checks a named function's definition ABI against the
+symabis defs, so `gc` refuses `runtime` outright without `-symabis`.
+
+`<sym>.args_stackmap` and `<sym>.arginfo0` are **not** built, and this staging
+is wrong to have asked for them here. The two are inseparable from stage 2's
+wrapper, by the same four facts the spec states above:
+`cmd/internal/obj/plist.go` appends the reference for every ABI0 text symbol,
+`gc/compile.go` defines the symbol only where `fn.ABI` is ABI0, `fn.ABI` is
+ABI0 only from a symabis `def ... ABI0` that matched a Go declaration, and
+`GenABIWrappers` then sets `ABIInternal` in `ABIRefs` unconditionally while
+`buildcfg` pins `RegabiWrappers` on for arm64. **An ABI0 `def` that matches a
+Go declaration owes exactly one wrapper and exactly one argument map, never one
+without the other.** There is therefore no package that needs the map and does
+not need the wrapper, and one gate covers both. Stage 2 owns the map.
+
+**Lifted the assembly refusal for all eight**, and lifted no package to
+compiling. The closure measurement stays at 20 of 28 and every one of the
+eight moved to a narrower refusal, which is the useful part of the reading:
+
+| Package | now refused for |
+| --- | --- |
+| `internal/abi` | `//go:nosplit` on `IntArgRegBitmap.Get`, [035](035-goroutines-and-stack-growth.md) |
+| `internal/chacha8rand` | `//go:nosplit` on `State.Next`, [035](035-goroutines-and-stack-growth.md) |
+| `internal/cpu` | `//go:linkname` |
+| `internal/bytealg` | `//go:linkname` |
+| `internal/runtime/atomic` | `//go:linkname` |
+| `internal/runtime/maps` | `//go:linkname` |
+| `internal/runtime/sys` | a Go call to `EnableDIT`, which the assembly defines under ABI0: stage 2 |
+| `runtime` | the runtime, by name |
+
 ### Stage 2: the ABIInternal wrapper, Go calling assembly
 
 Add the ABI0 register sets and the zero-size rule to `ssa.ABIWalk`. Add the ABI
 to `ir.Func` and to the call site. Read `ssagen.Options.ABI`. Generate one
-ABIInternal wrapper per bodyless declaration the symabis file `def`s as ABI0.
+ABIInternal wrapper per bodyless declaration the symabis file `def`s as ABI0,
+and, for the same declaration and from the same placement, the
+`<sym>.args_stackmap` and `<sym>.arginfo0` symbols stage 1 turned out not to be
+able to own. It must also build the `//go:linkname` model, because
+`internal/cpu` and `internal/runtime/atomic` are held by that refusal and not
+by this one.
 
 **Test.** The differential test [030](030-abi.md) already uses: compile the
 middle of three packages with nanogo and the other two with `gc`, where the
@@ -879,6 +954,53 @@ comparing the defined symbol set against `gc`'s with `go tool nm` settles it.
 cannot place.** Only the seven non-runtime packages were surveyed in detail.
 The count of 472 wrappers is measured, but the signatures behind them were not
 read. It does not block stages 0 to 3, and stage 4 must start by reading them.
+
+## What building stages 0 and 1 corrected in this spec
+
+**`//go:linkname` is a fourth blocker and the staging did not name it.** It is
+described above, in the section on which direction each wrapper goes, and it
+is treated there as the thing that triggers the ABI0 direction. It is more
+than that. `GenABIWrappers` matches a symabis `def` and `ref` against
+`sym.Linkname` first and against `sym.Pkg.Prefix + "." + sym.Name` second, and
+it adds `obj.ABISetCallable` to `ABIRefs` for a symbol the package defines
+under one. nanogo models neither, so a package that writes the directive
+cannot have its wrapper decision taken at all, and stage 1 refuses one by
+name. Four of the eight are now held by that refusal rather than by a wrapper:
+`internal/cpu`, `internal/bytealg`, `internal/runtime/atomic` and
+`internal/runtime/maps`. Stage 3 must build the linkname model before it can
+build its wrapper, and stage 2 must build it before `internal/cpu` and
+`internal/runtime/atomic` compile.
+
+The refusal is scoped to a package with assembly, because that is where the ABI
+decision reads the directive, and the same scoping applies to
+`//go:cgo_export_static`, `//go:cgo_export_dynamic` and `//go:cgo_unsafe_args`.
+A package that writes one of the four and has no assembly is unchanged: it
+still compiles with the directive recorded and dropped, which is
+[016](016-directives-and-pragmas.md)'s gap and not this spec's. A reader of the
+closure table should not conclude that `//go:linkname` is refused everywhere.
+It is refused where this spec's decision would otherwise be taken against the
+wrong symbol name.
+
+**Stage 1's own test plan asked for something stage 0 forbids.** It says to
+build `internal/abi` and `internal/chacha8rand` under a real
+`go build -toolexec=nanogo` and run a program that uses them. Both carry
+`//go:nosplit` on a function with a body, so stage 0's own gate refuses both,
+which the stage description says two paragraphs later. The two statements
+cannot both hold. What stands in its place is the unit evidence: the header is
+compared byte for byte against `gc`'s for all eight packages, the symabis
+reader is checked against the eight real files `cmd/asm -gensymabis` writes,
+and the wrapper decision is checked clause by clause. The `-toolexec` build
+belongs to whichever stage lifts the last refusal in front of those two
+packages, and that is [035](035-goroutines-and-stack-growth.md)'s.
+
+**A call to a bodyless declaration was already correct for the ABIInternal
+case.** `ssagen.callTarget` names a static callee under `obj.ABIInternal` and
+`driver.declaredSyms` already counts a bodyless declaration, so
+`internal/chacha8rand.block`, which the assembly defines as ABIInternal, is
+referenced under the ABI that defines it. This was checked rather than
+assumed, because the reverse would have been a silent link failure the moment
+stage 1 lifted the refusal. It says nothing about the ABI0 case, which has no
+definition to reach until stage 2 writes the wrapper.
 
 ## What this spec corrects
 

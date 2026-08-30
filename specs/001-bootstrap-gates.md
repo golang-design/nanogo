@@ -205,7 +205,8 @@ No gate is reached, and none has a mechanical test in the repository. The
 three-stage build above is a procedure nobody can run yet, for the reason
 [060](060-selfhost.md) records: the number of nanogo's own packages that nanogo
 compiles is zero. The refusals are the ones [060](060-selfhost.md) lists, led by
-a package with assembly in it and by a declared type whose run-time descriptor
+a package with assembly in it, which [047](047-abi-wrappers.md) has split into
+four narrower refusals rather than lifted, and by a declared type whose run-time descriptor
 [032](032-type-descriptors-and-itabs.md) cannot write; a package-level variable
 no longer refuses a package by itself, but one of type `error` still does.
 [060](060-selfhost.md) carries the census over the 27 packages the closure of a

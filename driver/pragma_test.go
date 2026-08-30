@@ -28,7 +28,7 @@ func parseLines(t *testing.T, src string) []int {
 	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := parseFiles(&Config{Package: "main", Files: []string{path}})
+	_, _, _, err := parseFiles(&Config{Package: "main", Files: []string{path}})
 	if err == nil {
 		return nil
 	}
@@ -226,7 +226,7 @@ func TestDirectivesReachTheDeclaration(t *testing.T) {
 	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	files, _, err := parseFiles(&Config{Package: "main", Files: []string{path}})
+	files, _, _, err := parseFiles(&Config{Package: "main", Files: []string{path}})
 	if err != nil {
 		t.Fatalf("parseFiles: %v", err)
 	}

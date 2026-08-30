@@ -628,27 +628,23 @@ func TestTargetABIFollowsTheSymbol(t *testing.T) {
 	}
 }
 
-// TestCompileRefusesAssembly checks both flags the go command sends for a
-// package that has .s files in it.
-func TestCompileRefusesAssembly(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		edit func(*Config)
-	}{
-		{"symabis", func(c *Config) { c.SymABIs = "/work/b001/symabis" }},
-		{"asmhdr", func(c *Config) { c.AsmHdr = "/work/b001/go_asm.h" }},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := compileSource(t, "package main\n\nfunc f(a int) int\n", tt.edit)
-			if err == nil {
-				t.Fatal("Compile accepted a package with assembly")
-			}
-			for _, want := range []string{"assembly", "ABI0", "ABIInternal", "specs/030"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("the message does not carry %q:\n%v", want, err)
-				}
-			}
-		})
+// TestCompileRefusesASymABIsFileItCannotRead covers the one thing -symabis
+// can go wrong with before a source file is read.
+//
+// A package with assembly is no longer refused whole (see TestABIWrapperGate),
+// but a symabis file the reader cannot open still is: a wrapper decision taken
+// against an empty table would conclude that no wrapper is owed because it
+// never read the line that says one is.
+func TestCompileRefusesASymABIsFileItCannotRead(t *testing.T) {
+	_, err := compileSource(t, "package main\n\nfunc f(a int) int\n",
+		func(c *Config) { c.SymABIs = "/work/b001/symabis" })
+	if err == nil {
+		t.Fatal("Compile accepted a -symabis file that is not there")
+	}
+	for _, want := range []string{"-symabis", "symabis"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message does not carry %q:\n%v", want, err)
+		}
 	}
 }
 
@@ -1368,7 +1364,7 @@ func F() []func() {
 				t.Fatal(err)
 			}
 			cfg := &Config{Package: "p", Output: filepath.Join(dir, "_pkg_.a"), Lang: tc.lang, Files: []string{path}}
-			files, fset, err := parseFiles(cfg)
+			files, fset, _, err := parseFiles(cfg)
 			if err != nil {
 				t.Fatal(err)
 			}

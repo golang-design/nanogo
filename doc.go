@@ -46,9 +46,17 @@
 //
 // Defer of a builtin, a method of a generic type, a method with type
 // parameters of its own, an instantiation of a generic another package
-// declared, a package with assembly in it, and a package with a go:embed
-// directive in it are refused, each with a message that names the function,
-// the position and the construct.
+// declared, and a package with a go:embed directive in it are refused, each
+// with a message that names the function, the position and the construct.
+//
+// A package with assembly in it is read rather than refused whole. The
+// compiler reads the symabis file the assembler wrote and writes the go_asm.h
+// header the assembler reads back, and it refuses only what it cannot do:
+// a function the assembly defines under a different calling convention from
+// the one a Go call uses, which needs an ABI wrapper, and a package that
+// writes go:linkname, which decides which convention a symbol is defined
+// with. "nanogo build" refuses assembly outright, because it runs no
+// assembler; "go build -toolexec" is the path that assembles.
 //
 // No program the probe corpus reaches behaves differently from the one gc
 // builds. That is a measurement over 97 programs compiled twice and run

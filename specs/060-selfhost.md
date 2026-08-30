@@ -53,13 +53,21 @@ NANOGO_MEASURE_CLOSURE=1 go test ./internal/selfhost/
 
 | Packages | Refused for | Owner |
 | --- | --- | --- |
-| 8 | a package with assembly in it | [047](047-abi-wrappers.md) |
+| 4 | `//go:linkname` in a package with assembly | [047](047-abi-wrappers.md) |
+| 2 | `//go:nosplit` in a runtime package | [035](035-goroutines-and-stack-growth.md) |
+| 1 | a Go call to an ABI0 assembly definition, which needs a wrapper | [047](047-abi-wrappers.md) |
+| 1 | `runtime` itself | [034](034-write-barriers.md), [035](035-goroutines-and-stack-growth.md), [047](047-abi-wrappers.md) |
 
-**One reason is left and it holds every refusal**, `runtime` among them. An
-assembly definition uses ABI0 and a Go call uses ABIInternal, and nanogo
-generates no wrapper between them, no `-asmhdr` header for the assembly sources
-to include, and no reader for the `symabis` file the go command produces.
-[047](047-abi-wrappers.md) is the design and it stages the work.
+The count was 20 before stages 0 and 1 of [047](047-abi-wrappers.md) and it is
+20 after, and the table above is what changed. All eight used to give one
+message, "a package with assembly in it", which was one refusal standing in
+front of four separate pieces of missing work. The compiler now reads the
+`symabis` file and writes the `-asmhdr` header, so the refusal that remains for
+each package is the one that is actually true of it. Four are held by
+`//go:linkname`, which decides which ABI a symbol is defined under and which
+nanogo does not model. Two are held by `//go:nosplit`, which is
+[035](035-goroutines-and-stack-growth.md)'s. One is held by the ABI wrapper
+itself, and one is `runtime`.
 
 Nothing in the closure is now refused for a reason in the language. The last
 two that were, `internal/runtime/gc/scan` and `internal/stringslite`, wanted

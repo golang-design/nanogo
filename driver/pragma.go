@@ -99,9 +99,23 @@ func pragmaVerb(verb string) pragmaFlag {
 	return 0
 }
 
-// pragmaAt is one directive with the position it was written at.
+// pragmaAt is one directive with the verb as written and the position it was
+// written at.
+//
+// The verb is kept rather than recovered from the flag. [pragmaVerb] folds
+// implications into the flag it returns, so //go:nosplit and //go:nocheckptr
+// are one bit apart and //go:nowritebarrierrec cannot be told from
+// //go:nowritebarrier by the flag alone. A diagnostic has to print the word
+// the author wrote, and a rule that fires on one verb and not on the verb it
+// implies has to test the verb.
+//
+// It is recorded for a verb [pragmaVerb] does not know as well, which is what
+// lets [sourceDirectives] see //go:linkname without giving it a flag: giving
+// it one would make it misplaced everywhere but a function, and gc accepts it
+// anywhere in a file.
 type pragmaAt struct {
 	flag pragmaFlag
+	verb string
 	pos  syntax.Pos
 }
 
@@ -151,7 +165,7 @@ func (p *pragma) misplaced(allowed pragmaFlag, report func(syntax.Error)) {
 // because the comment reaches the handler with the same text either way; the
 // blank flag is the scanner's record that nothing preceded the comment on its
 // line, and it is the only thing that separates the two.
-func newPragmaHandler(report func(syntax.Error)) syntax.PragmaHandler {
+func newPragmaHandler(report func(syntax.Error), seen *sourceDirectives) syntax.PragmaHandler {
 	return func(pos syntax.Pos, blank bool, text string, old syntax.Pragma) syntax.Pragma {
 		p, _ := old.(*pragma)
 		if text == "" {
@@ -172,9 +186,141 @@ func newPragmaHandler(report func(syntax.Error)) syntax.PragmaHandler {
 		}
 		flag := pragmaVerb(verb)
 		p.flag |= flag
-		p.list = append(p.list, pragmaAt{flag: flag, pos: pos})
+		p.list = append(p.list, pragmaAt{flag: flag, verb: verb, pos: pos})
+		seen.record(verb, pos)
 		return p
 	}
+}
+
+// abiDirectives are the directives that decide which ABI a symbol is defined
+// under, with what each one does to that decision.
+//
+// specs/047-abi-wrappers.md reads the decision out of ssagen.GenABIWrappers,
+// and all three of these are inputs to it:
+//
+//   - //go:linkname renames the symbol, so the symabis file's def and ref
+//     lines are matched against the linkname first and the package prefix
+//     second. It also puts the symbol in obj.ABISetCallable when the package
+//     defines it, which is what makes gc emit an ABI0 wrapper for
+//     internal/bytealg.Compare and its neighbours.
+//   - //go:cgo_export_static and //go:cgo_export_dynamic tell the linker to
+//     export the definition ABI to C, and gc then suppresses every wrapper
+//     for the symbol and fails the build if one was owed anyway.
+//
+// nanogo models none of the three. A package that writes one is refused by
+// name rather than decided wrongly: the failure of a wrong answer here is a
+// symbol defined twice or a reference to an ABI nothing defines, and both
+// surface as a link error naming neither the directive nor the function.
+var abiDirectives = map[string]string{
+	"go:linkname": "//go:linkname renames the symbol, so the symabis file's def and ref lines " +
+		"are matched against the new name, and a symbol the package defines under a linkname " +
+		"is callable under both ABIs (specs/047-abi-wrappers.md)",
+	"go:cgo_export_static": "the cgo export pragmas carry the definition ABI to the linker and suppress " +
+		"every ABI wrapper, and cgo is out of scope (specs/000-decisions.md decision 8)",
+	"go:cgo_export_dynamic": "the cgo export pragmas carry the definition ABI to the linker and suppress " +
+		"every ABI wrapper, and cgo is out of scope (specs/000-decisions.md decision 8)",
+}
+
+// sourceDirectives is the record of directives the package wrote that no
+// declaration is asked about.
+//
+// [checkDirectives] reads a declaration's own directives off the declaration,
+// which is where every rule in specs/016-directives-and-pragmas.md wants
+// them. The [abiDirectives] are the ones the assembly gate needs and the ones
+// a declaration cannot answer for, because gc accepts them anywhere in a file
+// and applies them by name: the //go:linkname form that gives a body away
+// stands before the function, and the form that takes one is often written on
+// its own beside the import of unsafe.
+//
+// The handler is the only thing that sees every //go: comment, claimed or
+// not, so this is filled there.
+type sourceDirectives struct {
+	// ABI is the first directive the package wrote that decides which ABI a
+	// symbol is defined under, Reason is what it does to that decision, and
+	// Pos is where it is. Empty when the package wrote none.
+	ABI    string
+	Reason string
+	Pos    syntax.Pos
+}
+
+// record notes a directive the parser handed the handler.
+//
+// The first one wins, because the refusal names one position and a reader
+// acts on the first occurrence.
+func (d *sourceDirectives) record(verb string, pos syntax.Pos) {
+	if d == nil || d.ABI != "" {
+		return
+	}
+	if reason, ok := abiDirectives[verb]; ok {
+		d.ABI, d.Reason, d.Pos = "//"+verb, reason, pos
+	}
+}
+
+// runtimeDirectives are the directives whose whole meaning is a rule nanogo
+// does not implement, with the spec that owns the rule.
+//
+// The set is read only for a package gc would apply the runtime rules to, and
+// the caller is what applies that scope. //go:nosplit is written outside the
+// runtime as well, and specs/047-abi-wrappers.md's gate is deliberately the
+// narrower one: a wider refusal would take out packages that compile today for
+// a rule that is not reachable in them, and the wide form belongs to
+// specs/035-goroutines-and-stack-growth.md. //go:systemstack and the three
+// write-barrier directives are refused by gc's own noder outside a runtime
+// package, so for those the scope costs nothing.
+//
+// //go:nosplit says the function runs where the stack cannot grow.
+// specs/035-goroutines-and-stack-growth.md records that nanogo emits the
+// stack-growth check anyway, and specs/047-abi-wrappers.md measured which
+// packages that reaches: five of the seven non-runtime packages the assembly
+// refusal covers carry the directive, so lifting the assembly refusal makes
+// this gap reachable for the first time. A function with the check in it that
+// is called from a context where the stack may not grow throws "morestack on
+// g0" at run time, which is loud and far from its cause.
+//
+// //go:systemstack says the function runs only on the system stack, and the
+// three write-barrier directives say what the function may and may not do to
+// a pointer field. specs/034-write-barriers.md owns all four and nanogo emits
+// no barrier at all, so a function that says it may not have one is
+// indistinguishable from one that says nothing.
+//
+// The verbs are matched rather than the flags, because [pragmaVerb] folds
+// //go:nowritebarrierrec into //go:nowritebarrier and //go:nosplit into
+// //go:nocheckptr, and //go:nocheckptr on its own is not in this set: nanogo
+// emits no pointer checks, so a function that asks for none gets what it
+// asked for.
+var runtimeDirectives = map[string]string{
+	"go:nosplit":            "specs/035-goroutines-and-stack-growth.md",
+	"go:systemstack":        "specs/034-write-barriers.md",
+	"go:nowritebarrier":     "specs/034-write-barriers.md",
+	"go:nowritebarrierrec":  "specs/034-write-barriers.md",
+	"go:yeswritebarrierrec": "specs/034-write-barriers.md",
+}
+
+// RuntimeDirective returns the runtime-only directive a declaration carries
+// that nanogo records and cannot honour, the spec that owns the gap, and the
+// position it is at.
+//
+// It is the per-function half of the runtime gate. specs/047-abi-wrappers.md
+// takes the decision apart: a blanket refusal of objabi.runtimePkgs would
+// refuse thirteen packages nanogo compiles today, and the property that
+// actually decides a program's meaning is per directive and per function.
+// This is that property, and [Config.RuntimeRules] is where the caller asks
+// whether the package is one gc would apply the runtime rules to.
+//
+// The name is returned rather than the flag, for the reason
+// [LifetimeDirective] gives: the only use of the answer is a diagnostic and a
+// reader needs the word they wrote.
+func RuntimeDirective(p syntax.Pragma) (verb, spec string, pos syntax.Pos, ok bool) {
+	q := asPragma(p)
+	if q == nil {
+		return "", "", syntax.Pos(0), false
+	}
+	for _, at := range q.list {
+		if s, found := runtimeDirectives[at.verb]; found {
+			return "//" + at.verb, s, at.pos, true
+		}
+	}
+	return "", "", syntax.Pos(0), false
 }
 
 // checkDirectives reports every directive attached to a declaration that does
@@ -250,6 +396,31 @@ func LifetimeDirective(p syntax.Pragma) (string, syntax.Pos, bool) {
 		}
 	}
 	return "", syntax.Pos(0), false
+}
+
+// cgoUnsafeArgsDirective returns the position of //go:cgo_unsafe_args on a
+// declaration, if it carries one.
+//
+// The directive pins the function to ABI0 whatever the symabis file says, and
+// gc propagates the linkname attribute onto the ABI0 symbol with it. It
+// exists because the callee walks its arguments by offset, so the argument
+// area's layout is part of the contract rather than an implementation detail.
+// specs/047-abi-wrappers.md refuses it by name for that reason.
+//
+// It is asked for separately from [RuntimeDirective] because it is not a
+// runtime directive: a package outside the runtime writes it, and the reason
+// it is refused is the ABI and not the stack.
+func cgoUnsafeArgsDirective(p syntax.Pragma) (syntax.Pos, bool) {
+	q := asPragma(p)
+	if q == nil {
+		return syntax.Pos(0), false
+	}
+	for _, at := range q.list {
+		if at.verb == "go:cgo_unsafe_args" {
+			return at.pos, true
+		}
+	}
+	return syntax.Pos(0), false
 }
 
 // asPragma recovers the driver's record from the parser's opaque interface.

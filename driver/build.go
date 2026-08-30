@@ -482,11 +482,23 @@ func (b *builder) checkTargets(targets []*loader.Package, embeds map[string][]st
 			}
 		}
 		if len(t.SFiles) > 0 {
+			// This is nanogo build's own gate and not the compiler's.
+			// Compile reads -symabis and writes -asmhdr now
+			// (specs/047-abi-wrappers.md stage 1) and refuses only a package
+			// that owes an ABI wrapper, but that path is the toolexec one,
+			// where the go command runs cmd/asm on either side of the
+			// compile. nanogo build runs no assembler at all: it would have to
+			// write the empty go_asm.h, run cmd/asm -gensymabis, compile, run
+			// cmd/asm again against the header and pack the objects into the
+			// archive. Until it does, an .s file here is a file whose
+			// definitions would be missing from the archive, and the failure
+			// is an undefined symbol at link time.
 			return &UnsupportedError{
 				Package: t.ImportPath,
 				What:    "a package with assembly in it",
-				Detail: "an assembly definition is ABI0 and a Go call is ABIInternal, so it needs the ABI wrapper " +
-					"of specs/030-abi.md, which is unbuilt",
+				Detail: "nanogo build runs no assembler: the two cmd/asm passes around the compile, " +
+					"and the ABI wrappers of specs/047-abi-wrappers.md, are unbuilt. " +
+					"go build -toolexec is the path that assembles",
 			}
 		}
 		if len(t.GoFiles) == 0 {

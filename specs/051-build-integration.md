@@ -151,7 +151,7 @@ only one:
 
 | Refused by | Packages |
 | --- | --- |
-| [030](030-abi.md)'s missing wrapper, for a package with assembly in it | 8 |
+| a package with assembly in it: `//go:linkname` (4), `//go:nosplit` (2), [047](047-abi-wrappers.md)'s wrapper (1), and `runtime` (1) | 8 |
 | [032](032-type-descriptors-and-itabs.md)'s encoder, on a declared type an importer would need a descriptor for | 7 |
 | the register allocator's output, which `ssagen` cannot emit | 2 |
 | a package-level variable of type `error`, which needs a function's signature in the IR type (`math/bits`) | 1 |

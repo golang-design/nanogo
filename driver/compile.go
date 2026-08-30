@@ -82,8 +82,17 @@ func Compile(cfg *Config) error {
 	if err := checkSupported(cfg); err != nil {
 		return err
 	}
+	// The symabis file is read here and not inside the gate below, because a
+	// file nanogo cannot decode is a refusal that costs no source reading and
+	// says something a later one cannot: a line the reader dropped would let
+	// the wrapper decision conclude that no wrapper is owed because it never
+	// read the line that says one is.
+	symabis, err := readSymABIs(cfg)
+	if err != nil {
+		return err
+	}
 
-	files, fset, err := parseFiles(cfg)
+	files, fset, seen, err := parseFiles(cfg)
 	if err != nil {
 		return err
 	}
@@ -101,6 +110,19 @@ func Compile(cfg *Config) error {
 		return &UnsupportedError{Package: cfg.Package, What: "this package", Detail: err.Error()}
 	}
 	if err := checkIR(cfg, p, fset); err != nil {
+		return err
+	}
+	// The assembly gate runs here rather than in checkSupported, because the
+	// question it asks is which of this package's declarations the assembly
+	// defines, and that needs the declarations.
+	if err := checkABIWrappers(cfg, symabis, seen, p, fset); err != nil {
+		return err
+	}
+	// The header is written before code generation and after every refusal
+	// above, which is gc's order: dumpasmhdr runs once the package type-checks
+	// and once every error is reported. A header written beside a refusal
+	// would be read by an assembler run the failed build never makes.
+	if err := writeAsmHdr(cfg, pkg, files, info); err != nil {
 		return err
 	}
 
@@ -124,11 +146,34 @@ func checkSupported(cfg *Config) error {
 	if len(cfg.Files) == 0 {
 		return fmt.Errorf("%s: no source files on the command line", cfg.Package)
 	}
-	if cfg.CompilingRuntime {
+	// The runtime is refused by name, and so is an explicit -+.
+	//
+	// The flag alone used to be the whole gate and it fired for nothing. The
+	// go command sends -+ for no package: there is no occurrence of it in
+	// cmd/go, and gc derives the property from -std and the package path
+	// instead ([Config.RuntimeRules]). specs/047-abi-wrappers.md measured what
+	// that cost: every one of the eight packages the assembly refusal covers
+	// is in objabi.runtimePkgs, so gc compiles all eight with the runtime
+	// rules on and nanogo's refusal fired for none of them.
+	//
+	// What is refused here is package runtime itself. The property covers
+	// twenty-three packages and thirteen of them compile today, so refusing
+	// the property would be a regression rather than a repair, and it is far
+	// coarser than what matters: base/flag.go's clauses are optimization and
+	// instrumentation policy, and the two that decide a program's meaning are
+	// per directive and per function. [RuntimeDirective] is that half, and
+	// emitPackage applies it.
+	//
+	// -+ is kept as a disjunct because gc keeps it: "Test code can also use
+	// the flag to set this explicitly." A person who writes it is asking for
+	// rules nanogo has none of.
+	if cfg.RuntimeRules() && (cfg.Package == "runtime" || cfg.CompilingRuntime) {
 		return &UnsupportedError{
 			Package: cfg.Package,
 			What:    "the runtime",
-			Detail:  "-+ turns on the write barrier and nosplit rules of specs/034 and specs/035, which are unbuilt",
+			Detail: "it needs the write barriers of specs/034-write-barriers.md, the nosplit budget of " +
+				"specs/035-goroutines-and-stack-growth.md, and the 472 ABI wrappers of " +
+				"specs/047-abi-wrappers.md, none of which is built",
 		}
 	}
 	if cfg.EmbedCfgFile != "" {
@@ -143,36 +188,116 @@ func checkSupported(cfg *Config) error {
 				"unbuilt front end of specs/050-driver.md",
 		}
 	}
-	return checkAssembly(cfg)
+	return nil
 }
 
-// checkAssembly refuses a package with assembly in it.
+// readSymABIs decodes the file -symabis names, if the go command sent one.
 //
 // The go command sends -symabis and -asmhdr exactly when the package has .s
-// files, so either flag is how nanogo learns that it does. Two things are
-// missing and both are needed:
+// files, so either flag is how nanogo learns that it does.
+func readSymABIs(cfg *Config) (*SymABIs, error) {
+	if cfg.SymABIs == "" {
+		return nil, nil
+	}
+	s, err := ReadSymABIs(cfg.SymABIs)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %v", cfg.Package, err)
+	}
+	return s, nil
+}
+
+// checkABIWrappers refuses a package whose assembly needs an ABI wrapper.
 //
-//  1. The ABI. cmd/asm refuses the <ABIInternal> marker outside the runtime,
-//     so every assembly definition in an ordinary package is ABI0, and a Go
-//     call to it under specs/030-abi.md names an ABIInternal symbol that does
-//     not exist. gc closes the gap by generating a wrapper per bodyless
-//     declaration. addGenerated builds generated functions already, but not
-//     this one: an ABI0 wrapper is a text symbol whose own convention is ABI0,
-//     so its arguments arrive in the outgoing argument area, and ssa.AssignABI
-//     has one answer. Without it the call reaches nothing and the linker
-//     reports a missing symbol, which is the wrong place to find out.
-//  2. The header. -asmhdr asks for the constants and the struct offsets the
-//     assembly refers to by name, and nanogo writes none.
-func checkAssembly(cfg *Config) error {
+// This is ssagen.GenABIWrappers's decision, taken and then refused instead of
+// acted on. specs/047-abi-wrappers.md reads the rule out of gc:
+//
+//	fn.ABI = defABI                      // where the symabis file has a def
+//	fn.ABIRefs |= refs                   // from the ref lines
+//	fn.ABIRefs.Set(obj.ABIInternal, true) // unconditionally
+//	need := fn.ABIRefs &^ obj.ABISetOf(fn.ABI)
+//
+// and one wrapper comes out per ABI still in need. Two shapes exist. A
+// bodyless declaration the assembly defines under ABI0 owes an ABIInternal
+// wrapper, because the unconditional ABIInternal reference is what need holds.
+// A function assembly calls under ABI0, or one carrying a //go:linkname, owes
+// an ABI0 wrapper whose own convention is ABI0.
+//
+// Neither is built. specs/047-abi-wrappers.md stages them as 2 and 3, and
+// this is the gate stage 1 leaves standing in front of both.
+//
+// The <sym>.args_stackmap symbol is refused by the same gate and not by one
+// of its own, and that is a measured property rather than a convenience.
+// cmd/internal/obj/plist.go appends a FUNCDATA_ArgsPointerMaps reference to
+// <sym>.args_stackmap for every ABI0 text symbol the assembler emits under
+// the package prefix, and gc/compile.go defines the symbol only for a
+// bodyless declaration whose fn.ABI is ABI0. A declaration's ABI is ABI0 only
+// where the symabis file has an ABI0 def for it, and GenABIWrappers then puts
+// ABIInternal in need unconditionally, and buildcfg pins RegabiWrappers on for
+// arm64 so the wrapper is always made. An ABI0 def that matches a Go
+// declaration therefore owes one wrapper and one argument map, never one
+// without the other, so there is no package that needs the map and passes
+// this gate. See the note in specs/047-abi-wrappers.md.
+func checkABIWrappers(cfg *Config, s *SymABIs, seen *sourceDirectives, p *ir.Package, fset *syntax.FileSet) error {
 	if cfg.SymABIs == "" && cfg.AsmHdr == "" {
+		// No assembly. A def or ref line cannot exist and no wrapper can be
+		// owed, whatever the package writes.
 		return nil
 	}
-	return &UnsupportedError{
-		Package: cfg.Package,
-		What:    "a package with assembly in it",
-		Detail: "an assembly definition is ABI0 and a Go call is ABIInternal, so it needs the ABI wrapper of " +
-			"specs/030-abi.md, and -asmhdr needs the header of specs/050-driver.md; neither is built",
+	// A directive that renames a symbol or pins its ABI is refused before any
+	// of the decision below is taken, because the decision reads it. Matching
+	// a def line against the wrong name is not a smaller error than missing
+	// it: it makes nanogo compile a Go body for a symbol the assembly also
+	// defines.
+	if seen.ABI != "" {
+		return &UnsupportedError{
+			Package: cfg.Package,
+			What:    seen.ABI + " in a package with assembly at " + position(fset, seen.Pos, cfg.Package),
+			Detail:  seen.Reason,
+		}
 	}
+	for _, fn := range p.Funcs {
+		if pos, ok := cgoUnsafeArgsDirective(fn.Pragma); ok {
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "//go:cgo_unsafe_args on function " + fn.Name + " at " + position(fset, pos, fn.Name),
+				Detail: "it pins the function to ABI0 and propagates the linkname attribute to the ABI0 " +
+					"symbol, because the callee walks its arguments by offset (specs/047-abi-wrappers.md)",
+			}
+		}
+		defABI, hasDef := s.Def(fn.Sym)
+		if hasDef && !fn.Bodyless {
+			// gc's "%v defined in both Go and assembly". The symbol would be
+			// defined twice and the linker would report the duplicate without
+			// naming either source.
+			return fmt.Errorf("%s: %s defined in both Go and assembly",
+				position(fset, fn.Pos, fn.Name), fn.Name)
+		}
+		abi := SymABI(obj.ABIInternal)
+		if hasDef {
+			abi = defABI
+		}
+		need := (s.Refs(fn.Sym) | abiSetOf(obj.ABIInternal)) &^ abiSetOf(abi)
+		if need == 0 {
+			continue
+		}
+		what := "function " + fn.Name + " at " + position(fset, fn.Pos, fn.Name)
+		if need.Has(obj.ABIInternal) {
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "a Go call to " + what,
+				Detail: "the assembly defines it under ABI0 and a Go call is ABIInternal, so it needs the " +
+					"ABIInternal wrapper and the " + fn.Sym + ".args_stackmap of " +
+					"specs/047-abi-wrappers.md stage 2, which is unbuilt",
+			}
+		}
+		return &UnsupportedError{
+			Package: cfg.Package,
+			What:    "an assembly call to " + what,
+			Detail: "the assembly names it under ABI0 and the Go definition is ABIInternal, so it needs the " +
+				"ABI0 wrapper of specs/047-abi-wrappers.md stage 3, which is unbuilt",
+		}
+	}
+	return nil
 }
 
 // parseFiles parses every source file named on the command line.
@@ -180,7 +305,12 @@ func checkAssembly(cfg *Config) error {
 // The files share one FileSet, because a position in nanogo's syntax package
 // is a bare offset into the set (specs/010-scanner-and-positions.md) and every
 // stage below reports positions through it.
-func parseFiles(cfg *Config) ([]*syntax.File, *syntax.FileSet, error) {
+//
+// The third result is the package's [sourceDirectives]. It is returned rather
+// than read off the declarations because the parser's handler is the only
+// thing that sees a //go: comment no declaration claimed, and //go:linkname
+// is written that way as often as not.
+func parseFiles(cfg *Config) ([]*syntax.File, *syntax.FileSet, *sourceDirectives, error) {
 	fset := syntax.NewFileSet()
 	files := make([]*syntax.File, 0, len(cfg.Files))
 	var diags diagnostics
@@ -197,7 +327,8 @@ func parseFiles(cfg *Config) ([]*syntax.File, *syntax.FileSet, error) {
 		}
 		diags.add(err.Pos, fmt.Errorf("%s: %s", current, err.Msg))
 	}
-	pragh := newPragmaHandler(report)
+	seen := new(sourceDirectives)
+	pragh := newPragmaHandler(report, seen)
 	for _, name := range cfg.Files {
 		current = name
 		f, err := syntax.ParseFile(fset, name, report, pragh, syntax.CheckBranches)
@@ -211,9 +342,9 @@ func parseFiles(cfg *Config) ([]*syntax.File, *syntax.FileSet, error) {
 		files = append(files, f)
 	}
 	if err := diags.err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return files, fset, nil
+	return files, fset, seen, nil
 }
 
 // A //go: directive is recorded but never honoured, and that is a correctness
@@ -445,10 +576,21 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	var initFns []obj.SymRef
 	for _, fn := range append(append([]*ir.Func{}, p.Funcs...), p.Inits...) {
 		if fn.Bodyless {
-			// A bodyless declaration is satisfied by assembly, and
-			// checkAssembly has already refused a package that has any.
-			// With -complete the go command promises there is none, so the
-			// declaration is an error rather than an external definition.
+			// A bodyless declaration is satisfied elsewhere, by an assembly
+			// file or by a //go:linkname, and there is nothing here to
+			// compile. With -complete the go command promises there is no
+			// assembly, so the declaration is an error rather than an
+			// external definition.
+			//
+			// This branch is reached now that checkABIWrappers lets a package
+			// with assembly through. internal/chacha8rand.block is the shape:
+			// the symabis file defines it as ABIInternal, which is the ABI a
+			// Go call already names, so no wrapper and no argument map is
+			// owed and the declaration needs nothing from this loop. A
+			// //go:nosplit on such a declaration needs nothing either, because
+			// nanogo emits no code for it and cmd/asm honours NOSPLIT on the
+			// definition itself. That is why the directive gate below stands
+			// after this branch and not before it.
 			//
 			// The test is ir.Func.Bodyless and not len(fn.Body), because
 			// "func f() {}" leaves Body empty too and is a complete Go
@@ -457,6 +599,21 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 				return nil, false, fmt.Errorf("%s: missing function body", position(fset, fn.Pos, fn.Name))
 			}
 			continue
+		}
+		// The per-function half of the runtime gate, per
+		// specs/047-abi-wrappers.md. gc turns on rules for a package in
+		// objabi.runtimePkgs that nanogo does not implement, and a blanket
+		// refusal of that list would take thirteen packages that compile today
+		// out of the build. The two clauses that decide a program's meaning
+		// are per directive and per function, and this is where the function
+		// is.
+		if verb, spec, pos, ok := RuntimeDirective(fn.Pragma); ok && cfg.RuntimeRules() {
+			return nil, false, &UnsupportedError{
+				Package: cfg.Package,
+				What:    verb + " on function " + fn.Name + " at " + position(fset, pos, fn.Name),
+				Detail: "the directive states a rule about the stack or about the write barrier that nanogo " +
+					"records and does not honour, and a runtime package is where the rule is real (" + spec + ")",
+			}
 		}
 		if d, pos, ok := LifetimeDirective(fn.Pragma); ok {
 			return nil, false, &UnsupportedError{
