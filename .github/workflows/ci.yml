@@ -81,11 +81,20 @@ jobs:
     # to check the numbers the documents quote, and that alone takes minutes.
     # The default ten minutes kills the whole run part way through, which reads
     # as a failure of whatever test happened to be running.
+    #
+    # It is 60 and not 40 because this job runs the suite about twice: once
+    # directly, and once inside the facts derivation, which starts its own
+    # `go test ./...` to measure coverage. 40 minutes was enough until the
+    # suite grew a package and three end-to-end files, and then the arm64
+    # runner died on the limit with "panic: test timed out after 40m0s" in
+    # internal/hygiene, which names the clock rather than anything that was
+    # wrong. 60 matches the race job below, so the file states one long budget
+    # rather than two.
     - name: Test
       env:
         NANOGO_REQUIRE_CORPUS: '1'
         NANOGO_REQUIRE_LINK: ${{ runner.arch == 'ARM64' && '1' || '' }}
-      run: go test -timeout 40m ./...
+      run: go test -timeout 60m ./...
 
     # Run twice, without and then with the detector. A data race can change
     # the answer rather than crash, and a compiler that compiles functions

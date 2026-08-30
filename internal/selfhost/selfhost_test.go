@@ -43,6 +43,15 @@ func TestNanogoCompilesItsOwnPackages(t *testing.T) {
 	if os.Getenv("NANOGO_REQUIRE_CORPUS") != "1" && !refreshing() {
 		t.Skip("each package needs its own build cache, which is minutes; set NANOGO_REQUIRE_CORPUS=1")
 	}
+	// internal/hygiene's facts derivation runs the whole suite again as a
+	// child, to measure coverage. This gate produces no fact and no coverage
+	// of any gated package, because every build it starts is a subprocess, so
+	// running it there costs minutes and proves nothing that the outer run has
+	// not already proved. The child is marked with NANOGO_FACTS_CHILD, which
+	// internal/hygiene sets and documents.
+	if os.Getenv("NANOGO_FACTS_CHILD") == "1" {
+		t.Skip("this process is measuring for a facts refresh; the gate ran in the parent")
+	}
 	hostIsTheTarget(t)
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("no go command")
