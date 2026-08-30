@@ -32,7 +32,7 @@ spec to grade itself against.
 | G-A | `internal/audit` probe classes | 95 ok, 3 refused, 0 wrong, of 98 | all ok |
 | G-B | `internal/gotest` corpus passes | 209 of 356, 0 miscompilations | all passing |
 | G-C | [020](020-ir.md) Go-specific rows | see the correction below | all built |
-| G-D | bootstrap standard library closure | 18 of 28 compile invocations | 28 |
+| G-D | bootstrap standard library closure | 20 of 28 compile invocations, all 8 refusals assembly | 28 |
 
 G-A and G-B are decided by `internal/audit/testdata/ratchet.txt` and
 `internal/gotest/testdata/ratchet.txt` rather than by this prose, and a
@@ -77,7 +77,6 @@ graph TD
   ASM["ABI0 WRAPPERS<br/>an assembly definition, a Go call"]:::key
   HDR["-asmhdr and symabis<br/>driver"]
   ASSEM["nanogo's own assembler"]
-  LOWER["two lowering rows<br/>unsafe.Slice, unsafe.String"]
 
   LINK["nanogo's own linker"]
   LOAD["package loader without go list"]
@@ -100,7 +99,6 @@ graph TD
   ASM --> HDR
   HDR --> G3
   ASSEM --> G3
-  LOWER --> G3
 ```
 
 Two rows carry the weight now and neither is a construct.
@@ -122,9 +120,11 @@ That is worth stating on its own: a build in which `gc` compiles anything can
 hide a symbol nanogo never emits, so a gap of this kind cannot be found by any
 measurement short of stage 1.
 
-**ABI0 wrappers are what the distribution waits on.** 8 of the 27 standard
-library archives the smallest Go program needs are refused for one reason, and
-`runtime` is one of the eight. An assembly definition uses ABI0 and a Go call
+**ABI0 wrappers are what the distribution waits on, and they are the only thing
+left in the closure.** 8 of the 28 compile invocations the smallest Go program
+needs are refused, every one of them for this reason, and `runtime` is one of
+the eight. Nothing in that closure is refused for a reason in the language any
+more. An assembly definition uses ABI0 and a Go call
 uses ABIInternal, and nanogo generates no wrapper between the two, no `-asmhdr`
 header for the assembly sources to include, and no reader for the `symabis`
 file the go command produces. [047](047-abi-wrappers.md) is the design and it

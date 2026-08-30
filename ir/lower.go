@@ -905,6 +905,20 @@ func (l *lowerer) sliceHeader(t *Type, ptr, length, capacity Expr, pos syntax.Po
 	return ref(o, pos)
 }
 
+// stringHeader writes a string header into a fresh temporary and returns it.
+//
+// The sibling of sliceHeader, without the capacity a string has no room for.
+// It is here rather than open coded at its one call site so that the two
+// headers are written down beside each other: a string header given three
+// fields writes a word past the end of the value, and the header type would
+// not disagree, because it is chosen by the value's kind and not by the caller.
+func (l *lowerer) stringHeader(t *Type, ptr, length Expr, pos syntax.Pos) Expr {
+	o := l.tempObj(t, pos)
+	l.emit(Assign(pos, l.headerField(ref(o, pos), hdrPtr, l.ptrTo(lowerByte)), ptr))
+	l.emit(Assign(pos, l.headerField(ref(o, pos), hdrLen, lowerInt), length))
+	return ref(o, pos)
+}
+
 // sliceCopy emits the copy of count elements of type elem from src to dst.
 //
 // The symbol is chosen by whether the element holds a pointer, and
@@ -1346,6 +1360,10 @@ func (l *lowerer) expr(n Expr) Expr {
 		// machine word rather than assumed to be one.
 		return &Node{Op: OBinary, Op1: syntax.Add, Pos: n.Pos, Type: n.Type,
 			X: n.X, Y: l.widen(n.Y)}
+	case OUnsafeSlice:
+		return l.unsafeSlice(n)
+	case OUnsafeString:
+		return l.unsafeString(n)
 	}
 	if n.Op.IsGoSpecific() {
 		l.refuse(n, "no row of the lowering table is built for it yet")
@@ -3856,6 +3874,198 @@ func nonNegative(n Expr) bool {
 	}
 	v, exact := c.Int64()
 	return exact && v >= 0
+}
+
+// unsafe.Slice and unsafe.String.
+//
+// specs/020-ir.md: a header built from a pointer and a length, with the length
+// checked. These are the two unsafe rows that reach the runtime, and the calls
+// are on the failure edges only. A length that passes every check builds the
+// header inline, with no call and no allocation, because the result points
+// into storage the operand already named.
+//
+// The shape is gc's walkUnsafeSlice and walkUnsafeString, which carry a
+// comment asking to be kept in sync with runtime.unsafeslice and
+// runtime.unsafestring. It was read off both, and `go tool compile -S` on a
+// probe was read as well, because the two sources state the checks and the
+// assembly states which symbols a compiled program actually names.
+//
+// # What is checked
+//
+// With n the length as a machine word, S the element size in bytes, and P the
+// pointer as a uintptr:
+//
+//	if n < 0                        -> panic...len
+//	if S == 0 and P == 0 and n > 0  -> panic...nilptr
+//	if S >= 2 and n > MaxUintptr/S  -> the failure edge
+//	if S >= 1 and n*S > 0-P         -> the failure edge
+//
+// and the failure edge is
+//
+//	if P == 0 { panic...nilptr }
+//	panic...len
+//
+// The last comparison is the one that does the work. 0-P is the count of bytes
+// between the pointer and the top of the address space, computed as an
+// unsigned negation, so n*S > 0-P is exactly "the array would run off the end
+// of the address space". A nil pointer makes 0-P zero, so the same comparison
+// is also the nil test the specification asks for: any positive length fails
+// it and a zero length passes, which is what makes unsafe.Slice(nil, 0) the
+// nil slice rather than a panic.
+//
+// The overflow test is gc's math.MulUintptr with the size a constant. gc calls
+// that function because its size is a value; here S is known, so the whole of
+// it is one comparison against a threshold the compiler divides out. It is
+// left out for S == 1 rather than emitted and folded away: n is already known
+// to be non-negative there, so n is at most MaxInt64 and n*1 cannot wrap. For
+// every S of two or more, MaxUintptr/S is at most MaxInt64 and the threshold
+// is an ordinary constant.
+//
+// Every comparison after the first is unsigned, which is why n is converted to
+// uintptr for them instead of being left an int. A signed compare against 0-P
+// answers the wrong question for every pointer above the middle of the address
+// space, and a heap pointer on darwin/arm64 is routinely there.
+//
+// # Why the length reaches the check as a signed word
+//
+// The specification lets the length have any integer type, so the conversion
+// to the machine type is part of the row rather than a detail of it. It is one
+// widening to int, which is what gc does on a target whose uint is a machine
+// word: an int8 of -1 sign-extends to -1 and the first check catches it, a
+// uint32 of 0xffffffff zero-extends to 4294967295 and is a length, and a
+// uint64 with the top bit set reinterprets as a negative int and the first
+// check catches that too. Reading a negative length as an unsigned one instead
+// would build a slice of nearly the whole address space, which is the failure
+// this row exists to prevent.
+
+// unsafeSlice builds specs/020-ir.md's unsafe.Slice row.
+func (l *lowerer) unsafeSlice(n Expr) Expr {
+	t, pos := n.Type, n.Pos
+	if t == nil || t.Kind != Slice || t.Elem == nil {
+		l.refuse(n, "a result that is not a slice")
+		return n
+	}
+	ptr, length, ok := l.unsafeCheck(n, t.Elem.Size,
+		"runtime.panicunsafeslicelen", "runtime.panicunsafeslicenilptr")
+	if !ok {
+		return n
+	}
+	// The operand's pointer type comes from the checker and the header's comes
+	// from ptrTo, so the two are equal types held in different values. The
+	// conversion is what makes them one type below the IR.
+	data := &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(t.Elem), X: ptr()}
+	return l.sliceHeader(t, data, length(), length(), pos)
+}
+
+// unsafeString builds specs/020-ir.md's unsafe.String row.
+//
+// The element is a byte, so the size is one and the overflow test above is not
+// emitted. That is gc's shape too: walkUnsafeString has no MulUintptr in it.
+func (l *lowerer) unsafeString(n Expr) Expr {
+	t, pos := n.Type, n.Pos
+	if t == nil || t.Kind != String {
+		l.refuse(n, "a result that is not a string")
+		return n
+	}
+	ptr, length, ok := l.unsafeCheck(n, 1,
+		"runtime.panicunsafestringlen", "runtime.panicunsafestringnilptr")
+	if !ok {
+		return n
+	}
+	data := &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(lowerByte), X: ptr()}
+	return l.stringHeader(t, data, length(), pos)
+}
+
+// unsafeCheck emits the checks the two rows share and returns the pointer and
+// the checked length.
+//
+// size is the element size in bytes, which is one for a string. lenSym and
+// nilSym are the row's two panic symbols. The results are factories because
+// each value is read more than once and a node may appear in the tree once.
+//
+// The pointer is spilled before the length is evaluated, so that the two are
+// evaluated in the order they are written. Neither operand is re-lowered here:
+// the descent in expr has already lowered both.
+func (l *lowerer) unsafeCheck(n Expr, size int64, lenSym, nilSym string) (ptr, length func() Expr, ok bool) {
+	pos := n.Pos
+	if n.X == nil || n.X.Type == nil || n.Y == nil || n.Y.Type == nil {
+		l.refuse(n, "an operand with no type")
+		return nil, nil, false
+	}
+	if n.X.Type.Kind != Ptr && n.X.Type.Kind != UnsafePtr {
+		l.refuse(n, "a pointer operand of kind "+n.X.Type.Kind.String())
+		return nil, nil, false
+	}
+	if !n.Y.Type.Kind.IsInteger() {
+		l.refuse(n, "a length of kind "+n.Y.Type.Kind.String())
+		return nil, nil, false
+	}
+	if n.Y.Type.Size > PtrSize {
+		// No Go integer type is wider than a machine word on this target, so
+		// this is unreachable today. It is named rather than assumed away
+		// because the alternative is a truncation that discards the bits the
+		// negative-length check reads, and a wrong slice is worse than a
+		// refusal.
+		l.refuse(n, "a length wider than a machine word")
+		return nil, nil, false
+	}
+
+	p := l.hold(n.X)
+	num := l.hold(&Node{Op: OConvert, Pos: pos, Type: lowerInt, X: n.Y})
+	// The pointer as an unsigned word. It is held rather than reconverted so
+	// that the failure edge and the address-space check read one slot.
+	addr := l.hold(&Node{Op: OConvert, Pos: pos, Type: lowerUintptr, X: p()})
+	zero := func() Expr { return intConst(pos, lowerUintptr, 0) }
+	isNil := func() Expr {
+		return &Node{Op: OCompare, Op1: syntax.Eql, Pos: pos, Type: lowerBool, X: addr(), Y: zero()}
+	}
+	// The failure edge, built fresh at each use. Two checks can reach it and
+	// each needs its own nodes.
+	bad := func() []Stmt {
+		return []Stmt{
+			&Node{Op: OIf, Pos: pos, Type: voidType, X: isNil(),
+				Body: []Stmt{runtimeCall(pos, nilSym)}},
+			runtimeCall(pos, lenSym),
+		}
+	}
+	over := func(a, b Expr) Expr {
+		return &Node{Op: OCompare, Op1: syntax.Gtr, Pos: pos, Type: lowerBool, X: a, Y: b}
+	}
+
+	// if n < 0 { panic...len }. Signed, on the machine word the conversion
+	// produced, and first, because every check below reads n as unsigned and
+	// is meaningless until the sign is known.
+	l.emit(&Node{Op: OIf, Pos: pos, Type: voidType,
+		X: &Node{Op: OCompare, Op1: syntax.Lss, Pos: pos, Type: lowerBool,
+			X: num(), Y: intConst(pos, lowerInt, 0)},
+		Body: []Stmt{runtimeCall(pos, lenSym)}})
+
+	if size == 0 {
+		// An element of no size occupies no address space, so there is no
+		// range to check and the address-space comparison below would pass for
+		// every length. The nil pointer is still an error with a non-zero
+		// length, and this is the only place that says so.
+		l.emit(&Node{Op: OIf, Pos: pos, Type: voidType, X: isNil(),
+			Body: []Stmt{&Node{Op: OIf, Pos: pos, Type: voidType,
+				X:    over(num(), intConst(pos, lowerInt, 0)),
+				Body: []Stmt{runtimeCall(pos, nilSym)}}}})
+		return p, num, true
+	}
+
+	un := l.hold(&Node{Op: OConvert, Pos: pos, Type: lowerUintptr, X: num()})
+	mem := un()
+	if size != 1 {
+		l.emit(&Node{Op: OIf, Pos: pos, Type: voidType,
+			X:    over(un(), intConst(pos, lowerUintptr, int64(^uint64(0)/uint64(size)))),
+			Body: bad()})
+		mem = &Node{Op: OBinary, Op1: syntax.Mul, Pos: pos, Type: lowerUintptr,
+			X: mem, Y: intConst(pos, lowerUintptr, size)}
+	}
+	l.emit(&Node{Op: OIf, Pos: pos, Type: voidType,
+		X: over(mem, &Node{Op: OBinary, Op1: syntax.Sub, Pos: pos, Type: lowerUintptr,
+			X: zero(), Y: addr()}),
+		Body: bad()})
+	return p, num, true
 }
 
 // copy, clear, min and max.

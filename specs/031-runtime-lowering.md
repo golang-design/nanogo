@@ -18,7 +18,7 @@ fixed contract.
 
 ## What is built, and what is not
 
-**The table is built and gated.** `rtsym` holds 121 symbols, checked against
+**The table is built and gated.** `rtsym` holds 131 symbols, checked against
 2,435 functions parsed out of the runtime's source: 0 missing, 0 differing.
 Nine of them are defined in assembly, and a second test checks that each symbol
 exists, because no Go source states their signatures.
@@ -32,7 +32,7 @@ checkable. The check is the same: the type's spelling is compared against the
 runtime's source, so a field inserted ahead of `enabled`, or padding that stops
 the four-byte load from being valid, is a build failure.
 
-**The 121 symbols and the contract below are not the same set, in either
+**The 131 symbols and the contract below are not the same set, in either
 direction.** Every call the sections below name is in the table now:
 `decoderune` was the last one missing and the `range` row over a string is its
 caller. `rtsym` holds calls those sections do not enumerate at all: the
@@ -57,6 +57,8 @@ other row of the tables further down names a call nothing produces yet:
 | `goPanicIndex` | the failure edge of an index bounds check | SSA lowering |
 | `goPanicSliceAlen` | a slice bound above the capacity | IR lowering and SSA lowering |
 | `goPanicSliceB` | a slice expression's low and high guards | IR lowering |
+| `panicunsafeslicelen`, `panicunsafeslicenilptr` | the failure edges of `unsafe.Slice` | IR lowering |
+| `panicunsafestringlen`, `panicunsafestringnilptr` | the failure edges of `unsafe.String` | IR lowering |
 | `morestack_noctxt` | the stack-growth tail ([035](035-goroutines-and-stack-growth.md)) | code generation |
 | `newobject` | `new`, `&T{...}` | IR lowering |
 | `newarray` | a slice literal, which is also every variadic call | IR lowering |
@@ -160,7 +162,7 @@ unexported, so none appears in export data and `go/importer` finds none of them:
 a probe against the installed toolchain returned nothing for any of them. The
 test parses `GOROOT/src/runtime` directly.
 
-**And the runtime's source is not one directory.** Ten of the 121 are not
+**And the runtime's source is not one directory.** Ten of the 131 are not
 declared in package `runtime`. `runtime.morestack_noctxt` and
 `runtime.gcWriteBarrier1` through `gcWriteBarrier8` are written in
 `runtime/asm_arm64.s` and have no Go declaration anywhere, so the table records
@@ -418,6 +420,9 @@ one leaves stale pointers visible to the collector.
 `goPanicIndex`, `goPanicSliceAlen`, `goPanicSliceB`, and the `goPanicSlice3*`,
 `goPanicSliceAcap` and unsigned `*U` forms the runtime declares beside them.
 
+Beside them the four `unsafe` panics: `panicunsafeslicelen`,
+`panicunsafeslicenilptr`, `panicunsafestringlen` and `panicunsafestringnilptr`.
+
 A nil dereference is `runtime.panicmem`, and the compiler does not call it. A
 nil load faults and `sigpanic` raises the panic from the signal handler, so
 there is no generated call to get wrong.
@@ -427,12 +432,22 @@ check and never returns. Marking them `no-return` matters: a block after a call
 to one is unreachable, and liveness that thinks otherwise keeps values alive
 across every bounds check in the program.
 
-Four panic symbols are emitted. `panicdivide` and `goPanicIndex` come from
+Eight panic symbols are emitted. `panicdivide` and `goPanicIndex` come from
 `ssa/rules/arm64.go`, off the division guard and the index bounds check it
 builds. `goPanicSliceB` comes from `ir/lower.go`'s guards on a slice
 expression's low and high bounds. `goPanicSliceAlen` comes from both: the IR
 guard on a three-index slice's `max`, and the SSA bounds check on a slice
 bound, where the valid condition is lower-or-same rather than lower.
+
+The other four are the failure edges of [020](020-ir.md)'s `unsafe.Slice` and
+`unsafe.String` rows: `panicunsafeslicelen` and `panicunsafeslicenilptr` for
+the first, `panicunsafestringlen` and `panicunsafestringnilptr` for the second.
+Each pair is two symbols and not one because the message differs, and the
+message is the whole of what the caller gets: a length out of range and a nil
+pointer with a non-zero length are two mistakes and the runtime spells them
+apart. Each takes no argument and reads the caller's pc for the position
+through `panicCheck1`, so the call has to be a real call. A jump to one would
+report the position of whatever the compiler left on the stack.
 
 `gopanic` and `gorecover` are emitted as well. [020](020-ir.md)'s `panic` row
 lowers to `gopanic`, under the operand restriction above, and its `recover` row
@@ -477,12 +492,13 @@ barrier buffer, and each is assembly with no Go declaration and no Go ABI.
 Rule 4 holds and is not enforced. Every failure block the `arm64` rules build
 ends in the call and is an `Exit` block, so `panicdivide`, `goPanicIndex` and
 `goPanicSliceAlen` do end their blocks. What decides that is the rule that
-wrote the block, not the flag: `rtsym.Sym.NoReturn` is set on five symbols and
-its own test proves the runtime really does not return from them, but nothing
-outside `rtsym` reads the field. The two no-return calls `ir/lower.go`
-introduces, `goPanicSliceB` and `gopanic`, get their blocks from `ssa.Build`
-and are covered by no such rule. A pass that emits a no-return call and forgets
-the `Exit` is not caught.
+wrote the block, not the flag: `rtsym.Sym.NoReturn` is set on twelve symbols
+and its own test proves the runtime really does not return from them, but
+nothing outside `rtsym` reads the field. The no-return calls `ir/lower.go`
+introduces get their blocks from `ssa.Build` and are covered by no such rule:
+`goPanicSliceB`, `gopanic`, and the four failure edges of the `unsafe.Slice`
+and `unsafe.String` rows. A pass that emits a no-return call and forgets the
+`Exit` is not caught.
 
 Rule 5 has no code at all. There is no `//go:nowritebarrier` check, because
 there is no write barrier to reject ([034](034-write-barriers.md)), and there

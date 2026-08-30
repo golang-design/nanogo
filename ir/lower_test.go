@@ -66,6 +66,7 @@ type H func(int)
 
 var gfn2 H
 func one() int         { return 1 }
+func bytePtr() *byte   { return nil }
 func two() (int, int)  { return 1, 2 }
 `
 
@@ -4744,5 +4745,270 @@ func TestLowerComplexConversionConvertsBothHalves(t *testing.T) {
 	}
 	if narrowed != 2 {
 		t.Errorf("the conversion narrowed %d halves, want 2:\n%s", narrowed, buildDump(fn))
+	}
+}
+
+// specs/020-ir.md's unsafe.Slice and unsafe.String rows.
+//
+// The row is a header plus a length check, and the check is the half that can
+// be silently wrong: a header built without it is a slice over memory the
+// program does not own, which no later pass sees and no assertion on the
+// result catches. So the cases below assert on the panic symbols the failure
+// edges name and on how many times each is named, and not only on the header.
+
+// countCalls returns how many times a lowered body calls each runtime symbol.
+func countCalls(fn *Func) map[string]int {
+	out := make(map[string]int)
+	for _, c := range lowerCalls(fn) {
+		out[c]++
+	}
+	return out
+}
+
+// TestLowerUnsafeSliceAndStringRows checks the calls each row emits.
+//
+// The counts follow from the checks. Every row calls the length panic once for
+// the negative test. A row whose element occupies address space adds the
+// failure edge, which is two calls, once for the address-space comparison and
+// once more for the overflow comparison when the element is wider than a byte.
+// A zero-sized element has no range to overflow and names the nil-pointer
+// panic alone.
+func TestLowerUnsafeSliceAndStringRows(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		want map[string]int
+	}{
+		{
+			"unsafe.Slice over a byte",
+			`func f(p *byte, n int) []byte { return unsafe.Slice(p, n) }`,
+			map[string]int{"runtime.panicunsafeslicelen": 2, "runtime.panicunsafeslicenilptr": 1},
+		},
+		{
+			"unsafe.Slice over a word",
+			`func f(p *int64, n int) []int64 { return unsafe.Slice(p, n) }`,
+			map[string]int{"runtime.panicunsafeslicelen": 3, "runtime.panicunsafeslicenilptr": 2},
+		},
+		{
+			"unsafe.Slice over an empty struct",
+			`func f(p *struct{}, n int) []struct{} { return unsafe.Slice(p, n) }`,
+			map[string]int{"runtime.panicunsafeslicelen": 1, "runtime.panicunsafeslicenilptr": 1},
+		},
+		{
+			"unsafe.String",
+			`func f(p *byte, n int) string { return unsafe.String(p, n) }`,
+			map[string]int{"runtime.panicunsafestringlen": 2, "runtime.panicunsafestringnilptr": 1},
+		},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			got := countCalls(fn)
+			if len(got) != len(tc.want) {
+				t.Fatalf("the row called %v, want %v:\n%s", got, tc.want, buildDump(fn))
+			}
+			for name, n := range tc.want {
+				if got[name] != n {
+					t.Errorf("%s is called %d times, want %d:\n%s", name, got[name], n, buildDump(fn))
+				}
+			}
+		})
+	}
+}
+
+// TestLowerUnsafeSliceBuildsAHeader checks the value the row produces.
+//
+// The result is a temporary whose fields were written, which is what
+// sliceHeader produces and what every other slice-valued row here returns. A
+// string is the same with the capacity left out.
+func TestLowerUnsafeSliceBuildsAHeader(t *testing.T) {
+	for _, tc := range []struct {
+		row    string
+		body   string
+		fields int
+	}{
+		{"unsafe.Slice", `func f(p *int, n int) []int { return unsafe.Slice(p, n) }`, 3},
+		{"unsafe.String", `func f(p *byte, n int) string { return unsafe.String(p, n) }`, 2},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			ret := fn.Body[len(fn.Body)-1]
+			if ret.Op != OReturn || len(ret.Args) != 1 || ret.Args[0].Op != OLocal {
+				t.Fatalf("the body does not end in a return of a local:\n%s", buildDump(fn))
+			}
+			o := ret.Args[0].Obj
+			var wrote []int
+			for _, s := range fn.Body {
+				Walk(s, func(n *Node) bool {
+					if n.Op != OAssign || n.X == nil {
+						return true
+					}
+					dst := n.X
+					if !headerRead(dst, dst.Index, tc.fields) {
+						return true
+					}
+					if a := dst.X.X; a != nil && a.Op == OAddr && a.X != nil && a.X.Obj == o {
+						wrote = append(wrote, dst.Index)
+					}
+					return true
+				})
+			}
+			if len(wrote) != tc.fields {
+				t.Errorf("the row wrote %v of the header, want %d fields:\n%s",
+					wrote, tc.fields, buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerUnsafeLengthIsCheckedSigned is the row's one rule that a wrong
+// answer would not announce.
+//
+// The specification lets the length have any integer type. It reaches the
+// check as a machine word, and the comparison against zero must be signed on
+// that word: a uint64 with its top bit set reinterprets as a negative int and
+// must panic, and an int8 of -1 must sign-extend rather than become 255.
+// Reading either as unsigned builds a slice over most of the address space and
+// returns it.
+func TestLowerUnsafeLengthIsCheckedSigned(t *testing.T) {
+	for _, tc := range []struct{ row, body string }{
+		{"an int8 length", `func f(p *byte, n int8) []byte { return unsafe.Slice(p, n) }`},
+		{"a uint64 length", `func f(p *byte, n uint64) []byte { return unsafe.Slice(p, n) }`},
+		{"a uintptr length", `func f(p *byte, n uintptr) []byte { return unsafe.Slice(p, n) }`},
+		{"a uint8 length", `func f(p *byte, n uint8) []byte { return unsafe.Slice(p, n) }`},
+		{"a uint64 string length", `func f(p *byte, n uint64) string { return unsafe.String(p, n) }`},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			var found bool
+			for _, s := range fn.Body {
+				Walk(s, func(n *Node) bool {
+					if n.Op != OCompare || n.Op1 != syntax.Lss || n.X == nil || n.X.Type == nil {
+						return true
+					}
+					if n.X.Type.Kind.IsSigned() && n.X.Type.Size == PtrSize {
+						found = true
+					}
+					return true
+				})
+			}
+			if !found {
+				t.Errorf("the length is not compared against zero as a signed word:\n%s", buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerUnsafeSliceComparesTheRangeUnsigned checks the other half of the
+// same rule.
+//
+// The address-space comparison is the length in bytes against 0-uintptr(ptr),
+// and both sides must be unsigned. ssa/rules/arm64.go's lowerCompare takes the
+// signedness from the argument type, so a comparison built on int here becomes
+// a signed one, and a heap pointer on darwin/arm64 is routinely above the
+// middle of the address space, where the signed answer is the wrong one.
+func TestLowerUnsafeSliceComparesTheRangeUnsigned(t *testing.T) {
+	fn := lowerOK(t, `func f(p *int64, n int) []int64 { return unsafe.Slice(p, n) }`)
+	var unsignedGtr int
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op != OCompare || n.Op1 != syntax.Gtr || n.X == nil || n.X.Type == nil {
+				return true
+			}
+			if n.X.Type.Kind == Uintptr && n.Y != nil && n.Y.Type != nil && n.Y.Type.Kind == Uintptr {
+				unsignedGtr++
+			}
+			return true
+		})
+	}
+	// One for the overflow threshold and one for the address space.
+	if unsignedGtr != 2 {
+		t.Errorf("%d unsigned range comparisons, want 2:\n%s", unsignedGtr, buildDump(fn))
+	}
+}
+
+// TestLowerUnsafeSliceOverflowThreshold checks the constant the overflow
+// comparison is against.
+//
+// gc calls math.MulUintptr because its element size is a value. Here it is a
+// constant, so the whole of that function is one comparison against
+// MaxUintptr/size. The threshold is the only part of the row a small length
+// never exercises, so a wrong number here passes every test that runs.
+func TestLowerUnsafeSliceOverflowThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		body string
+		want uint64
+	}{
+		{"a two-byte element", `func f(p *int16, n int) []int16 { return unsafe.Slice(p, n) }`, ^uint64(0) / 2},
+		{"an eight-byte element", `func f(p *int64, n int) []int64 { return unsafe.Slice(p, n) }`, ^uint64(0) / 8},
+		{"a sixteen-byte element", `func f(p *T, n int) []T { return unsafe.Slice(p, n) }`, ^uint64(0) / 16},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			fn := lowerOK(t, tc.body)
+			var got []uint64
+			for _, s := range fn.Body {
+				Walk(s, func(n *Node) bool {
+					if n.Op == OConst && n.Type != nil && n.Type.Kind == Uintptr {
+						if c, ok := n.Val.(ConstValue); ok {
+							if v, exact := c.Int64(); exact {
+								got = append(got, uint64(v))
+							}
+						}
+					}
+					return true
+				})
+			}
+			var found bool
+			for _, v := range got {
+				if v == tc.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("the overflow threshold is not %d; the uintptr constants are %v:\n%s",
+					tc.want, got, buildDump(fn))
+			}
+		})
+	}
+}
+
+// TestLowerUnsafeSliceEvaluatesThePointerFirst checks the order the
+// specification gives the two operands.
+//
+// Both operands may call, and the pointer is written first, so it is evaluated
+// first. The pass spills each into a temporary, so the order of the two calls
+// in the lowered body is the order the operands were evaluated in.
+func TestLowerUnsafeSliceEvaluatesThePointerFirst(t *testing.T) {
+	fn := lowerOK(t, `func f() []byte { return unsafe.Slice(bytePtr(), one()) }`)
+	var order []string
+	for _, s := range fn.Body {
+		Walk(s, func(n *Node) bool {
+			if n.Op == OCall && n.X != nil && n.X.Op == OGlobal && n.X.Obj != nil &&
+				(strings.HasSuffix(n.X.Obj.Name, ".bytePtr") || strings.HasSuffix(n.X.Obj.Name, ".one")) {
+				order = append(order, strings.TrimPrefix(n.X.Obj.Name, "p."))
+			}
+			return true
+		})
+	}
+	if len(order) != 2 || order[0] != "bytePtr" || order[1] != "one" {
+		t.Errorf("the operands were evaluated %v, want the pointer first:\n%s", order, buildDump(fn))
+	}
+}
+
+// TestLowerUnsafeSliceOfANilConstant checks the operand the row cannot spill.
+//
+// A nil pointer literal is a constant, so hold clones it rather than giving it
+// a temporary, and the row then reads a cloned constant three times: once for
+// the header and twice for the address-space comparison. It is the one operand
+// shape that does not name storage, and specs/021-ssa-construction.md builds a
+// constant of pointer type differently from a load.
+func TestLowerUnsafeSliceOfANilConstant(t *testing.T) {
+	for _, tc := range []struct{ row, body string }{
+		{"unsafe.Slice", `func f(n int) []int { return unsafe.Slice((*int)(nil), n) }`},
+		{"unsafe.String", `func f(n int) string { return unsafe.String((*byte)(nil), n) }`},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			lowerOK(t, tc.body)
+		})
 	}
 }

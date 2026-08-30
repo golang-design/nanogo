@@ -276,6 +276,16 @@ var syms = []Sym{
 	{Name: "runtime.panicdottypeE", Sig: "func(*_type, *_type, *_type)", NoReturn: true, Group: GroupPanic},
 	{Name: "runtime.panicdottypeI", Sig: "func(*itab, *_type, *_type)", NoReturn: true, Group: GroupPanic},
 	{Name: "runtime.panicnildottype", Sig: "func(*_type)", NoReturn: true, Group: GroupPanic},
+	// The four failure edges of unsafe.Slice and unsafe.String. Each pair is
+	// two symbols and not one because the message differs: a length out of
+	// range and a nil pointer with a non-zero length are two mistakes, and the
+	// runtime spells them apart in errorString. Each takes no argument and
+	// reads the caller's pc for the position, so the call must be a real call
+	// and not a jump.
+	{Name: "runtime.panicunsafeslicelen", Sig: "func()", NoReturn: true, Group: GroupPanic},
+	{Name: "runtime.panicunsafeslicenilptr", Sig: "func()", NoReturn: true, Group: GroupPanic},
+	{Name: "runtime.panicunsafestringlen", Sig: "func()", NoReturn: true, Group: GroupPanic},
+	{Name: "runtime.panicunsafestringnilptr", Sig: "func()", NoReturn: true, Group: GroupPanic},
 
 	// Goroutines and defer.
 	{Name: "runtime.newproc", Sig: "func(*funcval)", Group: GroupGoroutine},

@@ -45,7 +45,7 @@ named `Class`, `obj` named `Aux`, `rtsym` named `Group`, and `driver` named
 and no arithmetic over the language subset stands in for it.
 
 Measured over the 28 compile invocations a `func main() {}` needs, nanogo
-compiles **18** and refuses 10. `internal/selfhost` takes the reading:
+compiles **20** and refuses 8. `internal/selfhost` takes the reading:
 
 ```
 NANOGO_MEASURE_CLOSURE=1 go test ./internal/selfhost/
@@ -54,16 +54,17 @@ NANOGO_MEASURE_CLOSURE=1 go test ./internal/selfhost/
 | Packages | Refused for | Owner |
 | --- | --- | --- |
 | 8 | a package with assembly in it | [047](047-abi-wrappers.md) |
-| 2 | a row of [020](020-ir.md)'s lowering table: `unsafe.Slice` in `internal/runtime/gc/scan`, `unsafe.String` in `internal/stringslite` | [020](020-ir.md) |
 
-One reason holds eight of the ten, and `runtime` is one of the eight. An
+**One reason is left and it holds every refusal**, `runtime` among them. An
 assembly definition uses ABI0 and a Go call uses ABIInternal, and nanogo
 generates no wrapper between them, no `-asmhdr` header for the assembly sources
 to include, and no reader for the `symabis` file the go command produces.
-[047](047-abi-wrappers.md) is the design.
+[047](047-abi-wrappers.md) is the design and it stages the work.
 
-The other two are one row of the lowering table each and they are the same kind
-of gap.
+Nothing in the closure is now refused for a reason in the language. The last
+two that were, `internal/runtime/gc/scan` and `internal/stringslite`, wanted
+`unsafe.Slice` and `unsafe.String`, which are rows of [020](020-ir.md)'s
+lowering table and are built.
 
 ### What this table looked like before it was re-measured
 
