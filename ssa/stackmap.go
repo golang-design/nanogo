@@ -470,14 +470,20 @@ func (m *StackMaps) StackMapPCData(pcs *PCMap) ([]byte, error) {
 
 // UnsafePointPCData returns the PCDATA_UnsafePoint stream.
 //
-// Three kinds of range are unsafe, and the spec's point is that marking them
+// Four kinds of range are unsafe, and the spec's point is that marking them
 // is the whole obligation: the runtime scans an asynchronously preempted frame
 // conservatively, so no precise map is needed per instruction, only the
 // statement that a frame is not readable at all.
 //
 //   - the prologue, before the frame is established;
 //   - the epilogue, after it is torn down;
-//   - any sequence that leaves a pointer half written, which isUnsafe reports.
+//   - any sequence that leaves a pointer half written, which isUnsafe reports;
+//   - the whole body of a //go:nosplit function.
+//
+// The first three come from PrologueEnd, EpilogueStart and isUnsafe. The
+// fourth arrives in Unsafe, from the caller: it is not a property of the frame
+// but of the declaration, which this package cannot see
+// (specs/035-goroutines-and-stack-growth.md).
 //
 // isUnsafe may be nil. HalfWrittenPointer is the target-neutral answer for it.
 func (m *StackMaps) UnsafePointPCData(pcs *PCMap, isUnsafe func(*Value) bool) ([]byte, error) {

@@ -46,10 +46,12 @@ describes: a `//go:linkname` in a package nanogo compiles is a comment, and the
 symbol it was meant to bind keeps its declared name.
 
 `ir.Func.Pragma` carries a `*driver.pragma` for a function that was marked, and
-nothing below reads it. The chain is complete except at its far end, and
-`driver.TestNosplitIsStillDropped` gates that end: two packages that differ
-only by a `//go:nosplit` must produce the same object until somebody makes one
-of them not.
+two passes read it there. `driver.NoSplit` is honoured, and
+`driver.LifetimeDirective` is a refusal. Every other directive reaches no
+consumer. `driver.TestNosplitChangesTheObject` holds the first end down: two
+packages that differ only by a `//go:nosplit` produce different objects, and
+the unmarked one names `runtime.morestack_noctxt` where the marked one does
+not.
 
 ## Attachment
 
@@ -114,7 +116,7 @@ Getting one of these wrong produces a program that is wrong, not slow.
 
 | Directive | Meaning | Consumer |
 | --- | --- | --- |
-| `//go:nosplit` | No stack-growth check in the prologue. The function must fit the nosplit budget. | [035](035-goroutines-and-stack-growth.md) |
+| `//go:nosplit` | No stack-growth check in the prologue. The function must fit the nosplit budget. **Honoured.** | [035](035-goroutines-and-stack-growth.md) |
 | `//go:nowritebarrier` | Compile error if the body needs a write barrier. | [034](034-write-barriers.md) |
 | `//go:nowritebarrierrec` | The same, transitively through calls. | [034](034-write-barriers.md) |
 | `//go:yeswritebarrierrec` | Stops the recursive check above. | [034](034-write-barriers.md) |
@@ -124,12 +126,17 @@ Getting one of these wrong produces a program that is wrong, not slow.
 | `//go:uintptrkeepalive` | The same, without forcing escape. **Refused.** | [023](023-escape-analysis.md) |
 | `//go:cgo_unsafe_args` | Argument area may be addressed as one block. | out of scope; [000](000-decisions.md) decision 8 |
 
-The two `uintptr` directives are refused rather than recorded and dropped, and
-they are the only ones in this table that are. The rest of the group is written
-by the runtime, which nanogo does not compile, so nothing reachable is
-miscompiled by dropping them. These two are written by ordinary code that hands
-a pointer to a system as an integer, and dropping them collects the object while
-the callee is reading it.
+One directive in this table is honoured, two are refused, and the rest are
+recorded and dropped. This paragraph used to say that the whole group is
+written by the runtime alone, so nothing reachable is miscompiled by dropping
+it. That was wrong about `//go:nosplit`: a user's own function carrying it
+reaches this compiler, and it used to come out with a call to
+`runtime.morestack_noctxt` in it. It is honoured now. The claim still holds for
+the write-barrier rows, which are still dropped.
+
+The two `uintptr` directives are refused rather than recorded and dropped.
+They are written by ordinary code that hands a pointer to a system as an
+integer, and dropping them collects the object while the callee is reading it.
 [`uintptrescapes3.go`](../internal/gotest/testdata/go/test/uintptrescapes3.go)
 is the corpus file that showed it: it printed four failures rather than nothing.
 `driver.LifetimeDirective` is the refusal and
@@ -143,19 +150,21 @@ export data ([015](015-export-data.md)) or the check to read the callee's
 declaration through the type checker, and neither is built.
 
 `//go:nosplit` deserves its own note. The budget is a fixed number of bytes of
-stack available below the guard, shared by the whole nosplit call chain. The
-compiler must compute the chain's depth and reject an overflow, because the
-failure mode at run time is a stack overflow in code that cannot grow the stack,
-inside the scheduler. [035](035-goroutines-and-stack-growth.md) owns the
-computation.
+stack available below the guard, shared by the whole nosplit call chain, and
+the failure mode at run time is a stack overflow in code that cannot grow the
+stack, inside the scheduler. **`cmd/link` computes the chain's depth, not the
+compiler.** No Go compiler does; `cmd/link/internal/ld/stackcheck.go` is the
+only place in the toolchain that adds it up, and it reads
+`SymFlagNoSplit` off the object to decide which symbols take part.
+[035](035-goroutines-and-stack-growth.md) has the detail.
 
-`ssagen/prologue.go` decides `nosplit` without reading the directive:
-`f.nosplit = f.size == 0 || (f.leaf && f.size < stackSmall)`. Omitting the
-check for a function that cannot overflow is sound on its own terms, and the
-consequence is that a `//go:nosplit` on any other function is dropped. It is
-not dropped in silence when it stands in the wrong place, because rule 1
-reports that, but a directive in the right place reaches no consumer. The
-chain-depth computation does not exist at all.
+`ssagen/prologue.go` now reads the directive through
+`ssagen.Options.NoSplit`, which `driver.NoSplit` supplies from
+`ir.Func.Pragma`. `frame.skipsCheck` is where the two reasons for emitting no
+check meet: the frame is provably too small to overflow, which was the only
+rule the emitter had, or the author asked for no check at any frame size. Only
+the second sets `SymFlagNoSplit` and marks the whole body one unsafe point,
+which is the distinction `gc` keeps as well.
 
 `//go:linkname` deserves another. It breaks the package boundary and the
 standard library uses it heavily, in both directions: pulling a runtime symbol
@@ -225,7 +234,8 @@ evaluated.
 
 ## Testing
 
-What is built is the placement rule and the proof that nothing is honoured:
+What is built is the placement rule, one honoured directive and two refused
+ones:
 
 - `driver.TestMisplacedDirectiveIsRejected` pins each misplaced case at the
   line `gc` reports it on, and `driver.TestPragmaVerbMapsTheTable` pins the
@@ -234,18 +244,22 @@ What is built is the placement rule and the proof that nothing is honoured:
   `nowritebarrier`, and `uintptrescapes` implies `uintptrkeepalive`.
 - `test/directive.go` and `test/directive2.go` are `rejected` in
   [004](004-conformance.md)'s corpus, on the first error's line.
-- `driver.TestNosplitIsStillDropped` asserts that two packages differing only
-  by a `//go:nosplit` produce the same object, so the day a pass reads one this
-  test fails and has to be rewritten.
+- `driver.TestNoSplitReadsTheDirective` pins the predicate the back end reads,
+  and `driver.TestNosplitChangesTheObject` pins that it reaches the object.
+  `ssagen` checks the three things the directive changes, and `internal/e2e`
+  links a program with one in it, runs it and reads the linked instructions
+  back.
 
 What is not built, and waits on a consumer:
 
 - A corpus asserting that each correctness-required directive changes generated
   code in the specified way, checked by inspecting the emitted object rather
   than by running.
-- Rejection tests: an unknown directive in nanogo's own source, a
-  `//go:nosplit` chain that exceeds the budget, and a `//go:nowritebarrier`
-  function that needs one.
+- Rejection tests: an unknown directive in nanogo's own source, and a
+  `//go:nowritebarrier` function that needs one. The `//go:nosplit` chain that
+  exceeds the budget is built, in
+  `e2e.TestNoSplitOverBudgetIsRefusedByTheLinker`, and the diagnostic it
+  asserts is `cmd/link`'s rather than nanogo's.
 - `//go:linkname` in both directions, across packages, linked and run. It needs
   the verb recognised first.
 - The runtime is the real test and it arrives at M9.
@@ -274,11 +288,21 @@ positions, and [004](004-conformance.md)'s harness compares one of them: the
 first error's line. The per-position claim belongs to
 `driver.TestMisplacedDirectiveIsRejected` and not to the corpus.
 
-**The `//go:nosplit` row read as a plan the code lagged.** It is the reverse.
-`ssagen/prologue.go` sets the flag from the frame size and the leaf property
-and never from a directive, so a `//go:nosplit` in the right place on a
-function that needs one is dropped. The chain-depth computation
-[035](035-goroutines-and-stack-growth.md) owns does not exist.
+**The `//go:nosplit` row read as a plan the code lagged, and then the code
+caught up.** For a while `ssagen/prologue.go` set its flag from the frame size
+and the leaf property and never from a directive, so a `//go:nosplit` in the
+right place on a function that needed one was dropped. It is read now.
+
+**The chain-depth computation was described as the compiler's, in this spec
+and in [035](035-goroutines-and-stack-growth.md).** It is `cmd/link`'s. `gc`'s
+compiler has no budget code at all, and the only thing a compiler owes the
+check is `SymFlagNoSplit` on the symbol.
+
+**The sentence that the correctness group is written by the runtime alone, so
+dropping it miscompiles nothing reachable, was wrong for `//go:nosplit`.** A
+user's own function carrying it reached this compiler and came out with a call
+to `runtime.morestack_noctxt` in it, which is a crash in the scheduler. The
+sentence still holds for the write-barrier rows.
 
 **The spec said nanogo's own object writer uses `unsafe`, which is what made
 `unsafe` a G1 requirement.** It does not, and no compiler source file in the

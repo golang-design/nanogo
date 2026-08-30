@@ -128,8 +128,9 @@ type pragmaAt struct {
 // messages at two lines.
 //
 // It is the [syntax.Pragma] the parser attaches to a declaration, so it also
-// reaches ir.Func.Pragma. No pass reads it yet; specs/016 owns that gap and
-// TestDirectivesAreRecordedButNotHonoured gates it.
+// reaches ir.Func.Pragma. Two passes read it there: [NoSplit], which the back
+// end honours, and [LifetimeDirective], which is a refusal. Every other
+// directive is recorded and not read, and specs/016 owns that gap.
 type pragma struct {
 	flag pragmaFlag
 	list []pragmaAt
@@ -288,8 +289,12 @@ func (d *sourceDirectives) record(verb string, pos syntax.Pos) {
 // //go:nocheckptr, and //go:nocheckptr on its own is not in this set: nanogo
 // emits no pointer checks, so a function that asks for none gets what it
 // asked for.
+// //go:nosplit is not in this set. It is honoured rather than recorded:
+// ssagen emits no stack growth check in such a function, the object carries
+// obj.SymFlagNoSplit, and cmd/link computes the budget over the call graph and
+// fails the link on an overflow. Refusing it here after building all of that
+// would refuse a directive nanogo obeys.
 var runtimeDirectives = map[string]string{
-	"go:nosplit":            "specs/035-goroutines-and-stack-growth.md",
 	"go:systemstack":        "specs/034-write-barriers.md",
 	"go:nowritebarrier":     "specs/034-write-barriers.md",
 	"go:nowritebarrierrec":  "specs/034-write-barriers.md",
@@ -421,6 +426,23 @@ func cgoUnsafeArgsDirective(p syntax.Pragma) (syntax.Pos, bool) {
 		}
 	}
 	return syntax.Pos(0), false
+}
+
+// NoSplit reports whether a declaration carries //go:nosplit.
+//
+// The directive says the function must have no stack-growth check in it,
+// because it runs where the call to runtime.morestack is not allowed. The
+// back end reads the answer through ssagen.Options.NoSplit and emits no
+// check, and it sets the object file's SymFlagNoSplit so cmd/link adds the
+// function to the budget it computes over the call graph
+// (specs/035-goroutines-and-stack-growth.md).
+//
+// The declaration is what is read, so this covers the callee's own package
+// and no other. gc does the same: the directive is a property of the
+// definition and the caller needs no knowledge of it.
+func NoSplit(p syntax.Pragma) bool {
+	q := asPragma(p)
+	return q != nil && q.flag&nosplit != 0
 }
 
 // asPragma recovers the driver's record from the parser's opaque interface.

@@ -154,9 +154,10 @@ satisfied. nanogo must participate in that protocol from the first package that
 has assembly.
 
 `-+` turns on the runtime's extra checks: the write barrier restrictions of
-[034](034-write-barriers.md) and the nosplit accounting of
-[035](035-goroutines-and-stack-growth.md). It is the flag that makes G3 different
-from G1.
+[034](034-write-barriers.md), and `liveness.IsUnsafe`, which makes every
+function in the package an unsafe point whether or not it carries
+`//go:nosplit` ([035](035-goroutines-and-stack-growth.md)). It is the flag that
+makes G3 different from G1.
 
 ## `-V=full`
 

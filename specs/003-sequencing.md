@@ -162,7 +162,8 @@ Risks are listed with the milestone that retires them, not with a probability.
 | GC metadata is wrong in a way that only shows under load | M4 | Allocation stress with `GOGC=1` and `GODEBUG=gccheckmark=1`, not a unit test. |
 | The forked type checker cannot be re-pointed at nanogo's syntax tree cheaply | M2 | [012](012-type-checking.md) names the interface it is re-pointed through. If the fork resists, the fallback is to keep `go/ast` under the checker and translate, at a cost stated in that spec. |
 | Generics instantiation is a rewrite rather than a port | M5 | Deferred deliberately: nanogo's own source uses generics, so M6 cannot be reached without it, and M5 is where it is confronted with the corpus available. |
-| `//go:linkname` and `//go:nosplit` semantics are subtler than documented | M9 | The runtime is the only consumer that cares, and M9 is where it is compiled. |
+| `//go:linkname` semantics are subtler than documented | M9 | The runtime is the only consumer that cares, and M9 is where it is compiled. |
+| `//go:nosplit` semantics are subtler than documented | retired | The runtime was not the only consumer. A user's own function carrying it came out with a call to `runtime.morestack_noctxt` in it, so it was closed at M4 rather than M9. [035](035-goroutines-and-stack-growth.md) states what is built and `cmd/link` computes the budget. |
 
 ## Where the work stands
 
@@ -176,7 +177,7 @@ its gate is not met.**
 | M1 parser | done | 19,674 files agree with `go/scanner`, 16,293 with `go/parser` |
 | M2 types | done, less a generic declaration in export data | 623 subtests, a 375-entry errorcheck corpus, checks nanogo's own source, reads and writes gc's export data |
 | M3 first binary | **in progress** | a leaf package compiles under `go build -toolexec=nanogo`, links against `gc`-compiled code and the real runtime, and runs; the clause "with its tests passing" is unmet, because `go test -toolexec` is not run |
-| M4 runtime interface | **in progress** | liveness, stack maps, the ABI and the stack growth check are built, and a nanogo-allocated object survives a collection. The type descriptors an allocation needs are written, and a package that declares a type whose method set the IR type does not hold is refused. `defer` and `go` of a function value run, a captureless closure runs, and a deferred call runs while the goroutine panics on a runtime-raised panic; a `panic` statement, a read of the value `recover` returns, itabs, write barriers and every capture are not built |
+| M4 runtime interface | **in progress** | liveness, stack maps, the ABI and the stack growth check are built, `//go:nosplit` is honoured and `cmd/link` enforces its budget, and a nanogo-allocated object survives a collection. The type descriptors an allocation needs are written, and a package that declares a type whose method set the IR type does not hold is refused. `defer` and `go` of a function value run, a captureless closure runs, and a deferred call runs while the goroutine panics on a runtime-raised panic; a `panic` statement, a read of the value `recover` returns, itabs, write barriers and every capture are not built |
 | M5 to M10 | not started | |
 | the distribution | built, and reporting a zero | a tarball unpacks into a tree `driver.FindRoot` resolves, and its 27 archives account for themselves: 0 by nanogo, 27 by `gc` |
 

@@ -133,6 +133,21 @@ type frame struct {
 	in []place
 }
 
+// skipsCheck reports whether the prologue emits no stack-growth check.
+//
+// Two reasons remove it and they are not the same reason. The frame is
+// provably too small to overflow the region the runtime guarantees below the
+// guard, which is a measurement of this function. Or the author wrote
+// //go:nosplit, which is a requirement that holds at any frame size and which
+// [Options.NoSplit] carries here.
+//
+// Only the second reaches the symbol as SymFlagNoSplit. gc keeps the same two
+// apart: a leaf with no frame emits no check either and comes out
+// LEAF|NOFRAME and not NOSPLIT.
+func (f *frame) skipsCheck(pragma bool) bool {
+	return pragma || f.size == 0 || (f.leaf && f.size < stackSmall)
+}
+
 // locals returns the value FuncInfo carries.
 //
 // It is the frame size without the link register slot, which is the number gc
@@ -377,7 +392,7 @@ func (e *emitter) layout() error {
 		e.frames[h.Obj] = linkSlot + h.Off
 	}
 
-	f.nosplit = f.size == 0 || (f.leaf && f.size < stackSmall)
+	f.nosplit = f.skipsCheck(e.opt.NoSplit)
 	// Whether a stack-growth tail is emitted is decided here and read by the
 	// stack maps, which give the tail a bitmap of its own.
 	e.fr.Config.Grows = !f.nosplit

@@ -248,3 +248,50 @@ func TestDirectivesReachTheDeclaration(t *testing.T) {
 		t.Error("the directives are not recorded in source order")
 	}
 }
+
+// TestNoSplitReadsTheDirective covers the answer ssagen.Options.NoSplit
+// carries into the back end.
+//
+// The predicate is read from the declaration, so a function that carries the
+// directive answers true, one that carries another directive answers false,
+// and a declaration with no directive at all answers false without a nil
+// check at the call site.
+func TestNoSplitReadsTheDirective(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"nosplit", "package main\n\n//go:nosplit\nfunc f() {}\n", true},
+		{"noinline", "package main\n\n//go:noinline\nfunc f() {}\n", false},
+		{"none", "package main\n\nfunc f() {}\n", false},
+		// The verb is matched on the whole word. A directive nanogo does not
+		// know maps to no flag, so one that merely starts with the same
+		// letters is not this one.
+		{"unknown", "package main\n\n//go:nosplitting\nfunc f() {}\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "a.go")
+			if err := os.WriteFile(path, []byte(tt.src), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			files, _, _, err := parseFiles(&Config{Package: "main", Files: []string{path}})
+			if err != nil {
+				t.Fatalf("parseFiles: %v", err)
+			}
+			fn, ok := files[0].DeclList[0].(*syntax.FuncDecl)
+			if !ok {
+				t.Fatalf("the first declaration is a %T, want a *syntax.FuncDecl", files[0].DeclList[0])
+			}
+			if got := NoSplit(fn.Pragma); got != tt.want {
+				t.Errorf("NoSplit = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	// A nil Pragma is what a declaration with no comment carries, and it is
+	// also what the parser hands back once it has claimed the directives.
+	if NoSplit(nil) {
+		t.Error("a declaration with no directive answers true")
+	}
+}

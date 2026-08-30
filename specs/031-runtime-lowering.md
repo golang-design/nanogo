@@ -500,11 +500,13 @@ introduces get their blocks from `ssa.Build` and are covered by no such rule:
 and `unsafe.String` rows. A pass that emits a no-return call and forgets the
 `Exit` is not caught.
 
-Rule 5 has no code at all. There is no `//go:nowritebarrier` check, because
-there is no write barrier to reject ([034](034-write-barriers.md)), and there
-is no nosplit budget, because nothing computes one
-([035](035-goroutines-and-stack-growth.md) records the same gap from the other
-side).
+Rule 5 has no code at all here, and half of it needs none. There is no
+`//go:nowritebarrier` check, because there is no write barrier to reject
+([034](034-write-barriers.md)). The nosplit half is not this file's to enforce:
+`cmd/link` adds the chain up over every symbol carrying `SymFlagNoSplit` and
+fails the link on an overflow, which
+[035](035-goroutines-and-stack-growth.md) records. A call this file introduces
+into a `//go:nosplit` function is counted there like any other.
 
 ## Inlined fast paths
 

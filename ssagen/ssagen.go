@@ -105,6 +105,19 @@ type Options struct {
 	// method and an interface call names no symbol, so a rule that read the
 	// reference list of this function would see nothing.
 	ReflectMethod bool
+
+	// NoSplit is the answer to //go:nosplit, which driver.NoSplit reads off
+	// the declaration.
+	//
+	// It is a request and not a measurement, which is what separates it from
+	// frame.nosplit. frame.nosplit says the emitter proved the function
+	// cannot overflow the guard region and so emits no check; this says the
+	// author requires that no check be emitted whether or not it was proved.
+	// Three things follow from it and none follows from the other:
+	// the check and the growth tail are suppressed for a frame of any size,
+	// the text symbol carries SymFlagNoSplit, and the whole body is one
+	// unsafe point (specs/035-goroutines-and-stack-growth.md).
+	NoSplit bool
 }
 
 // A Result is one compiled function.
@@ -1874,11 +1887,21 @@ func (e *emitter) result() (*Result, error) {
 		// ir.Func.ReflectMethod says what happens without the mark.
 		text.Flag |= obj.SymFlagReflectMethod
 	}
-	// SymFlagNoSplit is not set even for a function that emits no check.
-	// The flag is what makes cmd/link compute the nosplit budget of
-	// specs/035-goroutines-and-stack-growth.md over the call graph, and
-	// nanogo does not compute that budget yet. Claiming the property without
-	// checking it is what specs/035 says must be rejected at compile time.
+	if e.opt.NoSplit {
+		// The flag is what enrols the symbol in the budget cmd/link computes
+		// over the call graph (cmd/link/internal/ld/stackcheck.go), which
+		// fails the link with "nosplit stack over N byte limit" when a chain
+		// of these functions does not fit below the guard. Setting it is
+		// therefore not a claim nanogo has to prove: it is what asks for the
+		// proof. Not setting it on a function that emits no check is the
+		// state that hides an overflow.
+		//
+		// It follows Options.NoSplit and not frame.nosplit. A leaf with no
+		// frame emits no check either, and gc marks such a function
+		// LEAF|NOFRAME and not NOSPLIT, because the budget is about the
+		// author's requirement and not about this one function's shape.
+		text.Flag |= obj.SymFlagNoSplit
+	}
 	text.Relocs = e.relocs
 
 	var files []uint32

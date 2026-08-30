@@ -87,6 +87,29 @@ func (e *emitter) buildTables(size int64) (*tables, error) {
 	// (cmd/compile/internal/liveness, compact). A leaf with a growable frame
 	// used to be refused here for want of it.
 
+	unsafeRanges := e.unsafe
+	if e.opt.NoSplit {
+		// //go:nosplit removes every ordinary safe point, which is what gc's
+		// liveness.IsUnsafe states: it is CompilingRuntime || f.NoSplit, and
+		// it sets allUnsafe, so every value and every block of the function
+		// is marked unsafe. The comment there gives the reason: safe points
+		// used to be coupled to the stack check, so the directive means "no
+		// safe points here" as much as it means "no check here".
+		//
+		// It is the asynchronous half that this removes and only that half.
+		// liveness.hasStackMap is unchanged by allUnsafe, so gc still writes
+		// a stack map at every call, and so does nanogo: this range is
+		// PCDATA_UnsafePoint and the collector's maps are
+		// PCDATA_StackMapIndex. A preempted frame would be scanned
+		// conservatively and this says the runtime may not stop here at all.
+		//
+		// The range is the whole symbol, which is wider than gc's: gc leaves
+		// the few instructions of the frame push safe. Wider is the safe
+		// direction, because every instruction it adds is one the runtime
+		// will not preempt at.
+		unsafeRanges = append(append([]ssa.PCRange{}, unsafeRanges...), ssa.PCRange{Lo: 0, Hi: size})
+	}
+
 	pcs := &ssa.PCMap{
 		FuncSize:    size,
 		MinLC:       minLC,
@@ -98,7 +121,7 @@ func (e *emitter) buildTables(size int64) (*tables, error) {
 		// range in Unsafe instead, which epilogue appends, and so is the
 		// stack-growth tail.
 		EpilogueStart: size,
-		Unsafe:        e.unsafe,
+		Unsafe:        unsafeRanges,
 		GrowPC:        int64(e.growPC),
 	}
 	stackMap, err := m.StackMapPCData(pcs)

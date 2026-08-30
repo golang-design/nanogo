@@ -1112,28 +1112,36 @@ func TestWriteOutputReportsAToolchainFailure(t *testing.T) {
 	}
 }
 
-// TestNosplitIsStillDropped records a known correctness gap so that closing it
-// is deliberate rather than accidental.
+// TestNosplitChangesTheObject checks that the directive travels the whole way,
+// from a comment in the source to the object nanogo writes.
 //
 // specs/016-directives-and-pragmas.md classes //go:nosplit as required for
 // correctness: a function marked with it must get no stack-growth check,
 // because it runs where the call that check makes is not allowed. The parser
-// now records the directive and it reaches ir.Func.Pragma, but no pass reads
-// it, so a marked function still compiles with the check in it.
+// records the directive, it reaches ir.Func.Pragma, driver.NoSplit reads it
+// there and ssagen.Options.NoSplit carries it into the back end.
 //
-// Nothing reachable is miscompiled, because the runtime is the only consumer
-// of that group and nanogo does not compile the runtime. The gate is on the
-// consumer rather than on the handler: two packages that differ only by the
-// directive must produce the same object today, and the day one of them stops
-// doing so is the day somebody has to look at this.
-func TestNosplitIsStillDropped(t *testing.T) {
+// This test stands where the gap used to be gated. Two packages that differ
+// in one comment and in nothing else produced identical objects for as long
+// as no pass read the directive, and the assertion here is the reverse of
+// that one. What differs is checked as well as that something differs: the
+// unmarked object references runtime.morestack_noctxt and the marked one does
+// not. ssagen's own tests check the symbol flag and the unsafe-point stream.
+func TestNosplitChangesTheObject(t *testing.T) {
 	arm64Only(t)
 	needGoCommand(t)
 	// The two sources differ in one comment and in nothing else, not even in
 	// line count, and they are compiled from the same path. Anything else
 	// would move the positions the object records and the objects would
 	// differ for a reason that is not the directive.
-	const body = "package main\n\n%s\nfunc f(x int) int { return x*3 + 1 }\n\nfunc main() { f(7) }\n"
+	// f is the only function in the package that would carry a check. Its
+	// frame is too large for the emitter to skip one on the size alone and
+	// the call to g makes it non-leaf, while g and main are leaves with no
+	// frame and never reference runtime.morestack_noctxt. That is what makes
+	// the name a test of f and not of the package.
+	const body = "package main\n\n//go:noinline\nfunc g(a, b int) int { return a + b }\n\n" +
+		"%s\nfunc f(x int) int {\n\tvar a [24]int\n\ta[x&23] = x\n\treturn g(a[x&23], 1)\n}\n\n" +
+		"func main() {}\n"
 	dir := t.TempDir()
 	src := filepath.Join(dir, "a.go")
 	compile := func(comment, out string) []byte {
@@ -1157,12 +1165,19 @@ func TestNosplitIsStillDropped(t *testing.T) {
 		}
 		return b
 	}
-	if !bytes.Equal(compile("// nosplit.", "plain.a"), compile("//go:nosplit", "marked.a")) {
-		t.Errorf("//go:nosplit now changes the object nanogo writes.\n" +
-			"Remove this test, and make specs/035-goroutines-and-stack-growth.md's " +
-			"chain-depth computation the thing that decides: " +
-			"specs/016-directives-and-pragmas.md says which directives are " +
-			"required for correctness rather than for speed.")
+	plain := compile("// nosplit.", "plain.a")
+	marked := compile("//go:nosplit", "marked.a")
+	if bytes.Equal(plain, marked) {
+		t.Fatal("//go:nosplit does not change the object nanogo writes, so the directive is recorded and dropped")
+	}
+	// The reference names the callee, so the symbol name is in the object's
+	// string table when the check is emitted and absent when it is not.
+	const morestack = "runtime.morestack_noctxt"
+	if !bytes.Contains(plain, []byte(morestack)) {
+		t.Fatalf("the unmarked object does not name %s, so the comparison is empty", morestack)
+	}
+	if bytes.Contains(marked, []byte(morestack)) {
+		t.Errorf("//go:nosplit and the object still names %s", morestack)
 	}
 }
 

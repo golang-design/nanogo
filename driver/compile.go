@@ -347,30 +347,30 @@ func parseFiles(cfg *Config) ([]*syntax.File, *syntax.FileSet, *sourceDirectives
 	return files, fset, seen, nil
 }
 
-// A //go: directive is recorded but never honoured, and that is a correctness
-// gap rather than a missing feature.
+// Most //go: directives are recorded and not honoured, and that is a
+// correctness gap rather than a missing feature.
 //
 // specs/016-directives-and-pragmas.md divides the directives into two groups,
 // and the first is titled "required for correctness": getting one of them
-// wrong produces a program that is wrong, not slow. A source file that says
+// wrong produces a program that is wrong, not slow.
 //
-//	//go:nosplit
-//	func f() { ... }
+// //go:nosplit was in that group and is now honoured. See [NoSplit] and
+// ssagen.Options.NoSplit: the stack-growth check and its tail are not emitted,
+// the text symbol carries SymFlagNoSplit so cmd/link adds the chain up, and
+// the whole body is one unsafe point. It was not the runtime that made it
+// urgent. A user's own function carrying the directive reached this compiler
+// and came out with a call to runtime.morestack in it, which is a crash in the
+// scheduler and not a missed optimisation.
 //
-// still compiles to a function with a stack-growth check in it. The check
-// calls runtime.morestack, and the whole reason a function is marked nosplit
-// is that it runs where that call is not allowed.
+// The write-barrier group is still recorded and not honoured, and
+// specs/034-write-barriers.md owns it. nanogo does not compile the runtime
+// today and the runtime is that group's only consumer, so it miscompiles
+// nothing reachable yet.
 //
-// nanogo does not compile the runtime today, and the runtime is the only
-// consumer of most of that group, so most of it miscompiles nothing reachable
-// yet. The gap is gated by TestDirectivesAreRecordedButNotHonoured rather than
-// left as an absence, because the day nanogo reaches a package that uses the
-// directive, the failure has no diagnostic at all.
-//
-// Two of them are not in that position and are refused instead. See
-// [LifetimeDirective]: //go:uintptrescapes and //go:uintptrkeepalive are
-// written by ordinary code that calls into a system, they were recorded and
-// dropped, and the corpus caught the program that came out.
+// Two more are refused instead. See [LifetimeDirective]:
+// //go:uintptrescapes and //go:uintptrkeepalive are written by ordinary code
+// that calls into a system, they were recorded and dropped, and the corpus
+// caught the program that came out.
 //
 // What the record does buy is the other half of the rule: a directive that no
 // declaration can use is now reported rather than dropped in silence. See
@@ -1418,6 +1418,7 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 				Line:          line,
 				Fset:          fset,
 				ReflectMethod: fn.ReflectMethod,
+				NoSplit:       NoSplit(fn.Pragma),
 			})
 			return err
 		}},

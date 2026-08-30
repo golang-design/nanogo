@@ -159,10 +159,14 @@ func TestRuntimeGateFiresForTheRightPackages(t *testing.T) {
 			edit: func(c *Config) { c.Package = "example.com/runtime" },
 		},
 		{
-			name: "//go:nosplit in a runtime package is refused",
+			// //go:nosplit is honoured and not refused. ssagen emits no
+			// stack growth check in such a function, the object carries
+			// obj.SymFlagNoSplit, and cmd/link computes the budget over the
+			// call graph. The gate refused it while it was recorded and
+			// dropped, which was true then and is not true now.
+			name: "//go:nosplit in a runtime package is compiled",
 			src:  nosplit,
 			edit: func(c *Config) { c.Package, c.Std = "internal/abi", true },
-			want: []string{"//go:nosplit on function f", "specs/035-goroutines-and-stack-growth.md"},
 		},
 		{
 			name: "//go:nowritebarrier in a runtime package is refused",

@@ -137,6 +137,13 @@ after it is torn down, and any sequence where a pointer exists only in a
 half-written form. nanogo marks these ranges rather than trying to produce a
 precise map for every instruction.
 
+A `//go:nosplit` function is a fourth range and is not about the frame at all.
+The whole body is marked, because `gc`'s `liveness.IsUnsafe` is
+`CompilingRuntime || f.NoSplit` and sets `allUnsafe`
+([035](035-goroutines-and-stack-growth.md)). The collector's own tables are
+untouched by it: `gc` writes a stack map at every call whatever `allUnsafe`
+says, and `liveness.hasStackMap` is where that is decided.
+
 ## Stack objects
 
 A local whose address is taken **and whose type holds pointers** lives in the

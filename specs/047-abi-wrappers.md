@@ -605,11 +605,12 @@ it follows from the placement being right.
 
 `makeABIWrapper` sets `ir.Nosplit` on every wrapper, with a comment saying the
 author could not make `all.bash` pass without it. [035](035-goroutines-and-stack-growth.md)
-forbids nanogo from claiming the property, and `ssagen.result` deliberately
-does not set `SymFlagNoSplit`, because nanogo does not compute the nosplit
-budget.
+used to forbid nanogo from claiming the property, and `ssagen.result`
+deliberately did not set `SymFlagNoSplit`.
 
-The conflict resolves in favour of setting the flag. `cmd/link`'s
+That conflict is resolved, in favour of setting the flag, and 035 now says so:
+`ssagen.Options.NoSplit` sets it for a function that carries the directive, and
+a wrapper is the same case. `cmd/link`'s
 `doStackCheck` in `ld/stackcheck.go` runs unconditionally over `ctxt.Textp`,
 reads `ldr.IsNoSplit(sym)` off the symbol, walks the call graph, and compares
 each height against `objabi.StackNosplit(race) - callSize - 8` on arm64. It

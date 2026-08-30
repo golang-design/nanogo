@@ -35,12 +35,27 @@ func synth(t *testing.T, size int64, leaf bool, in []place) []uint32 {
 	return synthEmitter(t, size, leaf, in).text
 }
 
+// synthNoSplit is synth for a function that carries //go:nosplit.
+func synthNoSplit(t *testing.T, size int64, leaf bool, in []place) []uint32 {
+	t.Helper()
+	return synthOpt(t, size, leaf, in, true).text
+}
+
 // synthEmitter is synth with the emitter kept, for the tables it filled.
 func synthEmitter(t *testing.T, size int64, leaf bool, in []place) *emitter {
 	t.Helper()
-	e := &emitter{opt: Options{Sym: "test.f"}, syms: newSymbols(obj.NewPackage("test"))}
+	return synthOpt(t, size, leaf, in, false)
+}
+
+// synthOpt is synthEmitter with the //go:nosplit answer given rather than
+// derived, which is the distinction Options.NoSplit records.
+func synthOpt(t *testing.T, size int64, leaf bool, in []place, nosplit bool) *emitter {
+	t.Helper()
+	e := &emitter{opt: Options{Sym: "test.f", NoSplit: nosplit}, syms: newSymbols(obj.NewPackage("test"))}
 	e.frame = frame{size: size, leaf: leaf, in: in}
-	e.frame.nosplit = size == 0 || (leaf && size < stackSmall)
+	// The rule is read from the emitter rather than restated, so a test that
+	// asks for //go:nosplit measures what layout would decide.
+	e.frame.nosplit = e.frame.skipsCheck(nosplit)
 	e.markSP() // the row run() writes before the prologue
 	e.prologue()
 	e.epilogue()

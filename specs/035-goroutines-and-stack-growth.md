@@ -38,8 +38,12 @@ argument becomes a capture, and a capture is read through the context register,
 which no SSA operation reads ([033](033-closures-defer-panic.md)). `go t.m()`
 is refused by the same rule, because the receiver is an argument.
 
-The `//go:nosplit` half is not built either, and it is the part of this spec
-most likely to be misread. See "The nosplit budget" below.
+The `//go:nosplit` half is built. A function that carries the directive gets no
+stack-growth check and no growth tail at any frame size, its text symbol carries
+`SymFlagNoSplit`, and its whole body is one unsafe point. `cmd/link` computes the
+budget over the call graph and fails the link when a chain does not fit. See
+"The nosplit budget" below, which this work corrected: the budget was never the
+compiler's to compute.
 
 ## The prologue
 
@@ -112,39 +116,80 @@ $$
 $$
 
 where `StackNosplit` is the runtime's reserved region,
-`internal/abi.StackNosplitBase` times `internal/runtime/sys.StackGuardMultiplier`.
-Both are read from the runtime rather than hard-coded, and the multiplier is
-not one on every configuration, so the budget is not a single number the
-compiler may carry. Neither constant is in the source today, so neither has the
-test `StackSmall` and `StackBig` have.
+`internal/abi.StackNosplitBase` times the guard multiplier. The multiplier is
+not one on every configuration, so the budget is not a single number a compiler
+may carry, and neither constant is in nanogo's source. That is correct rather
+than missing, for the reason below.
 
-The compiler computes this over the call graph and **rejects** an overflow at
-compile time. The runtime failure mode is a stack overflow inside code that
-cannot grow the stack, which manifests as memory corruption in the scheduler.
+**`cmd/link` computes this, not the compiler.** The sum lives in
+`cmd/link/internal/ld/stackcheck.go`, which walks the call graph over every
+symbol that carries `SymFlagNoSplit` and reports `nosplit stack over N byte
+limit` with the chain printed under it. `gc`'s compiler computes nothing of the
+kind: `grep -rn "nosplit stack" $GOROOT/src/cmd` finds `stackcheck.go` and its
+test and nothing else. The limit is `objabi.StackNosplit(race)`, which is
+`abi.StackNosplitBase` times `stackGuardMultiplier(race)`, less the size of a
+call, and the linker is where the multiplier is known.
 
-This is a G3 requirement, like the write barrier checks of
-[034](034-write-barriers.md), and for the same reason: only the runtime uses the
-directive.
+The runtime failure mode of getting it wrong is a stack overflow inside code
+that cannot grow the stack, which manifests as memory corruption in the
+scheduler.
 
-### What `nosplit` means in the code today
+### What `nosplit` means in the code
 
-Read the paragraphs above as a plan. Three things are true of the code.
+Three things change when a declaration carries the directive, and each has its
+own failure if it is missed.
 
-**The `//go:nosplit` directive is never read.** No pass looks at it. The
-emitter has a field called `nosplit`, and it is computed from the shape of the
-function: `size == 0 || (leaf && size < StackSmall)`. It means "this function
-provably cannot overflow the guard region", which is the leaf rule of the
-section above, and it does not mean "the author asked for no check".
+**No check and no tail, at any frame size.** `driver.NoSplit` reads the
+directive off `ir.Func.Pragma` and `ssagen.Options.NoSplit` carries it to
+`frame.skipsCheck`, which is the one place the two reasons for having no check
+meet: the emitter's own proof that the frame cannot overflow the guard region,
+and the author's requirement that no check be emitted whatever the frame is.
+`prologue` then pushes the frame with no guard load and `growstack` emits
+nothing. The instructions are compared against `go tool asm` at four frame
+sizes, the ones that would each pick a different form of the check.
 
-**`SymFlagNoSplit` is deliberately never set**, even on a function that emits
-no check. That flag is what makes `cmd/link` compute the budget over the call
-graph, and nanogo does not compute the budget. Claiming the property without
-checking it is exactly what this spec says must be rejected, so the emitter
-declines to claim it. This is the one place where an unbuilt check is handled
-correctly by refusing to assert anything.
+**`SymFlagNoSplit` on the text symbol.** This is what enrols the function in
+the linker's budget, so setting it is not a claim the compiler has to prove: it
+is what asks for the proof. Not setting it on a function that emits no check is
+the state that hides an overflow. It follows the directive and not
+`frame.nosplit`, because a leaf with no frame emits no check either and `gc`
+marks such a function `LEAF|NOFRAME` and not `NOSPLIT`.
 
-**Nothing computes the sum.** There is no call graph traversal, no
-`StackNosplit` constant anywhere in the source, and no rejection.
+**The whole body is one unsafe point.** `gc`'s `liveness.IsUnsafe` is
+`CompilingRuntime || f.NoSplit`, and it sets `allUnsafe`, so every value and
+every block is marked. `go tool compile -S` shows it: a `NOSPLIT` function's
+`PCDATA $0` stream goes to `-2` at the first instruction of the body and never
+returns to `-1`, while the same function without the directive returns to `-1`
+once its frame is pushed. nanogo marks the whole symbol, which is wider than
+`gc`'s and is the conservative direction.
+
+This removes the asynchronous half of the safe points and only that half.
+`liveness.hasStackMap` does not read `allUnsafe`, so `gc` still writes a stack
+map at every call and so does nanogo. A frame stopped by asynchronous
+preemption is scanned conservatively, and this range says the runtime may not
+stop there at all. A change that removed the collector's maps instead would be
+a collector fault rather than a missed preemption, so the two streams are
+asserted separately and the second is measured rather than argued:
+`e2e.TestNoSplitKeepsTheStackMapAtACall` runs a `//go:nosplit` function that
+allocates an object, holds the only reference to it in its own frame across two
+collections and then reads it, under `GODEBUG=gccheckmark=1,clobberfree=1` with
+`GOGC=1`. With the stack map removed for a nosplit function and nothing else
+changed, that program dies on the read.
+
+### It is not the runtime that made this urgent
+
+This spec said the directive was a G3 requirement, like the write barrier
+checks of [034](034-write-barriers.md), because only the runtime uses it. That
+is wrong about who is exposed. A user's own function carrying `//go:nosplit`
+reaches this compiler, and it used to come out with a call to
+`runtime.morestack_noctxt` in it. `internal/e2e` builds such a program, links
+it with the real linker and reads the linked instructions back. On the tree
+before this work the disassembly held the call, and the over-budget program
+linked and ran instead of being refused.
+
+Neither `internal/abi` nor `internal/chacha8rand` is unblocked by it. Both are
+refused earlier, by `checkAssembly`, and both would still be unusable if that
+gate were relaxed. See "What was wrong" below.
 
 ## Stack copying
 
@@ -171,22 +216,25 @@ This can happen at almost any instruction.
 The compiler's obligation is small but not zero:
 
 - Mark unsafe ranges with `PCDATA $PCDATA_UnsafePoint`, so the runtime does not
-  preempt where the frame is inconsistent. This is built. Three kinds of range
+  preempt where the frame is inconsistent. This is built. Four kinds of range
   are marked and the stream is written into the object file: the growth tail,
-  each frame teardown, and each write of a pointer-holding location that takes
-  more than one store, which `ssa.HalfWrittenPointer` names. The third is a
-  string, a slice or an interface, which holds one word of the new value and
-  the rest of the old one between the stores. The prologue is not among them,
-  for the reason in requirement 3.
+  each frame teardown, each write of a pointer-holding location that takes more
+  than one store, which `ssa.HalfWrittenPointer` names, and the whole body of a
+  `//go:nosplit` function. The third is a string, a slice or an interface, which
+  holds one word of the new value and the rest of the old one between the
+  stores. The prologue is not among them, for the reason in requirement 3.
 - Ensure that a loop without a call contains a preemptible point. A loop with no
   calls and no preemptible instruction is a goroutine that cannot be stopped;
   asynchronous preemption is what removed the need for the compiler to insert
   explicit checks, and the remaining obligation is only not to mark such a loop
-  unsafe throughout. Nothing checks this. It holds because no range nanogo
-  marks spans a loop: the teardown and the growth tail are outside any loop
-  body, and a half-written pointer range is the two or three stores of one
-  assignment, so a loop that contains one still has preemptible instructions
-  between them.
+  unsafe throughout. Nothing checks this. Of the four kinds above, three cannot
+  span a loop: the teardown and the growth tail are outside any loop body, and a
+  half-written pointer range is the two or three stores of one assignment, so a
+  loop that contains one still has preemptible instructions between them. The
+  fourth does span every loop in its function, deliberately, and `gc` does the
+  same for the same functions. A `//go:nosplit` function that spins is a
+  goroutine the runtime cannot stop, which is why the directive is written on
+  short functions and why the linker's budget bounds them.
 
 Frames stopped by asynchronous preemption are scanned **conservatively** by the
 collector, since there is no precise map for an arbitrary instruction. That is
@@ -215,9 +263,10 @@ arguments there is nothing to evaluate.
 - The nosplit budget: a chain that fits, a chain that does not, and a check that
   the second is rejected with a message naming the chain.
 
-Of those four, one exists. `ssagen` recurses 200,000 frames under
+Two of those four exist. `ssagen` recurses 200,000 frames under
 `gccheckmark`, at one frame size, carrying an integer rather than a pointer.
-Of the other three, one is blocked and two are only unwritten:
+The other two are the stack objects table, which is blocked, and preemption,
+which is only unwritten. Each of the four:
 
 - The stack objects test is blocked, though not where this spec said. The
   table is computed and never written: `ssa.StackMaps.ObjectsSym` builds one
@@ -229,14 +278,26 @@ Of the other three, one is blocked and two are only unwritten:
   in a loop with no call in it is preempted under `GOMAXPROCS=1`: the program
   finishes, and the same program hangs under `GODEBUG=asyncpreemptoff=1`. That
   contrast is the assertion the test needs, and the code it needs is built.
-- The nosplit test waits on the budget, which nothing computes.
+- The nosplit test exists now, in both halves.
+  `TestNoSplitLinksAndRunsWithNoGrowthCheck` builds a `//go:nosplit` function
+  with nanogo, links it with the real linker, runs it, compares the exit status
+  against an all-`gc` build of the same source, and reads the linked
+  instructions back with `go tool objdump` to check that no `morestack` call
+  and no guard load survived.
+  `TestNoSplitOverBudgetIsRefusedByTheLinker` gives the same function a
+  1600-byte frame and asserts that the link fails with `nosplit stack over` and
+  names the function. Only the second proves the symbol flag was written and
+  read, because no compile-only assertion reaches the linker.
+  `TestNoSplitKeepsTheStackMapAtACall` is the third, and it is the collector's
+  rather than the scheduler's.
 
-Two more tests hold the prologue in place. `ssagen` compares 101 emitted
+Three more tests hold the prologue in place. `ssagen` compares 101 emitted
 prologue and tail instructions against `go tool asm` on the same function, so a
-wrong encoding is a diff and not a crash. And it reads `StackSmall` and
-`StackBig` out of `internal/abi/stack.go` and fails when they move, which is
-what "read from the runtime rather than hard-coded" has to mean for a constant
-that is written into the instruction stream.
+wrong encoding is a diff and not a crash, and 32 more for the `//go:nosplit`
+forms at the four frame sizes that would each pick a different check. And it
+reads `StackSmall` and `StackBig` out of `internal/abi/stack.go` and fails when
+they move, which is what "read from the runtime rather than hard-coded" has to
+mean for a constant that is written into the instruction stream.
 
 ## What was wrong
 
@@ -255,6 +316,58 @@ that is written into the instruction stream.
   `go tool asm` on functions with large frames, and
   [042](042-arm64-backend.md) records the move from the back end's side. The
   save order is stated above because the other order loses an argument.
+- It said "the compiler computes this over the call graph and rejects an
+  overflow at compile time". No Go compiler does. `cmd/link` does, in
+  `stackcheck.go`, and `gc`'s compiler has no budget code at all.
+- It said `SymFlagNoSplit` was correctly withheld because "claiming the
+  property without checking it is exactly what this spec says must be
+  rejected". The premise was the sentence above. Setting the flag does not
+  claim a property nanogo failed to check; it is what asks the linker to check
+  it. Withholding it on a function that emits no check is the state that hides
+  an overflow, and that is what the code did.
+- It said `//go:nosplit` was a G3 requirement because only the runtime uses the
+  directive. A user's own function reaches this compiler with it and came out
+  with a call to `runtime.morestack_noctxt` in it, which is a crash in the
+  scheduler.
+- It said no unsafe range nanogo marks spans a loop. One does now, and `gc`
+  marks the same one.
+
+### Two packages `//go:nosplit` does not unblock
+
+`internal/abi` and `internal/chacha8rand` hold every `//go:nosplit` function in
+the bootstrap closure of [060](060-selfhost.md). There are three:
+`internal/abi.IntArgRegBitmap.Get`, `internal/abi.NoEscape` and
+`internal/chacha8rand.State.Next`. The other twenty-six packages of the closure
+hold none, so honouring the directive changes no object nanogo already writes.
+Neither of the two compiles, and the directive is not why. Both are refused by `checkAssembly` before any function is looked
+at, because the go command sends `-symabis` and `-asmhdr` for a package with a
+`.s` file in it. The closure reading is 20 of 28 before this work and 20 of 28
+after it.
+
+Relaxing that gate would not help either, which was measured rather than
+reasoned. With the gate bypassed the closure reads 25 of 28, and then the build
+fails in `gc`:
+
+```
+runtime/rand.go:61:23: chacha8rand.seed escapes to heap, not allowed in runtime
+```
+
+The reason is in `export/writer.go`: nanogo writes one empty escape note per
+receiver and parameter, and `gc` reads an empty note as "leaks to the heap".
+The `runtime` package forbids a heap escape, and `runtime` imports both of
+these packages, so an object nanogo produced for either one is refused by the
+compiler that builds the runtime against it. The blocker is
+[023](023-escape-analysis.md), which is unbuilt, and it stands whatever
+`checkAssembly` does.
+
+Two claims in `checkAssembly`'s own message are also wrong for these two
+packages on `arm64`, and the message is left alone because it fires on the
+presence of the flags rather than on either claim. Neither package needs an ABI
+wrapper: `internal/abi`'s assembly defines `FuncPCTestFn` at ABI0 and the Go
+declaration for it is in `export_test.go`, which is not in the non-test build,
+while `internal/chacha8rand`'s `block` is defined in assembly at
+**ABIInternal** already. And neither package's `.s` files include `go_asm.h`, so
+neither needs the `-asmhdr` header.
 
 ## Three symptoms, one with a cause and two without
 
