@@ -180,16 +180,25 @@ structural numbers this document does state are gated against that file by
 `TestTheSpecStatesWhatTheRatchetRecords`, so they cannot rot in silence:
 
 - the corpus is **356** files.
-- **207** of them pass.
+- **209** of them pass.
 
-The last two to go in were `chanlinear.go` and `gcgort.go`. Both compiled and
-ran for two batches before they were recorded, because both passed only when
-the collector did not run concurrently with a pointer store and
+The last two to go in were `method5.go` and `recover.go`. `method5.go` calls an
+interface method on receivers narrower than, equal to, and wider than a word,
+by value and by pointer, which is the shape that found the two faults
+[030](030-abi.md) records: an argument whose decomposition was already split
+across a register and the stack, and a call's operands laid over the word list
+rather than the declared parameter list. Neither refused. The callee read
+fields the caller never wrote, so the file ran and printed wrong numbers, and
+only the differential comparison against `gc` reported it.
+
+`chanlinear.go` and `gcgort.go` went in before those. Both compiled and ran for
+two batches before they were recorded, because both passed only when the
+collector did not run concurrently with a pointer store and
 [034](034-write-barriers.md) was not built. A ratchet entry for either would
 have made this gate fail on machine load rather than on a change. They went in
 with the barrier.
 
-The remaining 149 are not failures. They are refusals with a reason, kinds this
+The remaining 147 are not failures. They are refusals with a reason, kinds this
 harness does not carry out, recipes whose compiler flags nanogo has no
 equivalent of, and files this platform excludes. Every one of them is counted
 and named in the report.

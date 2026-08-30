@@ -173,6 +173,7 @@ pass matched maplinear.go
 pass rejected method1.go
 pass rejected method2.go
 pass matched method3.go
+pass matched method5.go
 pass rejected method6.go
 pass matched named.go
 pass rejected named1.go
@@ -187,6 +188,7 @@ pass matched printbig.go
 pass matched range.go
 pass rejected range2.go
 pass matched range3.go
+pass matched recover.go
 pass matched recover1.go
 pass matched recover2.go
 pass matched recover3.go
