@@ -9,10 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 
+	"golang.design/x/nanogo/driver"
 	"golang.design/x/nanogo/internal/selfhost"
 )
 
@@ -41,6 +43,7 @@ func TestNanogoCompilesItsOwnPackages(t *testing.T) {
 	if os.Getenv("NANOGO_REQUIRE_CORPUS") != "1" && !refreshing() {
 		t.Skip("each package needs its own build cache, which is minutes; set NANOGO_REQUIRE_CORPUS=1")
 	}
+	hostIsTheTarget(t)
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("no go command")
 	}
@@ -213,6 +216,30 @@ func TestTheListIsTheCompilerAndNotTheHarnesses(t *testing.T) {
 	if len(got) != rt.Packages {
 		t.Errorf("the list holds %d packages and %s records %d:\n\t%s",
 			len(got), ratchetPath, rt.Packages, strings.Join(got, "\n\t"))
+	}
+}
+
+// hostIsTheTarget skips a measurement that cannot mean anything here.
+//
+// nanogo emits arm64, and it refuses a build for any other GOARCH before it
+// compiles a function:
+//
+//	nanogo cannot compile for this target: nanogo emits arm64 machine code
+//	and the build is for amd64
+//
+// So on an amd64 runner every package reads as refused and the ratchet reports
+// every one of them as a regression. That is a fact about the host and not
+// about the compiler, and the CI matrix holds both an arm64 runner and an
+// amd64 one, so the gate runs where it means something and skips where it does
+// not.
+//
+// The document gates in this package do not skip. They read the ratchet and
+// the spec and run anywhere.
+func hostIsTheTarget(t *testing.T) {
+	t.Helper()
+	if runtime.GOARCH != driver.TargetArch {
+		t.Skipf("nanogo emits %s machine code and GOARCH is %s, so it refuses every package here",
+			driver.TargetArch, runtime.GOARCH)
 	}
 }
 

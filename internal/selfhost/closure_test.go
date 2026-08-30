@@ -41,6 +41,7 @@ func TestNanogoCompilesTheBootstrapClosure(t *testing.T) {
 		t.Skip("a reading rather than a gate, and about as slow as the self-host measurement; " +
 			"set NANOGO_MEASURE_CLOSURE=1")
 	}
+	hostIsTheTarget(t)
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("no go command")
 	}
