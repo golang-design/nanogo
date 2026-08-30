@@ -234,3 +234,130 @@ func TestGcAndNanogoAgreeOnAPromotedMethodOfAnImportedType(t *testing.T) {
 		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
 	}
 }
+
+// The library whose unexported method names belong to it.
+//
+// An unexported name belongs to the package that spells it, so scalar here and
+// scalar in the importer are two names and neither shadows the other. Scaler
+// is how the importer reaches these ones: it cannot write scalar and mean
+// lib's, and a value of a type in the importer satisfies the interface only
+// through the methods it promotes from Encoder.
+//
+// Each method answers with a different multiple of N, and the importer's own
+// methods answer with something else again, so a wrapper that reached the
+// wrong function prints a wrong number rather than the right one.
+const shadowLibrary = `package lib
+
+type Encoder struct{ N int }
+
+func (e *Encoder) scalar() int { return e.N }
+
+func (e *Encoder) bigInt() int { return e.N * 100 }
+
+func (e *Encoder) Value() int { return e.scalar() + e.bigInt() }
+
+type Scaler interface {
+	scalar() int
+	bigInt() int
+}
+
+func Call(s Scaler) int { return s.scalar() }
+
+func CallBig(s Scaler) int { return s.bigInt() }
+`
+
+// The importer that declares methods of the same names.
+//
+// This is export.bodyWriter, reduced. bodyWriter embeds *pkgbits.Encoder and
+// declares its own scalar and bigInt, so its method set holds four methods
+// under two names, and the two of each pair need two symbols.
+//
+// Two receiver shapes, because the descriptor and the itab name different
+// forms of the wrapper for each. writer is two words, so an interface holding
+// one holds a pointer and the itab names the pointer form. packed is one
+// pointer word, so it is stored directly in an interface and the itab names
+// the value form, which is the form that was missing.
+//
+// The pad in front of writer's embedded field puts the field at a nonzero
+// offset, so a wrapper that dropped the offset would load the wrong word.
+const shadowImporter = `package main
+
+import (
+	"fmt"
+
+	"nanogo.example/shadow/lib"
+)
+
+type writer struct {
+	pad int
+	*lib.Encoder
+}
+
+func (w *writer) scalar() int { return w.pad * 3 }
+
+func (w *writer) bigInt() int { return w.pad * 5 }
+
+type packed struct{ *lib.Encoder }
+
+func (p *packed) scalar() int { return 11 }
+
+func main() {
+	w := &writer{pad: 2, Encoder: &lib.Encoder{N: 3}}
+	fmt.Println("declared", w.scalar(), w.bigInt())
+	fmt.Println("promoted through a pointer", lib.Call(w), lib.CallBig(w))
+	fmt.Println("promoted through a value", lib.Call(*w), lib.CallBig(*w))
+
+	p := packed{&lib.Encoder{N: 7}}
+	fmt.Println("stored directly in the interface", lib.Call(p), lib.CallBig(p))
+	fmt.Println("declared on the direct one", p.scalar())
+
+	// The descriptors of the two value types, which is where the missing
+	// wrapper was named.
+	var a any = *w
+	var b any = p
+	fmt.Println("boxed", a != nil, b != nil)
+
+	// The exported method the library calls its own unexported ones from, so
+	// the answers the wrappers give can be checked against the declarations
+	// reached without one.
+	fmt.Println("through the embedded type", w.Value(), p.Value())
+}
+`
+
+// TestGcAndNanogoAgreeOnAShadowedUnexportedMethod is the evidence that two
+// unexported methods of one name from two packages stay two methods.
+//
+// A method symbol carries the method's own package in front of the name when
+// that package is not the receiver type's, which is gc's ir.MethodSymSuffix.
+// Without it the declaration and the wrapper for the promoted method are one
+// symbol: the object holds two definitions of main.(*writer).scalar and
+// nothing defines main.writer.scalar, which the descriptor of the value type
+// names. That is how nanogo's own export package left the self-hosting link
+// with
+//
+//	type:golang.design/x/nanogo/export.bodyWriter: relocation target
+//	golang.design/x/nanogo/export.bodyWriter.scalar not defined
+//
+// A link that succeeds is only half the claim. The other half is that each
+// wrapper reaches the method the language selects, which is why every call
+// here answers with a different number and why the comparison is against an
+// all-gc build of the same source.
+func TestGcAndNanogoAgreeOnAShadowedUnexportedMethod(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":     "module nanogo.example/shadow\n\ngo 1.27\n",
+		"lib/lib.go": shadowLibrary,
+		"main.go":    shadowImporter,
+	}, []string{"# nanogo owns the importer, which is where both names meet", "main"})
+
+	if out, err := h.build(t, "-o", "shadow", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	lines := h.decisions(t)
+	if !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the importing package:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "shadow"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}

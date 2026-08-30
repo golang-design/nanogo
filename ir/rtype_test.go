@@ -699,6 +699,59 @@ var (
 	}
 }
 
+// TestMethodSymbolQualifiesAForeignUnexportedMethod is what keeps two methods
+// of one name apart.
+//
+// An unexported name belongs to the package that spells it, so scalar declared
+// in export and scalar declared in export/pkgbits are two names and neither
+// shadows the other. A type that embeds *pkgbits.Encoder and declares its own
+// scalar therefore has both in its method set, and the two need two symbols.
+//
+// Spelled without the qualifier they were one. The declaration and the wrapper
+// for the promoted method were both written as export.(*bodyWriter).scalar, so
+// the object held two definitions of one symbol, and
+// export.bodyWriter.scalar, which the descriptor of the value type names, was
+// written by nobody. The link reported
+//
+//	type:golang.design/x/nanogo/export.bodyWriter: relocation target
+//	golang.design/x/nanogo/export.bodyWriter.scalar not defined
+//
+// The spelling is gc's, read off an archive gc compiled: main.writer and
+// main.(*writer) carry nanogo.example/mini/lib.scalar, with the method's
+// import path in front of the name and a dot between.
+func TestMethodSymbolQualifiesAForeignUnexportedMethod(t *testing.T) {
+	recv := layOut(t, &Type{Kind: Struct, Name: "main.writer", PkgPath: "main"})
+	for _, tc := range []struct {
+		what string
+		m    Method
+		ptr  bool
+		want string
+	}{
+		// The method's package is not the receiver's and the name is
+		// unexported, which is the whole of gc's condition.
+		{"a foreign unexported method", Method{Name: "scalar", Pkg: "lib"}, false, "main.writer.lib.scalar"},
+		{"the pointer form of it", Method{Name: "scalar", Pkg: "lib"}, true, "main.(*writer).lib.scalar"},
+		// The declaration of the same name in the receiver's own package,
+		// which is the symbol the qualifier stops the wrapper colliding with.
+		{"the receiver's own method", Method{Name: "scalar", Pkg: "main"}, true, "main.(*writer).scalar"},
+		// A producer that leaves Pkg empty is spelling a declaration, and a
+		// declaration is in the receiver's package by the language.
+		{"a method with no package", Method{Name: "scalar"}, true, "main.(*writer).scalar"},
+		// An exported name is the same name in every package, so it carries no
+		// qualifier however Pkg is filled in.
+		{"a foreign exported method", Method{Name: "Value", Pkg: "lib"}, false, "main.writer.Value"},
+	} {
+		got, err := MethodSymbol(recv, tc.m, tc.ptr)
+		if err != nil {
+			t.Errorf("%s: %v", tc.what, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s is %q, want %q", tc.what, got, tc.want)
+		}
+	}
+}
+
 // layOut lays out a composite built over a corpus type.
 func layOut(t *testing.T, typ *Type) *Type {
 	t.Helper()

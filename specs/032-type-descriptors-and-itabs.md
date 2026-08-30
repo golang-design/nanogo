@@ -666,6 +666,20 @@ that path are decisions and not detail:
   the embedded fields to recover the path, and the shallowest declaration wins,
   which is the language's own rule. Two embedded fields the same distance away
   are not selectable by the language either and are refused.
+- **An unexported method promoted from another package's type carries that
+  package in its symbol.** `ir.MethodSymbol` writes the method's own import
+  path in front of the name when that path is not the receiver type's, which is
+  `gc`'s `ir.MethodSymSuffix`. An unexported name belongs to the package that
+  spells it, so `scalar` declared in `export` and `scalar` declared in
+  `export/pkgbits` are two names, neither shadows the other, and a type that
+  embeds `*pkgbits.Encoder` and declares its own `scalar` has both in its
+  method set. Without the qualifier the two are one symbol, which fails in both
+  directions at once: the object holds two definitions of
+  `export.(*bodyWriter).scalar`, and `export.bodyWriter.scalar`, which the
+  value type's descriptor names, is defined by nobody. The clause is inert on
+  every declaration, because a method is declared on a type in the type's own
+  package, which is why `ir/build.go`'s `funcSym` spells a declaration without
+  it.
 
 **Which package owes it.** Not the rule the deref wrapper follows. A promoted
 wrapper is generated only for a type the package being compiled declares, which
@@ -1693,3 +1707,49 @@ second decision about which type a name belongs to.
 `dist` is what this closes: `dist/tally.go` holds `map[Producer]int` and
 `Producer` is two strings, so its hash is generated. A refusal removed is a
 refusal that stops hiding whatever is behind it, and this one is no exception.
+
+### Two unexported methods of one name were one symbol
+
+`ir.MethodSymbol` left out `gc`'s qualifier clause, and its comment said the
+clause was left out on purpose: nanogo's front end does not spell it either, so
+adding it would name a wrapper the callee does not answer to. Both halves of
+that were wrong. The clause is inert on a declaration, because a method is
+declared on a type in the type's own package, so the front end has no
+qualifier to spell and the callee's name does not move. It is a wrapper alone
+that puts one package's method name on another package's receiver.
+
+The shape is `export.bodyWriter`, which embeds `*pkgbits.Encoder` and declares
+its own `scalar` and `bigInt`. `pkgbits.Encoder` declares `scalar` and `bigInt`
+too, and the four are four methods rather than two: an unexported name belongs
+to the package that spells it, so neither pair shadows the other, and because
+the embedded field is a pointer the two promoted ones are in `bodyWriter`'s
+value method set. Spelled without the qualifier each pair collapsed to one
+symbol, and that broke two things at once.
+
+- `ssagen`'s `stopsAt` asked whether `export.(*bodyWriter).scalar` was
+  declared. The declaration answered yes for the *promoted* method as well, so
+  the walk stopped at `bodyWriter`, the promotion was not found, and the deref
+  wrapper was generated under the declaration's own symbol. `go tool nm` on the
+  object showed two definitions of it. `dupok` makes that legal, and which of
+  the two the linker keeps is not a thing this compiler decides.
+- Nothing generated `export.bodyWriter.scalar`, which the value type's
+  descriptor names, so the link reported
+  `type:golang.design/x/nanogo/export.bodyWriter: relocation target
+  golang.design/x/nanogo/export.bodyWriter.scalar not defined`. Four such
+  relocations, two names on each of `bodyWriter` and `bodyReader`, and
+  `bigFloat` is the control: `pkgbits.Encoder` declares it, `bodyWriter` does
+  not, its wrapper had no collision, and it resolved.
+
+The spelling was read off an archive `gc` compiled rather than reconstructed
+from `gc`'s source: `main.writer` and `main.(*writer)` carry
+`nanogo.example/mini/lib.scalar`, with the method's import path in front of the
+name and a dot between.
+
+`internal/e2e` carries the program. A library declares `scalar` and `bigInt` on
+`*Encoder` and an interface holding both, which is how the importer reaches
+names it cannot write. The importer declares its own `scalar` and `bigInt` and
+every method answers with a different number, so a wrapper that reached the
+wrong function prints a wrong answer rather than failing to link. Two receiver
+shapes, because a two-word type puts the pointer form in the itab and a
+one-pointer-word type puts the value form there, and the value form is the one
+that was missing.

@@ -106,11 +106,12 @@ Two rows carry the weight now and neither is a construct.
 **A foreign generic instantiation's method set is what G1 waits on.**
 [017](017-export-data-reading.md) measured stage 1 and it runs: all 19 packages
 compile against dependencies nanogo built, and the reader reads every archive
-nanogo writes. The build then stops at the linker, with seven relocations in
-three classes. The one that owns the gate is this: `ir/stencil.go` builds a
-method of a foreign instantiation only where that method is called, so the
-descriptor of `sync/atomic.Pointer[[]*syntax.SrcFile]` promises four methods
-and `syntax`'s object defines the two it calls.
+nanogo writes. The build then stopped at the linker, with seven relocations in
+three classes. Two of the classes are closed and this is the third, which owns
+the gate: `ir/stencil.go` builds a method of a foreign instantiation only where
+that method is called, so the descriptor of
+`sync/atomic.Pointer[[]*syntax.SrcFile]` promises four methods and `syntax`'s
+object defines the two it calls. Two relocations remain, both of them that.
 
 The gap is not new at G1 and it is not caused by G1. It is **revealed** there.
 `gc` emits a whole instantiation `dupok` in every package that reaches it, and

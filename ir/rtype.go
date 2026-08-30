@@ -375,12 +375,34 @@ func ItabSymbol(t, iface *Type) (string, error) {
 // this names is the one Build compiled, and a wrapper generated under a second
 // spelling would be a symbol a descriptor names and nothing defines.
 //
-// The rule is gc's ir.MethodSym with one clause left out. gc qualifies an
-// unexported method by its own package when that package is not the receiver
-// type's, which distinguishes two unexported methods of one name declared in
-// two packages. nanogo's front end does not spell that clause either (funcSym),
-// so adding it here would produce a name for the wrapper that the method it
-// calls does not have.
+// An unexported method whose package is not the receiver type's carries that
+// package in front of its name, which is gc's ir.MethodSymSuffix:
+//
+//	main.writer.nanogo.example/mini/lib.scalar
+//	main.(*writer).nanogo.example/mini/lib.scalar
+//
+// The qualifier is what keeps two methods apart. An unexported name belongs to
+// the package that spells it, so scalar declared in lib and scalar declared in
+// main are two names and neither shadows the other. A type in main that embeds
+// *lib.Encoder and declares its own scalar has both in its method set, and
+// without the qualifier both reach one symbol: the declaration and the wrapper
+// for the promoted method are then written under main.(*writer).scalar, and
+// main.writer.scalar, which the descriptor of the value type names, is written
+// by nobody.
+//
+// The qualifier never appears on a declaration. A method is declared on a type
+// in the type's own package, so m.Pkg and t.PkgPath are equal there and the
+// clause is inert, which is what lets build.go's funcSym spell a declaration
+// without consulting this function. It appears on a wrapper alone, because a
+// wrapper is the only symbol that puts one package's method name on another
+// package's receiver.
+//
+// The path is written as it is, not through objabi.PathToPrefix. That follows
+// the receiver's path on the same line, which this function has always written
+// as it is, so an import path whose last element holds a dot is spelled one way
+// here and another way by gc in both halves of the name rather than in one.
+// The two halves are one question and rtype.pathToPrefix is the answer to it,
+// which is a move across the package boundary and not a clause of this one.
 //
 // It is here with the descriptor names rather than with the wrapper generator
 // because two packages read it. ssagen generates the wrapper and rtype writes
@@ -396,10 +418,19 @@ func MethodSymbol(t *Type, m Method, ptrRecv bool) (string, error) {
 	if m.Name == "" {
 		return "", fmt.Errorf("ir: a method of %s has no name", t)
 	}
-	if ptrRecv {
-		return t.PkgPath + ".(*" + name + ")." + m.Name, nil
+	// gc's condition, and not the convention that Method.Pkg is empty for an
+	// exported name. The producers hold to that convention, but a caller that
+	// filled Pkg for an exported method would otherwise get a qualifier the
+	// language does not put there: an exported name is the same name in every
+	// package.
+	mname := m.Name
+	if m.Pkg != "" && m.Pkg != t.PkgPath && !ExportedName(m.Name) {
+		mname = m.Pkg + "." + m.Name
 	}
-	return t.PkgPath + "." + name + "." + m.Name, nil
+	if ptrRecv {
+		return t.PkgPath + ".(*" + name + ")." + mname, nil
+	}
+	return t.PkgPath + "." + name + "." + mname, nil
 }
 
 // receiverName returns the identifier a method symbol spells the receiver

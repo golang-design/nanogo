@@ -214,3 +214,95 @@ func TestBestSourceTakesTheShallowestDeclaration(t *testing.T) {
 		t.Errorf("the field index %d names %s, want %s", i, outer.Fields[i].Type, shallow)
 	}
 }
+
+// TestMethodWrappersSeparatesTwoUnexportedMethodsOfOneName is the shape that
+// took nanogo's own export package out of the self-hosting link.
+//
+// An unexported name belongs to the package that spells it. p.W declares
+// scalar and embeds *q.E, which declares its own scalar, and the two are
+// different names, so neither shadows the other and both are in W's method
+// set: the declaration with a pointer receiver, and the promoted one in the
+// value method set as well, because the embedded field is a pointer.
+//
+// Both used to reach one symbol. stopsAt asked whether p.(*W).scalar was
+// declared, the declaration answered yes for the promoted method too, and the
+// walk stopped at W. MethodWrappers then generated the deref wrapper under the
+// declaration's own symbol, which is a second definition of a function that
+// exists, and generated nothing for p.W.scalar, which the descriptor of the
+// value type names. The link reported "relocation target
+// golang.design/x/nanogo/export.bodyWriter.scalar not defined".
+//
+// The pad in front of the embedded field is there so that a wrapper which
+// dropped the field offset would still be visible in the path this builds.
+func TestMethodWrappersSeparatesTwoUnexportedMethodsOfOneName(t *testing.T) {
+	sig := &ir.Type{Kind: ir.FuncKind, Results: []*ir.Type{unitInt}}
+	// The declaration in the embedded type's own package.
+	foreign := ir.Method{Name: "scalar", Pkg: "q", Sig: sig}
+	e := &ir.Type{
+		Kind: ir.Struct, Name: "q.E", PkgPath: "q", Size: 8, Align: 8,
+		Methods: []ir.Method{{Name: "scalar", Pkg: "q", Sig: sig, PtrOnly: true}},
+	}
+	ptrE := &ir.Type{Kind: ir.Ptr, Elem: e, Size: 8, Align: 8}
+	w := &ir.Type{
+		Kind: ir.Struct, Name: "p.W", PkgPath: "p", Size: 16, Align: 8,
+		Fields: []ir.Field{
+			{Name: "pad", Type: unitInt, Offset: 0},
+			{Name: "E", Type: ptrE, Offset: 8, Embedded: true},
+		},
+		Methods: []ir.Method{
+			// Promoted through the embedded pointer, so it is in the value
+			// method set as well as the pointer's.
+			foreign,
+			// Declared here, with a pointer receiver.
+			{Name: "scalar", Pkg: "p", Sig: sig, PtrOnly: true},
+		},
+	}
+
+	fns, err := MethodWrappers([]*ir.Type{w}, "p", map[string]bool{"p.(*W).scalar": true})
+	if err != nil {
+		t.Fatalf("MethodWrappers: %v", err)
+	}
+	var got []string
+	for _, fn := range fns {
+		got = append(got, fn.Sym)
+	}
+	// Both receiver forms of the promoted method, each carrying the method's
+	// own package, and nothing under the declaration's symbol.
+	want := []string{"p.W.q.scalar", "p.(*W).q.scalar"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("the wrappers are %v, want %v", got, want)
+	}
+
+	// The call each one makes is the declaration in q, spelled without a
+	// qualifier because the method's package is the receiver's there.
+	target, err := ir.MethodSymbol(e, foreign, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "q.(*E).scalar"; target != want {
+		t.Fatalf("the declaration is %q, want %q", target, want)
+	}
+	for _, fn := range fns {
+		if got := calleeOf(t, fn); got != target {
+			t.Errorf("%s calls %q, want the declaration %q", fn.Sym, got, target)
+		}
+	}
+}
+
+// calleeOf is the symbol the single call in a generated wrapper's body names.
+func calleeOf(t *testing.T, fn *ir.Func) string {
+	t.Helper()
+	// The body is either the call and a bare return, or a return whose one
+	// argument is the call, which is the shape finishWrapper gives a wrapper
+	// with results.
+	for _, n := range fn.Body {
+		for _, c := range append([]ir.Expr{n}, n.Args...) {
+			if c == nil || c.Op != ir.OCall || c.X == nil || c.X.Obj == nil {
+				continue
+			}
+			return c.X.Obj.Name
+		}
+	}
+	t.Fatalf("%s has no call in its body", fn.Sym)
+	return ""
+}

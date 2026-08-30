@@ -176,14 +176,48 @@ $ grep -c '^compiled ' logN2.txt   # every package including main
 17
 ```
 
-Seven relocations in three classes. One of them is this spec's and two are
-not, and the split is not obvious from the messages, so it was measured.
+Seven relocations in three classes, as first measured. One of them is this
+spec's and two are not, and the split is not obvious from the messages, so it
+was measured. The two that are not this spec's are closed now, and the state
+column records which measurement each row stands at.
 
-| Class | Symbol | Owner |
-| --- | --- | --- |
-| a method of an instantiation of a generic type another package declares | `sync/atomic.(*Pointer[…]).Swap`, `.CompareAndSwap` | **this spec** |
-| an array descriptor's element descriptor | `type:[][]string` | [032](032-type-descriptors-and-itabs.md) |
-| the value-receiver form of a promoted method | `export.bodyWriter.bigInt`, `.scalar` | [032](032-type-descriptors-and-itabs.md), [030](030-abi.md) |
+| Class | Symbol | Owner | State |
+| --- | --- | --- | --- |
+| a method of an instantiation of a generic type another package declares | `sync/atomic.(*Pointer[…]).Swap`, `.CompareAndSwap` | **this spec**, stage 3 | open |
+| an array descriptor's element descriptor | `type:[][]string` | [032](032-type-descriptors-and-itabs.md) | closed, `RuntimeOwned` strips one slice and not two |
+| the value-receiver form of a promoted method | `export.bodyWriter.bigInt`, `.scalar` | [032](032-type-descriptors-and-itabs.md), [030](030-abi.md) | closed, `ir.MethodSymbol` qualifies a foreign unexported method |
+
+### The count today
+
+The same build, re-run against the tree that closed the second and third
+classes. Five of the seven are gone and the two that remain are one class,
+this spec's:
+
+```console
+$ GOCACHE=$fresh NANOGO_ALLOWLIST=allow19+main.txt NANOGO_LOG=logN2.txt \
+      go build -toolexec=./nanogo -o nanogo-N2 ./cmd/nanogo
+# golang.design/x/nanogo/cmd/nanogo
+type:*sync/atomic.Pointer[[]*golang.design/x/nanogo/syntax.SrcFile]: relocation target sync/atomic.(*Pointer[[]*golang.design/x/nanogo/syntax.SrcFile]).CompareAndSwap not defined
+type:*sync/atomic.Pointer[[]*golang.design/x/nanogo/syntax.SrcFile]: relocation target sync/atomic.(*Pointer[[]*golang.design/x/nanogo/syntax.SrcFile]).Swap not defined
+$ grep -c '^compiled ' logN2.txt
+17
+$ grep -c '^refused ' logN2.txt
+0
+```
+
+**The third class was not what its message said.** "The value-receiver form of
+a promoted method" reads as a wrapper that was never generated. It was
+generated, under the wrong name. `export.bodyWriter` embeds
+`*pkgbits.Encoder` and declares its own `scalar` and `bigInt`, and
+`pkgbits.Encoder` declares `scalar` and `bigInt` too. An unexported name
+belongs to the package that spells it, so those are four methods and not two,
+and `ir.MethodSymbol` gave each pair one symbol. The declaration and the
+wrapper for the promoted method were both written as
+`export.(*bodyWriter).scalar`, so the object held two definitions of it, and
+`export.bodyWriter.scalar` was defined by nobody.
+[032](032-type-descriptors-and-itabs.md) carries the diagnosis and the test.
+`bigFloat` is the control: `pkgbits.Encoder` declares it, `bodyWriter` does
+not, and its wrapper resolved throughout.
 
 **Stage 3 is built and the first class is gone.** The same command, on the same
 tree with stage 3 in it:
@@ -560,9 +594,13 @@ graph TD
   S5["stage 5<br/>N2 equals N3"]:::gate
 
   S1 --> S2 --> S3 --> S4 --> S5
-  D32["032 descriptor gaps<br/>type:[][]string,<br/>the value-receiver wrapper"]:::work
+  D32["032 descriptor gaps<br/>type:[][]string,<br/>the promoted wrapper's symbol<br/>both closed"]:::done
   D32 --> S4
 ```
+
+Stage 3 is now the only thing between the link and stage 4. The two `032` gaps
+that fed stage 4 are closed, and the build reports two relocations of one
+class rather than seven of three.
 
 **Stage 1: pin what already works.** A nanogo-compiled package is importable
 by another nanogo compile **today**, so the deliverable here is not a feature,
