@@ -188,7 +188,7 @@ func newPragmaHandler(report func(syntax.Error), seen *sourceDirectives) syntax.
 		flag := pragmaVerb(verb)
 		p.flag |= flag
 		p.list = append(p.list, pragmaAt{flag: flag, verb: verb, pos: pos})
-		seen.record(verb, pos)
+		seen.record(verb, text, pos)
 		return p
 	}
 }
@@ -196,26 +196,22 @@ func newPragmaHandler(report func(syntax.Error), seen *sourceDirectives) syntax.
 // abiDirectives are the directives that decide which ABI a symbol is defined
 // under, with what each one does to that decision.
 //
-// specs/047-abi-wrappers.md reads the decision out of ssagen.GenABIWrappers,
-// and all three of these are inputs to it:
+// specs/047-abi-wrappers.md reads the decision out of ssagen.GenABIWrappers.
+// //go:cgo_export_static and //go:cgo_export_dynamic tell the linker to export
+// the definition ABI to C, and gc then suppresses every wrapper for the symbol
+// and fails the build if one was owed anyway.
 //
-//   - //go:linkname renames the symbol, so the symabis file's def and ref
-//     lines are matched against the linkname first and the package prefix
-//     second. It also puts the symbol in obj.ABISetCallable when the package
-//     defines it, which is what makes gc emit an ABI0 wrapper for
-//     internal/bytealg.Compare and its neighbours.
-//   - //go:cgo_export_static and //go:cgo_export_dynamic tell the linker to
-//     export the definition ABI to C, and gc then suppresses every wrapper
-//     for the symbol and fails the build if one was owed anyway.
+// nanogo models neither. A package that writes one is refused by name rather
+// than decided wrongly: the failure of a wrong answer here is a symbol defined
+// twice or a reference to an ABI nothing defines, and both surface as a link
+// error naming neither the directive nor the function.
 //
-// nanogo models none of the three. A package that writes one is refused by
-// name rather than decided wrongly: the failure of a wrong answer here is a
-// symbol defined twice or a reference to an ABI nothing defines, and both
-// surface as a link error naming neither the directive nor the function.
+// //go:linkname was in this set until stage 2 and is not any more. It is
+// modelled in [linkname.go] instead, because it holds four of the eight
+// packages the assembly refusal covers and because the model it needs is the
+// name the def and ref lines are matched against, which is a rule and not a
+// gap.
 var abiDirectives = map[string]string{
-	"go:linkname": "//go:linkname renames the symbol, so the symabis file's def and ref lines " +
-		"are matched against the new name, and a symbol the package defines under a linkname " +
-		"is callable under both ABIs (specs/047-abi-wrappers.md)",
 	"go:cgo_export_static": "the cgo export pragmas carry the definition ABI to the linker and suppress " +
 		"every ABI wrapper, and cgo is out of scope (specs/000-decisions.md decision 8)",
 	"go:cgo_export_dynamic": "the cgo export pragmas carry the definition ABI to the linker and suppress " +
@@ -242,14 +238,39 @@ type sourceDirectives struct {
 	ABI    string
 	Reason string
 	Pos    syntax.Pos
+
+	// Linknames is every //go:linkname and //go:linknamestd the package
+	// wrote, in source order, undecoded. [ParseLinkname] decodes one and
+	// [Linknames.bind] resolves the local names against the declarations.
+	//
+	// The list is kept in file order and never in map order, because the
+	// refusals below name one directive and a message that named a different
+	// one between two runs over one input would not be a diagnostic
+	// (specs/053-determinism.md).
+	Linknames []LinknameText
+}
+
+// LinknameText is one //go:linkname or //go:linknamestd directive as written.
+type LinknameText struct {
+	Verb string     // "go:linkname" or "go:linknamestd"
+	Text string     // the whole directive, verb included
+	Pos  syntax.Pos // where it was written
 }
 
 // record notes a directive the parser handed the handler.
 //
-// The first one wins, because the refusal names one position and a reader
-// acts on the first occurrence.
-func (d *sourceDirectives) record(verb string, pos syntax.Pos) {
-	if d == nil || d.ABI != "" {
+// The first [abiDirectives] entry wins, because the refusal names one position
+// and a reader acts on the first occurrence. A linkname is kept in full,
+// because its arguments are the decision and not only its presence.
+func (d *sourceDirectives) record(verb, text string, pos syntax.Pos) {
+	if d == nil {
+		return
+	}
+	switch verb {
+	case "go:linkname", "go:linknamestd":
+		d.Linknames = append(d.Linknames, LinknameText{Verb: verb, Text: text, Pos: pos})
+	}
+	if d.ABI != "" {
 		return
 	}
 	if reason, ok := abiDirectives[verb]; ok {

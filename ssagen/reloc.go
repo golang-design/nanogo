@@ -184,6 +184,14 @@ func callTarget(aux any) (callee, error) {
 	if c, ok := runtimeCallee(o.Name); ok {
 		return c, nil
 	}
+	if o.Assembly {
+		// The callee is defined in assembly under ABI0, and the ABI is half
+		// of a symbol's identity: the ABIInternal symbol of the same name is
+		// the wrapper this call sits inside (specs/047-abi-wrappers.md). A
+		// reference under the wrong one resolves to the wrapper and the
+		// wrapper calls itself.
+		return callee{name: o.Name, abi: obj.ABI0}, nil
+	}
 	return callee{name: o.Name, abi: obj.ABIInternal}, nil
 }
 
@@ -224,7 +232,7 @@ func (e *emitter) symbolName(o *ir.Object) string {
 // ABI0, and a reference to one under ABIInternal names a symbol nothing
 // defines. Only a text symbol is ABIInternal.
 func (e *emitter) globalCallee(o *ir.Object) callee {
-	if o.Class == ir.ClassGlobal {
+	if o.Class == ir.ClassGlobal || o.Assembly {
 		return callee{name: e.symbolName(o), abi: obj.ABI0}
 	}
 	return callee{name: e.symbolName(o), abi: obj.ABIInternal}

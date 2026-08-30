@@ -536,18 +536,20 @@ happened the last time one boundary had two placements is the argument.
 
 | Piece | Owner | State |
 | --- | --- | --- |
-| the ABI0 register sets and the zero-size rule | `ssa/abi.go` | not built; one parameter and one clause |
-| a function's own ABI | `ir.Func` | not built; a new field |
-| a call's callee ABI | `ssa.Value` beside `Sig` | not built; see below |
-| building the wrapper as IR | `ssagen/wrapper.go` | the machinery is built; `finishWrapper` is the shape |
+| the ABI0 register sets | `ssa.Target.ABI0Target` | built, stage 2 |
+| the zero-size rule | `ssa/abi.go` | built, before stage 2, in `abiAssigner.place` |
+| a function's own ABI | `ir.Func` | not built and not needed until stage 3; every symbol nanogo emits is ABIInternal |
+| a call's callee ABI | `ir.Object.Assembly`, in a call's `Aux` | built, stage 2; no field beside `Sig` was needed |
+| building the wrapper as IR | `ssagen.ABIWrapper` | built, stage 2, through `finishWrapper` |
 | the runtime-package property | `driver/runtimepkg.go` | built, stage 0; checked against `GOROOT` |
 | the per-function directive gate | `driver.RuntimeDirective` | built, stage 0 |
 | reading the symabis file | `driver/symabis.go` | built, stage 1 |
 | writing the assembly header | `driver/asmhdr.go` | built, stage 1; byte-identical to `gc` over all eight packages |
 | refusing a package that owes a wrapper | `driver.checkABIWrappers` | built, stage 1; the decision is taken and refused |
-| the `//go:linkname` model | `driver`, `ir` | not built; refused by name in a package with assembly |
-| `<sym>.args_stackmap` and `<sym>.arginfo0` | `ssagen` beside `stackmap.go` | not built; inseparable from the stage 2 wrapper, see stage 1 |
-| the ABI on the emitted text symbol | `ssagen.Options.ABI` | **declared and ignored** |
+| the `//go:linkname` name model and `ABISetCallable` | `driver/linkname.go` | built, stage 2 |
+| emitting a definition under a renamed symbol | `driver`, `ir` | not built; refused by name in a package with assembly |
+| `<sym>.args_stackmap` and `<sym>.arginfo0` | `ssagen/argmap.go` | built, stage 2; byte-identical to `gc` over a fixed corpus |
+| the ABI on the emitted text symbol | `ssagen.Options.ABI` | **declared and ignored**; stage 3 is where it has to be read |
 | ABI0 references to runtime symbols | `rtsym`, `ssagen/reloc.go` | built |
 
 `ssagen.Options.ABI` is documented as "the calling convention the symbol is
@@ -623,6 +625,14 @@ The reverse choice is also not silent. A wrapper without `NOSPLIT` emits the
 stack-growth prologue, and reaching it from a context where the stack may not
 grow throws `morestack on g0` at run time. Loud, but at run time and far from
 the cause. The flag is the better answer and the linker is why.
+
+**Stage 2 took the reverse choice anyway, and the reason is narrower than the
+argument above.** `ssagen.result` does not set `SymFlagNoSplit` for any
+function, and making the ABI wrapper the one exception would be a claim taken
+in one place about a budget nanogo computes nowhere. The cost is one frame and
+one check per wrapper, and the two packages the stage 2 wrapper is for are
+held by [035](035-goroutines-and-stack-growth.md) anyway. The flag belongs
+with the budget, and both belong to that spec.
 
 ### What nanogo refuses by name in the first version
 
@@ -841,6 +851,121 @@ intrinsics, so its `atomic` wrappers are real calls into the ABI0 assembly
 where `gc`'s are intrinsified. Slower, and the same answer. `atomic` and `sys`
 still wait on [035](035-goroutines-and-stack-growth.md).
 
+**Built, in three pieces, and one of the three was smaller than the staging
+said.**
+
+The `//go:linkname` model is `driver/linkname.go`. It decodes both spellings
+and both shapes, fills the target in with the default object symbol name for
+the one-argument form as `noder.pragma` does, and gives the decision two
+separate booleans: whether the directive was written, and whether it renames
+the symbol. They are not one question. `sym.Linkname != ""` is true for the
+one-argument form as well, so a model that read only the rename would leave
+`internal/runtime/atomic`'s forty-nine assembly declarations out of
+`ABISetCallable` and give every Go call to `atomic.Xadd` a symbol nothing
+defines.
+
+The **rename half** is refused by name and it is refused narrowly: a directive
+whose target differs from the default name, over a function or a package-level
+variable **this package defines**, in a package with assembly. nanogo derives
+every symbol from the declaration in `ir.Build`, so a renamed definition would
+be emitted under the name the source wrote. A bodyless declaration passes the
+fence, which is what `internal/bytealg` needs: its
+`//go:linkname abigen_runtime_cmpstring runtime.cmpstring` stands over a
+declaration the assembly defines, and matching `def runtime.cmpstring
+ABIInternal` against the new name is the whole of what that package asks for.
+
+The ABI0 walk is `ssa.Target.ABI0Target`, which is the target with both
+register sets emptied, and `ssa.ABITargetOf`, which picks it at a call
+boundary. **No field beside `ssa.Value.Sig` was needed.** The spec asked for
+one and the graph already carries the answer: `OpStaticCall`'s `Aux` is the
+callee's `*ir.Object`, which is what `ssagen.callTarget` already reads to name
+the symbol, so `ir.Object.Assembly` puts the convention beside the name it
+belongs to. `ir.Func` needed no ABI field either, for a reason the staging did
+not see: the wrapper's own convention is ABIInternal, which is what nanogo
+emits for every function, so `ssagen.Options.ABI` is still declared and
+unread and stage 3 is where it has to be read.
+
+`ssagen.ABIWrapper` builds the wrapper as an `ir.Func` with a body of one call
+and one return, through the same `finishWrapper` the method wrappers use, and
+`driver.addABIWrappers` compiles it with `compileFunc` like any other
+function. That is `makeABIWrapper`'s own shape and it is not a convenience: a
+pointer argument of the wrapper is live across the inner call, and the
+collector finds it because the wrapper went through the ordinary liveness
+pass.
+
+The wrapper's symbol carries three of the four attributes `gc` sets on it:
+`DUPOK`, `ABIWRAPPER`, and the linkname attribute of the declaration it wraps.
+`NOSPLIT` is the fourth and nanogo does not set it, for the reason below.
+
+The linkname attribute is not cosmetic and this spec's risk list already said
+so. `cmd/link`'s `loader.checkLinkname` reads it, and it reads it off the
+**wrapper** rather than off the assembly: for a reference to another package's
+assembly symbol it computes `otherABI := 1 - abiToVer(...)`, looks the same
+name up under that version, and tests `IsLinkname` and `IsLinknameStd` on what
+it finds. The comment in the loader says it outright: "For an assembly symbol,
+check if there is a linkname applied to its ABI wrapper." A wrapper that lost
+the attribute turns a legitimate pull into a link error naming neither the
+directive nor the function.
+
+The two bits are exclusive and `gc` prints them that way.
+`internal/runtime/atomic.Xadd`'s wrapper is
+`DUPOK|NOSPLIT|LEAF|NOFRAME|ABIWRAPPER|LINKNAMESTD|ABIInternal` and
+`internal/cpu.sysctlEnabled`'s is `DUPOK|NOSPLIT|ABIWRAPPER|LINKNAME`, so
+`//go:linkname` sets the first and `//go:linknamestd` sets the second and
+neither sets both. `internal/runtime/atomic.Xchg8`, which carries no directive,
+gets neither.
+
+`ssagen/argmap.go` writes `<sym>.args_stackmap` and `<sym>.arginfo0` from the
+same ABI0 placement, so the offsets the map describes and the offsets the
+wrapper stores at cannot disagree. `TestArgMapsMatchGc` compares the bytes
+against `go tool compile -S` over thirteen signatures, and
+`TestArgMapsMatchGcForTheStandardLibrary` compares them over `internal/cpu`'s
+four declarations and `internal/runtime/sys`'s three. All match.
+
+`EmitArgInfo`'s encoding **is** reproducible byte for byte, which the "What is
+not settled" section above left open. The corpus covers a struct, an array, a
+slice, a string, a complex and twelve scalars, and every stream agrees.
+
+**Lifted the assembly refusal for `internal/runtime/atomic` and
+`internal/runtime/sys`, and lifted no package to compiling.** The closure stays
+at 20 of 28 and five of the eight moved to a narrower refusal:
+
+| Package | before stage 2 | after stage 2 |
+| --- | --- | --- |
+| `internal/abi` | `//go:nosplit` | unchanged |
+| `internal/chacha8rand` | `//go:nosplit` | unchanged |
+| `internal/cpu` | `//go:linkname` | an ABI0 wrapper for `sysctlEnabled`, stage 3 |
+| `internal/bytealg` | `//go:linkname` | an ABI0 wrapper for `abigen_runtime_cmpstring`, stage 3 |
+| `internal/runtime/atomic` | `//go:linkname` | `//go:nosplit` on `Load`, [035](035-goroutines-and-stack-growth.md) |
+| `internal/runtime/sys` | the ABIInternal wrapper | `//go:nosplit` on `Len64`, [035](035-goroutines-and-stack-growth.md) |
+| `internal/runtime/maps` | `//go:linkname` | a `//go:linkname` that renames a definition nanogo emits, `zeroVal` |
+| `runtime` | the runtime, by name | unchanged |
+
+`internal/runtime/atomic` and `internal/runtime/sys` are the two the wrapper
+was for, and both now pass this spec's gate entirely: what holds them is
+[035](035-goroutines-and-stack-growth.md) and nothing here.
+`internal/runtime/maps` moved to the rename refusal rather than to stage 3,
+because the rename is what fires first and it is as true and as unbuilt as the
+wrapper behind it. Its seventeen `//go:linkname ... runtime.*` directives stand
+over functions with Go bodies, and one more, `//go:linkname zeroVal
+runtime.zeroVal`, stands over a package-level variable, which is the first the
+gate reaches.
+
+**Evidence.** `internal/e2e.TestGcAndNanogoAgreeOnAnABIInternalWrapper` is the
+differential build the stage asked for: a package of seven bodyless
+declarations and a hand-written ABI0 `.s` file, compiled by nanogo, called from
+a `main` package compiled by `gc`, linked and run, and its output compared
+against an all-`gc` build of the same module. The signatures are the six
+measured rows of the table above. The program also calls in a loop that
+allocates, so a collection runs while the wrapper's frame and the assembly's
+frame are both on the stack.
+
+The differential test is the only execution evidence there is, and it had to be
+written: `checkABIWrappers` refuses `internal/cpu`, `internal/bytealg` and
+`internal/runtime/maps` before the wrapper code runs, and the `//go:nosplit`
+gate refuses `internal/runtime/atomic` and `internal/runtime/sys` after it. Not
+one line of the wrapper is reached by the closure measurement.
+
 ### Stage 3: the ABI0 wrapper, assembly calling Go
 
 Emit a text symbol whose own ABI is ABI0. Compute `ABIRefs` from the symabis
@@ -915,13 +1040,13 @@ and the symptom is a crash in a later collection with no connection to the
 function that caused it. The mitigation is a byte comparison against `gc`'s
 symbol, which is cheap and exhaustive over a fixed corpus.
 
-**The linkname attribute on the wrapper.** `makeABIWrapper` copies
-`IsLinkname` and `IsLinknameStd` from the wrapped symbol onto the wrapper's
-symbol. `cmd/link`'s loader checks linkname pushes and pulls against the
-*other* ABI's symbol when it cannot find one on the ABI it was given. A wrapper
-that loses the attribute turns a working linkname into a link error, which is
-loud, and one that gains it wrongly permits a pull that should be refused,
-which is not.
+**The linkname attribute on the wrapper.** Closed in stage 2, and the loader's
+own code says why it had to be. `makeABIWrapper` copies `IsLinkname` and
+`IsLinknameStd` from the wrapped symbol onto the wrapper's symbol, and
+`loader.checkLinkname` reads them off the wrapper: for a reference to another
+package's assembly symbol it looks the same name up under the other ABI and
+tests the attribute there. `driver.addABIWrappers` copies both and
+`TestABIWrapperCarriesTheFlagsGcSets` reads them back out of the object.
 
 **Two symbols with one name.** The wrapper and the wrapped function share a
 name and differ only by ABI. `ssagen.symbols.index` is keyed by the
@@ -935,12 +1060,13 @@ have to become ABI-aware before an ABI0 definition exists.
 
 ## What is not settled
 
-**Whether `EmitArgInfo`'s encoding must match `gc` byte for byte.** The symbol
-is read by `runtime.printArgs` when a traceback prints argument values. A wrong
-encoding produces a wrong traceback and not a wrong program. It is listed as
-part of stage 1 because the assembler references it, but its exact bytes were
-not compared. Reading `ssagen.EmitArgInfo` against a dump of a real
-`.arginfo0` symbol settles it.
+**Whether `EmitArgInfo`'s encoding must match `gc` byte for byte.** Settled in
+stage 2, and the answer is that it does and it does. `ssagen.EmitArgInfo` is
+reproducible from its own source, and `TestArgMapsMatchGc` compares the stream
+against a dump of `gc`'s own `.arginfo0` symbols over thirteen signatures and
+over `internal/cpu` and `internal/runtime/sys`. A wrong stream would give a
+wrong traceback and not a wrong program, so this was the one byte comparison
+here that was not a correctness requirement, and it costs nothing to hold.
 
 **Whether a `def` line may name a symbol that is not in the compiled package's
 own prefix.** `internal/bytealg`'s file has `def runtime.cmpstring ABIInternal`
@@ -1002,6 +1128,70 @@ referenced under the ABI that defines it. This was checked rather than
 assumed, because the reverse would have been a silent link failure the moment
 stage 1 lifted the refusal. It says nothing about the ABI0 case, which has no
 definition to reach until stage 2 writes the wrapper.
+
+## What building stage 2 corrected in this spec
+
+**The one new SSA need was not new.** The design above asks for the callee's
+ABI as a field of `ssa.Value` beside `Sig`, and it is not needed. `Aux` on a
+static call is already the callee's `*ir.Object`, and `ssagen.callTarget`
+already reads it to name the symbol, so the convention travels with the name
+by putting one field on the object. The general point stands and only its
+place changed: without the callee's ABI at the call site the wrapper lays its
+outgoing area out with the wrong register sets. Removing `ABITargetOf` and
+rebuilding makes the differential program print
+`addone 103121712496641 103121712496641` and then fault, which is what a
+caller writing its arguments into registers the callee never reads looks like.
+
+**`ir.Func` needs no ABI field for stage 2 and `ssagen.Options.ABI` need not
+be read.** Both are in the design because the staging did not separate the
+wrapper's own convention from the callee's. The ABIInternal wrapper's own
+convention is ABIInternal, which is what `emitter.result` already hardcodes,
+so the declared-and-unread field stays unread until stage 3 emits a text
+symbol whose own ABI is ABI0. That also keeps a trap shut: `obj.ABI0` is 0, so
+reading the field would make every `Options` literal that omits it emit ABI0.
+
+**`ir.Type.PtrBits` marks both words of an interface and `gc`'s `typebits`
+marks one.** Found by comparing the argument map against `gc`'s.
+`typebits.Set` clears the first word with the comment "The first word of an
+interface is a pointer, but we don't treat it as such": it is an itab in
+`persistentalloc` space, or a `_type` in the read-only section, or a
+reflect-allocated `_type` that reflect itself holds. `gc` uses that one walk
+for the heap mask as well, in `reflectdata.fillptrmask`, so the divergence is
+not confined to stack maps.
+
+nanogo's field is read by the locals and arguments bitmaps of
+[027](027-liveness-and-stackmaps.md) and by a type descriptor's `GCData`, so
+the divergence is nanogo-wide and predates this spec. It is conservative and
+not wrong: a bit set over a pointer into memory outside the heap is ignored,
+because `runtime.findObject` returns nothing for such an address, and a bit
+set over a reflect-allocated `_type` keeps alive an object reflect is already
+holding. The failure a stack map can produce is the other direction.
+
+The argument map is derived from `ir.Type.PtrBits` and not from a second walk
+beside it, which keeps nanogo's one statement of the rule one statement.
+Closing the divergence means changing that field, and that changes every
+descriptor and every stack map nanogo writes. It belongs to
+[027](027-liveness-and-stackmaps.md).
+`driver.TestArgMapMarksBothWordsOfAnInterface` holds the gap open and states
+the direction it is safe in.
+
+**The `//go:linkname` refusal splits in two and only one half is a gap.** The
+name a symabis line is matched against is a rule, and stage 2 states it.
+Emitting a definition under a renamed symbol is the gap, and it is what
+`internal/runtime/maps` is now held by. The stage 1 note that four packages
+were held by "the `//go:linkname` refusal" was true of the refusal and not of
+the directive: three of the four needed only the matching.
+
+**The directive names a function by its identifier and a package-level
+variable by its object symbol.** `ir.Build` spells a function's `Name` as the
+bare identifier and keeps the linker symbol in `Sym`, and it spells a
+package-level variable's `ir.Object.Name` with the package prefix already on
+it. So the rename fence looks a function up by `l.Local` and a variable up by
+the default object symbol name, and the two lookups are not interchangeable. A
+fence that used the identifier for both found no variable at all and let
+`//go:linkname zeroVal runtime.zeroVal` through, which is a definition emitted
+under the name the source wrote. Found by a test that asserted the refusal and
+did not get it.
 
 ## What this spec corrects
 

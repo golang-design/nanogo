@@ -194,7 +194,7 @@ func methodWrapper(t *ir.Type, m ir.Method) (*ir.Func, error) {
 		Type: t,
 		X:    &ir.Node{Op: ir.OLocal, Pos: wrapperPos, Type: ptr, Obj: recv},
 	}
-	return finishWrapper(fn, sym, m.Sig, arg, target)
+	return finishWrapper(fn, sym, m.Sig, arg, wrapperCallee(target, m.Sig))
 }
 
 // wrappable reports the reason a method cannot be forwarded through a
@@ -230,8 +230,15 @@ func shortName(t *ir.Type) string {
 // receiver in front. That is the shape ir.Build gives a call to a method of a
 // concrete type: the receiver is the first argument and the callee is the
 // method's symbol.
-func finishWrapper(fn *ir.Func, sym string, sig *ir.Type, recv ir.Expr, target string) (*ir.Func, error) {
-	args := []ir.Expr{recv}
+func finishWrapper(fn *ir.Func, sym string, sig *ir.Type, recv ir.Expr, callee *ir.Object) (*ir.Func, error) {
+	var args []ir.Expr
+	if recv != nil {
+		// A method wrapper puts the adapted receiver in front. An ABI wrapper
+		// has no receiver at all, and a nil expression here is what says so:
+		// an empty leading argument would be placed at offset 0 of the
+		// callee's area, which is where the convention puts a receiver.
+		args = append(args, recv)
+	}
 	for i, pt := range sig.Params {
 		o := &ir.Object{Name: fmt.Sprintf(".p%d", i), Type: pt, Class: ir.ClassParam, Pos: wrapperPos}
 		fn.Params = append(fn.Params, o)
@@ -250,9 +257,7 @@ func finishWrapper(fn *ir.Func, sym string, sig *ir.Type, recv ir.Expr, target s
 		Op:   ir.OCall,
 		Pos:  wrapperPos,
 		Type: res,
-		X: &ir.Node{Op: ir.OGlobal, Pos: wrapperPos, Type: sig, Obj: &ir.Object{
-			Name: target, Type: sig, Class: ir.ClassFunc, Pos: wrapperPos,
-		}},
+		X:    &ir.Node{Op: ir.OGlobal, Pos: wrapperPos, Type: sig, Obj: callee},
 		Args: args,
 	}
 	ret := &ir.Node{Op: ir.OReturn, Pos: wrapperPos, Type: res}
@@ -598,7 +603,7 @@ func promotedWrapper(t *ir.Type, m ir.Method, p *promotion, ptrRecv bool) (*ir.F
 	if err != nil {
 		return nil, err
 	}
-	return finishWrapper(fn, sym, m.Sig, cur, target)
+	return finishWrapper(fn, sym, m.Sig, cur, wrapperCallee(target, m.Sig))
 }
 
 // callResultType is the type of the value a call to a function with these
@@ -636,3 +641,73 @@ var voidType = func() func() *ir.Type {
 	}
 	return func() *ir.Type { return t }
 }()
+
+// The ABI wrappers of specs/047-abi-wrappers.md.
+//
+// A bodyless Go declaration that an assembly file defines under ABI0 is two
+// symbols and not one. The ABI is half of a symbol's identity in the object
+// format, so internal/cpu.getisar0 under ABI0 and internal/cpu.getisar0 under
+// ABIInternal are two names the linker keeps apart, and a Go call names the
+// second. The wrapper is the second: it takes its arguments where a Go caller
+// puts them, writes them where the assembly reads them, calls, and reads the
+// results back.
+//
+// gc's makeABIWrapper builds the same function the same way, as an ir.Func
+// with a body of one call and one return, and lets the ordinary pipeline
+// compile it. That is not a convenience. A pointer argument of the wrapper is
+// live across the inner call, so the collector has to find it, and it does
+// because the wrapper went through the ordinary liveness pass
+// (specs/027-liveness-and-stackmaps.md). A wrapper emitted by a shortcut path
+// would have to answer that question again, by hand, for every shape.
+//
+// What gc does that nanogo does not: it emits a tail call for a signature
+// with no parameters and no results, and it marks the wrapper NOSPLIT. nanogo
+// has no tail call, and specs/035-goroutines-and-stack-growth.md forbids
+// claiming NOSPLIT without computing the budget the claim rests on, so the
+// wrapper carries the ordinary stack-growth prologue. The cost is one frame
+// and one check; neither changes the answer.
+
+// wrapperCallee is the object a generated wrapper's inner call names.
+//
+// The ABI travels with it. specs/030-abi.md makes the convention half of a
+// symbol's identity, and [ir.Object.Assembly] is which half a reference names.
+func wrapperCallee(target string, sig *ir.Type) *ir.Object {
+	return &ir.Object{Name: target, Type: sig, Class: ir.ClassFunc, Pos: wrapperPos}
+}
+
+// ABIWrapper returns the ABIInternal wrapper a bodyless declaration owes.
+//
+// decl is the Go declaration and sym is the linker symbol the assembly
+// defines, which is decl's own symbol unless a //go:linkname renamed it. The
+// wrapper takes that name under ABIInternal and its inner call takes the same
+// name under ABI0, which is why the two coexist: the relocation carries the
+// convention, so the CALL in gc's own output prints the name of the TEXT it
+// sits inside.
+//
+// A method is refused. gc refuses the same shape with "makeABIWrapper support
+// for wrapping methods not implemented", and the receiver takes offset 0 of
+// the ABI0 area, which nanogo's call walk recovers by a heuristic
+// specs/030-abi.md already names as a bound.
+func ABIWrapper(decl *ir.Func, sym string) (*ir.Func, error) {
+	if decl == nil {
+		return nil, fmt.Errorf("ssagen: an ABI wrapper for no declaration")
+	}
+	if decl.Type == nil {
+		return nil, fmt.Errorf("ssagen: the ABI wrapper %s needs the signature of %s, which the IR does not carry", sym, decl.Name)
+	}
+	if decl.Recv != nil {
+		return nil, fmt.Errorf("ssagen: the ABI wrapper %s is for a method, and the receiver takes offset 0 of the ABI0 area (specs/047-abi-wrappers.md)", sym)
+	}
+	if !decl.Bodyless {
+		return nil, fmt.Errorf("ssagen: the ABI wrapper %s is for a declaration with a Go body, which would define the symbol twice", sym)
+	}
+	fn := &ir.Func{
+		Name:    decl.Name,
+		Sym:     sym,
+		Pos:     wrapperPos,
+		Wrapper: true,
+	}
+	callee := wrapperCallee(sym, decl.Type)
+	callee.Assembly = true
+	return finishWrapper(fn, sym, decl.Type, nil, callee)
+}

@@ -79,21 +79,30 @@ NANOGO_MEASURE_CLOSURE=1 go test ./internal/selfhost/
 
 | Packages | Refused for | Owner |
 | --- | --- | --- |
-| 4 | `//go:linkname` in a package with assembly | [047](047-abi-wrappers.md) |
-| 2 | `//go:nosplit` in a runtime package | [035](035-goroutines-and-stack-growth.md) |
-| 1 | a Go call to an ABI0 assembly definition, which needs a wrapper | [047](047-abi-wrappers.md) |
+| 4 | `//go:nosplit` in a runtime package | [035](035-goroutines-and-stack-growth.md) |
+| 2 | an assembly call to a Go function, which needs the ABI0 wrapper | [047](047-abi-wrappers.md) stage 3 |
+| 1 | a `//go:linkname` that renames a definition nanogo emits | [047](047-abi-wrappers.md) |
 | 1 | `runtime` itself | [034](034-write-barriers.md), [035](035-goroutines-and-stack-growth.md), [047](047-abi-wrappers.md) |
 
-The count was 20 before stages 0 and 1 of [047](047-abi-wrappers.md) and it is
-20 after, and the table above is what changed. All eight used to give one
+The count was 20 before stages 0, 1 and 2 of [047](047-abi-wrappers.md) and it
+is 20 after, and the table above is what changed. All eight used to give one
 message, "a package with assembly in it", which was one refusal standing in
-front of four separate pieces of missing work. The compiler now reads the
-`symabis` file and writes the `-asmhdr` header, so the refusal that remains for
-each package is the one that is actually true of it. Four are held by
-`//go:linkname`, which decides which ABI a symbol is defined under and which
-nanogo does not model. Two are held by `//go:nosplit`, which is
-[035](035-goroutines-and-stack-growth.md)'s. One is held by the ABI wrapper
-itself, and one is `runtime`.
+front of four separate pieces of missing work.
+
+Stages 0 and 1 split that one message into four true ones. Stage 2 built the
+ABIInternal wrapper, the argument map that goes with it and the
+`//go:linkname` name model, and five of the eight moved again.
+`internal/runtime/atomic` and `internal/runtime/sys` are now held by
+`//go:nosplit` alone, which is the largest single thing this closure is
+waiting on: four of the eight are there.
+`internal/cpu` and `internal/bytealg` need the ABI0 wrapper of stage 3.
+`internal/runtime/maps` needs the other half of the `//go:linkname` model,
+which is emitting a definition under the renamed symbol.
+
+The useful reading is that [047](047-abi-wrappers.md) now holds three of the
+eight rather than five, and that
+[035](035-goroutines-and-stack-growth.md) holds four rather than two. The
+work moved rather than the count.
 
 Nothing in the closure is now refused for a reason in the language. The last
 two that were, `internal/runtime/gc/scan` and `internal/stringslite`, wanted

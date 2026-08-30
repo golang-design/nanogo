@@ -128,7 +128,7 @@ believed.
 | [044](044-plan9-assembler.md) | Plan 9 assembler | `draft` | G3; not written |
 | [045](045-linker.md) | Linker | `in progress` | G2; the object reader and reachability agree with `cmd/link`; addresses, `pclntab` and `moduledata` not written |
 | [046](046-debug-info.md) | Debug information | `in progress` | tracebacks built, DWARF not |
-| [047](047-abi-wrappers.md) | ABI wrappers | `in progress` | G3; stages 0 and 1 built: the runtime gate is derived from `-std` and `objabi.runtimePkgs`, the symabis file is read, and `-asmhdr` matches `gc` byte for byte over all eight packages. The wrappers, `args_stackmap` and `arginfo0` are not written, and `//go:linkname` holds four of the eight |
+| [047](047-abi-wrappers.md) | ABI wrappers | `in progress` | G3; stages 0, 1 and 2 built: the runtime gate, the symabis reader, an `-asmhdr` that matches `gc` byte for byte, the `//go:linkname` name model, the ABIInternal wrapper a Go call to an ABI0 assembly definition needs, and `args_stackmap` and `arginfo0` that match `gc` byte for byte. Stage 3's ABI0 wrapper and the rename half of `//go:linkname` are unbuilt |
 
 ### Driver
 

@@ -271,6 +271,26 @@ type Object struct {
 	// being wrong is memory corruption.
 	Addrtaken bool
 
+	// Assembly records that this function symbol is defined in assembly under
+	// ABI0, so a call to it passes every argument and every result in memory.
+	//
+	// It is meaningful on a [ClassFunc] object and on nothing else. The ABI is
+	// half of a symbol's identity in the object format, so an ABI0 definition
+	// and an ABIInternal one of the same name are two symbols
+	// (specs/030-abi.md), and this is which of the two a reference names.
+	//
+	// A Go call never sets it. specs/047-abi-wrappers.md is why: an ABI0
+	// assembly definition that a Go declaration matched owes an ABIInternal
+	// wrapper under the same name, so every Go call resolves to the wrapper
+	// and only the wrapper's own inner call names the assembly. The field is
+	// set on the callee object that wrapper carries and nowhere else.
+	//
+	// Getting it wrong is silent in both directions. Unset, the wrapper lays
+	// its outgoing area out with registers the assembly never reads. Set on
+	// an ordinary Go callee, the caller writes its arguments into memory the
+	// callee never looks at.
+	Assembly bool
+
 	// Escapes records that this variable's storage may outlive the frame that
 	// declares it, so it lives in a heap cell and both halves reach it through
 	// a pointer.

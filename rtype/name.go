@@ -117,7 +117,7 @@ func namePathSymbol(name, tag, pkgPath string, exported, embedded bool) (Symbol,
 	// They are the last thing in the encoding, after the name and the tag,
 	// which is where internal/abi.Name.PkgPath reads them from.
 	ip := importPathSymbol(pkgPath)
-	sym.Name += ".pkg." + pathToPrefix(pkgPath)
+	sym.Name += ".pkg." + PathToPrefix(pkgPath)
 	sym.Data = append(sym.Data, 0, 0, 0, 0)
 	sym.Relocs = append(sym.Relocs, Reloc{
 		Off:    int32(len(sym.Data) - 4),
@@ -137,7 +137,7 @@ func importPathSymbol(path string) Symbol {
 	data = binary.AppendUvarint(data, uint64(len(path)))
 	data = append(data, path...)
 	return Symbol{
-		Name:  "type:.importpath." + pathToPrefix(path) + ".",
+		Name:  "type:.importpath." + PathToPrefix(path) + ".",
 		Kind:  obj.SRODATA,
 		Align: 1,
 		Dupok: true,
@@ -145,7 +145,7 @@ func importPathSymbol(path string) Symbol {
 	}
 }
 
-// pathToPrefix escapes an import path for use inside a symbol name.
+// PathToPrefix escapes an import path for use inside a symbol name.
 //
 // It is cmd/internal/objabi.PathToPrefix, reproduced rather than approximated.
 // A symbol name is parsed by the object reader and by every tool that prints
@@ -153,7 +153,7 @@ func importPathSymbol(path string) Symbol {
 // between the path and the identifier that follows it. No path in the standard
 // library needs an escape, which is exactly why this is worth writing out: the
 // case that needs it is the case nobody tests.
-func pathToPrefix(s string) string {
+func PathToPrefix(s string) string {
 	slash := strings.LastIndex(s, "/")
 	escaped := func(r int) bool {
 		c := s[r]

@@ -1435,8 +1435,8 @@ func (e *emitter) callValue(v *ssa.Value) {
 // base is where the arguments of the same boundary left the stack part of the
 // area. A result the registers cannot hold sits after them, so a walk that
 // started at zero would read it out of a word an argument occupies.
-func (e *emitter) resultPlaces(base int64, types []*ir.Type) ([]place, error) {
-	vals, _, err := ssa.ABIResults(e.a.Target, base, types)
+func (e *emitter) resultPlaces(t *ssa.Target, base int64, types []*ir.Type) ([]place, error) {
+	vals, _, err := ssa.ABIResults(t, base, types)
 	if err != nil {
 		return nil, err
 	}
@@ -1456,11 +1456,16 @@ func (e *emitter) callResults(v *ssa.Value, types []*ir.Type) ([]place, error) {
 			return valuePlaces(c.Results)
 		}
 	}
-	vals, _, _, err := ssa.ABICallArgs(e.a.Target, v)
+	// The callee's convention decides where its results are, so the fallback
+	// walk takes the callee's register sets and not this function's
+	// (specs/047-abi-wrappers.md). An ABI0 callee has none, and every result
+	// is in the area.
+	t := ssa.ABITargetOf(e.a.Target, v)
+	vals, _, _, err := ssa.ABICallArgs(t, v)
 	if err != nil {
 		return nil, err
 	}
-	return e.resultPlaces(ssa.ABIStackEnd(vals), types)
+	return e.resultPlaces(t, ssa.ABIStackEnd(vals), types)
 }
 
 // storeArg writes one outgoing argument into the frame.

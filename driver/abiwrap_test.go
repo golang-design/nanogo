@@ -34,12 +34,12 @@ func TestABIWrapperGate(t *testing.T) {
 			// internal/runtime/atomic. gc sets fn.ABI to ABI0 from the def
 			// and then puts ABIInternal in ABIRefs unconditionally, so the
 			// ABIInternal wrapper is always owed, and gc/compile.go writes
-			// the argument map for exactly this case.
+			// the argument map for exactly this case. Stage 2 builds both,
+			// and TestABI0DefinitionEmitsAWrapperAndItsMaps reads what comes
+			// out.
 			name:    "an ABI0 definition owes a wrapper and an argument map",
 			src:     "package main\n\nfunc f(a int) int\n\nfunc g() int { return f(1) }\n",
 			symabis: "def main.f ABI0\n",
-			want: []string{"a Go call to function f", "main.f.args_stackmap",
-				"specs/047-abi-wrappers.md stage 2"},
 		},
 		{
 			// internal/chacha8rand.block. The assembly defines the symbol
@@ -89,10 +89,68 @@ func TestABIWrapperGate(t *testing.T) {
 			want:    []string{"a.go:3:6", "f defined in both Go and assembly"},
 		},
 		{
-			name:    "//go:linkname is refused, because the decision reads it",
+			// internal/bytealg.abigen_runtime_cmpstring. The def line names
+			// the linkname and not the declaration, so the match happens
+			// only through the directive: fn.ABI is ABIInternal, the
+			// linkname over a symbol this package's assembly defines adds
+			// ABISetCallable, and need is left holding ABI0.
+			name:    "a //go:linkname is matched against the def line",
 			src:     "package main\n\n//go:linkname f runtime.cmpstring\nfunc f(a, b string) int\n",
 			symabis: "def runtime.cmpstring ABIInternal\n",
-			want:    []string{"//go:linkname", "specs/047-abi-wrappers.md"},
+			want: []string{"an assembly call to function f",
+				"specs/047-abi-wrappers.md stage 3"},
+		},
+		{
+			// The one-argument form. noder fills the target in with the
+			// default name, so sym.Linkname is not empty and the symbol is
+			// callable under both conventions. internal/cpu.sysctlEnabled is
+			// this shape and it is why internal/cpu needs an ABI0 wrapper
+			// that has nothing to do with its four ABI0 definitions.
+			name:    "a one-argument //go:linkname over a Go body owes an ABI0 wrapper",
+			src:     "package main\n\n//go:linkname f\nfunc f(a int) int { return a }\n",
+			symabis: "",
+			want: []string{"an assembly call to function f",
+				"specs/047-abi-wrappers.md stage 3"},
+		},
+		{
+			// internal/runtime/atomic.storePointer and
+			// internal/runtime/maps.typeString. The package writes the
+			// directive over a declaration it does not define at all, so
+			// gc's conjunction fails on its second term and nothing is owed.
+			// This row is what separates "the directive was written" from
+			// "the package defines the symbol", and a model that read only
+			// the first would refuse both packages for a wrapper neither
+			// owes.
+			name:    "a //go:linkname over a declaration this package does not define owes nothing",
+			src:     "package main\n\n//go:linkname f\nfunc f(a int) int\n\nfunc g() int { return f(1) }\n",
+			symabis: "",
+		},
+		{
+			// The rename half of the directive is not built. A bodyless
+			// declaration passes, because nanogo emits no definition for one
+			// and the name is only ever matched.
+			name:    "a //go:linkname that renames a definition nanogo emits",
+			src:     "package main\n\n//go:linkname f other.f\nfunc f(a int) int { return a }\n",
+			symabis: "",
+			want: []string{"//go:linkname f other.f", "it renames the function nanogo defines",
+				"specs/047-abi-wrappers.md"},
+		},
+		{
+			// internal/runtime/maps writes //go:linkname zeroVal
+			// runtime.zeroVal over a package-level variable it declares. The
+			// storage is nanogo's to emit and it would be emitted under the
+			// name the source wrote.
+			name:    "a //go:linkname that renames a variable nanogo defines",
+			src:     "package main\n\n//go:linkname V other.V\nvar V int\n\nfunc g() int { return V }\n",
+			symabis: "",
+			want: []string{"//go:linkname V other.V", "it renames the package-level variable nanogo defines",
+				"specs/047-abi-wrappers.md"},
+		},
+		{
+			name:    "a //go:linkname with no arguments",
+			src:     "package main\n\n//go:linkname\nfunc f(a int) int { return a }\n",
+			symabis: "",
+			want:    []string{"usage: //go:linkname localname [linkname]"},
 		},
 		{
 			name:    "//go:cgo_export_static is refused",

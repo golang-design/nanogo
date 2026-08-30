@@ -115,7 +115,8 @@ func Compile(cfg *Config) error {
 	// The assembly gate runs here rather than in checkSupported, because the
 	// question it asks is which of this package's declarations the assembly
 	// defines, and that needs the declarations.
-	if err := checkABIWrappers(cfg, symabis, seen, p, fset); err != nil {
+	wrappers, err := checkABIWrappers(cfg, symabis, seen, p, fset)
+	if err != nil {
 		return err
 	}
 	// The header is written before code generation and after every refusal
@@ -126,7 +127,7 @@ func Compile(cfg *Config) error {
 		return err
 	}
 
-	out, hasInit, err := emitPackage(cfg, p, fset, imp.reader.Imports(), owed)
+	out, hasInit, err := emitPackage(cfg, p, fset, imp.reader.Imports(), owed, wrappers)
 	if err != nil {
 		return err
 	}
@@ -204,100 +205,6 @@ func readSymABIs(cfg *Config) (*SymABIs, error) {
 		return nil, fmt.Errorf("%s: %v", cfg.Package, err)
 	}
 	return s, nil
-}
-
-// checkABIWrappers refuses a package whose assembly needs an ABI wrapper.
-//
-// This is ssagen.GenABIWrappers's decision, taken and then refused instead of
-// acted on. specs/047-abi-wrappers.md reads the rule out of gc:
-//
-//	fn.ABI = defABI                      // where the symabis file has a def
-//	fn.ABIRefs |= refs                   // from the ref lines
-//	fn.ABIRefs.Set(obj.ABIInternal, true) // unconditionally
-//	need := fn.ABIRefs &^ obj.ABISetOf(fn.ABI)
-//
-// and one wrapper comes out per ABI still in need. Two shapes exist. A
-// bodyless declaration the assembly defines under ABI0 owes an ABIInternal
-// wrapper, because the unconditional ABIInternal reference is what need holds.
-// A function assembly calls under ABI0, or one carrying a //go:linkname, owes
-// an ABI0 wrapper whose own convention is ABI0.
-//
-// Neither is built. specs/047-abi-wrappers.md stages them as 2 and 3, and
-// this is the gate stage 1 leaves standing in front of both.
-//
-// The <sym>.args_stackmap symbol is refused by the same gate and not by one
-// of its own, and that is a measured property rather than a convenience.
-// cmd/internal/obj/plist.go appends a FUNCDATA_ArgsPointerMaps reference to
-// <sym>.args_stackmap for every ABI0 text symbol the assembler emits under
-// the package prefix, and gc/compile.go defines the symbol only for a
-// bodyless declaration whose fn.ABI is ABI0. A declaration's ABI is ABI0 only
-// where the symabis file has an ABI0 def for it, and GenABIWrappers then puts
-// ABIInternal in need unconditionally, and buildcfg pins RegabiWrappers on for
-// arm64 so the wrapper is always made. An ABI0 def that matches a Go
-// declaration therefore owes one wrapper and one argument map, never one
-// without the other, so there is no package that needs the map and passes
-// this gate. See the note in specs/047-abi-wrappers.md.
-func checkABIWrappers(cfg *Config, s *SymABIs, seen *sourceDirectives, p *ir.Package, fset *syntax.FileSet) error {
-	if cfg.SymABIs == "" && cfg.AsmHdr == "" {
-		// No assembly. A def or ref line cannot exist and no wrapper can be
-		// owed, whatever the package writes.
-		return nil
-	}
-	// A directive that renames a symbol or pins its ABI is refused before any
-	// of the decision below is taken, because the decision reads it. Matching
-	// a def line against the wrong name is not a smaller error than missing
-	// it: it makes nanogo compile a Go body for a symbol the assembly also
-	// defines.
-	if seen.ABI != "" {
-		return &UnsupportedError{
-			Package: cfg.Package,
-			What:    seen.ABI + " in a package with assembly at " + position(fset, seen.Pos, cfg.Package),
-			Detail:  seen.Reason,
-		}
-	}
-	for _, fn := range p.Funcs {
-		if pos, ok := cgoUnsafeArgsDirective(fn.Pragma); ok {
-			return &UnsupportedError{
-				Package: cfg.Package,
-				What:    "//go:cgo_unsafe_args on function " + fn.Name + " at " + position(fset, pos, fn.Name),
-				Detail: "it pins the function to ABI0 and propagates the linkname attribute to the ABI0 " +
-					"symbol, because the callee walks its arguments by offset (specs/047-abi-wrappers.md)",
-			}
-		}
-		defABI, hasDef := s.Def(fn.Sym)
-		if hasDef && !fn.Bodyless {
-			// gc's "%v defined in both Go and assembly". The symbol would be
-			// defined twice and the linker would report the duplicate without
-			// naming either source.
-			return fmt.Errorf("%s: %s defined in both Go and assembly",
-				position(fset, fn.Pos, fn.Name), fn.Name)
-		}
-		abi := SymABI(obj.ABIInternal)
-		if hasDef {
-			abi = defABI
-		}
-		need := (s.Refs(fn.Sym) | abiSetOf(obj.ABIInternal)) &^ abiSetOf(abi)
-		if need == 0 {
-			continue
-		}
-		what := "function " + fn.Name + " at " + position(fset, fn.Pos, fn.Name)
-		if need.Has(obj.ABIInternal) {
-			return &UnsupportedError{
-				Package: cfg.Package,
-				What:    "a Go call to " + what,
-				Detail: "the assembly defines it under ABI0 and a Go call is ABIInternal, so it needs the " +
-					"ABIInternal wrapper and the " + fn.Sym + ".args_stackmap of " +
-					"specs/047-abi-wrappers.md stage 2, which is unbuilt",
-			}
-		}
-		return &UnsupportedError{
-			Package: cfg.Package,
-			What:    "an assembly call to " + what,
-			Detail: "the assembly names it under ABI0 and the Go definition is ABIInternal, so it needs the " +
-				"ABI0 wrapper of specs/047-abi-wrappers.md stage 3, which is unbuilt",
-		}
-	}
-	return nil
 }
 
 // parseFiles parses every source file named on the command line.
@@ -503,7 +410,7 @@ func checkTarget(pkg, arch string) error {
 // Declaration order, not map order: the object's symbol table is written by
 // walking the lists in the order symbols were added, so two runs over the same
 // input must add them in the same order (specs/053-determinism.md).
-func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []export.Import, owed []*ir.Type) (*obj.Package, bool, error) {
+func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []export.Import, owed []*ir.Type, wrappers *abiWrapperSet) (*obj.Package, bool, error) {
 	if err := checkTarget(cfg.Package, cfg.TargetArch()); err != nil {
 		return nil, false, err
 	}
@@ -694,6 +601,15 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 	}
 	types, err := descriptorSet(cfg, needed)
 	if err != nil {
+		return nil, false, err
+	}
+	// The ABI wrappers of specs/047-abi-wrappers.md, and the argument maps
+	// that cannot be separated from them. They go in before the generated
+	// functions and after every declared one, which is the order that keeps
+	// the two symbol names apart: the wrapper takes the bodyless
+	// declaration's own name under ABIInternal and the assembly keeps it
+	// under ABI0.
+	if err := addABIWrappers(cfg, out, target, fset, wrappers); err != nil {
 		return nil, false, err
 	}
 	fns, err := generatedFuncs(cfg, types, declaredSyms(p))

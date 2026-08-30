@@ -589,6 +589,68 @@ func abiRoundUp(n, align int64) int64 {
 	return (n + align - 1) / align * align
 }
 
+// ABI0Target returns t with both argument register sets empty.
+//
+// ABI0 is not a second convention and this is not a second walk.
+// cmd/compile/abi-internal.md states the relationship outright: "The ABI
+// assignment algorithm above is equivalent to Go's stack-based ABI0 calling
+// convention if there are zero architecture registers." So the walk is
+// [ABIWalk] with nothing for it to assign, and every clause that makes the two
+// agree is already in it. The pointer-alignment field between the arguments
+// and the results is the abiRoundUp between the two placeAll calls, the
+// trailing one is in finish, and the zero-size rule is in place. The spill
+// part disappears on its own, because it holds one slot per value that
+// travelled in a register.
+//
+// A second walk that laid a signature out from the type list directly is ten
+// lines and is the wrong ten lines. It would be a second statement of one
+// rule, checked against the first by nothing, and specs/030-abi.md records
+// what the last divergence of that kind cost.
+//
+// The copy is shallow and the register sets are the only fields it clears.
+// Everything else the walk reads, ClassOf above all, has to be the target's
+// own: a class function that disagreed would place a float where the callee
+// reads an integer.
+func (t *Target) ABI0Target() *Target {
+	if t == nil {
+		return nil
+	}
+	abi0 := *t
+	abi0.Name = t.Name + "/ABI0"
+	abi0.ArgRegs = [NumRegClass][]Reg{}
+	abi0.ResultRegs = [NumRegClass][]Reg{}
+	return &abi0
+}
+
+// CalleeABI0 reports that v calls a symbol defined in assembly under ABI0.
+//
+// The callee's identity is the *ir.Object in a static call's Aux, which is
+// where specs/021-ssa-construction.md puts it and what the lowering rules
+// preserve, so the ABI travels with the name rather than in a field of its
+// own. An indirect call has no object and is never ABI0: a func value holds
+// the address of an ABIInternal entry point.
+func CalleeABI0(v *Value) bool {
+	if v == nil || !v.Op.IsCall() {
+		return false
+	}
+	o, _ := v.Aux.(*ir.Object)
+	return o != nil && o.Assembly
+}
+
+// ABITargetOf returns the register sets one call boundary is placed with.
+//
+// It is the whole of the callee's half of specs/047-abi-wrappers.md. Without
+// it the ABIInternal wrapper lays its outgoing area out by the ABIInternal
+// walk while the assembly reads ABI0 offsets, which is a caller writing
+// arguments where the callee reads none and registers holding the values
+// instead. The program links and prints a plausible answer.
+func ABITargetOf(t *Target, v *Value) *Target {
+	if !CalleeABI0(v) {
+		return t
+	}
+	return t.ABI0Target()
+}
+
 // ABIWalk places one function's arguments and results with one assigner, and
 // returns the size of the argument area the two need together.
 //
@@ -1506,7 +1568,7 @@ func (a *abiPass) splitOperands(v *Value) error {
 	}
 	// The call's results are walked with its arguments, because the spill
 	// slots the size covers sit above both.
-	place, _, size, err := ABIWalk(a.t, types, abiCallResultTypes(v), nil)
+	place, _, size, err := ABIWalk(ABITargetOf(a.t, v), types, abiCallResultTypes(v), nil)
 	if err != nil || len(place) != len(types) {
 		return nil
 	}
@@ -1810,7 +1872,7 @@ func (a *abiPass) spillCallResults(call *Value) bool {
 	if err != nil {
 		return false
 	}
-	place, _, err := ABIResults(a.t, ABIStackEnd(args), abiCallResultTypes(call))
+	place, _, err := ABIResults(ABITargetOf(a.t, call), ABIStackEnd(args), abiCallResultTypes(call))
 	if err != nil {
 		return false
 	}
@@ -1994,7 +2056,7 @@ func (a *abiPass) callResults(call *Value) error {
 	if err != nil {
 		return a.unreadableResult(call, "the convention does not place the call's arguments")
 	}
-	place, _, err := ABIResults(a.t, ABIStackEnd(args), abiCallResultTypes(call))
+	place, _, err := ABIResults(ABITargetOf(a.t, call), ABIStackEnd(args), abiCallResultTypes(call))
 	if err != nil {
 		return a.unreadableResult(call, "the convention does not place the call's results")
 	}
@@ -2607,7 +2669,7 @@ func ABICallArgs(t *Target, v *Value) (out []ABIValue, lo int, size int64, err e
 	// Selection creates calls of its own, runtime.memmove among them, and
 	// they are placed by the walk like any other. The results are walked with
 	// them so that the size covers the whole area.
-	out, _, size, err = ABIWalk(t, abiOperandTypes(v, lo), abiCallResultTypes(v), nil)
+	out, _, size, err = ABIWalk(ABITargetOf(t, v), abiOperandTypes(v, lo), abiCallResultTypes(v), nil)
 	return out, lo, size, err
 }
 

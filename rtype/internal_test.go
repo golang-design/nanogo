@@ -315,8 +315,8 @@ func TestPathToPrefixEscapes(t *testing.T) {
 		{"p/with%pct", "p/with%25pct"},
 		{"p/é", "p/%c3%a9"},
 	} {
-		if got := pathToPrefix(tc.in); got != tc.want {
-			t.Errorf("pathToPrefix(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := PathToPrefix(tc.in); got != tc.want {
+			t.Errorf("PathToPrefix(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 	if isExportedName("") {
