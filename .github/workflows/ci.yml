@@ -90,11 +90,32 @@ jobs:
     # internal/hygiene, which names the clock rather than anything that was
     # wrong. 60 matches the race job below, so the file states one long budget
     # rather than two.
+    # A test that makes a directory under TMPDIR and does not remove it leaks
+    # it for the life of the machine, and nothing in the suite goes red for it.
+    # Four sites here did: internal/gotest left 258 directories at 160GB,
+    # internal/audit 7.1GB, ssagen 432 directories, and internal/release kept
+    # the scratch directory it asked -work for. One laptop reached 8.2GB free
+    # of 926GB before anyone noticed.
+    #
+    # internal/hygiene catches the shape of this on every push by reading the
+    # source. It cannot catch all of it: two of those four directories were
+    # made inside a subprocess and named only on its stdout, which no source
+    # scan reaches. This gate reads what is actually left behind, so it
+    # answers for the whole process tree.
+    #
+    # It wraps the Test step rather than adding a job of its own because the
+    # leak only appears when the corpus runs, and this is the step that runs
+    # it. A gate over a fast `go test ./...` would report the 160GB site as
+    # absent. The version is pinned: an unpinned gate changes what the build
+    # asserts without a commit saying so.
+    - name: Install the temporary-directory gate
+      run: go install latere.ai/x/ci-gate/cmd/lateregate@v0.8.0
+
     - name: Test
       env:
         NANOGO_REQUIRE_CORPUS: '1'
         NANOGO_REQUIRE_LINK: ${{ runner.arch == 'ARM64' && '1' || '' }}
-      run: go test -timeout 60m ./...
+      run: lateregate tempdir -- go test -timeout 60m ./...
 
     # Run twice, without and then with the detector. A data race can change
     # the answer rather than crash, and a compiler that compiles functions
