@@ -5,6 +5,7 @@
 package ir
 
 import (
+	"errors"
 	"go/constant"
 	"strings"
 	"testing"
@@ -212,7 +213,7 @@ func TestForeignBodyRefusesABodyItCannotRead(t *testing.T) {
 		src  *fixedBodies
 		want string
 	}{
-		{"no body in the archive", &fixedBodies{}, "the archive holds no body for it"},
+		{"no body in the archive", &fixedBodies{}, "no archive this compilation read holds a body for it"},
 		{
 			"a declaration with no block",
 			&fixedBodies{body: &export.Body{Dict: &export.Dict{}}},
@@ -1520,4 +1521,299 @@ func TestForeignNumLocalsCountsEveryDeclaringSite(t *testing.T) {
 	if got, want := foreignNumLocals(body), 2+15; got != want {
 		t.Errorf("the body numbers %d local(s), want %d", got, want)
 	}
+}
+
+// The method set of an instantiation of a generic type another package
+// declares (specs/017-export-data-reading.md).
+//
+// The descriptor of such an instantiation names every method it has, so the
+// package that emits the descriptor owes every body. The three tests below
+// measure the halves of that: the builder asks for the whole method set rather
+// than for the methods the source calls, every instantiation it builds is
+// duplicate-tolerant, and a method whose body cannot be built is recorded
+// rather than turned into a refusal of the package.
+
+// cellSource is a package that holds an instantiation of sync/atomic.Pointer
+// and calls no method of it at all.
+//
+// No call, on purpose. Every method of the four is then reached by the method
+// set pass and by nothing else, so a build that asks for four bodies asks for
+// them because a descriptor would name them.
+const cellSource = "package p\n\nimport \"sync/atomic\"\n\n" +
+	"type cell struct{ p atomic.Pointer[[]int] }\n\n" +
+	"func use(c *cell) *cell { return c }\n"
+
+// pointerTypeParams returns the type parameters of sync/atomic.Pointer as the
+// checker made them, which is the domain a body of one of its methods
+// substitutes through.
+func pointerTypeParams(t *testing.T, pkg *types2.Package) []*types2.TypeParam {
+	t.Helper()
+	for _, imp := range pkg.Imports() {
+		if imp.Path() != "sync/atomic" {
+			continue
+		}
+		obj, _ := imp.Scope().Lookup("Pointer").(*types2.TypeName)
+		named, _ := obj.Type().(*types2.Named)
+		if named == nil {
+			t.Fatal("the checked sync/atomic package declares no Pointer type")
+		}
+		list := named.TypeParams()
+		out := make([]*types2.TypeParam, list.Len())
+		for i := range out {
+			out[i] = list.At(i)
+		}
+		return out
+	}
+	t.Fatal("the checked package does not import sync/atomic")
+	return nil
+}
+
+// pointerLocals is the number of locals each method of sync/atomic.Pointer
+// opens with: the receiver, then the parameters, then the results.
+var pointerLocals = map[string]int{
+	"(*Pointer).Load":           2,
+	"(*Pointer).Store":          2,
+	"(*Pointer).Swap":           3,
+	"(*Pointer).CompareAndSwap": 4,
+}
+
+// methodBodies is a [BodySource] that answers with a body of the right shape
+// for each method of sync/atomic.Pointer.
+//
+// The number of locals is the number the signature declares, because
+// buildForeignInstance compares the two and a body that opened with the wrong
+// count would be refused for that rather than for what is measured here.
+type methodBodies struct {
+	dict *export.Dict
+	err  error
+	// refuse holds, per declaration, a statement the walk has no case for.
+	// A body carrying one decodes and starts building, which is what makes
+	// the undo path different from a body that could not be read at all.
+	refuse map[string]export.Stmt
+	// asked records the declarations the pass looked for, in order.
+	asked []string
+}
+
+func (m *methodBodies) Body(path, name string) (*export.FuncBody, error) {
+	m.asked = append(m.asked, name)
+	if m.err != nil {
+		return nil, m.err
+	}
+	n, ok := pointerLocals[name]
+	if !ok {
+		return nil, nil
+	}
+	params := make([]export.Local, n)
+	for i := range params {
+		params[i].DictRType = -1
+	}
+	stmts := []export.Stmt{&export.ReturnStmt{}}
+	if s, ok := m.refuse[name]; ok {
+		stmts = []export.Stmt{s}
+	}
+	return &export.FuncBody{Path: path, Name: name, Generic: true, Body: &export.Body{
+		Params:   params,
+		HasBlock: true,
+		Stmts:    stmts,
+		Dict:     m.dict,
+	}}, nil
+}
+
+// TestForeignMethodSetIsBuiltWhole is stage 3 of
+// specs/017-export-data-reading.md.
+//
+// Nothing in the source calls a method, so the builder used to ask for no body
+// at all and the object defined none. The descriptor of the instantiation
+// names four, and this is the test that the four are asked for and built.
+func TestForeignMethodSetIsBuiltWhole(t *testing.T) {
+	pkg, files, info := buildTypecheckWithImports(t, cellSource)
+	src := &methodBodies{dict: &export.Dict{TypeParams: pointerTypeParams(t, pkg)}}
+	withBodies(t, src)
+
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, name := range []string{
+		"(*Pointer).Load",
+		"(*Pointer).Store",
+		"(*Pointer).Swap",
+		"(*Pointer).CompareAndSwap",
+	} {
+		if !askedFor(src.asked, name) {
+			t.Errorf("the build never asked for the body of %s; it asked for %v", name, src.asked)
+		}
+	}
+	if len(out.ForeignInsts) != 1 {
+		t.Fatalf("the package records %d foreign instantiations and it holds one", len(out.ForeignInsts))
+	}
+	fi := out.ForeignInsts[0]
+	if fi.Origin != "sync/atomic" || fi.Decl != "Pointer" {
+		t.Errorf("the instantiation is recorded as %s.%s and it is sync/atomic.Pointer", fi.Origin, fi.Decl)
+	}
+	if len(fi.Methods) != 4 {
+		t.Fatalf("the record names %d methods and the instantiation has 4", len(fi.Methods))
+	}
+	for _, m := range fi.Methods {
+		if m.Reason != "" {
+			t.Errorf("the method %s was not built: %s", m.Name, m.Reason)
+		}
+		if !m.PtrOnly {
+			t.Errorf("the method %s is declared with a pointer receiver and the record says otherwise", m.Name)
+		}
+		if !definesSym(out, m.Sym) {
+			t.Errorf("the package defines no function %s", m.Sym)
+		}
+	}
+}
+
+// TestForeignInstancesAreDuplicateTolerant reads the flag every program whose
+// packages share one instantiation depends on.
+//
+// An instantiation belongs to no package, so every package that names it
+// compiles it and defines the symbol. Without the mark cmd/link reports a
+// duplicate symbol for a program whose two packages both hold the type, and
+// the method set pass above makes that arrangement the ordinary one.
+func TestForeignInstancesAreDuplicateTolerant(t *testing.T) {
+	pkg, files, info := buildTypecheckWithImports(t, cellSource)
+	withBodies(t, &methodBodies{dict: &export.Dict{TypeParams: pointerTypeParams(t, pkg)}})
+
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	found := 0
+	for _, fn := range out.Funcs {
+		if !strings.Contains(fn.Sym, "sync/atomic.(*Pointer[") {
+			continue
+		}
+		found++
+		if !fn.Dupok {
+			t.Errorf("%s is an instantiation and is not marked duplicate-tolerant", fn.Sym)
+		}
+	}
+	if found != 4 {
+		t.Errorf("the package defines %d methods of the instantiation and it owes 4", found)
+	}
+}
+
+// TestForeignMethodSetRecordsAReasonRatherThanRefusing is the other half of
+// the rule.
+//
+// A method nothing calls is built on speculation, and whether the descriptor
+// that would name it is emitted is decided after lowering, by the driver. So a
+// body this pass cannot read is a row with a reason on it and not a refusal:
+// refusing here would refuse a package that emits no descriptor for the type
+// and needs none of the bodies. driver/compile.go's checkForeignMethodSets is
+// where a reason becomes a refusal.
+func TestForeignMethodSetRecordsAReasonRatherThanRefusing(t *testing.T) {
+	pkg, files, info := buildTypecheckWithImports(t, cellSource)
+	withBodies(t, &methodBodies{err: errors.New("no archive holds it")})
+
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build refused the package for a body nothing in it calls: %v", err)
+	}
+	if len(out.ForeignInsts) != 1 {
+		t.Fatalf("the package records %d foreign instantiations and it holds one", len(out.ForeignInsts))
+	}
+	for _, m := range out.ForeignInsts[0].Methods {
+		if m.Reason == "" {
+			t.Errorf("the method %s has no body and the record carries no reason", m.Name)
+		}
+		if definesSym(out, m.Sym) {
+			t.Errorf("the package defines %s and no body for it could be read", m.Sym)
+		}
+	}
+}
+
+// TestForeignMethodSetUndoesAnAttemptThatStartedBuilding is the other shape
+// the reason can arrive in, and the one the undo exists for.
+//
+// A body that cannot be read is refused before anything is queued. A body that
+// decodes and then meets a statement the walk has no case for has already been
+// queued as an instance and already appended a function, and the walk's refusal
+// is in b.errs. Leaving any of the three behind is what the undo prevents: the
+// error would refuse the package, the function would be a body compiled from a
+// half-built tree, and the instance would answer a later lookup with a symbol
+// nothing defines.
+func TestForeignMethodSetUndoesAnAttemptThatStartedBuilding(t *testing.T) {
+	pkg, files, info := buildTypecheckWithImports(t, cellSource)
+	src := &methodBodies{
+		dict: &export.Dict{TypeParams: pointerTypeParams(t, pkg)},
+		// An increment the walk has no operator for, which
+		// TestForeignBodyRefusesTheShapesItCannotBuild names as well.
+		refuse: map[string]export.Stmt{
+			"(*Pointer).Swap": &export.IncDecStmt{Op: export.OpMul, X: foreignLocalUse(1)},
+		},
+	}
+	withBodies(t, src)
+
+	out, err := Build(pkg, files, info)
+	if err != nil {
+		t.Fatalf("Build refused the package for a body nothing in it calls: %v", err)
+	}
+	if len(out.ForeignInsts) != 1 {
+		t.Fatalf("the package records %d foreign instantiations and it holds one", len(out.ForeignInsts))
+	}
+	built := 0
+	for _, m := range out.ForeignInsts[0].Methods {
+		if m.Name == "Swap" {
+			if !strings.Contains(m.Reason, "the increment or decrement") {
+				t.Errorf("Swap's reason is %q and the walk refused an increment", m.Reason)
+			}
+			if definesSym(out, m.Sym) {
+				t.Errorf("the package defines %s and the walk refused its body part way through", m.Sym)
+			}
+			continue
+		}
+		if m.Reason != "" {
+			t.Errorf("the method %s was not built: %s", m.Name, m.Reason)
+		}
+		if !definesSym(out, m.Sym) {
+			t.Errorf("the package defines no function %s", m.Sym)
+		}
+		built++
+	}
+	if built != 3 {
+		t.Fatalf("%d of the four methods were built and three of them have a body", built)
+	}
+	// The count and not only the membership. A partial function left behind by
+	// an attempt that failed carries a symbol of its own, so it would pass
+	// every test above and show only here.
+	if got := len(out.Funcs); got != len(declaredFuncSyms(out))+3 {
+		t.Errorf("the package holds %d functions and it owes its own plus the three methods", got)
+	}
+}
+
+// declaredFuncSyms is the functions of the package that are not methods of a
+// foreign instantiation.
+func declaredFuncSyms(p *Package) []string {
+	var out []string
+	for _, fn := range p.Funcs {
+		if !strings.Contains(fn.Sym, "sync/atomic.(*Pointer[") {
+			out = append(out, fn.Sym)
+		}
+	}
+	return out
+}
+
+// askedFor reports whether the source was asked for the declaration.
+func askedFor(list []string, name string) bool {
+	for _, v := range list {
+		if v == name {
+			return true
+		}
+	}
+	return false
+}
+
+// definesSym reports whether the package defines a function with the symbol.
+func definesSym(p *Package, sym string) bool {
+	for _, fn := range p.Funcs {
+		if fn.Sym == sym {
+			return true
+		}
+	}
+	return false
 }

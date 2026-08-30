@@ -327,7 +327,7 @@ func (b *builder) funcInstance(origin *types2.Func, targs []types2.Type) (*Objec
 		Type:  b.irType(sig),
 		Pos:   decl.Pos(),
 	}
-	b.instances[sym] = in
+	b.noteInstance(sym, in)
 	b.todo = append(b.todo, in)
 	return in.obj, sig
 }
@@ -382,8 +382,19 @@ func (b *builder) drainInstances() {
 	b.todo, b.types = nil, nil
 }
 
+// noteInstance records one instantiation under its symbol.
+//
+// The order is kept beside the map because the map cannot say which entries
+// an attempt made, and foreignMethodSets undoes an attempt whose body the
+// walk refused.
+func (b *builder) noteInstance(sym string, in *instance) {
+	b.instances[sym] = in
+	b.instOrder = append(b.instOrder, sym)
+}
+
 // instantiateType queues every method of one instantiation of a generic type
-// this package declares.
+// this package declares, and records one of a generic type another package
+// declares for foreignMethodSets to build.
 //
 // The type and not the call site is the unit, because a method of an
 // instantiation is reached by more than a call. An itab holds it, a descriptor
@@ -392,22 +403,27 @@ func (b *builder) drainInstances() {
 // exactly as gc builds it: gc stencils the shape body and emits one wrapper
 // per method per instantiation, both dupok, in the package that instantiates.
 //
-// An instantiation of a generic type another package declares is not built
-// here, and the unit for one is the selection rather than the type. The
-// converter reports every instantiated defined type it meets, and it meets one
-// wherever a type reaches it: a field of a struct of an imported package is
-// enough, so os.File alone puts sync/atomic.Pointer[os.dirInfo] on this queue.
-// Building the method set of each would read an archive for every type the
-// package's types transitively hold, most of which no code here calls. So the
-// bodies of a foreign instantiation are built where one is named, which is
-// checkMethodIsBuilt, and foreign.go is the walk over them.
+// An instantiation of a generic type another package declares is recorded
+// here and its method set is built after the drain, by foreignMethodSets. Two
+// units are in play for one and they are not the same set. A call site names
+// one method, and checkMethodIsBuilt queues that one where the call is built.
+// A descriptor names the whole method set, and the package that emits the
+// descriptor owes every method in it, call or no call
+// (specs/017-export-data-reading.md). The converter reports every instantiated
+// defined type it meets, and it meets one wherever a type reaches it: a field
+// of a struct of an imported package is enough, so os.File alone puts
+// sync/atomic.Pointer[os.dirInfo] on this list.
 func (b *builder) instantiateType(named *types2.Named) {
 	n := named.TypeArgs()
 	if n.Len() == 0 {
 		return
 	}
 	obj := named.Origin().Obj()
-	if obj == nil || obj.Pkg() != b.tpkg {
+	if obj == nil || obj.Pkg() == nil {
+		return
+	}
+	if obj.Pkg() != b.tpkg {
+		b.noteForeignType(named)
 		return
 	}
 	targs := make([]types2.Type, n.Len())
@@ -479,7 +495,7 @@ func (b *builder) methodInstance(named *types2.Named, m *types2.Func, targs []ty
 		Type:  b.irType(sig),
 		Pos:   decl.Pos(),
 	}
-	b.instances[sym] = in
+	b.noteInstance(sym, in)
 	b.todo = append(b.todo, in)
 	return in.obj
 }
@@ -529,6 +545,9 @@ func (b *builder) buildInstance(in *instance) *Func {
 		Sym:    in.sym,
 		Pos:    in.decl.Pos(),
 		Pragma: in.decl.Pragma,
+		// Every package that names this instantiation compiles it, so every
+		// one of them defines this symbol. Func.Dupok says why.
+		Dupok: true,
 	}
 
 	saveFn, saveSig, saveSinks, saveFree := b.fn, b.sig, b.sinks, b.free
@@ -680,11 +699,14 @@ func (b *builder) resolveSelection(x *syntax.SelectorExpr, sel *types2.Selection
 //
 // A method of an instantiation this package declares is built by
 // instantiateType and is not refused here. One of an instantiation another
-// package declares is queued here, and here is the only place it is: the
-// converter meets such a type wherever a type reaches it, and the selection is
-// what says the program calls the method rather than merely holding a value of
-// the type. Its body comes out of the declaring package's archive
-// (foreign.go), and a body that cannot be read is refused there by name.
+// package declares is queued here as well, and the two queues are not the same
+// set: this one is the methods the program calls, and foreignMethodSets is the
+// whole method set a descriptor names. A call is queued here rather than left
+// to that pass because a call is a hard requirement, so a body it cannot read
+// refuses the package by name, and a method nothing calls is refused only when
+// the descriptor that names it is one this object writes
+// (specs/017-export-data-reading.md). The body comes out of an archive either
+// way (foreign.go).
 //
 // A generic type used for its fields alone is not refused, and is correct: the
 // field types are substituted by the checker and the IR type is an ordinary

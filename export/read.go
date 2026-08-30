@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -269,13 +270,78 @@ func (r *Reader) Bodies(path string) ([]*FuncBody, error) {
 	return bodies, err
 }
 
-// Body returns the body of one declaration, or nil when the archive carries
-// none for it.
+// Body returns the body of one declaration, or nil when no archive this
+// compilation read carries one for it.
 //
 // name is gc's linker symbol name, which is what the export data names a body
 // by: "Contains" for a function and "(*Pointer).Store" for a method.
+//
+// # Why more than the declaring package's archive is searched
+//
+// A generic declaration is copied whole into the archive of every package
+// whose exported surface reaches it, which is what [Write] does through
+// foreign.go and what gc's linker.relocObj does. So the body of
+// sync/atomic.(*Pointer).Load is in os's archive as well as in sync/atomic's,
+// and a package that holds an os.File without importing sync/atomic still
+// owes the method set of sync/atomic.Pointer[os.dirInfo]
+// (specs/017-export-data-reading.md). Its -importcfg names no archive for the
+// declaring package at all, so the declaring package's own archive is the
+// first place to look and cannot be the only one.
+//
+// The search order is the sorted import path order, which is the order
+// foreign.go's writer searches in and for the same reason: which archive a
+// declaration is taken from must be fixed by the import paths and not by the
+// order a map produced them (specs/053-determinism.md).
 func (r *Reader) Body(path, name string) (*FuncBody, error) {
-	bodies, err := r.Bodies(path)
+	var err error
+	for _, p := range r.searchOrder(path) {
+		b, e := r.bodyIn(p, path, name)
+		if b != nil {
+			return b, nil
+		}
+		if err == nil {
+			err = e
+		}
+	}
+	// The error is reported only when nothing was found. An archive this
+	// compilation cannot decode is a fault worth naming, and it is not a fault
+	// in a build whose body came out of the next archive along.
+	return nil, err
+}
+
+// searchOrder is the archives [Reader.Body] looks in for a declaration of
+// path, in the order it looks.
+//
+// The declaring package's own archive comes first when this compilation read
+// one, because it is the copy every other archive holds a copy of. That this
+// compilation read none is not a fault and not an error: it is one fewer place
+// to look.
+func (r *Reader) searchOrder(path string) []string {
+	all := r.archivePaths()
+	out := make([]string, 0, len(all)+1)
+	first := false
+	for _, p := range all {
+		if p == path {
+			first = true
+		}
+	}
+	if first {
+		out = append(out, path)
+	}
+	for _, p := range all {
+		if p != path {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// bodyIn returns the body of path.name that the archive of archive carries.
+//
+// The two paths differ wherever a declaration was copied: archive is the
+// package whose file is read and path is the package that declares the body.
+func (r *Reader) bodyIn(archive, path, name string) (*FuncBody, error) {
+	bodies, err := r.Bodies(archive)
 	if err != nil {
 		return nil, err
 	}
@@ -294,6 +360,26 @@ func (r *Reader) Body(path, name string) (*FuncBody, error) {
 		}
 	}
 	return nil, nil
+}
+
+// archivePaths is the import paths of the archives this compilation read, in
+// sorted order and once each.
+func (r *Reader) archivePaths() []string {
+	all := make([]string, 0, len(r.imports))
+	for _, imp := range r.imports {
+		all = append(all, imp.Path)
+	}
+	sort.Strings(all)
+	// Two entries for one path are one archive to search. Bodies caches by
+	// path, so a duplicate would not decode the file twice, but it would
+	// walk the decoded list twice for nothing.
+	out := all[:0]
+	for i, p := range all {
+		if i == 0 || p != all[i-1] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // readBodies decodes one archive's bodies.

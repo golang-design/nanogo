@@ -260,10 +260,10 @@ func main() {
 //
 // The symbol count is the assertion and the output is not, because a program
 // with two copies of one body still computes what Go says it computes. What
-// two copies cost is size, and what they say is that an instantiation reaches
-// the object as an ordinary package definition, which cmd/link takes as unique
-// by construction. gc marks every stencil dupok so that its linker merges
-// them, and ir.Func carries no flag that would say so.
+// two copies cost is size. ir.Func.Dupok is what keeps the count at one: an
+// instantiation belongs to no package, so every package that names it defines
+// the symbol, and the mark moves the definition into the index space cmd/link
+// deduplicates by name in. gc sets the same bit on every stencil.
 func TestToolexecSharesAForeignStencilBetweenTwoPackages(t *testing.T) {
 	h := setup(t, foreignSharedModule(), []string{
 		"nanogo.example/foreignshared/a",
@@ -300,10 +300,196 @@ func TestToolexecSharesAForeignStencilBetweenTwoPackages(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("the program holds %d definitions of slices.Contains[[]int,int], want 1: "+
-			"an instantiation reaches the object as a package definition, which cmd/link takes as "+
-			"unique by construction, and ir.Func has no flag that would mark it duplicate-tolerant "+
-			"the way gc marks its own stencils", n)
+			"an instantiation is defined by every package that names it, and ir.Func.Dupok is "+
+			"what puts the definition in the index space cmd/link deduplicates by name in", n)
 	}
+}
+
+// The module of specs/017-export-data-reading.md's ten-line reproduction.
+//
+// Cell holds an instantiation of a generic type another package declares and
+// calls two of its four methods. The descriptor of the instantiation names all
+// four, so before the method set was built whole the link stopped with
+//
+//	type:*sync/atomic.Pointer[[]int]: relocation target
+//	sync/atomic.(*Pointer[[]int]).CompareAndSwap not defined
+//
+// main is compiled by nanogo as well and names no method at all. It holds a
+// *cell.Cell, which is enough to reach the same instantiation, so the two
+// packages define one method set between them and the mark on each definition
+// is what keeps the linker from taking two copies.
+func foreignCellModule() map[string]string {
+	return map[string]string{
+		"go.mod": "module nanogo.example/foreigncell\n\ngo 1.27\n",
+		"cell/cell.go": `package cell
+
+import "sync/atomic"
+
+type Cell struct{ p atomic.Pointer[[]int] }
+
+func New() *Cell            { return &Cell{} }
+func (c *Cell) Put(s []int) { c.p.Store(&s) }
+func (c *Cell) Get() []int  { return *c.p.Load() }
+`,
+		"main.go": `package main
+
+import "nanogo.example/foreigncell/cell"
+
+func main() {
+	c := cell.New()
+	c.Put([]int{7, 8, 9})
+	got := c.Get()
+	println(len(got), got[0], got[2])
+}
+`,
+	}
+}
+
+// TestToolexecBuildsEveryMethodOfAForeignInstantiation is stage 3 of
+// specs/017-export-data-reading.md, end to end.
+//
+// The link is the assertion that could not be made before: the descriptor of
+// an instantiation names its whole method set and no other package can have
+// compiled it, so an object that writes the descriptor and defines two of the
+// four methods links against nothing. The archive is read back as well,
+// because a program that links proves the symbols resolved and not that this
+// object is the one that defined them.
+func TestToolexecBuildsEveryMethodOfAForeignInstantiation(t *testing.T) {
+	h := setup(t, foreignCellModule(), []string{"nanogo.example/foreigncell/cell", "main"})
+
+	out, err := h.build(t, "-work", "-o", "cellprog", ".")
+	if err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	lines := h.decisions(t)
+	for _, pkg := range []string{"nanogo.example/foreigncell/cell", "main"} {
+		if !compiled(lines, pkg) {
+			t.Fatalf("nanogo delegated %s:\n%s", pkg, strings.Join(lines, "\n"))
+		}
+	}
+
+	got := runProgram(t, filepath.Join(h.mod, "cellprog"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+
+	// The archive, not the binary: the two methods nothing calls are dropped
+	// by the linker's dead code pass, so the program is no witness to them.
+	archive := archiveOf(t, lines, "nanogo.example/foreigncell/cell")
+	nm, err := exec.Command(goTool(t), "tool", "nm", archive).CombinedOutput()
+	if err != nil {
+		t.Fatalf("go tool nm %s: %v\n%s", archive, err, nm)
+	}
+	for _, want := range []string{"Load", "Store", "Swap", "CompareAndSwap"} {
+		sym := "sync/atomic.(*Pointer[[]int])." + want
+		if !defines(string(nm), sym) {
+			t.Errorf("the archive of the cell package does not define %s, and its descriptor names it:\n%s",
+				sym, nm)
+		}
+	}
+}
+
+// The module whose executed generic bodies come out of an archive of a
+// package that only copied them.
+//
+// lib is the one package that imports sync/atomic, and gc compiles it. main
+// imports lib and not sync/atomic, so its -importcfg names lib's archive and
+// the type checker never reads sync/atomic's. The bodies of the four methods
+// are still on disk, because a generic declaration is copied whole into the
+// archive of every package whose exported surface reaches it, and lib's
+// exported surface reaches this one.
+//
+// Every method is called, so the answers are the assertion and not the link.
+// A body decoded out of an archive that copied it and substituted wrongly
+// would produce a program that links and prints something else, which is the
+// failure the comparison against gc's own build finds.
+func foreignCopiedModule() map[string]string {
+	return map[string]string{
+		"go.mod": "module nanogo.example/foreigncopied\n\ngo 1.27\n",
+		"lib/lib.go": `package lib
+
+import "sync/atomic"
+
+type Box struct {
+	P atomic.Pointer[[]int]
+}
+`,
+		"main.go": `package main
+
+import "nanogo.example/foreigncopied/lib"
+
+func main() {
+	var b lib.Box
+	one := []int{1, 2, 3}
+	two := []int{7}
+	b.P.Store(&one)
+	got := b.P.Load()
+	println(len(*got), (*got)[0], (*got)[2])
+	println(b.P.CompareAndSwap(&two, &two), b.P.CompareAndSwap(&one, &two))
+	old := b.P.Swap(&one)
+	println(len(*old), len(*b.P.Load()))
+}
+`,
+	}
+}
+
+// TestToolexecRunsAGenericBodyOutOfAnArchiveThatCopiedIt is the reading half
+// of specs/017-export-data-reading.md's stage 3, run.
+//
+// The declaring package is not in this compilation's -importcfg at all, so a
+// reader that looked only in the declaring package's archive answers "this
+// compilation read no archive for sync/atomic" and the package is refused for
+// bodies that are on disk. That much the link would show. What it would not
+// show is a body found in the wrong archive or substituted wrongly, because
+// the methods of an instantiation nothing calls are dropped by the dead code
+// pass. So every method is called here and the answers are compared with gc's.
+func TestToolexecRunsAGenericBodyOutOfAnArchiveThatCopiedIt(t *testing.T) {
+	h := setup(t, foreignCopiedModule(), []string{"main"})
+
+	if out, err := h.build(t, "-o", "copied", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	lines := h.decisions(t)
+	if !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+	if compiled(lines, "nanogo.example/foreigncopied/lib") {
+		t.Fatalf("nanogo compiled the library, so main read no archive that had to copy the bodies:\n%s",
+			strings.Join(lines, "\n"))
+	}
+
+	got := runProgram(t, filepath.Join(h.mod, "copied"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}
+
+// archiveOf returns the object file nanogo wrote for one package, which the
+// log line records.
+func archiveOf(t *testing.T, lines []string, pkg string) string {
+	t.Helper()
+	for _, line := range lines {
+		if rest, ok := strings.CutPrefix(line, "compiled "+pkg+" "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	t.Fatalf("no log line records an archive for %s:\n%s", pkg, strings.Join(lines, "\n"))
+	return ""
+}
+
+// defines reports whether go tool nm's output holds a text definition of sym.
+//
+// The kind letter matters. A U row is a reference and a T row is the
+// definition, and the whole of what is being measured here is which of the two
+// this object holds.
+func defines(nm, sym string) bool {
+	for _, line := range strings.Split(nm, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[1] == "T" && fields[2] == sym {
+			return true
+		}
+	}
+	return false
 }
 
 // The program the statement half of the foreign walk has to compile.

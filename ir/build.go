@@ -273,9 +273,10 @@ func Build(pkg *types2.Package, files []*syntax.File, info *types2.Info) (*Packa
 		owner: make(map[*Object]*Func),
 		ptrs:  make(map[types2.Type]*Type),
 
-		generic:   make(map[*types2.Func]*syntax.FuncDecl),
-		instances: make(map[string]*instance),
-		ctxt:      types2.NewContext(),
+		generic:     make(map[*types2.Func]*syntax.FuncDecl),
+		instances:   make(map[string]*instance),
+		foreignSeen: make(map[*Type]bool),
+		ctxt:        types2.NewContext(),
 
 		closgen:   make(map[*Func]int),
 		isLiteral: make(map[*Func]bool),
@@ -325,6 +326,18 @@ type builder struct {
 	types     []*types2.Named
 	stencil   *stencil
 	ctxt      *types2.Context
+
+	// instOrder is the symbols of instances, in the order they were added.
+	// The map above is a lookup table and cannot say which entries an attempt
+	// made, and foreignMethodSets undoes an attempt that failed
+	// (specs/017-export-data-reading.md).
+	instOrder []string
+
+	// foreignTypes holds every instantiation of a generic type another
+	// package declares that the converter reported, in discovery order and
+	// once each. foreign.go builds the method set of each.
+	foreignTypes []*types2.Named
+	foreignSeen  map[*Type]bool
 
 	// foreign is the body of the instantiation being built when that body
 	// came out of an archive rather than out of a syntax tree, and is nil
@@ -980,6 +993,10 @@ func (b *builder) buildPackage(files []*syntax.File) {
 	// Last, because an instantiation is discovered while a body that calls it
 	// is built and the initialisation function is a body like any other.
 	b.drainInstances()
+
+	// After the drain, so that a method some call site named is already built
+	// and this pass adds only the methods nothing here calls.
+	b.foreignMethodSets()
 }
 
 // buildFunc builds one declared function or method.
@@ -1471,6 +1488,13 @@ func (b *builder) closureNode(fn *Func, pos syntax.Pos, caps []*Object) Expr {
 	}
 	fn.Captures = caps
 	fn.Closure = closureContext(caps, pos)
+	if b.fn != nil && b.fn.Dupok {
+		// A literal inside an instantiation is compiled by every package that
+		// compiles the instantiation, and its symbol is derived from the
+		// instantiation's, so the two symbols are duplicated together. gc
+		// inherits the bit the same way, in ir.NewClosureFunc.
+		fn.Dupok = true
+	}
 	b.out.Funcs = append(b.out.Funcs, fn)
 	return node
 }

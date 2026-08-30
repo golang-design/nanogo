@@ -628,6 +628,14 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 		if err != nil {
 			return nil, false, err
 		}
+		if fn.Dupok {
+			// An instantiation, or a literal inside one. Every package that
+			// names it compiles it, so the definitions are merged rather than
+			// reported as a duplicate. ir.Func.Dupok says why, and the flag
+			// also moves the symbol into the non-package index space, which
+			// is the space cmd/link deduplicates by name in.
+			r.Text.Flag |= obj.SymFlagDupok
+		}
 		ref, err := r.Add(out)
 		if err != nil {
 			return nil, false, &UnsupportedError{Package: cfg.Package, What: "function " + fn.Name, Detail: err.Error()}
@@ -702,6 +710,11 @@ func emitPackage(cfg *Config, p *ir.Package, fset *syntax.FileSet, imports []exp
 		if types, err = descriptorSet(cfg, append(types, extra...)); err != nil {
 			return nil, false, err
 		}
+	}
+	// The set is settled here, so this is the first point at which "does this
+	// object write the descriptor of that instantiation" can be answered.
+	if err := checkForeignMethodSets(cfg, p, types); err != nil {
+		return nil, false, err
 	}
 	if err := addDescriptors(cfg, out, types, itabs, funcvals, asserts, switches, generated); err != nil {
 		return nil, false, err
@@ -867,6 +880,107 @@ func generatedFuncs(cfg *Config, types []*ir.Type, declared map[string]bool) ([]
 		fns = append(fns, more...)
 	}
 	return fns, nil
+}
+
+// receiverForms records which receiver form of one type this object writes a
+// descriptor for.
+//
+// They are two symbols and they describe two method sets. type:T names the
+// methods declared with a value receiver and type:*T names all of them, which
+// is the split rtype's methodSet makes.
+type receiverForms struct{ value, ptr bool }
+
+// checkForeignMethodSets refuses a package whose descriptor names a method of
+// a foreign instantiation that no object defines.
+//
+// The descriptor of an instantiation names its whole method set, and the
+// package that emits the descriptor owes every body in it: the instantiation
+// exists nowhere else, so the package that declares the generic cannot have
+// compiled it (specs/017-export-data-reading.md). ir.Build built every method
+// it could and recorded a reason for each it could not, and this is where the
+// two halves meet, because the set of descriptors an object writes is decided
+// here and not there.
+//
+// The refusal names the descriptor and not a call site, because there is no
+// call site: a method nothing calls is exactly the one that is missing. The
+// alternative, writing the descriptor with the buildable methods only, is
+// refused as a design: reflect.Type.NumMethod would answer with a number the
+// source does not support and an interface satisfaction check would take the
+// wrong branch, which is a wrong answer inside a program that links.
+//
+// A type whose descriptor this object does not write is not refused. The
+// bodies are owed by whoever writes the descriptor, and a package that merely
+// holds a value of the type owes nothing.
+func checkForeignMethodSets(cfg *Config, p *ir.Package, types []*ir.Type) error {
+	if len(p.ForeignInsts) == 0 {
+		return nil
+	}
+	// forms is a lookup table and is never ranged over
+	// (specs/053-determinism.md): the order of the answer is the order
+	// ir.Build recorded the instantiations in.
+	forms := make(map[string]receiverForms, len(types))
+	for _, t := range types {
+		base, ptr := t, false
+		if t != nil && t.Kind == ir.Ptr && t.Elem != nil {
+			base, ptr = t.Elem, true
+		}
+		name, err := ir.TypeSymbol(base)
+		if err != nil {
+			// A type rtype cannot name never became a descriptor either, and
+			// descriptorSet refused the package before this point if one of
+			// the set could not be written.
+			continue
+		}
+		f := forms[name]
+		if ptr {
+			f.ptr = true
+		} else {
+			f.value = true
+		}
+		forms[name] = f
+	}
+	for _, fi := range p.ForeignInsts {
+		name, err := ir.TypeSymbol(fi.Type)
+		if err != nil {
+			continue
+		}
+		f, ok := forms[name]
+		if !ok {
+			continue
+		}
+		for _, m := range fi.Methods {
+			if m.Reason == "" {
+				continue
+			}
+			if !f.ptr && (m.PtrOnly || !f.value) {
+				// No descriptor this object writes names this row.
+				continue
+			}
+			return &UnsupportedError{
+				Package: cfg.Package,
+				What:    "the descriptor of " + descriptorName(fi.Type, f.ptr),
+				Detail: fmt.Sprintf("it names the method %s of an instantiation of %s, declared in %s, and its body was not built: %s",
+					m.Name, fi.Decl, fi.Origin, m.Reason),
+			}
+		}
+	}
+	return nil
+}
+
+// descriptorName is how the refusal above spells the descriptor's type.
+//
+// The pointer form is the one that names the whole method set, so it is the
+// one named when this object writes it, and it is the spelling cmd/link would
+// have reported the undefined relocation against.
+func descriptorName(t *ir.Type, ptr bool) string {
+	name, err := ir.TypeLinkString(t)
+	if err != nil {
+		return t.String()
+	}
+	if ptr {
+		return "*" + name
+	}
+	return name
 }
 
 // algOwner names the type a generated equality or hash function belongs to,

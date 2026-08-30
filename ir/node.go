@@ -499,6 +499,22 @@ type Func struct {
 	// reference list cannot see it. specs/032-type-descriptors-and-itabs.md
 	// records the one case gc has that this does not.
 	ReflectMethod bool
+
+	// Dupok records that another object may define this symbol too, so the
+	// linker merges the definitions instead of reporting a duplicate.
+	//
+	// It is set on an instantiation and on every function literal inside one.
+	// An instantiation belongs to no package: List[int] is compiled by every
+	// package that names it, because the package that declares List has no
+	// way to know which arguments some importer will pick. gc sets the same
+	// bit from the same rule, in noder/reader.go, where a declaration with
+	// type parameters gets SetDupok(true) and a literal inherits it from the
+	// function around it.
+	//
+	// Without it two packages that name one instantiation give cmd/link two
+	// definitions of one symbol, and the build stops on a duplicate that
+	// neither source file contains.
+	Dupok bool
 }
 
 // Package is one compiled package.
@@ -508,6 +524,54 @@ type Package struct {
 	Funcs   []*Func
 	Globals []*Object
 	Inits   []*Func
+
+	// ForeignInsts holds every instantiation of a generic type another
+	// package declares that this compilation met, with what became of each
+	// method of it.
+	//
+	// The descriptor of an instantiation names its whole method set, and the
+	// package that emits the descriptor owes every method in it
+	// (specs/017-export-data-reading.md). Whether the descriptor is emitted
+	// is decided after this pass, by the lowering and the closure the driver
+	// takes over it, so this list is the evidence that decision is made
+	// against rather than a refusal made here.
+	ForeignInsts []ForeignInstantiation
+}
+
+// A ForeignInstantiation is one instantiation of a generic type another
+// package declares.
+type ForeignInstantiation struct {
+	// Type is the instantiation itself, which is the type a descriptor of it
+	// describes. Origin is the import path of the package that declares the
+	// generic, and Decl is how that package spells its name.
+	Type   *Type
+	Origin string
+	Decl   string
+
+	// Methods is the whole method set of the instantiation, in the order the
+	// checker holds it, and not the part of it this package calls.
+	Methods []ForeignMethod
+}
+
+// A ForeignMethod is one method of a [ForeignInstantiation].
+type ForeignMethod struct {
+	// Name is the method's name and Sym is the linker symbol of the function
+	// the front end compiles for it, which is the receiver form the method is
+	// declared with. The other form is a wrapper, and whoever writes the
+	// descriptor generates it (ssagen.MethodWrappers).
+	Name string
+	Sym  string
+
+	// PtrOnly reports whether the method is in the method set of the pointer
+	// and not in the method set of the type itself, exactly as [Method]
+	// records it. The descriptor of T names the methods it is false for and
+	// the descriptor of *T names all of them.
+	PtrOnly bool
+
+	// Reason is empty when the body was built, and otherwise says why it was
+	// not. A method with a reason is a symbol nothing defines, so a
+	// descriptor that names it cannot be emitted.
+	Reason string
 }
 
 // Walk calls f for n and every node below it, in source order.

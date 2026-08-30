@@ -143,7 +143,10 @@ func (b *builder) foreignBody(path, name string) (*export.Body, error) {
 		return nil, err
 	}
 	if fb == nil || fb.Body == nil {
-		return nil, fmt.Errorf("the archive holds no body for it")
+		// Every archive this compilation read, not only the declaring
+		// package's: a generic declaration is copied into the archive of every
+		// package whose exported surface reaches it (export/read.go).
+		return nil, fmt.Errorf("no archive this compilation read holds a body for it")
 	}
 	if !fb.Body.HasBlock {
 		return nil, fmt.Errorf("the declaration has no body, so it is implemented in assembly or by a linkname")
@@ -226,7 +229,7 @@ func (b *builder) foreignInstance(sym string, origin *types2.Func, targs []types
 
 	in := &instance{sym: sym, origin: origin, targs: targs, sig: sig, recv: recv, body: body}
 	in.obj = &Object{Name: sym, Class: ClassFunc, Type: b.irType(sig)}
-	b.instances[sym] = in
+	b.noteInstance(sym, in)
 	b.todo = append(b.todo, in)
 	return in.obj
 }
@@ -249,7 +252,7 @@ func (b *builder) foreignInstance(sym string, origin *types2.Func, targs []types
 // therefore empty rather than wrong, and giving it a real one is what
 // specs/010-scanner-and-positions.md would have to answer first.
 func (b *builder) buildForeignInstance(in *instance) *Func {
-	fn := &Func{Name: instanceName(in), Sym: in.sym}
+	fn := &Func{Name: instanceName(in), Sym: in.sym, Dupok: true}
 
 	saveFn, saveSig, saveSinks, saveFree := b.fn, b.sig, b.sinks, b.free
 	saveStencil, saveForeign := b.stencil, b.foreign
@@ -282,6 +285,161 @@ func (b *builder) buildForeignInstance(in *instance) *Func {
 	b.fn, b.sig, b.sinks, b.free = saveFn, saveSig, saveSinks, saveFree
 	b.stencil, b.foreign = saveStencil, saveForeign
 	return fn
+}
+
+// The method set of a foreign instantiation.
+//
+// A call names one method. A descriptor names the whole method set, and the
+// two sets are not the same one. The descriptor of atomic.Pointer[[]int] has
+// four rows whatever the package that emits it calls, because
+// reflect.Type.NumMethod reads the count out of it and an itab is filled from
+// it, so a package that emits the descriptor owes four bodies. Building only
+// the methods a call names produces an object whose descriptor points at
+// symbols nothing defines, and the failure is the linker's:
+//
+//	type:*sync/atomic.Pointer[[]int]: relocation target
+//	sync/atomic.(*Pointer[[]int]).Swap not defined
+//
+// gc discharges the same obligation with needWrapper and MakeWrappers, and
+// specs/017-export-data-reading.md is where the gap was measured.
+//
+// # Why the refusal is not made here
+//
+// Whether this package emits the descriptor is not known in this pass. The
+// set of descriptors an object writes is decided after lowering, by the
+// closure the driver takes over the types its code names, and this pass runs
+// before the first function is lowered. A method whose body cannot be built is
+// therefore recorded rather than refused, and the driver refuses the package
+// when the descriptor that names the method turns out to be one this object
+// writes. Refusing here would refuse a package that emits no descriptor for
+// the type and needs none of the bodies.
+//
+// # Why an attempt is taken back out
+//
+// The walk records a refusal in b.errs and Build returns the first of them,
+// so a method built on speculation would fail the whole package for a body
+// nothing here calls. An attempt therefore marks the build, queues the method,
+// drains, and undoes everything the attempt added when it recorded an error.
+// What survives is the reason, on the method's row.
+
+// noteForeignType records one instantiation of a generic type another package
+// declares, once.
+//
+// The key is the IR type, which the converter caches, so two checker types
+// naming one instantiation are one entry and the list is in discovery order
+// (specs/053-determinism.md).
+func (b *builder) noteForeignType(named *types2.Named) {
+	t := b.irType(named)
+	if b.foreignSeen[t] {
+		return
+	}
+	b.foreignSeen[t] = true
+	b.foreignTypes = append(b.foreignTypes, named)
+}
+
+// buildPoint is how far a build had got before an attempt.
+type buildPoint struct {
+	errs, funcs, insts int
+}
+
+// mark records where the build is now.
+func (b *builder) mark() buildPoint {
+	return buildPoint{errs: len(b.errs), funcs: len(b.out.Funcs), insts: len(b.instOrder)}
+}
+
+// undo takes the build back to p, and returns what the attempt said or the
+// empty string when it said nothing.
+//
+// The three lists are truncated rather than rebuilt, because everything an
+// attempt added is at the end of each: the attempt runs after the drain that
+// built the package's own bodies, so nothing else appends while it runs.
+func (b *builder) undo(p buildPoint) string {
+	if len(b.errs) == p.errs {
+		return ""
+	}
+	reason := b.errs[p.errs].Error()
+	b.errs = b.errs[:p.errs]
+	for _, sym := range b.instOrder[p.insts:] {
+		delete(b.instances, sym)
+	}
+	b.instOrder = b.instOrder[:p.insts]
+	b.out.Funcs = b.out.Funcs[:p.funcs]
+	return reason
+}
+
+// foreignMethodSets builds the whole method set of every instantiation of a
+// generic type another package declares that this compilation met.
+//
+// The list grows while it is walked: a body built here converts the types it
+// names, and the converter reports an instantiation it has not seen before.
+// The index loop reads the length each time round for that reason.
+func (b *builder) foreignMethodSets() {
+	if len(b.errs) > 0 {
+		// The package is refused already and Build returns the first error, so
+		// every body built here would be built for an object nobody writes.
+		return
+	}
+	for i := 0; i < len(b.foreignTypes); i++ {
+		b.foreignMethodSet(b.foreignTypes[i])
+	}
+}
+
+// foreignMethodSet builds every method of one instantiation and records what
+// became of each.
+func (b *builder) foreignMethodSet(named *types2.Named) {
+	origin := named.Origin().Obj()
+	if origin == nil || origin.Pkg() == nil {
+		return
+	}
+	n := named.TypeArgs()
+	targs := make([]types2.Type, n.Len())
+	for i := range targs {
+		targs[i] = n.At(i)
+	}
+	rec := ForeignInstantiation{
+		Type:   b.irType(named),
+		Origin: origin.Pkg().Path(),
+		Decl:   origin.Name(),
+	}
+	for i := 0; i < named.NumMethods(); i++ {
+		rec.Methods = append(rec.Methods, b.foreignMethod(named, named.Method(i), targs))
+	}
+	if len(rec.Methods) == 0 {
+		// A type with no methods owes nothing, and a row for it would be a
+		// row the driver reads on every descriptor it writes.
+		return
+	}
+	b.out.ForeignInsts = append(b.out.ForeignInsts, rec)
+}
+
+// foreignMethod builds one method of one instantiation, and returns its row.
+//
+// A method some call site already named is built and its row carries no
+// reason. Every other method is attempted, and an attempt that failed is
+// undone so that a body nothing calls does not refuse the package here.
+func (b *builder) foreignMethod(named *types2.Named, m *types2.Func, targs []types2.Type) ForeignMethod {
+	out := ForeignMethod{Name: m.Name()}
+	osig, _ := m.Origin().Type().(*types2.Signature)
+	if osig == nil || osig.Recv() == nil {
+		out.Reason = "it is not a method of the instantiation"
+		return out
+	}
+	_, ptr := unalias(osig.Recv().Type()).(*types2.Pointer)
+	out.PtrOnly = ptr
+	sym, err := MethodSymbol(b.irType(named), Method{Name: m.Name()}, ptr)
+	if err != nil {
+		out.Reason = err.Error()
+		return out
+	}
+	out.Sym = sym
+	if _, ok := b.instances[sym]; ok {
+		return out
+	}
+	at := b.mark()
+	b.methodInstance(named, m, targs)
+	b.drainInstances()
+	out.Reason = b.undo(at)
+	return out
 }
 
 // foreignCheckNumbering compares the locals the walk declared with the locals

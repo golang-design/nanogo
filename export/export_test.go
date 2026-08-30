@@ -560,3 +560,52 @@ func TestReadIsCached(t *testing.T) {
 		t.Errorf("Imports() = %+v, want one entry", r.Imports())
 	}
 }
+
+// TestBodyIsFoundInAnArchiveThatCopiedIt is the reading half of
+// specs/017-export-data-reading.md's stage 3.
+//
+// A package that holds an os.File owes the method set of
+// sync/atomic.Pointer[os.dirInfo], because the descriptor of that
+// instantiation names four methods and no other package can have compiled
+// them. Its -importcfg names no archive for sync/atomic at all: the import is
+// os's and not its own. The bodies are still reachable, because a generic
+// declaration is copied whole into the archive of every package whose
+// exported surface reaches it, so os's archive carries sync/atomic's.
+//
+// The declaring package is not read here, on purpose. A reader that searched
+// only the declaring package's archive answers "this compilation read no
+// archive for sync/atomic" and the package is refused for a body that is on
+// disk.
+func TestBodyIsFoundInAnArchiveThatCopiedIt(t *testing.T) {
+	dir := fixtureModule(t)
+	file := exportFile(t, dir, "os")
+
+	r := NewReader()
+	if _, err := r.Read("os", file); err != nil {
+		t.Fatalf("Read os: %v", err)
+	}
+	for _, name := range []string{
+		"(*Pointer).Load",
+		"(*Pointer).Store",
+		"(*Pointer).Swap",
+		"(*Pointer).CompareAndSwap",
+	} {
+		b, err := r.Body("sync/atomic", name)
+		if err != nil {
+			t.Fatalf("Body(sync/atomic, %s): %v", name, err)
+		}
+		if b == nil {
+			t.Errorf("os's archive carries no body for sync/atomic.%s", name)
+			continue
+		}
+		if b.Path != "sync/atomic" || b.Name != name {
+			t.Errorf("the body found for sync/atomic.%s is %s.%s", name, b.Path, b.Name)
+		}
+	}
+	// A declaration no archive this compilation read holds is still (nil, nil)
+	// rather than an error, which is what the caller reports by name.
+	b, err := r.Body("sync/atomic", "(*Pointer).NoSuchMethod")
+	if b != nil || err != nil {
+		t.Errorf("a declaration no archive holds gave (%v, %v), want (nil, nil)", b, err)
+	}
+}

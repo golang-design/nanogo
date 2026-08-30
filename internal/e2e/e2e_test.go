@@ -71,6 +71,7 @@ type harness struct {
 	list  string // the allowlist file
 	log   string // the file nanogo records its decisions in
 	cache string // a build cache of this test's own
+	tmp   string // the temporary directory the go command works in
 }
 
 // setup builds nanogo the way a user installs it and writes the module.
@@ -87,6 +88,13 @@ func setup(t *testing.T, files map[string]string, allow []string) *harness {
 	// caches per compiler identity, and a cached result would make the test
 	// pass while nanogo did nothing.
 	h.cache = filepath.Join(h.dir, "gocache")
+	// The go command's own work directory, inside the tree the test owns, so
+	// that a build run with -work leaves nothing behind and a build killed on
+	// a deadline leaves nothing outside this tree either.
+	h.tmp = filepath.Join(h.dir, "gotmp")
+	if err := os.MkdirAll(h.tmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	build := exec.Command(h.goCmd, "build", "-o", h.bin, "golang.design/x/nanogo/cmd/nanogo")
 	build.Dir = repoRoot(t)
@@ -142,6 +150,7 @@ func (h *harness) build(t *testing.T, args ...string) (string, error) {
 		"NANOGO_ALLOWLIST=" + h.list,
 		"NANOGO_LOG=" + h.log,
 		"GOCACHE=" + h.cache,
+		"GOTMPDIR=" + h.tmp,
 	})
 	out, err := cmd.CombinedOutput()
 	return string(out), err

@@ -185,16 +185,39 @@ not, and the split is not obvious from the messages, so it was measured.
 | an array descriptor's element descriptor | `type:[][]string` | [032](032-type-descriptors-and-itabs.md) |
 | the value-receiver form of a promoted method | `export.bodyWriter.bigInt`, `.scalar` | [032](032-type-descriptors-and-itabs.md), [030](030-abi.md) |
 
+**Stage 3 is built and the first class is gone.** The same command, on the same
+tree with stage 3 in it:
+
+```console
+$ GOCACHE=$fresh NANOGO_ALLOWLIST=allow19+main.txt NANOGO_LOG=logN2.txt \
+      go build -toolexec=./nanogo -o nanogo-N2 ./cmd/nanogo
+# golang.design/x/nanogo/cmd/nanogo
+type:[10][]string: relocation target type:[][]string not defined
+type:golang.design/x/nanogo/export.bodyWriter: relocation target golang.design/x/nanogo/export.bodyWriter.bigInt not defined
+type:golang.design/x/nanogo/export.bodyWriter: relocation target golang.design/x/nanogo/export.bodyWriter.scalar not defined
+type:golang.design/x/nanogo/export.bodyReader: relocation target golang.design/x/nanogo/export.bodyReader.bigInt not defined
+type:golang.design/x/nanogo/export.bodyReader: relocation target golang.design/x/nanogo/export.bodyReader.scalar not defined
+$ grep -c '^compiled ' logN2.txt
+17
+```
+
+Seven became five, the two this spec owned are the two that went, and the five
+that are left are [032](032-type-descriptors-and-itabs.md)'s two rows. No
+package was refused: the 17 `compiled` lines are unchanged.
+
 ### The one that is this spec's, isolated
 
 The descriptor of an instantiated generic type names every method the
-instantiation has. `ir/stencil.go` builds a method of a foreign instantiation
-only where the method is **called**, and `instantiateType` says why:
+instantiation has. Before stage 3, `ir/stencil.go` built a method of a foreign
+instantiation only where the method was **called**, and `instantiateType` said
+why:
 
 > Building the method set of each would read an archive for every type the
 > package's types transitively hold, most of which no code here calls.
 
-So the descriptor promises four methods and the object holds two.
+So the descriptor promised four methods and the object held two. That argument
+is measured below and it does not hold: the whole transitive type closure of
+`types2`, the largest of the 19, holds two such instantiations.
 
 ```console
 $ go tool nm syntax/_pkg_.a | grep 'atomic.(\*Pointer\[\[\]\*.*SrcFile\])'
@@ -204,7 +227,8 @@ $ go tool nm syntax/_pkg_.a | grep 'atomic.(\*Pointer\[\[\]\*.*SrcFile\])'
          U sync/atomic.(*Pointer[[]*…syntax.SrcFile]).CompareAndSwap
 ```
 
-`syntax` calls `Load` and `Store` and stencils exactly those two.
+`syntax` calls `Load` and `Store` and stencilled exactly those two. It stencils
+all four now, and the reading above is the one that was taken before stage 3.
 
 **Why this never surfaced before.** `gc` emits the whole instantiation,
 methods included, in every package that reaches it, `dupok`. Running
@@ -234,7 +258,7 @@ graph TD
 
   A1["nanogo compiles syntax<br/>the descriptor names 4 methods<br/>the object defines the 2 it calls"]:::bad
   A2["gc compiles the six importers<br/>each defines all 4"]:::ok
-  A3["today: the link resolves"]:::ok
+  A3["before stage 3: the link resolves"]:::ok
   A1 --> A3
   A2 --> A3
 
@@ -243,6 +267,10 @@ graph TD
   B3["at G1: Swap and CompareAndSwap<br/>not defined"]:::bad
   B1 --> B3
   B2 --> B3
+
+  C1["with stage 3<br/>every package that reaches the type<br/>defines all 4, dupok"]:::ok
+  C2["the link resolves and<br/>cmd/link keeps one copy"]:::ok
+  C1 --> C2
 ```
 
 ### A ten-line reproduction
@@ -284,9 +312,30 @@ get 7
 swapped old 7 now 9
 ```
 
-So the bodies decode and the walk builds them. What is missing is not the
+So the bodies decode and the walk builds them. What was missing is not the
 ability to build the method, it is the decision to build a method nothing
 calls.
+
+With stage 3 in, the reproduction as written links and runs, and `c`'s archive
+holds the four definitions:
+
+```console
+$ GOCACHE=$fresh NANOGO_ALLOWLIST=allowC.txt NANOGO_LOG=logC.txt \
+      go build -work -toolexec=./nanogo -o helloC ./cmd/hello
+$ ./helloC
+get 7
+$ go tool nm $(grep '^compiled xrt/c ' logC.txt | awk '{print $3}') |
+      grep 'T sync/atomic'
+    3ea8 T sync/atomic.(*Pointer[[]int]).Load
+    3e54 T sync/atomic.(*Pointer[[]int]).Store
+    3ef8 T sync/atomic.(*Pointer[[]int]).Swap
+    3f54 T sync/atomic.(*Pointer[[]int]).CompareAndSwap
+```
+
+The archive and not the linked program, because the linker's dead code pass
+drops the two methods nothing calls. `internal/e2e/foreign_test.go`'s
+`TestToolexecBuildsEveryMethodOfAForeignInstantiation` is this reproduction as
+a test and it reads the archive for that reason.
 
 ### What nanogo's reader must do that it does not
 
@@ -324,7 +373,7 @@ end of the compilation.
 | --- | --- | --- |
 | read every method of an imported generic type's declaration | `reader.go` `objIdx`, `ObjType` case | built (`export/reader.go` reads the declaration) |
 | stencil the method a call names | `funcExt` queues the body | built (`ir/stencil.go` `checkMethodIsBuilt`, `ir/foreign.go` walks it) |
-| stencil every method of an instantiation whose descriptor is emitted | `needWrapper` plus `MakeWrappers` | **not built** |
+| stencil every method of an instantiation whose descriptor is emitted | `needWrapper` plus `MakeWrappers` | built (`ir/foreign.go` `foreignMethodSets`, `driver/compile.go` `checkForeignMethodSets`) |
 | skip that work for a non-generic imported type | `importedDef` | not needed, because nanogo does not emit those descriptors either |
 
 ## The generic case
@@ -444,6 +493,12 @@ packages=19 identical=19 differing=0
 Byte for byte, archive for archive, including each `__.PKGDEF`. No determinism
 defect is observed in the reader or the writer today.
 
+That reading was taken before stage 3, and stage 3 adds two lists a map could
+have supplied: the instantiations `ir` records and the archives
+`export.Reader.Body` searches. Both are ordered lists and neither is a map
+range, and the spot check is `types2` compiled twice from one argument vector,
+5,429,920 bytes identical. The full 19-package comparison has not been retaken.
+
 **One false positive is recorded because it will happen again.** The same
 comparison run against the live working tree reported `driver` differing by 129
 bytes. The differing bytes were string constants of nanogo's own source, and
@@ -500,7 +555,7 @@ graph TD
 
   S1["stage 1<br/>pin the round trip<br/>a regression test"]:::done
   S2["stage 2<br/>the foreign walk's<br/>refusals, measured"]:::work
-  S3["stage 3<br/>every method of a foreign<br/>instantiation, or refuse it"]:::work
+  S3["stage 3<br/>every method of a foreign<br/>instantiation, or refuse it"]:::done
   S4["stage 4<br/>N2 links"]:::work
   S5["stage 5<br/>N2 equals N3"]:::gate
 
@@ -534,23 +589,114 @@ The test that proves it: a ratchet under `internal/selfhost` or beside
 `ir/foreign_test.go` that fails when a body that used to decode and walk stops
 doing so, and that names each refusal by the code rather than counting them.
 
-**Stage 3: every method of an instantiation of a foreign generic type.** For
-each instantiated generic type whose descriptor this package emits, build every
-method of the instantiation, not only the ones the package calls. `gc`'s
-`needWrapper` and `MakeWrappers` are the shape. The cost is what
-`instantiateType`'s comment warns about: an archive read per instantiated
-foreign type the package's types transitively hold. Two things bound it. The
-descriptor is already being emitted, so the set is the set of descriptors and
-not the set of types. And the bodies are already cached per archive by
-`export.Reader.Bodies`.
+**Stage 3: every method of an instantiation of a foreign generic type.** Built.
+It landed in three pieces and the split is the design, so it is recorded rather
+than summarised.
 
-The test that proves it: the ten-line reproduction above, linked and run, plus
-`go tool nm` asserting that all four `atomic.Pointer[[]int]` methods are
-defined in the object.
+*The builder builds, and it does not refuse.* `ir/stencil.go`'s
+`instantiateType` records every instantiation of a foreign generic type the
+converter reports, and `ir/foreign.go`'s `foreignMethodSets` builds the whole
+method set of each after the ordinary drain has finished. After, so that a
+method some call site names is already built and this pass adds only the
+methods nothing calls. A method whose body the walk refuses is **undone** and
+its reason is recorded on `ir.Package.ForeignInsts`: the pass marks the build,
+queues the method, drains, and truncates the error list, the function list and
+the instance table when the attempt recorded anything. Without the undo, a body
+nothing calls would refuse the whole package through `Build`'s first error, and
+that is an over-refusal rather than a fix.
+
+*The driver decides whether the reason is a refusal.* Whether this object emits
+the descriptor of an instantiation is not known in `ir`: the descriptor set is
+the closure the driver takes over the types the lowered code names, and that
+closure is taken after the last function is lowered. `driver/compile.go`'s
+`checkForeignMethodSets` runs at that point, matches each recorded
+instantiation against the closed set, and refuses the package when a descriptor
+it writes names a method that carries a reason. The receiver form decides which
+rows count: `type:*T` names the whole method set and `type:T` names the methods
+declared with a value receiver, which is the split `rtype`'s `methodSet` makes.
+
+*The reader searches more than the declaring package's archive.* The first
+build after the two pieces above refused `dist` and `export` by name, and the
+reason was not a body nanogo cannot walk. `dist` holds an `os.File`, so it owes
+the method set of `sync/atomic.Pointer[os.dirInfo]`, and it imports
+`sync/atomic` neither directly nor through the type checker, so the reader has
+no archive under that path at all. `export.Reader.Body` looked only in the
+declaring package's archive and answered `this compilation read no archive for
+"sync/atomic"`. A generic declaration is copied whole into the archive of every
+package whose exported surface reaches it, which is what `export/foreign.go`
+does and what `gc`'s `linker.relocObj` does, so the four bodies are in `os`'s
+archive. `Body` now searches the declaring package's archive first and then
+every other archive in sorted import path order, which is the order
+`export/foreign.go`'s writer searches in and for the same reason
+([053](053-determinism.md)).
+
+That path is executed and not only resolved. A `main` that holds a `lib.Box`
+whose one field is an `atomic.Pointer[[]int]`, and that calls all four methods
+without importing `sync/atomic` itself, runs bodies decoded out of `lib`'s
+archive and prints what `gc`'s build of the same source prints. Before the
+search the same package did not compile:
+
+    nanogo: main: nanogo cannot compile this package: ir:
+    sync/atomic.(*Pointer[[]int]).Store is declared in package sync/atomic and
+    its body cannot be read out of an archive: this compilation read no archive
+    for "sync/atomic"
+
+Every method is called there on purpose. The methods of an instantiation
+nothing calls are dropped by the linker's dead code pass, so a body taken from
+the wrong archive, or substituted wrongly, would produce a program that links
+and is wrong. Comparing the output against `gc`'s is what finds that.
+
+*One flag the whole arrangement rests on.* An instantiation belongs to no
+package, so every package that names it compiles it, and stage 3 makes that the
+ordinary case rather than the rare one: in the ten-line reproduction both `c`
+and `main` build all four methods. `ir.Func.Dupok` marks an instantiation and
+every function literal inside one, and `driver/compile.go` turns it into
+`obj.SymFlagDupok`, which moves the definition into the index space `cmd/link`
+deduplicates by name in. `gc` sets the same bit from the same rule, in
+`noder/reader.go`, where a declaration with type parameters gets
+`SetDupok(true)` and a literal inherits it from the function around it.
+
+**The cost, measured rather than argued.** `instantiateType`'s comment asserted
+that this would read an archive for every type a package's types transitively
+hold. The measurement is one compile action of one package, replayed with the
+argument vector the go command handed nanogo, five runs of each compiler
+alternating so that a machine that gets busier moves both readings:
+
+| package | text symbols before | after | archive bytes | user CPU before | after |
+| --- | --- | --- | --- | --- | --- |
+| `types2`, the largest of the 19 | 1,393 | 1,401 | +7,062 of 5,422,858 | 3.00 s | 3.06 s |
+| `dist`, which reaches the cross-archive search | 191 | 195 | +3,552 of 769,990 | 0.220 s | 0.226 s |
+
+The eight symbols `types2` gained are the four methods of
+`sync/atomic.Pointer[[]*syntax.SrcFile]` and the four of
+`sync/atomic.Pointer[os.dirInfo]`, and `dist`'s four are the second of those.
+So the whole transitive type closure of the largest package holds **two**
+instantiations of a foreign generic type, not the many the comment feared, and
+the compile time difference is inside the run-to-run spread of either compiler.
+The narrower rule the comment would have justified, a driver callback that
+stencils exactly the missing methods after the descriptor set closes and
+re-closes it as `addGenerated` already does for one round, is **not built** and
+is not needed on this evidence.
+
+The tests that prove it, by package.
+
+| Test | What it holds |
+| --- | --- |
+| `ir/foreign_test.go` `TestForeignMethodSetIsBuiltWhole` | a package that calls no method asks for four bodies and defines four symbols |
+| `ir/foreign_test.go` `TestForeignInstancesAreDuplicateTolerant` | every one of the four is marked duplicate-tolerant |
+| `ir/foreign_test.go` `TestForeignMethodSetRecordsAReasonRatherThanRefusing` | a body no archive holds is a reason on a row and not an error from `Build` |
+| `ir/foreign_test.go` `TestForeignMethodSetUndoesAnAttemptThatStartedBuilding` | the truncation. A body that cannot be read is refused before anything is queued, and a body that decodes and then meets a statement the walk has no case for has already queued an instance and already appended a function |
+| `driver/compile_test.go` `TestForeignMethodSetRefusesTheDescriptorAndNotTheCallSite` | the refusal, and every clause of its message |
+| `driver/compile_test.go` `TestForeignMethodSetIsNotRefusedWhenNoDescriptorNamesIt` | a package that writes no descriptor for the type is not refused |
+| `export/export_test.go` `TestBodyIsFoundInAnArchiveThatCopiedIt` | `os`'s archive answers for `sync/atomic`'s four declarations |
+| `internal/e2e/foreign_test.go` `TestToolexecBuildsEveryMethodOfAForeignInstantiation` | the ten-line reproduction, linked, run against `gc`'s answer, and read back with `go tool nm` |
+| `internal/e2e/foreign_test.go` `TestToolexecRunsAGenericBodyOutOfAnArchiveThatCopiedIt` | the cross-archive bodies run rather than only resolve |
 
 **Stage 4: $N_2$ links.** Stage 3 plus [032](032-type-descriptors-and-itabs.md)'s
 two descriptor gaps. The test is the `cmd/nanogo` build above with an exit
-status of 0 and a `nanogo-N2 version` that answers.
+status of 0 and a `nanogo-N2 version` that answers. Stage 3 is in, so what is
+left of it is [032](032-type-descriptors-and-itabs.md)'s five relocations and
+nothing of this spec's.
 
 **Stage 5: $N_2 = N_3$.** Build $N_3$ with $N_2$ and compare bytes. This is
 [060](060-selfhost.md)'s gate and this spec ends at stage 4.
@@ -593,19 +739,24 @@ wrote.
 
 **Stage 3** adds one refusal, and it is the one that matters most, because the
 alternative to it is the failure this spec is about. When a method of an
-instantiation cannot be built, the compiler must refuse the package by name
-rather than emit the descriptor without the method:
+instantiation cannot be built, the compiler refuses the package by name rather
+than emit the descriptor without the method. What
+`driver/compile.go`'s `checkForeignMethodSets` writes is:
 
-    nanogo cannot compile <pkg>: the descriptor of <type> names the method
+    <pkg>: nanogo cannot compile the descriptor of <type>: it names the method
     <name> of an instantiation of <origin>, declared in <path>, and its body
-    is <reason>
+    was not built: <reason>
 
-with `<reason>` one of three: the body is not in that package's archive, or
-the foreign walk refuses it and the message names the code, or it is a generic
-method, which
-[013](013-generics.md) leaves open. The refusal has to name the *descriptor*
-and not the call site, because there is no call site: that is the whole shape
-of the bug.
+with `<reason>` the whole of what `ir` said, which is one of three: no archive
+this compilation read holds the body, or the foreign walk refuses it and the
+message names the code, or it is a generic method, which
+[013](013-generics.md) leaves open. The refusal names the *descriptor* and not
+the call site, because there is no call site: that is the whole shape of the
+bug. Both branches are gated:
+`TestForeignMethodSetRefusesTheDescriptorAndNotTheCallSite` asserts the
+refusal, and `TestForeignMethodSetIsNotRefusedWhenNoDescriptorNamesIt` asserts
+that a package which writes no descriptor for the type is not refused, because
+the bodies are owed by whoever writes the descriptor.
 
 The refusal that must **not** be written is the tempting one: emitting the
 descriptor with a shortened method list. `reflect.Type.NumMethod` would then
@@ -648,13 +799,13 @@ every exported declaration of a package, which is what finds a declaration a
 file omits rather than one a build happens not to reach. It runs over the
 standard library and has never been pointed at nanogo's own 19 packages.
 
-**Whether stage 3's cost is acceptable is not measured.** `instantiateType`'s
-comment asserts that building the method set of every foreign instantiation
-would read an archive for every type a package's types transitively hold. That
-is an argument and not a measurement, and the set stage 3 needs is smaller than
-the set the comment describes, because it is bounded by the descriptors the
-package actually emits. What settles it is a compile time comparison on
-`types2`, which is the largest of the 19.
+**Stage 3's cost is measured and the table is above.** `types2` gains eight
+text symbols and 7,062 archive bytes, `dist` gains four and 3,552, and neither
+compile time moves outside its own run-to-run spread. What is *not* measured is
+the shape of the cost on a package whose type closure holds many foreign
+instantiations rather than two, because nanogo's own 19 packages hold two. A
+standard library package with a wider closure would be the reading that settles
+it, and `internal/selfhost`'s closure measurement is where it would be taken.
 
 **Whether the two [032](032-type-descriptors-and-itabs.md) classes are one bug
 or two is not settled here.** `type:[10][]string` naming an undefined

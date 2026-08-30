@@ -1494,3 +1494,84 @@ func TestRtypeSizeHonoursTheZeroFilledKind(t *testing.T) {
 		}
 	}
 }
+
+// cellInstantiation is one instantiation of a generic type another package
+// declares, with one method whose body ir.Build could not read.
+//
+// Load stands for the method that was built and Swap for the one that was
+// not, which is the shape specs/017-export-data-reading.md measured: the
+// descriptor names four methods and the object holds the ones the source
+// calls.
+func cellInstantiation() (*ir.Package, *ir.Type) {
+	sig := &ir.Type{Kind: ir.FuncKind, Params: []*ir.Type{}, Results: []*ir.Type{}}
+	inst := &ir.Type{
+		Kind: ir.Struct, Name: "sync/atomic.Pointer[[]int]", PkgPath: "sync/atomic",
+		Methods: []ir.Method{
+			{Name: "Load", Sig: sig, PtrOnly: true},
+			{Name: "Swap", Sig: sig, PtrOnly: true},
+		},
+	}
+	p := &ir.Package{Path: "p", Name: "p", ForeignInsts: []ir.ForeignInstantiation{{
+		Type:   inst,
+		Origin: "sync/atomic",
+		Decl:   "Pointer",
+		Methods: []ir.ForeignMethod{
+			{Name: "Load", Sym: "sync/atomic.(*Pointer[[]int]).Load", PtrOnly: true},
+			{Name: "Swap", Sym: "sync/atomic.(*Pointer[[]int]).Swap", PtrOnly: true,
+				Reason: "the archive holds no body for it"},
+		},
+	}}}
+	return p, inst
+}
+
+// TestForeignMethodSetRefusesTheDescriptorAndNotTheCallSite is stage 3's
+// refusal, from specs/017-export-data-reading.md.
+//
+// The descriptor of an instantiation names its whole method set, so an object
+// that writes it and defines less than the whole of it links against nothing.
+// The refusal has to name the descriptor, because there is no call site: a
+// method nothing calls is exactly the one that is missing.
+func TestForeignMethodSetRefusesTheDescriptorAndNotTheCallSite(t *testing.T) {
+	p, inst := cellInstantiation()
+	ptr := &ir.Type{Kind: ir.Ptr, Elem: inst}
+
+	err := checkForeignMethodSets(&Config{Package: "p"}, p, []*ir.Type{ptr})
+	if err == nil {
+		t.Fatal("the object writes the descriptor of the instantiation and one of its methods has no body, and the package was not refused")
+	}
+	var ue *UnsupportedError
+	if !errors.As(err, &ue) {
+		t.Fatalf("the refusal is %T and a package nanogo cannot compile is an *UnsupportedError: %v", err, err)
+	}
+	for _, want := range []string{
+		"the descriptor of *sync/atomic.Pointer[[]int]",
+		"the method Swap",
+		"an instantiation of Pointer",
+		"declared in sync/atomic",
+		"the archive holds no body for it",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not say %q:\n%s", want, err)
+		}
+	}
+}
+
+// TestForeignMethodSetIsNotRefusedWhenNoDescriptorNamesIt is the other side of
+// the same rule.
+//
+// A package that holds a value of the type and writes no descriptor for it
+// owes no body: whoever writes the descriptor owes them. Refusing here would
+// refuse a package for a symbol nothing in the program asks for.
+func TestForeignMethodSetIsNotRefusedWhenNoDescriptorNamesIt(t *testing.T) {
+	p, inst := cellInstantiation()
+	other := &ir.Type{Kind: ir.Int64, Name: "int"}
+
+	if err := checkForeignMethodSets(&Config{Package: "p"}, p, []*ir.Type{other}); err != nil {
+		t.Errorf("the object writes no descriptor of the instantiation and the package was refused: %v", err)
+	}
+	// The value form names only the methods declared with a value receiver,
+	// and both of these are declared on the pointer, so it names neither.
+	if err := checkForeignMethodSets(&Config{Package: "p"}, p, []*ir.Type{inst}); err != nil {
+		t.Errorf("the descriptor of the value form names no pointer method and the package was refused: %v", err)
+	}
+}
