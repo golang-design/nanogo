@@ -120,12 +120,25 @@ func sweep(t *testing.T, only map[string]bool) *gotest.Report {
 	nanogo, goCmd, work, cache := tools(t)
 	start := time.Now()
 	rep, err := gotest.Sweep(gotest.Options{
-		Corpus:  corpusDir(t),
-		Work:    work,
-		Nanogo:  nanogo,
-		Go:      goCmd,
-		Cache:   cache,
-		Timeout: 90 * time.Second,
+		Corpus: corpusDir(t),
+		Work:   work,
+		Nanogo: nanogo,
+		Go:     goCmd,
+		Cache:  cache,
+		// Generous on purpose. This bounds a nanogo bug, an infinite loop it
+		// generated or a compile that does not finish, and it is not a
+		// performance budget. A recipe that spawns the toolchain several
+		// times legitimately takes tens of seconds: linkmain_run.go runs
+		// go tool compile and go tool link and takes about 44 seconds on an
+		// idle machine.
+		//
+		// It was 90 seconds, and that was close enough to 44 that a loaded
+		// machine crossed it. A refresh taken while four other test binaries
+		// were running classed linkmain_run.go as timed-out, and because the
+		// ratchet records it as matched, that reads as a regression and fails
+		// the build. A gate that fails on machine load is a gate people learn
+		// to re-run rather than read.
+		Timeout: 180 * time.Second,
 		Only:    only,
 	})
 	if err != nil {
