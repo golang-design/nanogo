@@ -111,7 +111,34 @@ three classes. Two of the classes are closed and this is the third, which owns
 the gate: `ir/stencil.go` builds a method of a foreign instantiation only where
 that method is called, so the descriptor of
 `sync/atomic.Pointer[[]*syntax.SrcFile]` promises four methods and `syntax`'s
-object defines the two it calls. Two relocations remain, both of them that.
+object defines the two it calls.
+
+**Every relocation is closed and stage 1 of the three-stage build passes.**
+nanogo compiles all 19 of its own packages and `main`, the objects link, and
+the executable runs:
+
+```
+$ nanogo-N2 version
+nanogo b46003a+dirty (objects for darwin/arm64, compatible with go1.27.0, host darwin/arm64)
+```
+
+N2 is a working compiler on ordinary input. It builds and runs a Go program
+that prints 42, compiled by N2 alone.
+
+**Stage 2 does not pass.** N2 compiling nanogo's own source panics in its own
+type checker, on `rtsym`, `types2/errors` and `obj/arm64` among others:
+
+```
+nanogo: golang.design/x/nanogo/rtsym: the type checker panicked:
+runtime error: invalid memory address or nil pointer dereference
+```
+
+So N2 compiles nothing of nanogo and N3 does not exist. The fault is a
+miscompilation in code N2 contains, and it is the first fault of its kind this
+project has been able to see: it is reachable only by running a compiler nanogo
+built, over input large enough to need it. [060](060-selfhost.md) predicted
+this shape and could not predict the fault, which is the argument for running
+the stage before it can pass.
 
 The gap is not new at G1 and it is not caused by G1. It is **revealed** there.
 `gc` emits a whole instantiation `dupok` in every package that reaches it, and

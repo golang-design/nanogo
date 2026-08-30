@@ -14,7 +14,33 @@ The G1 gate of [001](001-bootstrap-gates.md), as a procedure that can be run.
 
 ## Where this procedure stands
 
-Stage 1 does not start, and what stops it is no longer the language. All 19 of
+**Stage 1 passes.** nanogo compiles all 19 of its own packages and `main`, the
+objects link, and $N_2$ runs and reports its version. $N_2$ is a working
+compiler on ordinary input: it builds a Go program that prints 42, and the
+program runs.
+
+**Stage 2 fails, and it fails in a way only stage 2 could show.** $N_2$
+compiling nanogo's own source panics inside its own type checker:
+
+```
+nanogo: golang.design/x/nanogo/rtsym: the type checker panicked:
+runtime error: invalid memory address or nil pointer dereference
+```
+
+`rtsym`, `types2/errors` and `obj/arm64` are among the packages that do it, so
+$N_2$ compiles none of nanogo and $N_3$ does not exist. The fault is a
+miscompilation in code $N_2$ contains. It is not reachable by any test in this
+repository: every one of them runs a compiler that `gc` built, and this needs a
+compiler that nanogo built, over input large enough to reach the fault. The
+smallest program compiled by $N_2$ is correct, so the fault is not in the
+common path.
+
+That is the whole argument for running a stage before it can pass. This
+document predicted the shape and could not predict the fault.
+
+### What used to stop stage 1 from starting
+
+The language, and then three classes of relocation. All 19 of
 nanogo's own library packages compile, each measured on its own, and the
 section below records that and the harness that keeps it true.
 
