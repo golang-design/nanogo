@@ -392,11 +392,35 @@ jobs:
     # -coverpkg=./... measures every package from every test binary, so a
     # package tested only through its caller gets the credit it earned. The
     # cost is duplicate blocks, one per binary, which the gate merges.
+    #
+    # internal/e2e is left out of the list of binaries to run, and only that
+    # list: -coverpkg still names every package, so every number this job
+    # gates is measured the same way it was before. It can be left out because
+    # it cannot contribute. It holds no file that is not a _test.go, so it has
+    # no statement of its own to cover, and it imports no package of this
+    # module at all: its one mention of nanogo is a string in an exec.Command.
+    # Every build it makes is a subprocess, and a subprocess carries none of
+    # its coverage back.
+    #
+    # What it does have is the longest run in the suite, and instrumenting
+    # every package makes it longer. It reached the 40 minute limit here and
+    # took the job down with a timeout, which names the clock and not the
+    # fault. It still runs, in the test job, where it proves what it is for.
+    #
+    # NANOGO_FACTS_CHILD marks this process as one that is measuring rather
+    # than checking, which is what internal/hygiene's own derivation sets on
+    # its children. Without it the facts gate starts a second `go test ./...`
+    # with coverage from inside a job that is already doing exactly that, and
+    # that nested run is what reached the limit in internal/hygiene. The gates
+    # it skips here all run in the test job, on both runners.
     - name: Measure
       env:
         NANOGO_REQUIRE_CORPUS: '1'
         NANOGO_REQUIRE_LINK: '1'
-      run: go test -timeout 40m -coverprofile=cover.out -coverpkg=./... ./...
+        NANOGO_FACTS_CHILD: '1'
+      run: |
+        go test -timeout 40m -coverprofile=cover.out -coverpkg=./... \
+          $(go list ./... | grep -v '/internal/e2e$')
 
     # Per package, never one repository average. An average lets a well-tested
     # package carry an untested one and reports a number nobody can act on:
