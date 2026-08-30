@@ -41,6 +41,15 @@ var comparisons int
 
 func TestMain(m *testing.M) {
 	code := m.Run()
+	// The link configurations are shared by every test in the package, so
+	// they outlive all of them and only TestMain can remove them.
+	for _, c := range []*linkCfg{hostCfg, dwarf5Cfg} {
+		for _, dir := range []string{c.work, c.dir} {
+			if dir != "" {
+				os.RemoveAll(dir)
+			}
+		}
+	}
 	fmt.Fprintf(os.Stderr, "ssagen: %d instructions compared against the toolchain\n", comparisons)
 	// A run that compared nothing is a run where the oracle was absent and
 	// the tests passed on their own word. CI sets NANOGO_REQUIRE_CORPUS and
@@ -395,6 +404,14 @@ type linkCfg struct {
 	link    string // importcfg.link, for go tool link
 	compile string // the main package's importcfg, for go tool compile
 	err     error
+
+	// The two directories build leaves behind, held so TestMain can remove
+	// them. Both are needed: dir is the stub's own, and work is the one the
+	// go command keeps because build passes -work to be told where the
+	// import configurations were written. Neither was held until August 2026
+	// and the package leaked 432 directories.
+	dir  string
+	work string
 }
 
 var (
@@ -428,6 +445,7 @@ func (c *linkCfg) build(t *testing.T) {
 			c.err = err
 			return
 		}
+		c.dir = dir
 		files := map[string]string{
 			"go.mod": "module nanogo.example/link\n\ngo 1.27\n",
 			// The imports of this probe decide the importcfg every caller in
@@ -458,6 +476,7 @@ func (c *linkCfg) build(t *testing.T) {
 				work = strings.TrimSpace(w)
 			}
 		}
+		c.work = work
 		if work == "" {
 			c.err = fmt.Errorf("go build did not report its work directory:\n%s", out)
 			return

@@ -62,8 +62,11 @@ func hostRunsNanogoOutput(t *testing.T) {
 // either compiler produces for a probe is ever a cache hit and only the
 // standard library is replayed; replaying it is the difference between a two
 // minute sweep and a twenty minute one. The directory is under TMPDIR and
-// removed by the process that made it, because a t.TempDir would be removed
-// when the first test that asked for it finished.
+// removed by TestMain, because a t.TempDir would be removed when the first
+// test that asked for it finished and the second would find the tools gone.
+//
+// TestMain is the whole of the removal. It was missing until August 2026 and
+// the probes leaked 145 directories, 7.1GB.
 var (
 	toolsOnce sync.Once
 	toolsBin  string
@@ -71,6 +74,16 @@ var (
 	toolsRoot string
 	toolsErr  error
 )
+
+// TestMain removes the installation and cache that tools built, which no test
+// can remove for itself: they outlive every test in the package.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if toolsRoot != "" {
+		os.RemoveAll(toolsRoot)
+	}
+	os.Exit(code)
+}
 
 func tools(t *testing.T) (nanogo, goCmd, cache string) {
 	t.Helper()
