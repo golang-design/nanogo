@@ -893,9 +893,8 @@ func (a *abiPass) resultTypes() []*ir.Type {
 	return nil
 }
 
-// abiOperandTypes returns the types of v's operands from lo, without the
-// memory argument.
-func abiOperandTypes(v *Value, lo int) []*ir.Type {
+// abiOperands returns v's operands from lo, without the memory argument.
+func abiOperands(v *Value, lo int) []*Value {
 	args := v.Args
 	if len(args) > 0 && IsMemory(args[len(args)-1]) {
 		args = args[:len(args)-1]
@@ -903,7 +902,13 @@ func abiOperandTypes(v *Value, lo int) []*ir.Type {
 	if lo > len(args) {
 		lo = len(args)
 	}
-	args = args[lo:]
+	return args[lo:]
+}
+
+// abiOperandTypes returns the types of v's operands from lo, without the
+// memory argument.
+func abiOperandTypes(v *Value, lo int) []*ir.Type {
+	args := abiOperands(v, lo)
 	out := make([]*ir.Type, 0, len(args))
 	for _, arg := range args {
 		out = append(out, arg.Type)
@@ -937,7 +942,13 @@ func (a *abiPass) rewriteArgs() {
 	for i, o := range a.objs {
 		av := &a.f.ABI.In[i]
 		if len(a.args[i]) != 1 {
-			continue // decomposition already split it
+			if !av.InReg {
+				// Decomposition split the parameter and the convention put
+				// it in the area, so the copy is one store per word and the
+				// rewrite below is homeInArgs read over that list.
+				a.homeSplitInArgs(o, a.args[i], av)
+			}
+			continue
 		}
 		v := a.args[i][0]
 		if v.Type != o.Type || v.AuxInt != 0 || !Multiword(v.Type) {
@@ -1029,10 +1040,128 @@ func (a *abiPass) homeInArgs(arg, st *Value, av *ABIValue) {
 	a.replaceValue(st, st.Args[2])
 	a.kill(st)
 	a.kill(arg)
-	for i, o := range a.f.Frame {
-		if o == av.Obj {
+	a.leaveFrame(av.Obj)
+}
+
+// homeSplitInArgs is homeInArgs for a parameter decomposition already split.
+//
+// The two are one rule of specs/030-abi.md read over two shapes of the entry
+// block. A parameter the registers cannot hold keeps the storage the caller
+// wrote it into, so the copy specs/021-ssa-construction.md made into a frame
+// slot writes the value over itself and goes. Where decomposition left the
+// parameter whole that copy is one store, which homeInArgs deletes. Where
+// decomposition split it the copy is one store per word, and this deletes the
+// whole chain of them.
+//
+// Without it the parameter kept a second slot in the locals and the entry
+// block kept a load per word to fill it. Those loads are the first thing the
+// function does, so the allocator gives them the registers it believes are
+// free, and the registers the caller left the *following* arguments in are
+// exactly the ones nothing in the graph says are taken yet: an OpArg is live
+// from the caller's store and the allocator's range for it begins at its own
+// definition. A method with a wide value receiver is the smallest case, and
+// Go's own test/method5.go is where it prints the receiver's words in place of
+// its arguments.
+func (a *abiPass) homeSplitInArgs(o *ir.Object, args []*Value, av *ABIValue) {
+	sts := a.selfStoreChain(o, args, av)
+	if sts == nil {
+		return
+	}
+	av.Home = true
+	// The stores are a chain, so the memory the first one read is the memory
+	// every reader of the last one reads once they have all gone.
+	a.replaceValue(sts[len(sts)-1], sts[0].Args[2])
+	for _, st := range sts {
+		a.kill(st)
+	}
+	for _, arg := range args {
+		a.kill(arg)
+	}
+	a.leaveFrame(av.Obj)
+}
+
+// selfStoreChain returns the stores that write the words of one decomposed
+// parameter into its frame home, in word order, or nil when the words are read
+// any other way.
+//
+// It is selfStore over a list, and it is exact for the same reason: a looser
+// match would delete a store that writes something else, or one whose
+// destination is not this parameter's own slot. The word order is the
+// placement's, matched on the byte offset each OpArg carries, so a list in any
+// other order is not this shape. Every store but the last has to be read by
+// the next one alone, because only the last one's readers are moved.
+func (a *abiPass) selfStoreChain(o *ir.Object, args []*Value, av *ABIValue) []*Value {
+	if o == nil || len(args) == 0 || len(args) != len(av.Parts) {
+		return nil
+	}
+	out := make([]*Value, 0, len(args))
+	for k := range av.Parts {
+		p := &av.Parts[k]
+		arg := args[k]
+		if p.Type == nil || arg.Type == nil || arg.AuxInt != p.Off || arg.Type.Size != p.Type.Size {
+			return nil
+		}
+		if int(arg.ID) >= len(a.users) || len(a.users[arg.ID]) != 1 {
+			return nil
+		}
+		st := a.users[arg.ID][0]
+		if st.Op != OpStore || len(st.Args) != 3 || st.Args[1] != arg {
+			return nil
+		}
+		if st.AuxInt != p.Type.Size || st.Block != arg.Block {
+			return nil
+		}
+		if !abiAddressesPart(st.Args[0], o, p.Off) {
+			return nil
+		}
+		if k > 0 {
+			prev := out[k-1]
+			if st.Args[2] != prev {
+				return nil
+			}
+			if int(prev.ID) >= len(a.users) || len(a.users[prev.ID]) != 1 {
+				return nil
+			}
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// abiAddressesPart reports whether dst is the address of the word at off of
+// o's own slot.
+//
+// specs/021-ssa-construction.md names the slot with OpLocalAddr and every word
+// above the first is reached by an OpOffPtr on it, which is the address
+// arithmetic partAddr makes and decomposition leaves behind.
+func abiAddressesPart(dst *Value, o *ir.Object, off int64) bool {
+	if dst == nil {
+		return false
+	}
+	if dst.Op == OpOffPtr && len(dst.Args) == 1 {
+		if dst.AuxInt != off {
+			return false
+		}
+		dst = dst.Args[0]
+		off = 0
+	}
+	if off != 0 || dst == nil || dst.Op != OpLocalAddr {
+		return false
+	}
+	d, ok := dst.Aux.(*ir.Object)
+	return ok && d == o
+}
+
+// leaveFrame drops a parameter whose storage is the incoming argument area
+// from the locals.
+//
+// The frame layout must not give it a second slot, and the collector reads it
+// through the arguments bitmap instead of the locals bitmap.
+func (a *abiPass) leaveFrame(o *ir.Object) {
+	for i, have := range a.f.Frame {
+		if have == o {
 			a.f.Frame = append(a.f.Frame[:i:i], a.f.Frame[i+1:]...)
-			break
+			return
 		}
 	}
 }
@@ -1331,104 +1460,230 @@ func (a *abiPass) rewriteBoundaries() error {
 
 // splitOperands places the operands of one call.
 //
-// It records the placement whenever it changes the operand list, because the
-// list then stops describing what the call passes: a copied value is not in it
-// at all, and a value split into one operand per register has a spill slot the
-// parts do not add up to, since the value's own alignment padding is in it and
-// theirs is not. Every reader of the placement, the register allocator and the
-// code generator both, takes the record rather than walking the list again.
+// It is rewriteResults for a call, and it walks the same two lists: the
+// callee's declared arguments, which is what the convention is assigned over,
+// and the operands, which are the machine words decomposition left in their
+// place. abiCallArgs maps one onto the other.
+//
+// It records the placement whether or not it changes the operand list, because
+// the operand list is not the list the placement is over. A copied value is
+// not in it at all, a value split into one operand per register has a spill
+// slot the parts do not add up to, and a value the registers cannot hold that
+// decomposition split is one operand per word over a placement made for the
+// whole. Every reader of the placement, the register allocator and the code
+// generator both, takes the record rather than walking the list again.
 func (a *abiPass) splitOperands(v *Value) error {
 	lo := abiCallPrefix(v)
-	types := abiOperandTypes(v, lo)
+	ops := abiOperands(v, lo)
+	types, spans := abiCallArgs(v, ops)
+	if types == nil {
+		return nil
+	}
 	// The call's results are walked with its arguments, because the spill
 	// slots the size covers sit above both.
 	place, _, size, err := ABIWalk(a.t, types, abiCallResultTypes(v), nil)
-	if err != nil || len(place) != len(v.Args)-lo-a.memArgs(v) {
+	if err != nil || len(place) != len(types) {
 		return nil
 	}
 	mem := a.memoryOf(v)
 
-	rec := &ABICall{Size: size, Vals: make([]ABIValue, 0, len(place))}
+	rec := &ABICall{Size: size, Vals: make([]ABIValue, 0, len(ops)+len(place))}
 	args := make([]*Value, 0, len(v.Args)+len(place))
 	args = append(args, v.Args[:lo]...)
 	changed := false
 	copies := 0
+	at := 0
 	for i := range place {
 		av := &place[i]
-		arg := v.Args[lo+i]
+		from, to := at, at+spans[i]
+		at = to
+		// A value decomposition left whole, which is the one shape the copy
+		// and the register split below have an address to work from.
+		whole := to-from == 1 && ops[from] != nil && Multiword(ops[from].Type)
 		switch {
-		case av.InReg && len(av.Parts) >= 2 && Multiword(arg.Type):
-			parts := a.loadParts(v, arg, av, mem)
-			if parts == nil {
-				args = append(args, arg)
+		case av.Type.Size == 0 || len(av.Parts) == 0:
+			// No width, so no register and no word. The operands, if there
+			// are any, are placed where they are.
+			for k := from; k < to; k++ {
+				args = append(args, ops[k])
 				rec.Vals = append(rec.Vals, *av)
-				continue
+			}
+
+		case av.InReg && whole && len(av.Parts) >= 2:
+			parts := a.loadParts(v, ops[from], av, mem)
+			if parts == nil {
+				args = append(args, ops[from])
+				rec.Vals = append(rec.Vals, *av)
+				break
 			}
 			args = append(args, parts...)
 			// One entry per operand, each one word wide, at the offset the
 			// whole value's slot puts it. That is where the callee spills the
 			// register the word arrived in.
-			for j := range av.Parts {
-				rec.Vals = append(rec.Vals, abiWordValue(av, j))
+			for k := range av.Parts {
+				rec.Vals = append(rec.Vals, abiWordValue(av, k))
 			}
 			changed = true
 
-		case !av.InReg && av.Type.Size > 0 && mem != nil:
-			src := a.addressOf(v, arg)
+		case !av.InReg && whole && Multiword(av.Type) && mem != nil:
+			src := a.addressOf(v, ops[from])
 			if src == nil {
-				if Multiword(av.Type) {
-					// One value the machine has no move for, left as an
-					// operand for the code generator, which has no move for it
-					// either. Reporting it here names the function and the
-					// type; leaving it reached "no arm64 rule lowered this
-					// operation", which is a panic and names neither.
-					//
-					// A scalar in the stack part is the other case and is not
-					// this one: it is one machine value, the code generator
-					// stores it into the area, and there is nothing to copy.
-					return fmt.Errorf("ssa: abi: %s: v%d: an argument of %s does not fit the registers, and the value it is read from is not one this pass can copy out of",
-						a.f.Name, arg.ID, abiTypeName(av.Type))
-				}
-				args = append(args, arg)
-				rec.Vals = append(rec.Vals, *av)
-				continue
+				// One value the machine has no move for, left as an operand
+				// for the code generator, which has no move for it either.
+				// Reporting it here names the function and the type; leaving
+				// it reached "no arm64 rule lowered this operation", which is
+				// a panic and names neither.
+				return fmt.Errorf("ssa: abi: %s: v%d: an argument of %s does not fit the registers, and the value it is read from is not one this pass can copy out of",
+					a.f.Name, ops[from].ID, abiTypeName(av.Type))
 			}
 			o := a.home("~a", copies, av.Type, av.Off, false)
 			copies++
 			mem = a.copyInto(v, v.Block, o, av.Type, src, mem)
-			a.kill(arg)
+			a.kill(ops[from])
 			c := *av
 			c.Copied = true
 			rec.Vals = append(rec.Vals, c)
 			changed = true
 
+		case to-from == len(av.Parts):
+			// One operand per word already. Each takes the register its part
+			// travels in, or the word of the area the part sits at. A scalar
+			// the registers could not hold is this case with one part, and
+			// the code generator stores it into the area.
+			for k := from; k < to; k++ {
+				args = append(args, ops[k])
+				rec.Vals = append(rec.Vals, abiWordValue(av, k-from))
+			}
+
 		default:
-			args = append(args, arg)
-			rec.Vals = append(rec.Vals, *av)
+			for k := from; k < to; k++ {
+				args = append(args, ops[k])
+				rec.Vals = append(rec.Vals, *av)
+			}
 		}
 	}
-	if !changed {
-		return nil
+	if changed {
+		args = append(args, v.Args[lo+len(ops):]...)
+		if mem != nil {
+			// The copies wrote into the area, so the call reads the memory
+			// they produced and not the memory they read.
+			args[len(args)-1] = mem
+		}
+		setArgs(v, args...)
 	}
-	args = append(args, v.Args[lo+len(place):]...)
-	if mem != nil {
-		// The copies wrote into the area, so the call reads the memory they
-		// produced and not the memory they read.
-		args[len(args)-1] = mem
-	}
-	setArgs(v, args...)
+	// The record is kept whether or not the operand list changed, for the
+	// reason rewriteResults keeps its own: the placement is over the declared
+	// arguments either way and a walk of the operand list is not it.
 	if int(v.ID) < len(a.f.ABI.Calls) {
 		a.f.ABI.Calls[v.ID] = rec
 	}
 	return nil
 }
 
-// memArgs counts the memory operand a value carries, which is one or none.
-func (a *abiPass) memArgs(v *Value) int {
-	if a.memoryOf(v) != nil {
-		return 1
+// abiCallArgs returns the list the convention places a call's arguments over
+// and how many operands each entry of it occupies.
+//
+// It is the argument half of the rule declaredResults states for the results.
+// Assignment is all-or-nothing per entry of the list it walks, so a list of
+// machine words and a list of declared arguments give the same registers in
+// the same order only while the register set holds them both. Above that they
+// part: gc gives a call of fifteen scalar words followed by a two-word struct
+// the sixteenth register to nothing and puts the whole struct in the area,
+// where a walk of the words puts the struct's first word in that register and
+// only its second in the area. That is a caller writing one half of an
+// argument where the callee reads neither, and only a comparison against gc
+// reports it.
+//
+// The fallback is the operand list, one entry each, which is the list that was
+// walked before the declared one was read and which agrees with the declared
+// walk wherever no register file runs out inside one argument. It is taken for
+// a call with no signature, which is a call built by hand or created by a pass
+// below ssa.Build, and for one whose operands abiCallArgTypes cannot map onto
+// the signature.
+func abiCallArgs(v *Value, ops []*Value) ([]*ir.Type, []int) {
+	if types, spans, ok := abiCallArgTypes(v, ops); ok {
+		return types, spans
 	}
-	return 0
+	types := make([]*ir.Type, 0, len(ops))
+	spans := make([]int, 0, len(ops))
+	for _, op := range ops {
+		if op == nil || op.Type == nil {
+			return nil, nil
+		}
+		types = append(types, op.Type)
+		spans = append(spans, 1)
+	}
+	return types, spans
+}
+
+// abiCallArgTypes reads the declared argument list off the callee's signature
+// and maps the call's operands onto it.
+//
+// The signature's parameter list is not the whole of that list. ir.Converter
+// keeps a method's receiver out of Params, the way types2 keeps it out of
+// Params and in Recv, so the operands of a call to a method of a concrete type
+// are the receiver and then the words of the parameters, and the operands of a
+// call to a method of an interface are the receiver's data word and then the
+// same. The receiver is therefore recovered from the operand list rather than
+// from the signature: the declared list is either the parameters alone or one
+// leading operand and then the parameters, and the span walk of
+// abiResultSpans says which of the two consumes the operands exactly.
+//
+// Both consuming them exactly is an ambiguity, and an ambiguity is not an
+// answer: placing the operands over the wrong one of the two would put an
+// argument in a register the callee does not read. The walk of the operand
+// list is taken instead, which is what this compiler did before the declared
+// list was read at all.
+//
+// A receiver decomposition split is the shape neither candidate matches, since
+// its declared type is then in no operand and in no list. The walk of the
+// operand list is taken there too, and specs/030-abi.md names it as the bound
+// that is left.
+func abiCallArgTypes(v *Value, ops []*Value) ([]*ir.Type, []int, bool) {
+	sig := v.Sig
+	if sig == nil || sig.Kind != ir.FuncKind || sig.Params == nil {
+		return nil, nil, false
+	}
+	params := make([]*ir.Type, 0, len(sig.Params)+1)
+	for _, p := range sig.Params {
+		if p == nil {
+			return nil, nil, false
+		}
+		params = append(params, p)
+	}
+	var types []*ir.Type
+	var spans []int
+	found := 0
+	for pre := 0; pre <= 1; pre++ {
+		if pre > len(ops) {
+			break
+		}
+		try := params
+		if pre == 1 {
+			if ops[0] == nil || ops[0].Type == nil {
+				continue
+			}
+			try = append([]*ir.Type{ops[0].Type}, params...)
+		}
+		place := make([]ABIValue, len(try))
+		for i, t := range try {
+			if t == nil {
+				return nil, nil, false
+			}
+			parts, _ := ABILeaves(t)
+			place[i] = ABIValue{Type: t, Parts: parts}
+		}
+		sp, ok := abiResultSpans(place, ops)
+		if !ok {
+			continue
+		}
+		found++
+		types, spans = try, sp
+	}
+	if found != 1 {
+		return nil, nil, false
+	}
+	return types, spans, true
 }
 
 // loadParts returns one load per register of a whole aggregate operand, or nil

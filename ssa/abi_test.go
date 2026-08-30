@@ -1877,3 +1877,410 @@ func TestAssignABIFallsBackToTheReturnWithoutASignature(t *testing.T) {
 		}
 	}
 }
+
+// TestAssignABIHomesAnArgumentDecompositionAlreadySplit is the second shape of
+// the rule TestAssignABIHomesALargeArgumentInTheArea covers.
+//
+// A parameter the registers cannot hold keeps the storage the caller wrote it
+// into, whether decomposition left it whole or split it into one value per
+// word. Where it split it, specs/021-ssa-construction.md's copy into a frame
+// slot is one store per word and the whole chain writes the value over itself.
+//
+// An array of two words is the smallest case, because Go's convention refuses
+// an array of more than one element a register whatever it holds. Leaving the
+// chain in place left a load per word at the head of the entry block, and
+// those loads take the registers the caller left the *following* arguments in:
+// an OpArg is live from the caller's store and the allocator's range for it
+// begins at its own definition. Go's own test/method5.go is where that prints
+// the receiver's words in place of the arguments.
+func TestAssignABIHomesAnArgumentDecompositionAlreadySplit(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiArray("a2", 2, abiTInt)
+	f, o := abiFuncWithArg(typ)
+	Decompose(f)
+	// Decomposition is what makes this the shape under test. Without it the
+	// parameter reaches the pass whole and the whole-value rewrite covers it.
+	args := 0
+	for _, v := range f.Entry.Values {
+		if v.Op == OpArg {
+			args++
+		}
+	}
+	if args != 2 {
+		t.Fatalf("decomposition left %d arguments, and this test is about the two words\n%s", args, f)
+	}
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	if f.ABI.In[0].InReg {
+		t.Fatalf("the array took registers, and the convention gives an array of two elements none")
+	}
+	for _, v := range f.Entry.Values {
+		if v.Op == OpArg || v.Op == OpStore {
+			t.Errorf("v%d survived, and the copy writes the value over itself\n%s", v.ID, f)
+		}
+	}
+	if len(f.Frame) != 0 {
+		t.Errorf("the parameter is still a local, and its storage is the argument area")
+	}
+	off, ok := f.ABI.ArgHome(o)
+	if !ok || off != 0 {
+		t.Errorf("the parameter is homed at %d (%v), want 0", off, ok)
+	}
+	found := false
+	for _, v := range f.Entry.Values {
+		if v.Op == OpLocalAddr && v.Aux == any(o) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the address of the parameter is gone, and the body reads it through that address")
+	}
+}
+
+// TestAssignABIKeepsAStoreChainItDoesNotOwn holds the match of selfStoreChain
+// exact.
+//
+// A word of a parameter written anywhere but that parameter's own slot is not
+// the copy specs/021-ssa-construction.md makes, so deleting it would delete a
+// store the program wrote.
+func TestAssignABIKeepsAStoreChainItDoesNotOwn(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiArray("a2", 2, abiTInt)
+	f, o := abiFuncWithArg(typ)
+	Decompose(f)
+	// The second word goes to a slot of its own, so the chain is no longer
+	// one parameter written over itself.
+	other := &ir.Object{Name: "q", Type: typ, Class: ir.ClassLocal}
+	f.Frame = append(f.Frame, other)
+	moved := false
+	for _, v := range f.Entry.Values {
+		if v.Op != OpStore || v.AuxInt != 8 || v.Args[0].Op != OpOffPtr {
+			continue
+		}
+		addr := v.Args[0].Args[0]
+		if addr.Op == OpLocalAddr && addr.Aux == any(o) {
+			addr.Aux = other
+			moved = true
+		}
+	}
+	if !moved {
+		t.Fatalf("the store of the second word was not found\n%s", f)
+	}
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	if f.ABI.In[0].Home {
+		t.Error("the parameter was homed in the area, and one of its words is written elsewhere")
+	}
+	stores := 0
+	for _, v := range f.Entry.Values {
+		if v.Op == OpStore {
+			stores++
+		}
+	}
+	if stores != 2 {
+		t.Errorf("%d stores are left, and neither of the two is this pass's to delete\n%s", stores, f)
+	}
+}
+
+// abiCallWithSig builds a call to a function of the given signature, with the
+// operands given, and returns the function and the call.
+func abiCallWithSig(sig *ir.Type, operand func(b *Block, mem *Value) []*Value) (*Func, *Value) {
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	args := append(operand(b, mem), mem)
+	call := b.NewValue(0, OpStaticCall, MemType, args...)
+	call.Aux = &ir.Object{Name: "main.g"}
+	call.Sig = sig
+	b.Control = b.NewValue(0, OpMakeResult, MemType, call)
+	return f, call
+}
+
+// TestAssignABIPlacesArgumentsOverTheDeclaredList is the argument half of
+// TestAssignABIPlacesResultsOverTheDeclaredList.
+//
+// Assignment is all-or-nothing per entry of the list it walks, so a list of
+// machine words and a list of declared arguments part as soon as a register
+// file runs out inside one argument. Fifteen integers and a two-word struct is
+// where: gc leaves the sixteenth integer register unused and puts the whole
+// struct in the area, and a walk of the words puts the struct's first word in
+// that register and only its second in the area.
+//
+// The float after it is the other half of the same rule. The two register
+// files are counted apart, so an argument in the area does not push the ones
+// after it out of their own file.
+func TestAssignABIPlacesArgumentsOverTheDeclaredList(t *testing.T) {
+	tg := NewArm64Target()
+	p := abiStruct("P", 2, abiTInt)
+	params := make([]*ir.Type, 0, 18)
+	for i := 0; i < 15; i++ {
+		params = append(params, abiTInt)
+	}
+	params = append(params, p, abiTInt, abiTF64)
+	sig := &ir.Type{Kind: ir.FuncKind, Name: "func(...)", Params: params, Results: []*ir.Type{}}
+
+	f, call := abiCallWithSig(sig, func(b *Block, mem *Value) []*Value {
+		out := make([]*Value, 0, 19)
+		for i := 0; i < 15; i++ {
+			out = append(out, b.NewValue(0, OpConstInt, abiTInt))
+		}
+		// The struct reaches the call as the two words decomposition left of
+		// it, which is the list the placement is not over.
+		out = append(out, b.NewValue(0, OpConstInt, abiTInt), b.NewValue(0, OpConstInt, abiTInt))
+		out = append(out, b.NewValue(0, OpConstInt, abiTInt))
+		out = append(out, b.NewValue(0, OpConstFloat, abiTF64))
+		return out
+	})
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	vals, lo, size, err := ABICallArgs(tg, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lo != 0 || len(vals) != 19 {
+		t.Fatalf("a static call with nineteen operands gave lo=%d and %d placements", lo, len(vals))
+	}
+	for i := 0; i < 15; i++ {
+		if !vals[i].InReg || vals[i].Parts[0].Reg != tg.ArgRegs[ClassInt][i] {
+			t.Errorf("integer %d is in %v, want %v", i, vals[i].Parts[0].Reg, tg.ArgRegs[ClassInt][i])
+		}
+	}
+	// The struct is all-or-nothing, so neither of its words takes the
+	// sixteenth register and both sit in the first two words of the area.
+	for i, want := range []int64{0, 8} {
+		av := &vals[15+i]
+		if av.InReg {
+			t.Errorf("word %d of the struct took a register, and the struct does not fit", i)
+		}
+		if av.Off != want {
+			t.Errorf("word %d of the struct is at %d, want %d", i, av.Off, want)
+		}
+	}
+	// The integer after it takes the register the struct did not.
+	if !vals[17].InReg || vals[17].Parts[0].Reg != tg.ArgRegs[ClassInt][15] {
+		t.Errorf("the integer after the struct is in %v, want %v", vals[17].Parts[0].Reg, tg.ArgRegs[ClassInt][15])
+	}
+	// The float is in the first register of its own file, which the integers
+	// did not touch.
+	if !vals[18].InReg || vals[18].Parts[0].Reg != tg.ArgRegs[ClassFloat][0] {
+		t.Errorf("the float is in %v, want %v", vals[18].Parts[0].Reg, tg.ArgRegs[ClassFloat][0])
+	}
+	// gc gives this call 152 bytes: sixteen for the struct, then one spill
+	// slot per value that travelled in a register.
+	if size != 152 {
+		t.Errorf("the outgoing area is %d bytes, and gc gives it 152", size)
+	}
+}
+
+// TestAssignABIPlacesAReceiverAheadOfTheParameters keeps a method call right.
+//
+// ir.Converter keeps a method's receiver out of a signature's parameter list,
+// the way types2 keeps it out of Params and in Recv, so a call to a method of
+// a concrete type passes one operand more than the signature declares. Reading
+// the parameter list as though it were the whole of the argument list would
+// place every argument one entry early, which is the receiver's words arriving
+// as the arguments after it.
+func TestAssignABIPlacesAReceiverAheadOfTheParameters(t *testing.T) {
+	tg := NewArm64Target()
+	recv := abiArray("a2", 2, abiTInt)
+	sig := &ir.Type{Kind: ir.FuncKind, Name: "func(int, int8) ()",
+		Params: []*ir.Type{abiTInt, abiTI8}, Results: []*ir.Type{}}
+
+	var load *Value
+	f, call := abiCallWithSig(sig, func(b *Block, mem *Value) []*Value {
+		base := b.NewValue(0, OpArg, abiTPtr)
+		base.Aux = &ir.Object{Name: "p", Type: abiTPtr, Class: ir.ClassLocal}
+		load = b.NewValue(0, OpLoad, recv, base, mem)
+		return []*Value{load, b.NewValue(0, OpConstInt, abiTInt), b.NewValue(0, OpConstInt, abiTI8)}
+	})
+
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+	vals, _, size, err := ABICallArgs(tg, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vals) != 3 {
+		t.Fatalf("%d values are placed, want the receiver and two arguments\n%s", len(vals), f)
+	}
+	if vals[0].InReg || !vals[0].Copied || vals[0].Off != 0 {
+		t.Errorf("the receiver is at %d, in registers %v, copied %v; the convention gives an array of two elements the area",
+			vals[0].Off, vals[0].InReg, vals[0].Copied)
+	}
+	// The two arguments take the first two registers, because the receiver
+	// took none. A file that ran out mid-argument is the only thing that
+	// moves them, and neither of these is that.
+	for i, av := range []*ABIValue{&vals[1], &vals[2]} {
+		if !av.InReg || av.Parts[0].Reg != tg.ArgRegs[ClassInt][i] {
+			t.Errorf("argument %d is in %v, want %v", i, av.Parts[0].Reg, tg.ArgRegs[ClassInt][i])
+		}
+	}
+	// The receiver is in the area already, so the call no longer carries it.
+	if len(call.Args) != 3 {
+		t.Errorf("the call passes %d operands, want two arguments and the memory\n%s", len(call.Args), f)
+	}
+	if size != 32 {
+		t.Errorf("the outgoing area is %d bytes, and gc gives this call 32", size)
+	}
+}
+
+// TestABICallArgTypesFallsBackToTheOperands names the bound
+// specs/030-abi.md leaves.
+//
+// A receiver decomposition split is in no list: the signature does not carry
+// it and the operands are its words rather than its declared type. Neither
+// candidate list consumes the operands, so the placement is the walk of the
+// operand list that this compiler made before it read the declared one, which
+// is right wherever no register file runs out inside one argument.
+func TestABICallArgTypesFallsBackToTheOperands(t *testing.T) {
+	tg := NewArm64Target()
+	sig := &ir.Type{Kind: ir.FuncKind, Name: "func(int) ()",
+		Params: []*ir.Type{abiTInt}, Results: []*ir.Type{}}
+	f, call := abiCallWithSig(sig, func(b *Block, mem *Value) []*Value {
+		// Two words of a receiver and then the one declared parameter.
+		return []*Value{
+			b.NewValue(0, OpConstInt, abiTInt),
+			b.NewValue(0, OpConstInt, abiTInt),
+			b.NewValue(0, OpConstInt, abiTInt),
+		}
+	})
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	ops := abiOperands(call, 0)
+	if _, _, ok := abiCallArgTypes(call, ops); ok {
+		t.Fatal("the operands were mapped onto the signature, and the receiver's declared type is in neither")
+	}
+	vals, _, _, err := ABICallArgs(tg, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vals) != 3 {
+		t.Fatalf("%d values are placed, want one per operand", len(vals))
+	}
+	for i := range vals {
+		if !vals[i].InReg || vals[i].Parts[0].Reg != tg.ArgRegs[ClassInt][i] {
+			t.Errorf("operand %d is in %v, want %v", i, vals[i].Parts[0].Reg, tg.ArgRegs[ClassInt][i])
+		}
+	}
+}
+
+// TestSelfStoreChainRejectsEveryShapeButTheCopy walks the ways a chain of
+// stores is not specs/021-ssa-construction.md's copy of a parameter into its
+// own slot.
+//
+// Deleting one of these would delete a store the program wrote, so the match
+// is exact and each rejection is a case of its own.
+func TestSelfStoreChainRejectsEveryShapeButTheCopy(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiArray("a2", 2, abiTInt)
+
+	// wordStore returns the store of word k of the parameter, by the offset
+	// the placement gives that word.
+	wordStore := func(f *Func, off int64) *Value {
+		for _, v := range f.Entry.Values {
+			if v.Op != OpStore || len(v.Args) != 3 || v.Args[1].Op != OpArg {
+				continue
+			}
+			if v.Args[1].AuxInt == off {
+				return v
+			}
+		}
+		return nil
+	}
+
+	tests := []struct {
+		name   string
+		break_ func(f *Func, o *ir.Object)
+	}{
+		{"a store of the wrong width", func(f *Func, o *ir.Object) {
+			wordStore(f, 8).AuxInt = 4
+		}},
+		{"a word with a second reader", func(f *Func, o *ir.Object) {
+			st := wordStore(f, 0)
+			f.Entry.NewValue(0, OpARM64ADD, abiTInt, st.Args[1], st.Args[1])
+		}},
+		{"a word written at the wrong offset", func(f *Func, o *ir.Object) {
+			wordStore(f, 8).Args[0].AuxInt = 16
+		}},
+		{"a chain the second store does not continue", func(f *Func, o *ir.Object) {
+			st := wordStore(f, 8)
+			st.Args[2] = wordStore(f, 0).Args[2]
+		}},
+		{"a word written through no local address", func(f *Func, o *ir.Object) {
+			st := wordStore(f, 0)
+			st.Args[0] = f.Entry.NewValue(0, OpArg, abiPtrTo(abiTInt))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, o := abiFuncWithArg(typ)
+			Decompose(f)
+			tc.break_(f, o)
+			if err := AssignABI(f, tg); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := f.ABI.ArgHome(o); ok {
+				t.Errorf("the parameter was homed in the area, and the copy is not the one this pass owns\n%s", f)
+			}
+		})
+	}
+}
+
+// TestAssignABIPlacesAnArgumentOfNoWidth keeps a zero-size argument out of the
+// registers and out of the area.
+//
+// It occupies no word, so it takes no register and shifts nothing, and the
+// arguments after it are placed as though it were not there. The operand is
+// still an operand, because the graph passes a value for it.
+func TestAssignABIPlacesAnArgumentOfNoWidth(t *testing.T) {
+	tg := NewArm64Target()
+	sig := &ir.Type{Kind: ir.FuncKind, Name: "func(struct{}, int) ()",
+		Params: []*ir.Type{abiTEmpty, abiTInt}, Results: []*ir.Type{}}
+	f, call := abiCallWithSig(sig, func(b *Block, mem *Value) []*Value {
+		return []*Value{
+			b.NewValue(0, OpConstInt, abiTEmpty),
+			b.NewValue(0, OpConstInt, abiTInt),
+		}
+	})
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatal(err)
+	}
+	vals, _, size, err := ABICallArgs(tg, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vals) != 2 {
+		t.Fatalf("%d values are placed, want one per operand", len(vals))
+	}
+	if len(vals[0].Parts) != 0 {
+		t.Errorf("the empty struct occupies %d words, and it occupies none", len(vals[0].Parts))
+	}
+	if !vals[1].InReg || vals[1].Parts[0].Reg != tg.ArgRegs[ClassInt][0] {
+		t.Errorf("the integer after it is in %v, want the first argument register", vals[1].Parts[0].Reg)
+	}
+	// One spill slot, for the integer alone.
+	if size != 8 {
+		t.Errorf("the outgoing area is %d bytes, want 8", size)
+	}
+}

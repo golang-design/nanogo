@@ -755,3 +755,170 @@ func TestGcAndNanogoAgreeOnAResultTheRegistersCannotHold(t *testing.T) {
 		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
 	}
 }
+
+// The three packages of TestGcAndNanogoAgreeOnArgumentsTheRegistersCannotHold.
+//
+// Every shape here is one the argument placement is easy to get wrong, and
+// every one of them is silent inside a single compiler: a caller and a callee
+// that disagree about the same wrong rule read and write the same words and
+// print the right answer. Only the comparison against gc reports it.
+const wideArgGcLibrary = `package gclib
+
+// A is two words of array. Go's internal ABI passes an array of more than one
+// element in memory whatever it holds, so a value of this type is in the
+// argument area and the arguments after it are still in registers.
+type A [2]uintptr
+
+// P is two words the registers hold when two are left and do not when one is.
+type P struct{ X, Y int }
+
+// W is an aggregate the registers refuse for the same reason A is.
+type W struct {
+	Arr [2]int
+	N   int
+}
+
+//go:noinline
+func (a A) M(x int, b byte) (uintptr, uintptr, int, byte) { return a[0], a[1], x, b }
+
+//go:noinline
+func Wide(w W, x int, b byte, f float64) (int, int, int, int, byte, float64) {
+	return w.Arr[0], w.Arr[1], w.N, x, b, f
+}
+
+//go:noinline
+func Full(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14 int,
+	p P, z int, f float64) (int, int, int, int, int, float64) {
+	return a0, a14, p.X, p.Y, z, f
+}
+
+//go:noinline
+func Vari(w W, prefix int, rest ...int) (int, int, int) {
+	t := 0
+	for _, r := range rest {
+		t = t*10 + r
+	}
+	return w.N, prefix, t
+}
+`
+
+const wideArgNanogoLibrary = `package nglib
+
+import "nanogo.example/widearg/gclib"
+
+//go:noinline
+func Method(a gclib.A, x int, b byte) (uintptr, uintptr, int, byte) { return a.M(x, b) }
+
+//go:noinline
+func Wide(w gclib.W, x int, b byte, f float64) (int, int, int, int, byte, float64) {
+	return w.Arr[0], w.Arr[1], w.N, x, b, f
+}
+
+//go:noinline
+func Full(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14 int,
+	p gclib.P, z int, f float64) (int, int, int, int, int, float64) {
+	return a0, a14, p.X, p.Y, z, f
+}
+
+//go:noinline
+func Vari(w gclib.W, prefix int, rest ...int) (int, int, int) {
+	t := 0
+	for _, r := range rest {
+		t = t*10 + r
+	}
+	return w.N, prefix, t
+}
+
+// The four below call gclib, so nanogo is the caller and gc is the callee.
+
+//go:noinline
+func CallMethod(a gclib.A, x int, b byte) (uintptr, uintptr, int, byte) { return a.M(x, b) }
+
+//go:noinline
+func CallWide(w gclib.W, x int, b byte, f float64) (int, int, int, int, byte, float64) {
+	return gclib.Wide(w, x, b, f)
+}
+
+//go:noinline
+func CallFull(p gclib.P, z int, f float64) (int, int, int, int, int, float64) {
+	return gclib.Full(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, p, z, f)
+}
+
+//go:noinline
+func CallVari(w gclib.W, prefix int) (int, int, int) {
+	return gclib.Vari(w, prefix, 1, 2, 3)
+}
+`
+
+const crossToolchainWideArgProgram = `package main
+
+import (
+	"fmt"
+
+	"nanogo.example/widearg/gclib"
+	"nanogo.example/widearg/nglib"
+)
+
+func main() {
+	a := gclib.A{5, 6}
+	w := gclib.W{Arr: [2]int{7, 8}, N: 9}
+	p := gclib.P{X: 100, Y: 200}
+
+	fmt.Println(nglib.Method(a, 1000, 99))
+	fmt.Println(nglib.Wide(w, 1000, 99, 2.5))
+	fmt.Println(nglib.Full(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, p, 300, 4.5))
+	fmt.Println(nglib.Vari(w, 42, 1, 2, 3))
+
+	fmt.Println(nglib.CallMethod(a, 1000, 99))
+	fmt.Println(nglib.CallWide(w, 1000, 99, 2.5))
+	fmt.Println(nglib.CallFull(p, 300, 4.5))
+	fmt.Println(nglib.CallVari(w, 42))
+}
+`
+
+// TestGcAndNanogoAgreeOnArgumentsTheRegistersCannotHold is the argument-side
+// mirror of TestGcAndNanogoAgreeOnAResultTheRegistersCannotHold.
+//
+// nanogo owns the middle package, so main's calls into it test the callee's
+// half of the argument placement and its own calls into gclib test the
+// caller's half. Five shapes are covered and each of them is one the two
+// compilers can disagree about while each stays self-consistent:
+//
+//   - a method whose receiver the registers cannot hold, which is Go's own
+//     test/method5.go and where the receiver's words used to arrive as the
+//     arguments after it,
+//   - an aggregate the registers cannot hold followed by scalars,
+//   - fifteen integers and then a two-word struct, which exhausts the integer
+//     file inside one argument and is where a walk of the machine words and a
+//     walk of the declared arguments part,
+//   - a float after an argument in the area, because the two register files
+//     are counted apart and an argument in the area pushes nothing out of the
+//     other one,
+//   - a variadic call, whose packed slice is one declared argument and three
+//     machine words.
+func TestGcAndNanogoAgreeOnArgumentsTheRegistersCannotHold(t *testing.T) {
+	h := setup(t, map[string]string{
+		"go.mod":         "module nanogo.example/widearg\n\ngo 1.27\n",
+		"gclib/gclib.go": wideArgGcLibrary,
+		"nglib/nglib.go": wideArgNanogoLibrary,
+		"main.go":        crossToolchainWideArgProgram,
+	}, []string{
+		"# nanogo owns the middle package and gc owns the two either side",
+		"nanogo.example/widearg/nglib",
+	})
+
+	if out, err := h.build(t, "-o", "widearg", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	lines := h.decisions(t)
+	if !compiled(lines, "nanogo.example/widearg/nglib") {
+		t.Fatalf("nanogo delegated the library, so no call crossed the boundary:\n%s", strings.Join(lines, "\n"))
+	}
+	if compiled(lines, "main") || compiled(lines, "nanogo.example/widearg/gclib") {
+		t.Fatalf("nanogo compiled a package either side of the library:\n%s", strings.Join(lines, "\n"))
+	}
+	got := runProgram(t, filepath.Join(h.mod, "widearg"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}
