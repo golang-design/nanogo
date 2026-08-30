@@ -326,7 +326,7 @@ func run(opts Options, dir string, timeout time.Duration, argv ...string) result
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
-	cmd.Env = sweepEnv(opts.Cache)
+	cmd.Env = sweepEnv(opts.Cache, opts.Work)
 	b, err := cmd.CombinedOutput()
 	r := result{out: string(b), timedOut: ctx.Err() != nil}
 	if err != nil {
@@ -339,10 +339,47 @@ func run(opts Options, dir string, timeout time.Duration, argv ...string) result
 	return r
 }
 
+// dropEnv removes every entry for one variable.
+//
+// The replacement is appended after this rather than beside the old value,
+// because a variable set twice is read by the last entry on some systems and
+// the first on others, and a rule that depends on which is not a rule.
+func dropEnv(env []string, name string) []string {
+	out := env[:0]
+	for _, kv := range env {
+		if strings.HasPrefix(kv, name+"=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // sweepEnv keeps the go command off the network and away from the developer's
-// own nanogo settings, which would change what the sweep measures.
-func sweepEnv(cache string) []string {
+// own nanogo settings, which would change what the sweep measures, and points
+// the child's temporary directory at the sweep's own.
+//
+// nanogo build opens a scratch directory with os.MkdirTemp, which reads
+// TMPDIR, and removes it with a defer. A defer does not run when the process
+// is killed, and this sweep kills a build that passes its deadline. The
+// directory then outlives the run and nothing removes it: the child is gone
+// and the parent never knew the name.
+//
+// So the parent chooses the name instead. work is the sweep's own scratch
+// directory and the sweep removes it, so anything the child leaves lands
+// inside something that is already going away. This is containment rather
+// than a fix for the kill, because there is no fix for the kill: SIGKILL runs
+// no code in the process it ends.
+//
+// It reproduces only under load. Each of the four packages that drive nanogo
+// is clean when it runs alone, and one directory survives when the whole
+// suite runs, because go test runs packages in parallel and a build that
+// clears its deadline on an idle machine does not clear it on a busy one.
+func sweepEnv(cache, work string) []string {
 	out := append(os.Environ(), "GOTOOLCHAIN=local", "GOFLAGS=", "GO111MODULE=on", "GOPROXY=off", "GOCACHE="+cache)
+	if work != "" {
+		out = append(dropEnv(out, "TMPDIR"), "TMPDIR="+work)
+	}
 	for i, kv := range out {
 		if strings.HasPrefix(kv, "NANOGO_ALLOWLIST=") || strings.HasPrefix(kv, "NANOGO_LOG=") {
 			out[i] = strings.SplitN(kv, "=", 2)[0] + "="

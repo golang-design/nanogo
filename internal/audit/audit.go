@@ -448,10 +448,32 @@ func timedOut(ctx context.Context, what string) string {
 	return ""
 }
 
+// env is the environment the two compilers run under.
+//
+// TMPDIR is the sweep's own work directory. nanogo build opens a scratch
+// directory with os.MkdirTemp, which reads TMPDIR, and removes it with a
+// defer. This sweep kills a build that passes its deadline, and a defer does
+// not run in a process that was killed, so the directory outlives the run and
+// nothing removes it: the child is gone and the parent never knew the name.
+// Pointing the child at a directory the sweep already removes contains it.
+//
+// There is no fix for the kill itself. SIGKILL runs no code in the process it
+// ends, so the parent choosing the name is the whole of the answer.
 func env(opts Options) []string {
 	e := os.Environ()
 	if opts.Cache != "" {
 		e = append(e, "GOCACHE="+opts.Cache)
+	}
+	if opts.Work != "" {
+		// Appended after the inherited entry is dropped. A variable set twice
+		// is read by the last entry on some systems and the first on others.
+		var keep []string
+		for _, kv := range e {
+			if !strings.HasPrefix(kv, "TMPDIR=") {
+				keep = append(keep, kv)
+			}
+		}
+		e = append(keep, "TMPDIR="+opts.Work)
 	}
 	return e
 }
