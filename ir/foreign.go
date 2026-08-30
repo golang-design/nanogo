@@ -531,6 +531,8 @@ func (b *builder) foreignStmt(s export.Stmt) {
 		b.foreignIncDec(s)
 	case *export.BranchStmt:
 		b.foreignBranch(s)
+	case *export.CallStmt:
+		b.foreignCallStmt(s)
 	case *export.ReturnStmt:
 		b.foreignReturn(s)
 	case *export.IfStmt:
@@ -767,6 +769,89 @@ func (b *builder) foreignBranch(s *export.BranchStmt) {
 		return
 	}
 	b.emit(&Node{Op: op, Type: voidType})
+}
+
+// foreignCallStmt builds go and defer.
+//
+// It is [builder.callStmt] over the other tree, and the part of it that
+// matters is not the node but what runs before the node. The specification
+// evaluates the callee and every operand where the statement is written and
+// not where the call runs, so each one that can change in between is put in a
+// temporary here. [builder.snapshot] emits that temporary through
+// [builder.temp], which writes into the sink of the enclosing statement list,
+// and [builder.foreignStmts] pushes one sink per list, so the assignments land
+// ahead of the ODefer or the OGo and in the order the operands were reached.
+//
+// [builder.deferOperand] states which operands need no temporary, and it is
+// used unchanged: a constant and a conversion of one are the same value at
+// both moments, and a declared function cannot be reassigned.
+//
+// Two arms of callStmt have no counterpart here, and each is left out rather
+// than carried because a refusal already catches its shape earlier.
+// callStmt's builtin arm holds the operands of close, panic, copy and the rest
+// in X and Y, and [builder.foreignBuiltin] builds only len and cap and refuses
+// every one of those by name, so a CallStmt of one never reaches this walk.
+// Its interface-method arm snapshots the receiver inside the selection, and
+// [builder.foreignMethodCall] refuses a call through an interface by name for
+// the same reason.
+//
+// Four shapes are refused. An operator that is neither go nor defer is not
+// this statement. A statement with no call at all leaves nothing to run. A
+// statement whose operand the walk built as something other than a call is a
+// tree that was misread, and emitting the node around it would hand the
+// runtime a word that is not a func value. And [export.CallStmt.DeferAt] is a
+// defer record other than the frame's own.
+// gc sets it in one place, which is rangefunc/rewrite.go rewriting a defer
+// written inside the body of a range over a function, so the defer runs when
+// the function around the loop returns and not when the closure does. That
+// record is a variable of the rewrite and this compilation allocates none, so
+// a defer naming one is refused rather than run against the frame's own
+// record, which would run it a loop iteration too early. The closure that
+// carries it is refused by [builder.foreignFuncLit] first, so this refusal is
+// the second gate on one shape rather than the only one.
+func (b *builder) foreignCallStmt(s *export.CallStmt) {
+	var op Op
+	switch s.Op {
+	case export.OpGo:
+		op = OGo
+	case export.OpDefer:
+		op = ODefer
+	default:
+		b.refuseForeign("the statement %q written with the operator %q",
+			export.StmtKindOf(s).String(), s.Op.String())
+		return
+	}
+	if s.DeferAt != nil {
+		b.refuseForeign("a defer that names the defer record it runs in")
+		return
+	}
+	call := b.foreignExpr(s.Call)
+	if call == nil {
+		b.refuseForeign("a %s of nothing", s.Op.String())
+		return
+	}
+	if call.Op != OCall {
+		// Every builtin the walk builds is len or cap, and neither may be a
+		// statement: the specification restricts the call of a go and of a
+		// defer the way it restricts an expression statement, and the result
+		// of len must be used. So a node that is not a call here is one this
+		// walk built for something else, and there is nothing to run.
+		b.refuseForeign("a %s of %s, which is not a call", s.Op.String(), call.Op)
+		return
+	}
+	if call.X != nil && !isFuncSymbol(call.X) {
+		// The value the call uses is what the statement read. A declared
+		// function is the one callee that needs no temporary, because nothing
+		// can reassign it; everything else, a package-scope variable of
+		// function type and a field of one included, is snapshotted whole, so
+		// that neither the variable nor the struct it is read out of is read
+		// again when the call runs.
+		call.X = b.snapshot(call.X)
+	}
+	for i, a := range call.Args {
+		call.Args[i] = b.deferOperand(a)
+	}
+	b.emit(&Node{Op: op, Type: voidType, X: b.wrapCallStmt(syntax.NoPos, call)})
 }
 
 // foreignSwitch builds an expression switch.
@@ -1038,6 +1123,12 @@ func (b *builder) foreignExpr(e export.Expr) Expr {
 		return nil
 	case *export.ConstExpr:
 		return b.constNode(syntax.NoPos, e.Value, b.foreignType(e.Type))
+	case *export.ZeroExpr:
+		return b.foreignZero(e)
+	case *export.CompLitExpr:
+		return b.foreignCompLit(e)
+	case *export.NewExpr:
+		return b.foreignNew(e)
 	case *export.LocalExpr:
 		l, ok := b.foreignLocalAt(e)
 		if !ok {
@@ -1067,6 +1158,258 @@ func (b *builder) foreignExpr(e export.Expr) Expr {
 		b.refuseForeign("the expression %q", export.ExprKindOf(e).String())
 		return b.badExpr(syntax.NoPos)
 	}
+}
+
+// foreignZero builds the zero value the format writes where the source wrote
+// nil.
+//
+// gc writes this node in one place, which is an identifier the checker
+// resolved to the predeclared nil (cmd/compile/internal/noder/writer.go's
+// exprZero arm), and export/bodybuild.go writes it in the one matching place.
+// So the node stands for a typed nil and for nothing else, and its type is the
+// type the context gave that nil.
+//
+// The type is read off [export.ZeroExpr.Type] rather than off the reshape node
+// in front of the expression. That is where the decoder puts it and where gc's
+// own reader takes it from, and a reshape is not written in front of every
+// expression, so the node's own field is the one that is always there.
+//
+// [builder.zeroValue] is the local builder for a zero value and it is used
+// unchanged. It answers for more types than a nil ever has, a struct and an
+// array among them, and it is not narrowed here: one definition of what a zero
+// value is in this package is worth more than a second nil constant written
+// beside it, and the two agree on every type gc can write this node with.
+//
+// One shape is refused: a node with no type at all. The zero of a pointer, of
+// a string and of a struct are three different values, and nothing else in the
+// tree says which was meant.
+//
+// There is no second refusal for a type zeroValue has no answer for, because
+// there is no such type here. zeroValue reads the IR kind, and every kind
+// outside its cases is a pointer-shaped one whose zero is the nil constant it
+// returns. A type that is not the type of a value at all, a tuple or a
+// constraint union, is refused by [Converter.Convert] one line earlier and
+// stops the build there, which is where every other node of this walk stops
+// for the same reason.
+func (b *builder) foreignZero(e *export.ZeroExpr) Expr {
+	t := b.foreignType(e.Type)
+	if t == nil {
+		b.refuseForeign("a zero value whose type the stream does not carry")
+		return b.badExpr(syntax.NoPos)
+	}
+	return b.zeroValue(syntax.NoPos, b.irType(t))
+}
+
+// foreignCompLit builds a composite literal.
+//
+// It is [builder.compositeLit] over the other tree, and the split into two
+// functions is that one's: the pointer form is one node around the other, and
+// the element walk is written once for both.
+//
+// The pointer form is an element of []*T written as {…}, which the language
+// makes the address of a T literal. The type on the node is still the pointer,
+// because that is what the expression produces, and the literal inside it is
+// built at the element type. The address is taken with a node written here
+// rather than through [builder.addrOf], because compositeLit takes it that way
+// too: the literal is a value this expression made and no variable of the body
+// has its address taken by it, so neither the addrtaken mark nor the escape
+// mark applies. ir/lower.go's addrLit is what turns the pair into an
+// allocation.
+//
+// A nested literal that elides its element type is not a shape of its own
+// here. gc writes the type of every literal from the checker's answer for it
+// (cmd/compile/internal/noder/writer.go's compLit), so an elided inner type
+// reaches this walk written out, and so does the pointer an element of []*T
+// elides.
+//
+// [export.CompLitExpr.MapRType] is read by nothing here. The descriptor a map
+// literal needs at run time is computed by ir/lower.go from the node's own
+// type, which is the instantiated type this walk substituted, and reading the
+// declaring package's slot instead would name the descriptor of the shape the
+// body was written against.
+func (b *builder) foreignCompLit(e *export.CompLitExpr) Expr {
+	t := b.foreignType(e.Type)
+	if t == nil {
+		b.refuseForeign("a composite literal whose type the stream does not carry")
+		return b.badExpr(syntax.NoPos)
+	}
+	if p, ok := coreType(t).(*types2.Pointer); ok {
+		return &Node{Op: OAddr, Type: b.irType(t), X: b.foreignLiteral(e, p.Elem())}
+	}
+	return b.foreignLiteral(e, t)
+}
+
+// foreignLiteral builds the elements of a composite literal of type t.
+//
+// The format has three element encodings, one for an array or a slice, one
+// for a map and one for a struct, and each core type takes the arm
+// [builder.literal] gives it.
+//
+// A struct is normalised to one element per field in declaration order, which
+// is what makes a keyed literal and a positional one one shape below this
+// pass, and a field the literal left out is written out as its zero value.
+// ir/lower.go's structLit reads exactly that: a literal with elements writes
+// every field and needs no clear before it.
+//
+// An array and a slice keep the element list the body wrote, because an
+// element there carries its index and not its position: the language gives an
+// element with no key the index after the previous one, so [...]int{5: 1, 2}
+// writes 5 and 6 and a normalisation here would have to know the array's
+// length to do it. A keyed element becomes an assignment of the value to the
+// key, which is the pair ir/lower.go's litIndices reads.
+//
+// A map is a list of those pairs and nothing else, because every element of a
+// map literal has a key.
+//
+// The elements are built with [builder.foreignExpr] and not with
+// [builder.foreignOperand]. literal builds them with b.expr for the same
+// reason: a literal is one node until ir/lower.go scatters it, so hoisting a
+// call out of an element here would order the elements differently from the
+// way the syntax walk orders them for the same source.
+//
+// Five shapes are refused. A type with none of the three encodings has no
+// element list to read at all, which is the shape gc's own writer stops on.
+// An element of a struct literal whose key names a promoted field carries the
+// path to it, and the language has no such key: gc rejects it, so no archive
+// written from Go the checker accepted holds one, and the field a one-step
+// index would pick is a field of the embedded struct and not of this one. An
+// element at a field index the struct has no field for and two elements for
+// one field are both trees no writer produces and both would write the wrong
+// storage. And an element of a map literal with no key has no destination at
+// all.
+func (b *builder) foreignLiteral(e *export.CompLitExpr, t types2.Type) Expr {
+	n := &Node{Op: OCompositeLit, Type: b.irType(t)}
+	switch ct := coreType(t).(type) {
+	case *types2.Struct:
+		n.Args = make([]Expr, ct.NumFields())
+		for i := range e.Elems {
+			el := &e.Elems[i]
+			if len(el.Embedded) != 0 {
+				b.refuseForeign("an element of a literal of %s whose key names a promoted field %d level(s) down",
+					types2.TypeString(t, nil), len(el.Embedded))
+				return b.badExpr(syntax.NoPos)
+			}
+			if el.Field < 0 || el.Field >= len(n.Args) {
+				b.refuseForeign("an element of a literal of %s at field %d, of %d it has",
+					types2.TypeString(t, nil), el.Field, len(n.Args))
+				return b.badExpr(syntax.NoPos)
+			}
+			if n.Args[el.Field] != nil {
+				b.refuseForeign("two elements of a literal of %s for field %d",
+					types2.TypeString(t, nil), el.Field)
+				return b.badExpr(syntax.NoPos)
+			}
+			n.Args[el.Field] = b.foreignElem(el.Value, ct.Field(el.Field).Type())
+		}
+		for i := range n.Args {
+			if n.Args[i] == nil {
+				// A field the literal left out is its zero value, written out
+				// rather than left implicit.
+				n.Args[i] = b.zeroValue(syntax.NoPos, b.irType(ct.Field(i).Type()))
+			}
+		}
+
+	case *types2.Array:
+		n.Args = b.foreignIndexedElems(e, ct.Elem())
+	case *types2.Slice:
+		n.Args = b.foreignIndexedElems(e, ct.Elem())
+
+	case *types2.Map:
+		for i := range e.Elems {
+			el := &e.Elems[i]
+			if el.Key == nil {
+				b.refuseForeign("an element of a literal of %s with no key", types2.TypeString(t, nil))
+				return b.badExpr(syntax.NoPos)
+			}
+			n.Args = append(n.Args, Assign(syntax.NoPos,
+				b.foreignElem(el.Key, ct.Key()), b.foreignElem(el.Value, ct.Elem())))
+		}
+
+	default:
+		b.refuseForeign("a composite literal of %s", types2.TypeString(t, nil))
+		return b.badExpr(syntax.NoPos)
+	}
+	return n
+}
+
+// foreignIndexedElems builds the elements of an array or a slice literal. An
+// element with a key is a pair; the others are positional.
+func (b *builder) foreignIndexedElems(e *export.CompLitExpr, elem types2.Type) []Expr {
+	out := make([]Expr, 0, len(e.Elems))
+	for i := range e.Elems {
+		el := &e.Elems[i]
+		if el.Key == nil {
+			out = append(out, b.foreignElem(el.Value, elem))
+			continue
+		}
+		// The key is an index and one written at any other integer type is
+		// converted the way an index is.
+		key := b.assignConv(b.foreignExpr(el.Key), b.foreignTypeOf(el.Key), types2.Typ[types2.Int])
+		out = append(out, Assign(syntax.NoPos, key, b.foreignElem(el.Value, elem)))
+	}
+	return out
+}
+
+// foreignElem builds one element of a composite literal, with the conversion
+// the specification calls an assignment. It is [builder.elem] over the other
+// tree.
+func (b *builder) foreignElem(e export.Expr, want types2.Type) Expr {
+	return b.assignConv(b.foreignExpr(e), b.foreignTypeOf(e), want)
+}
+
+// foreignNew builds new(T) and new(x).
+//
+// It is the "new" arm of [builder.builtin], and the two are not one node for
+// the reason that arm states: new(T) allocates a zero value and new(x)
+// allocates and stores the value the expression produced, so dropping the
+// operand would compile the second into the first and hand the caller a
+// pointer to a zero where the program asked for a pointer to its value.
+//
+// The element type comes off the result type and not off
+// [export.NewExpr.Type], for two reasons. The result of new is a pointer to
+// the element by definition, so the two say the same thing, and the field
+// carries a run-time descriptor rather than a type: reading it would take the
+// declaring package's dictionary slot, which names the shape the body was
+// written against and not the type this instantiation allocates.
+//
+// The operand goes through [builder.foreignOperand] because the arm in
+// build.go builds it with b.operand: it is one operand of one call and the
+// order it is evaluated in is observable.
+//
+// Four shapes are refused, in the order below so that each is decided from
+// what the one before it established. A node that carries both a value and a
+// type, or neither, is a tree the format cannot hold: it writes one bit
+// selecting which of the two follows, so a node with the other count is a
+// stream that was misread and building either half would be a guess about
+// which half is real. A node with no type leaves the size of the allocation
+// unknown. And a node whose type is not a pointer is not a new: gc writes the
+// result type of every call in front of it, the result of new is a pointer by
+// definition, and ir/lower.go's newExpr would otherwise refuse it with a
+// message naming no declaration to open.
+func (b *builder) foreignNew(e *export.NewExpr) Expr {
+	switch {
+	case e.Value != nil && e.Type != nil:
+		b.refuseForeign("a new naming both a value and a type, where the format writes one of the two")
+		return b.badExpr(syntax.NoPos)
+	case e.Value == nil && e.Type == nil:
+		b.refuseForeign("a new naming neither a value nor a type")
+		return b.badExpr(syntax.NoPos)
+	}
+	t := b.foreignTypeOf(e)
+	if t == nil {
+		b.refuseForeign("a new whose type the stream does not carry")
+		return b.badExpr(syntax.NoPos)
+	}
+	p, ok := coreType(t).(*types2.Pointer)
+	if !ok {
+		b.refuseForeign("a new of %s, which is not a pointer", types2.TypeString(t, nil))
+		return b.badExpr(syntax.NoPos)
+	}
+	n := &Node{Op: ONew, Type: b.irType(t)}
+	if e.Value != nil {
+		n.X = b.assignConv(b.foreignOperand(e.Value), b.foreignTypeOf(e.Value), p.Elem())
+	}
+	return n
 }
 
 // foreignFuncLit builds a function literal of a foreign body.

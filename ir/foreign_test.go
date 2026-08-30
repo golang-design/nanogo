@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"golang.design/x/nanogo/export"
+	"golang.design/x/nanogo/syntax"
 	"golang.design/x/nanogo/types2"
 )
 
@@ -131,11 +132,8 @@ func TestForeignBodyRefusesANodeItDoesNotMap(t *testing.T) {
 		{"a channel send", &export.SendStmt{}, `the statement "send"`},
 		{"a select", &export.SelectStmt{}, `the statement "select"`},
 		{"a label", &export.LabelStmt{Label: "loop"}, `the statement "label"`},
-		{"a deferred call", &export.CallStmt{}, `the statement "go or defer"`},
-		{"a composite literal", &export.ExprStmt{X: &export.CompLitExpr{}}, `the expression "composite literal"`},
 		{"make", &export.ExprStmt{X: &export.MakeExpr{}}, `the expression "make"`},
 		{"a type assertion", &export.ExprStmt{X: &export.AssertExpr{}}, `the expression "type assertion"`},
-		{"a zero value", &export.ExprStmt{X: &export.ZeroExpr{}}, `the expression "zero value"`},
 
 		// The branches. Each of the three below is a jump to a label, and gc
 		// writes a label flat: the statement it labels is the next entry of
@@ -435,6 +433,331 @@ func foreignDef(name string) export.Assignee {
 // foreignTo is a destination that assigns to an expression.
 func foreignTo(e export.Expr) export.Assignee {
 	return export.Assignee{Kind: export.AssignExpr, Expr: e}
+}
+
+// foreignValue is a statement that walks one expression and throws the value
+// away, which is what a refusal row for an expression needs.
+func foreignValue(e export.Expr) export.Stmt { return &export.ExprStmt{X: e} }
+
+// foreignPairStruct is a struct of two int fields, which is the smallest type
+// a struct literal's field index can be out of range for.
+var foreignPairStruct = types2.NewStruct([]*types2.Var{
+	types2.NewField(syntax.NoPos, nil, "A", types2.Typ[types2.Int], false),
+	types2.NewField(syntax.NoPos, nil, "B", types2.Typ[types2.Int], false),
+}, nil)
+
+// foreignDefOf is a destination that declares a variable of a given type.
+func foreignDefOf(name string, t types2.Type) export.Assignee {
+	return export.Assignee{
+		Kind:  export.AssignDef,
+		Name:  name,
+		Type:  export.TypeUse{Type: t},
+		Local: export.Local{DictRType: -1},
+	}
+}
+
+// foreignDeclaredValue is a body that declares one variable of a given type
+// and gives it one value, and returns the assignment the walk built for it.
+//
+// It is the shape every success test of a value-producing node needs here. A
+// hand-written node carries no reshape, so the walk reads the type off the
+// node's own field, and a declared destination is what gives the assignment a
+// type on the other side. The variable takes the number after the three the
+// body opens with.
+func foreignDeclaredValue(t *testing.T, typ types2.Type, value export.Expr) Expr {
+	t.Helper()
+	p, err := foreignIndexBody(t, &export.AssignStmt{
+		Lhs: []export.Assignee{foreignDefOf("x", typ)},
+		Rhs: export.MultiExpr{Exprs: []export.Expr{value}},
+	})
+	if err != nil {
+		t.Fatalf("the instantiation was refused: %v", err)
+	}
+	fn := buildFuncOf(t, p, "Index[[]int,int]")
+	for _, s := range fn.Body {
+		if s.Op == OAssign && s.Y != nil {
+			return s.Y
+		}
+	}
+	t.Fatalf("the body holds no assignment: %v", fn.Body)
+	return nil
+}
+
+// TestForeignBodyBuildsTheZeroValueWrittenForNil is the success half of the
+// zero value.
+//
+// gc writes the node for the predeclared nil and for nothing else, so the two
+// rows below are the two nil-shaped classes a body can carry it at: a pointer,
+// whose zero is one word of zeroes, and an interface, whose zero is two. Both
+// are the nil constant [builder.zeroValue] returns, and the type on it is what
+// tells every pass below how wide it is.
+func TestForeignBodyBuildsTheZeroValueWrittenForNil(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		typ  types2.Type
+		want Kind
+	}{
+		{"a pointer", types2.NewPointer(types2.Typ[types2.Int]), Ptr},
+		{"an interface", types2.NewInterfaceType(nil, nil), Interface},
+		{"a slice", types2.NewSlice(types2.Typ[types2.Int]), Slice},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			n := foreignDeclaredValue(t, tt.typ, &export.ZeroExpr{Type: export.TypeUse{Type: tt.typ}})
+			if n.Op != OConst {
+				t.Fatalf("the zero value is %v, want a constant", n.Op)
+			}
+			if n.Val == nil || n.Val.String() != "nil" {
+				t.Errorf("the zero value carries the constant %v, want nil", n.Val)
+			}
+			if n.Type == nil || n.Type.Kind != tt.want {
+				t.Errorf("the zero value has the type %s, want a %s", n.Type, tt.want)
+			}
+		})
+	}
+}
+
+// TestForeignBodyBuildsTheZeroValueOfAStruct is the arm zeroValue answers with
+// a literal rather than a constant.
+//
+// gc does not write this node at a struct type today, because it writes it
+// only for nil. The walk still goes through the one local zero builder rather
+// than a nil constant of its own, and this pins that: a struct zero is the
+// empty composite literal ir/lower.go clears, and a nil constant of struct
+// type would be one word where the value is several.
+func TestForeignBodyBuildsTheZeroValueOfAStruct(t *testing.T) {
+	n := foreignDeclaredValue(t, foreignPairStruct,
+		&export.ZeroExpr{Type: export.TypeUse{Type: foreignPairStruct}})
+	if n.Op != OCompositeLit || len(n.Args) != 0 {
+		t.Fatalf("the zero value is %v with %d element(s), want an empty literal", n.Op, len(n.Args))
+	}
+	if n.Type == nil || n.Type.Kind != Struct {
+		t.Errorf("the zero value has the type %s, want a struct", n.Type)
+	}
+}
+
+// TestForeignBodyNormalisesAStructLiteralToOneElementPerField is the shape
+// ir/lower.go's structLit reads.
+//
+// The format writes a keyed literal as the elements the body wrote, each with
+// its field index, and a positional one as every element in order. Both become
+// one element per field in declaration order here, and a field the literal
+// left out is written out as its zero value, because structLit writes every
+// field of a literal that has elements and clears nothing before it. A walk
+// that passed the keyed list through would write the value of field 1 into
+// field 0.
+func TestForeignBodyNormalisesAStructLiteralToOneElementPerField(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		lit   *export.CompLitExpr
+		wantA int64
+		wantB int64
+	}{
+		{
+			"positional",
+			&export.CompLitExpr{
+				Type:  export.TypeUse{Type: foreignPairStruct},
+				Elems: []export.LitElem{{Field: 0, Value: foreignConst(3)}, {Field: 1, Value: foreignConst(4)}},
+			},
+			3, 4,
+		},
+		{
+			"keyed, with the first field left out",
+			&export.CompLitExpr{
+				Type:  export.TypeUse{Type: foreignPairStruct},
+				Keyed: true,
+				Elems: []export.LitElem{{Field: 1, Value: foreignConst(9)}},
+			},
+			0, 9,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			n := foreignDeclaredValue(t, foreignPairStruct, tt.lit)
+			if n.Op != OCompositeLit || len(n.Args) != 2 {
+				t.Fatalf("the literal is %v with %d element(s), want two", n.Op, len(n.Args))
+			}
+			for i, want := range []int64{tt.wantA, tt.wantB} {
+				got, ok := n.Args[i].Val.(Const).Int64()
+				if !ok || got != want {
+					t.Errorf("field %d holds %v, want %d", i, n.Args[i], want)
+				}
+			}
+		})
+	}
+}
+
+// TestForeignBodyKeepsTheElementListOfAnArrayLiteral is the arm that is not
+// normalised, and the reason it is not.
+//
+// An element of an array or a slice literal carries its index and not its
+// position, so a keyed element becomes an assignment of the value to the key
+// and a positional one stays a value. ir/lower.go's litIndices reads exactly
+// that pair, and it is what gives [...]int{5: 1, 2} the indices 5 and 6.
+func TestForeignBodyKeepsTheElementListOfAnArrayLiteral(t *testing.T) {
+	at := types2.NewArray(types2.Typ[types2.Int], 4)
+	n := foreignDeclaredValue(t, at, &export.CompLitExpr{
+		Type:  export.TypeUse{Type: at},
+		Keyed: true,
+		Elems: []export.LitElem{{Key: foreignConst(2), Value: foreignConst(7)}, {Value: foreignConst(8)}},
+	})
+	if n.Op != OCompositeLit || len(n.Args) != 2 {
+		t.Fatalf("the literal is %v with %d element(s), want two", n.Op, len(n.Args))
+	}
+	keyed := n.Args[0]
+	if keyed.Op != OAssign {
+		t.Fatalf("the keyed element is %v, want an assignment of the value to the key", keyed.Op)
+	}
+	if got, ok := keyed.X.Val.(Const).Int64(); !ok || got != 2 {
+		t.Errorf("the key is %v, want 2", keyed.X)
+	}
+	if got, ok := keyed.Y.Val.(Const).Int64(); !ok || got != 7 {
+		t.Errorf("the keyed value is %v, want 7", keyed.Y)
+	}
+	if n.Args[1].Op != OConst {
+		t.Errorf("the positional element is %v, want the value itself", n.Args[1].Op)
+	}
+}
+
+// TestForeignBodyBuildsAMapLiteralAsPairs is the third element encoding.
+//
+// Every element of a map literal has a key, and ir/lower.go's mapLit reads
+// each element as a key and a value and refuses anything else. The descriptor
+// it makes the map with comes from the node's own type, which is why
+// [export.CompLitExpr.MapRType] is not read here.
+func TestForeignBodyBuildsAMapLiteralAsPairs(t *testing.T) {
+	mt := types2.NewMap(types2.Typ[types2.Int], types2.Typ[types2.Int])
+	n := foreignDeclaredValue(t, mt, &export.CompLitExpr{
+		Type:  export.TypeUse{Type: mt},
+		Keyed: true,
+		Elems: []export.LitElem{{Key: foreignConst(1), Value: foreignConst(2)}},
+	})
+	if n.Op != OCompositeLit || n.Type == nil || n.Type.Kind != Map {
+		t.Fatalf("the literal is %v of %s, want a map literal", n.Op, n.Type)
+	}
+	if len(n.Args) != 1 || n.Args[0].Op != OAssign {
+		t.Fatalf("the literal holds %v, want one key and value pair", n.Args)
+	}
+}
+
+// TestForeignBodyBuildsAPointerLiteralAsTheAddressOfOne is the form an element
+// of []*T is written as.
+//
+// The literal is built at the element type and the address of it is the value,
+// which is the pair ir/lower.go's addrLit turns into an allocation. A walk
+// that built the literal at the pointer type would ask the lowering for a
+// literal of a pointer, which has no elements at all.
+func TestForeignBodyBuildsAPointerLiteralAsTheAddressOfOne(t *testing.T) {
+	pt := types2.NewPointer(foreignPairStruct)
+	n := foreignDeclaredValue(t, pt, &export.CompLitExpr{
+		Type:  export.TypeUse{Type: pt},
+		Keyed: true,
+		Elems: []export.LitElem{{Field: 0, Value: foreignConst(5)}},
+	})
+	if n.Op != OAddr || n.Type == nil || n.Type.Kind != Ptr {
+		t.Fatalf("the literal is %v of %s, want the address of one", n.Op, n.Type)
+	}
+	if n.X == nil || n.X.Op != OCompositeLit || n.X.Type == nil || n.X.Type.Kind != Struct {
+		t.Fatalf("the address is taken of %v, want a struct literal", n.X)
+	}
+	if len(n.X.Args) != 2 {
+		t.Errorf("the literal holds %d element(s), want one per field", len(n.X.Args))
+	}
+}
+
+// foreignDeferBody builds a body that declares one variable of function type
+// and then defers or spawns a call of it, and returns the statements the walk
+// emitted.
+func foreignDeferBody(t *testing.T, op export.Op, sig *types2.Signature, args ...export.Expr) []Stmt {
+	t.Helper()
+	p, err := foreignIndexBody(t,
+		// var f func(...)
+		&export.AssignStmt{Lhs: []export.Assignee{foreignDefOf("f", sig)}},
+		&export.CallStmt{Op: op, Call: &export.CallExpr{
+			Fun:  foreignLocalUse(3),
+			Args: export.MultiExpr{Exprs: args},
+		}},
+	)
+	if err != nil {
+		t.Fatalf("the instantiation was refused: %v", err)
+	}
+	return buildFuncOf(t, p, "Index[[]int,int]").Body
+}
+
+// TestForeignBodyEvaluatesTheOperandsOfAGoAndADeferAtTheStatement is the
+// requirement the node alone does not carry.
+//
+// The specification evaluates the callee and the operands where the statement
+// is written and not where the call runs. Each one is held in a temporary
+// assigned ahead of the ODefer, so a variable assigned between the statement
+// and the call still calls the value the statement read. A walk that left them
+// in place compiles and calls something else.
+func TestForeignBodyEvaluatesTheOperandsOfAGoAndADeferAtTheStatement(t *testing.T) {
+	intParam := types2.NewTuple(types2.NewParam(syntax.NoPos, nil, "d", types2.Typ[types2.Int]))
+	sig := types2.NewSignatureType(nil, nil, nil, intParam, types2.NewTuple(), false)
+	body := foreignDeferBody(t, export.OpDefer, sig, foreignLocalUse(1))
+
+	var temps int
+	for _, s := range body {
+		if s.Op == OAssign && s.Op1 == defineOp {
+			temps++
+			continue
+		}
+		if s.Op != ODefer {
+			continue
+		}
+		if temps != 2 {
+			t.Errorf("%d temporaries stand before the defer, want one for the callee and one for the operand", temps)
+		}
+		return
+	}
+	t.Fatalf("the body holds no defer: %v", body)
+}
+
+// TestForeignBodyWrapsADeferredCallThatHasOperands is the shape
+// runtime.deferproc takes.
+//
+// It takes one word, a func value, and calls it with no arguments, so an
+// operand travels inside that value as a capture. A call with no operands
+// needs no literal and gets none, because a frame between the deferred call
+// and runtime.gopanic is the one thing recover counts.
+func TestForeignBodyWrapsADeferredCallThatHasOperands(t *testing.T) {
+	empty := types2.NewTuple()
+	intParam := types2.NewTuple(types2.NewParam(syntax.NoPos, nil, "d", types2.Typ[types2.Int]))
+	for _, tt := range []struct {
+		name    string
+		op      export.Op
+		sig     *types2.Signature
+		args    []export.Expr
+		want    Op
+		wrapped bool
+	}{
+		{"a defer with an operand", export.OpDefer, types2.NewSignatureType(nil, nil, nil, intParam, empty, false),
+			[]export.Expr{foreignLocalUse(1)}, ODefer, true},
+		{"a defer with none", export.OpDefer, types2.NewSignatureType(nil, nil, nil, empty, empty, false),
+			nil, ODefer, false},
+		{"a go with an operand", export.OpGo, types2.NewSignatureType(nil, nil, nil, intParam, empty, false),
+			[]export.Expr{foreignLocalUse(1)}, OGo, true},
+		{"a go with none", export.OpGo, types2.NewSignatureType(nil, nil, nil, empty, empty, false),
+			nil, OGo, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := foreignDeferBody(t, tt.op, tt.sig, tt.args...)
+			var n Expr
+			for _, s := range body {
+				if s.Op == tt.want {
+					n = s
+				}
+			}
+			if n == nil {
+				t.Fatalf("the body holds no %v: %v", tt.want, body)
+			}
+			if n.X == nil || n.X.Op != OCall {
+				t.Fatalf("the statement runs %v, want a call", n.X)
+			}
+			if got := n.X.X != nil && n.X.X.Op == OClosure; got != tt.wrapped {
+				t.Errorf("the call is of %v, and wrapping it was %v", n.X.X, tt.wrapped)
+			}
+		})
+	}
 }
 
 // TestForeignBodyNumbersTheLocalsAnAssignmentDeclares is the numbering half of
@@ -920,6 +1243,115 @@ func TestForeignBodyRefusesTheShapesItCannotBuild(t *testing.T) {
 				Recv: export.TypeUse{Type: types2.NewInterfaceType(nil, nil)},
 			}),
 			"through the interface",
+		},
+		// The composite literal. The type decides which of the four element
+		// encodings the elements are read under, and each row below is a
+		// shape inside one of them that no writer produces and that would
+		// write the wrong storage if it were built.
+		{
+			"a composite literal with no type",
+			foreignValue(&export.CompLitExpr{}),
+			"a composite literal whose type the stream does not carry",
+		},
+		{
+			"a composite literal of a type with no element encoding",
+			foreignValue(&export.CompLitExpr{Type: intUse}),
+			"a composite literal of int",
+		},
+		{
+			// A key naming a promoted field is not legal Go, so gc's own
+			// compile of the declaring package rejected every body holding
+			// one. The field a one-step index would pick belongs to the
+			// embedded struct and not to this one.
+			"an element of a struct literal that names a promoted field",
+			foreignValue(&export.CompLitExpr{
+				Type:  export.TypeUse{Type: foreignPairStruct},
+				Keyed: true,
+				Elems: []export.LitElem{{Field: 0, Embedded: []int{0, 0}, Value: foreignConst(1)}},
+			}),
+			"whose key names a promoted field 2 level(s) down",
+		},
+		{
+			"an element of a struct literal at a field the struct has not",
+			foreignValue(&export.CompLitExpr{
+				Type:  export.TypeUse{Type: foreignPairStruct},
+				Keyed: true,
+				Elems: []export.LitElem{{Field: 7, Value: foreignConst(1)}},
+			}),
+			"at field 7, of 2 it has",
+		},
+		{
+			"two elements of a struct literal for one field",
+			foreignValue(&export.CompLitExpr{
+				Type:  export.TypeUse{Type: foreignPairStruct},
+				Keyed: true,
+				Elems: []export.LitElem{{Field: 1, Value: foreignConst(1)}, {Field: 1, Value: foreignConst(2)}},
+			}),
+			"for field 1",
+		},
+		{
+			"an element of a map literal with no key",
+			foreignValue(&export.CompLitExpr{
+				Type:  export.TypeUse{Type: types2.NewMap(types2.Typ[types2.Int], types2.Typ[types2.Int])},
+				Keyed: true,
+				Elems: []export.LitElem{{Value: foreignConst(1)}},
+			}),
+			"an element of a literal of map[int]int with no key",
+		},
+
+		// new. The format writes one bit choosing between new(T) and new(x)
+		// and the operand that follows it, so a node carrying both or neither
+		// is a stream that was misread.
+		{
+			"a new naming neither a value nor a type",
+			foreignValue(&export.NewExpr{}),
+			"a new naming neither a value nor a type",
+		},
+		{
+			"a new naming both a value and a type",
+			foreignValue(&export.NewExpr{Value: foreignConst(1), Type: &export.ExprType{}}),
+			"a new naming both a value and a type",
+		},
+		{
+			"a new whose type the stream does not carry",
+			foreignValue(&export.NewExpr{Value: foreignConst(1)}),
+			"a new whose type the stream does not carry",
+		},
+
+		// go and defer. The operator says which of the two it is, the call is
+		// what the statement runs, and the defer record is the second runtime
+		// entry point this compilation has no allocation for.
+		{
+			"a go or defer written with neither operator",
+			&export.CallStmt{Op: export.OpAdd, Call: foreignConst(1)},
+			`the statement "go or defer" written with the operator "+"`,
+		},
+		{
+			"a defer that names the record it runs in",
+			&export.CallStmt{Op: export.OpDefer, Call: foreignConst(1), DeferAt: foreignConst(2)},
+			"a defer that names the defer record it runs in",
+		},
+		{
+			"a defer of nothing",
+			&export.CallStmt{Op: export.OpDefer},
+			"a defer of nothing",
+		},
+		{
+			"a go of something that is not a call",
+			&export.CallStmt{Op: export.OpGo, Call: foreignConst(1)},
+			"a go of const, which is not a call",
+		},
+		{
+			// The zero value. The type is the whole of the node, because the
+			// zero of a pointer and the zero of a struct are values of
+			// different widths, so a node without one is refused rather than
+			// given the nil the name suggests.
+			"a zero value with no type",
+			&export.AssignStmt{
+				Lhs: []export.Assignee{foreignDefOf("x", types2.Typ[types2.Int])},
+				Rhs: export.MultiExpr{Exprs: []export.Expr{&export.ZeroExpr{}}},
+			},
+			"a zero value whose type the stream does not carry",
 		},
 		{
 			"a call of a function literal whose own type the stream does not carry",

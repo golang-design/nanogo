@@ -535,10 +535,15 @@ func TestCompileStencilsAGenericOfAnotherPackage(t *testing.T) {
 //
 // The mapping covers what the instantiations nanogo's own source reaches need
 // and refuses the rest by name. slices.Clone is the smallest declaration in the
-// standard library that falls outside it: its body names the zero value of a
-// slice type, and a zero value is a kind the walk does not build. The refusal
-// has to name the declaration and the kind, because that pair is the whole of
-// what somebody extending the mapping needs to know.
+// standard library that falls outside it: its body appends, and append needs
+// the run-time descriptor of the element type, which is the dictionary slot
+// the declaring package numbered rather than a type this instantiation can
+// name. The refusal has to name the declaration and the kind, because that
+// pair is the whole of what somebody extending the mapping needs to know.
+//
+// The kind this test names moves as the mapping grows, and that is the point
+// of it rather than a fault in it. It named the zero value until the walk
+// started building one, and the body then refused one node later, at append.
 //
 // A test that only asserted the compile would pass just as well if the walk
 // guessed at the node and produced a function that computes something else,
@@ -556,7 +561,7 @@ func TestCompileRefusesAForeignBodyItCannotMap(t *testing.T) {
 	if err == nil {
 		t.Fatal("a body holding a kind the walk does not map was built")
 	}
-	for _, want := range []string{"slices.Clone[[]int,int]", "zero value"} {
+	for _, want := range []string{"slices.Clone[[]int,int]", "a call of the builtin append"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not name %q: %v", want, err)
 		}
@@ -872,6 +877,121 @@ func Nested[T ~int](v T) T {
 	outer()()
 	return acc
 }
+
+// The zero value the format writes for the predeclared nil. gc writes that
+// node for nil and for nothing else, so each row below is one nil-shaped class
+// a body can reach it at. The widths differ: a nil pointer is one word, a nil
+// slice is three and a nil interface is two, so one answer for all of them
+// would write part of a value.
+
+func NilPtr[T any]() *T { return nil }
+
+func NilSlice[T any]() []T { return nil }
+
+func NilMap[T comparable]() map[T]int { return nil }
+
+func NilChan[T any]() chan T { return nil }
+
+func NilFunc[T any]() func(T) T { return nil }
+
+func NilIface[T any]() any { return nil }
+
+// NilCompare reads the node in an operand position rather than in a result,
+// where the type it takes is the type of the value it is compared against.
+func NilCompare[T any](s []T) int {
+	if s == nil {
+		return 1
+	}
+	return 0
+}
+
+// The composite literal, at each of the three element encodings the format
+// has and at each form inside them.
+
+type Rec[T any] struct {
+	A T
+	B int
+}
+
+func LitKeyed[T any](v T) Rec[T] { return Rec[T]{A: v, B: 2} }
+
+func LitPositional[T any](v T) Rec[T] { return Rec[T]{v, 3} }
+
+// LitPartial leaves B out, so the walk writes B's zero value out rather than
+// leaving the element list short.
+func LitPartial[T any](v T) Rec[T] { return Rec[T]{A: v} }
+
+// LitEmpty names no field at all, which ir/lower.go clears rather than writes.
+func LitEmpty[T any]() Rec[T] { return Rec[T]{} }
+
+func LitSlice[T any](a, b T) []T { return []T{a, b} }
+
+// LitSliceKeyed gives one element an index, and the element after it takes the
+// index after that one, which is why an element list is not normalised.
+func LitSliceKeyed[T any](a, b T) []T { return []T{2: a, b} }
+
+func LitArray[T any](a, b T) [4]T { return [4]T{a, b} }
+
+func LitArrayKeyed[T any](v T) [4]T { return [4]T{3: v} }
+
+func LitMap[T comparable](k T, v int) map[T]int { return map[T]int{k: v} }
+
+// LitNested elides the type of the inner literals, which the format writes out
+// whether or not the source did.
+func LitNested[T any](v T) [][]T { return [][]T{{v}, {v, v}} }
+
+// LitPtrElem elides the pointer of an element of a slice of pointers, which is
+// the one literal whose value is the address of another.
+func LitPtrElem[T any](v T) []*Rec[T] { return []*Rec[T]{{A: v, B: 1}} }
+
+// LitAddr writes the address, which is a unary operator around a literal
+// rather than the pointer form of one.
+func LitAddr[T any](v T) *Rec[T] { return &Rec[T]{A: v, B: 5} }
+
+// new, in both of its forms. new(T) allocates a zero value and new(x)
+// allocates and stores the value the expression produced.
+
+func NewT[T any]() *T { return new(T) }
+
+func NewVal[T any](v T) *T { return new(v) }
+
+// NewSum stores the value of an operation, so the operand is one the walk
+// builds rather than one it copies.
+func NewSum[T ~int](a, b T) *T { return new(a + b) }
+
+// go and defer. The operands are evaluated where the statement is written, so
+// each body below changes one of them afterwards and the answer says which
+// moment the call read.
+
+// Store is the callee a deferred call names by symbol, which is the one callee
+// that needs no temporary because nothing can reassign it.
+func Store(p *int, v int) { *p = v }
+
+func DeferStore[T ~int](p *int, v, w T) {
+	defer Store(p, int(v))
+	v = w
+	_ = v
+}
+
+// DeferValue defers a call of a function value, which is the callee that has
+// to go into a temporary because the variable may be assigned in between.
+func DeferValue[T any](f func(T), v, w T) {
+	defer f(v)
+	v = w
+	_ = v
+}
+
+// DeferNoArgs defers a call with no operands, which needs no wrapper literal
+// and gets none: a frame between the deferred call and runtime.gopanic is the
+// one thing recover counts.
+func DeferNoArgs[T ~int](f func(), v T) T {
+	defer f()
+	return v + 1
+}
+
+// Spawned starts a call on a new goroutine, which reads its operands at the
+// statement the way a defer does.
+func Spawned[T any](f func(T), v T) { go f(v) }
 `)
 	write("refuse/refuse.go", `package refuse
 
@@ -882,8 +1002,6 @@ func Nested[T ~int](v T) T {
 func MapAt[T comparable](m map[T]int, k T) int { return m[k] }
 
 func Assert[T any](v any) bool { _, ok := v.(T); return ok }
-
-func Lit[T any](v T) []T { return []T{v} }
 
 func Appended[T any](s []T, v T) int { return len(append(s, v)) }
 
@@ -920,8 +1038,6 @@ func WithSubdict[T any](v T) T {
 	b.V = v
 	return b.Get()
 }
-
-func Deferred[T any](f func(T), v T) { defer f(v) }
 `)
 	return dir
 }
@@ -955,13 +1071,11 @@ func TestCompileRefusesEachForeignConstructItDoesNotMap(t *testing.T) {
 	}{
 		{"a map index", "refuse.MapAt(map[int]int{1: 2}, 1)", "an index of a map"},
 		{"a type assertion", "btoi(refuse.Assert[int](any(1)))", `the expression "type assertion"`},
-		{"a composite literal", "len(refuse.Lit(1))", `the expression "composite literal"`},
 		{"a builtin that needs a descriptor", "refuse.Appended([]int{1}, 2)", "a call of the builtin append"},
 		{"a range over a map", "refuse.Ranged(map[int]int{1: 2})", "and only a range over a slice is built"},
 		{"a type switch", "refuse.TypeSwitched(any(1), 2)", "a type switch"},
 		{"a method through a dictionary slot", "refuse.ThroughDict(named(3))", "a call of Name on a type parameter"},
 		{"a method of an instantiation", "refuse.WithSubdict(4)", "a call of Get"},
-		{"a deferred call", "func() int { refuse.Deferred(func(int) {}, 1); return 0 }()", `the statement "go or defer"`},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			src := "package main\n\nimport \"nanogo.example/gen/refuse\"\n\n" +
@@ -1069,6 +1183,65 @@ func main() {
 	rev := []int{1, 2, 3, 4}
 	lib.Reverse(rev)
 	d += rev[0] - 4
+
+	// The zero value, once per nil-shaped class, read back rather than only
+	// produced: a wrong width writes part of a value and prints nothing.
+	if lib.NilPtr[int]() != nil {
+		d++
+	}
+	if lib.NilSlice[int]() != nil {
+		d++
+	}
+	if lib.NilMap[int]() != nil {
+		d++
+	}
+	if lib.NilChan[int]() != nil {
+		d++
+	}
+	if lib.NilFunc[int]() != nil {
+		d++
+	}
+	if lib.NilIface[int]() != nil {
+		d++
+	}
+	d += lib.NilCompare([]int(nil)) - 1
+	d += lib.NilCompare([]int{1})
+
+	// The composite literal, at each element encoding and each form.
+	d += lib.LitKeyed(1).A + lib.LitKeyed(1).B - 3
+	d += lib.LitPositional(1).A + lib.LitPositional(1).B - 4
+	d += lib.LitPartial(1).A + lib.LitPartial(1).B - 1
+	d += lib.LitEmpty[int]().A + lib.LitEmpty[int]().B
+	d += len(lib.LitSlice(1, 2)) + lib.LitSlice(1, 2)[1] - 4
+	d += len(lib.LitSliceKeyed(7, 8)) + lib.LitSliceKeyed(7, 8)[2] - 11
+	d += lib.LitArray(1, 2)[1] + lib.LitArray(1, 2)[3] - 2
+	d += lib.LitArrayKeyed(9)[3] - 9
+	d += lib.LitMap(2, 5)[2] - 5
+	d += len(lib.LitNested(1)) + len(lib.LitNested(1)[1]) - 4
+	d += lib.LitPtrElem(6)[0].A + lib.LitPtrElem(6)[0].B - 7
+	d += lib.LitAddr(2).A + lib.LitAddr(2).B - 7
+
+	// new, in both forms. Reading the value back is what tells new(x) from
+	// new(T): dropping the operand hands back a pointer to a zero.
+	d += *lib.NewT[int]()
+	d += *lib.NewVal(8) - 8
+	d += *lib.NewSum(3, 4) - 7
+
+	// go and defer, each with the operand changed after the statement, so the
+	// answer says which moment the call read.
+	var stored int
+	lib.DeferStore(&stored, 4, 99)
+	d += stored - 4
+	var byValue int
+	lib.DeferValue(func(n int) { byValue = n }, 5, 99)
+	d += byValue - 5
+	ran := 0
+	d += lib.DeferNoArgs(func() { ran++ }, 6) - 7
+	d += ran - 1
+	done := make(chan int)
+	lib.Spawned(func(n int) { done <- n }, 7)
+	d += <-done - 7
+
 	if lib.Not(false) {
 		d += 0
 	}

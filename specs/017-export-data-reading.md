@@ -384,24 +384,32 @@ Over the 138 archives in `cmd/nanogo`'s closure, decoding every body reached
 through a declaration's extension data, which is the generic path:
 
 $$
-\underbrace{317}_{\text{generic bodies}}
+\underbrace{309}_{\text{generic bodies}}
 \qquad
-\underbrace{96}_{\text{hold a code the walk does not name}}
+\underbrace{17}_{\text{hold a code the walk does not name}}
 \qquad
-\underbrace{221}_{\text{within reach}}
+\underbrace{292}_{\text{within reach}}
 $$
 
 | Code the walk does not name | bodies holding it |
 | --- | --- |
-| expression: zero value | 78 |
-| expression: composite literal | 21 |
-| expression: `new` | 20 |
-| statement: `go` or `defer` | 18 |
 | expression: type assertion | 7 |
 | expression: `make` | 6 |
 | expression: `Sizeof` | 2 |
 | expression: runtime helper | 2 |
 | expression: function instantiation | 1 |
+
+The four largest rows are gone. They were `zero value` at 78 bodies,
+`composite literal` at 21, `new` at 20 and `go` or `defer` at 18, and mapping
+them took the count from 96 to 17.
+
+The denominator moved as well, from 317 to 309, and **the cause of that is not
+established**. The measurement was rebuilt from this spec's own description and
+every other number reproduced exactly, the 138 archives and each per-code row
+included, so the eight bodies are a difference in what the two runs enumerated
+rather than in what the walk does. It is recorded rather than smoothed over,
+because a denominator nobody can account for is the thing that makes a ratio
+worth doubting.
 
 This is a static over-approximation and the spec says so rather than
 overstating it. A body is walked only when something instantiates it, and two
@@ -558,13 +566,26 @@ each stage adds a refusal rather than a guess.
 the code and the declaration it was met in:
 
     a use of <what> <n>, of <m> the body has
-    the statement "go or defer"
-    the expression "zero value"
-    the expression "composite literal"
     the expression "Sizeof"
     a call of the builtin <name>
     a reference to the generic <name> outside an instantiation node
     a call naming subdictionary slot <n> of <m>
+
+The three whole-kind refusals that stood here, `the statement "go or defer"`,
+`the expression "zero value"` and `the expression "composite literal"`, are
+gone with the mapping. What replaced them is narrower and it is the shape a
+refusal should take once a kind is built: not the kind, but the sub-form the
+walk cannot account for. A composite literal now refuses an element list whose
+keys do not resolve to distinct fields of the type, a `new` refuses a node that
+names both a value and a type or neither, and a `go` or `defer` refuses one
+that names the defer record it runs in.
+
+None of those is reachable from Go the checker accepted, which is stated here
+rather than left implicit: each is a shape `gc`'s writer cannot produce, so
+each is covered by construction and not by a test that instantiates it. A
+refusal that cannot be reached is still worth writing, because the alternative
+is a walk that assumes the encoding and is wrong in silence when the assumption
+stops holding.
 
 What stage 2 must not do is convert any of these into a fallback. A body the
 walk half-builds is a wrong answer inside a function nobody in this repository

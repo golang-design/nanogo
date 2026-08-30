@@ -745,3 +745,275 @@ func TestToolexecRunsAForeignGenericThatSlices(t *testing.T) {
 		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
 	}
 }
+
+// The module whose library holds the zero value, the composite literal, new,
+// and go and defer, which are the four codes the walk mapped last.
+//
+// Only main is on the allowlist, so gc compiles lib and nanogo reads each body
+// below out of the archive gc wrote. No syntax tree of any of them exists in
+// the build that stencils them.
+//
+// The element types are one word, two words and three words with a pointer in
+// the middle, because a literal whose elements were placed by position where
+// the format gave them an index, or a zero whose width came from the wrong
+// type, writes the wrong bytes rather than crashing, and prints a wrong answer
+// rather than failing to link.
+func foreignLatestModule() map[string]string {
+	return map[string]string{
+		"go.mod": "module nanogo.example/foreignlatest\n\ngo 1.27\n",
+		"lib/lib.go": `package lib
+
+// The zero value, once per nil-shaped class. The widths differ, so an answer
+// that came from the wrong type writes part of a value.
+
+func NilPtr[T any]() *T { return nil }
+
+func NilSlice[T any]() []T { return nil }
+
+func NilMap[T comparable]() map[T]int { return nil }
+
+func NilFunc[T any]() func(T) T { return nil }
+
+func NilIface[T any]() any { return nil }
+
+// NilCompare reads the node in an operand position, where the type it takes is
+// the type of the value it is compared against.
+func NilCompare[T any](s []T) int {
+	if s == nil {
+		return 1
+	}
+	return 0
+}
+
+// Holder gives a nil a field to be stored in, so the node reaches an element
+// of a composite literal and its width is read back through the struct.
+type Holder[T any] struct {
+	P *T
+	S []T
+	N int
+}
+
+func NilHolder[T any](n int) Holder[T] { return Holder[T]{P: nil, S: nil, N: n} }
+
+// The composite literal, at each of the three element encodings and at each
+// form inside them.
+
+type Rec[T any] struct {
+	A T
+	B int
+}
+
+func LitKeyed[T any](v T) Rec[T] { return Rec[T]{A: v, B: 2} }
+
+func LitPositional[T any](v T) Rec[T] { return Rec[T]{v, 3} }
+
+// LitPartial leaves B out, so the walk writes B's zero value out rather than
+// handing the lowering a short element list.
+func LitPartial[T any](v T) Rec[T] { return Rec[T]{A: v} }
+
+// LitEmpty names no field at all, which the lowering clears rather than
+// writes.
+func LitEmpty[T any]() Rec[T] { return Rec[T]{} }
+
+func LitSlice[T any](a, b T) []T { return []T{a, b} }
+
+// LitSliceKeyed gives one element an index, and the element after it takes the
+// index after that one. A walk that renumbered the elements by position would
+// write both at the front.
+func LitSliceKeyed[T any](a, b T) []T { return []T{2: a, b} }
+
+func LitArray[T any](a, b T) [4]T { return [4]T{a, b} }
+
+func LitArrayKeyed[T any](v T) [4]T { return [4]T{3: v} }
+
+func LitMap[T comparable](k T, v int) map[T]int { return map[T]int{k: v} }
+
+// LitNested elides the type of the inner literals, which the format writes out
+// whether or not the source did.
+func LitNested[T any](v T) [][]T { return [][]T{{v}, {v, v}} }
+
+// LitPtrElem elides the pointer of an element of a slice of pointers, which is
+// the one literal whose value is the address of another.
+func LitPtrElem[T any](v T) []*Rec[T] { return []*Rec[T]{{A: v, B: 1}} }
+
+// LitAddr writes the address, which is a unary operator around a literal
+// rather than the pointer form of one.
+func LitAddr[T any](v T) *Rec[T] { return &Rec[T]{A: v, B: 5} }
+
+// new. The value is read back through the pointer, because dropping the
+// operand of new(x) compiles it into new(T) and returns a pointer to a zero,
+// which no allocation or link check would show.
+
+func NewT[T any]() *T { return new(T) }
+
+func NewVal[T any](v T) *T { return new(v) }
+
+func NewRec[T any](v T) *Rec[T] { return new(Rec[T]{A: v, B: 4}) }
+
+// go and defer. Each operand is changed after the statement, so the answer
+// says whether the call read the value at the statement or at the call.
+
+// Store is the callee named by symbol, which is the one callee that needs no
+// temporary because nothing can reassign it.
+func Store(p *int, v int) { *p = v }
+
+func DeferStore[T ~int](p *int, v, w T) {
+	defer Store(p, int(v))
+	v = w
+	_ = v
+}
+
+// DeferValue defers a call of a function value, which is the callee that has
+// to go into a temporary.
+func DeferValue[T any](f func(T), v, w T) {
+	defer f(v)
+	v = w
+	_ = v
+}
+
+// DeferNoArgs defers a call with no operands, which needs no wrapper literal
+// and gets none.
+func DeferNoArgs[T ~int](f func(), v T) T {
+	defer f()
+	return v + 1
+}
+
+// DeferOrder defers three calls, so the order they run in is read and not
+// assumed: the specification runs them last in, first out.
+func DeferOrder[T any](f func(T), a, b, c T) {
+	defer f(a)
+	defer f(b)
+	defer f(c)
+}
+
+// Spawned starts a call on a new goroutine, which reads its operand at the
+// statement the way a defer does.
+func Spawned[T any](f func(T), v, w T) {
+	go f(v)
+	v = w
+	_ = v
+}
+`,
+		"main.go": `package main
+
+import "nanogo.example/foreignlatest/lib"
+
+type trio struct {
+	n    int
+	name string
+	m    int
+}
+
+func main() {
+	println(lib.NilPtr[int]() == nil, lib.NilPtr[trio]() == nil)
+	println(lib.NilSlice[string]() == nil, len(lib.NilSlice[trio]()))
+	println(lib.NilMap[string]() == nil, len(lib.NilMap[int]()))
+	println(lib.NilFunc[int]() == nil, lib.NilIface[trio]() == nil)
+	println(lib.NilCompare([]int(nil)), lib.NilCompare([]int{1}))
+
+	// The nil inside a struct, read back through the fields around it. A zero
+	// of the wrong width writes over N.
+	h := lib.NilHolder[trio](11)
+	println(h.P == nil, h.S == nil, len(h.S), h.N)
+
+	// The struct literal, at one word and at three with a pointer in the
+	// middle. LitPartial leaves B out and LitEmpty leaves everything out.
+	println(lib.LitKeyed(7).A, lib.LitKeyed(7).B)
+	println(lib.LitPositional("x").A, lib.LitPositional("x").B)
+	tk := lib.LitKeyed(trio{1, "one", 2})
+	println(tk.A.n, tk.A.name, tk.A.m, tk.B)
+	tp := lib.LitPartial(trio{3, "three", 4})
+	println(tp.A.n, tp.A.name, tp.A.m, tp.B)
+	te := lib.LitEmpty[trio]()
+	println(te.A.n, te.A.name == "", te.A.m, te.B)
+	ts := lib.LitEmpty[string]()
+	println(ts.A == "", ts.B)
+
+	// The element list of an array and a slice, where an element carries its
+	// index and not its position.
+	ss := lib.LitSlice("a", "bb")
+	println(len(ss), cap(ss), ss[0], ss[1])
+	sk := lib.LitSliceKeyed(trio{5, "five", 6}, trio{7, "seven", 8})
+	println(len(sk), sk[0].n, sk[2].name, sk[3].name)
+	ar := lib.LitArray("a", "bb")
+	println(len(ar), ar[0], ar[1], ar[3] == "")
+	ak := lib.LitArrayKeyed(trio{9, "nine", 10})
+	println(ak[0].n, ak[0].name == "", ak[3].n, ak[3].name)
+
+	m := lib.LitMap("k", 5)
+	println(len(m), m["k"], m["absent"])
+
+	nested := lib.LitNested(trio{1, "one", 2})
+	println(len(nested), len(nested[0]), len(nested[1]), nested[1][1].name)
+
+	pe := lib.LitPtrElem("v")
+	println(len(pe), pe[0].A, pe[0].B)
+	pa := lib.LitAddr(trio{3, "three", 4})
+	println(pa.A.name, pa.B)
+
+	// new, read back through the pointer.
+	println(*lib.NewT[int](), *lib.NewT[string]() == "")
+	nt := lib.NewT[trio]()
+	println(nt.n, nt.name == "", nt.m)
+	println(*lib.NewVal(41), *lib.NewVal("val"))
+	nv := lib.NewVal(trio{5, "five", 6})
+	println(nv.n, nv.name, nv.m)
+	nr := lib.NewRec("r")
+	println(nr.A, nr.B)
+
+	// defer, with the operand changed after the statement.
+	var stored int
+	lib.DeferStore(&stored, 4, 99)
+	println(stored)
+	var byValue string
+	lib.DeferValue(func(s string) { byValue = s }, "read", "later")
+	println(byValue)
+	ran := 0
+	println(lib.DeferNoArgs(func() { ran++ }, 6), ran)
+	order := ""
+	lib.DeferOrder(func(s string) { order += s }, "a", "b", "c")
+	println(order)
+
+	// go, joined through a channel so that the answer is read and not raced.
+	//
+	// The gate is what makes the answer a fact rather than a coin toss. The
+	// goroutine reads its operand and Spawned assigns to that variable after
+	// the statement, so a build that gave the call the variable's cell rather
+	// than a temporary would print the later value only when the goroutine
+	// happened to run second. Holding the goroutine until Spawned has returned
+	// makes it run second every time.
+	gate := make(chan int)
+	done := make(chan trio)
+	lib.Spawned(func(v trio) { <-gate; done <- v }, trio{1, "one", 2}, trio{9, "nine", 9})
+	gate <- 0
+	got := <-done
+	println(got.n, got.name, got.m)
+}
+`,
+	}
+}
+
+// TestToolexecRunsAForeignGenericAtTheLastFourCodes is the evidence for the
+// zero value, the composite literal, new, and go and defer.
+//
+// A stencil compiles whatever it computes, so the claim is agreement with the
+// program gc builds from the same source, and it is answered by running both.
+// The values are printed rather than counted, because each of the four fails
+// as a wrong value and not as a wrong shape: a zero of the wrong width, an
+// element at the wrong index, a pointer to a zero where the source asked for a
+// pointer to a value, and a call that read its operand a statement too late.
+func TestToolexecRunsAForeignGenericAtTheLastFourCodes(t *testing.T) {
+	h := setup(t, foreignLatestModule(), []string{"# gc owns lib, nanogo owns main", "main"})
+
+	if out, err := h.build(t, "-o", "foreignlatest", "."); err != nil {
+		t.Fatalf("go build -toolexec=nanogo: %v\n%s", err, out)
+	}
+	if lines := h.decisions(t); !compiled(lines, "main") {
+		t.Fatalf("nanogo delegated the main package:\n%s", strings.Join(lines, "\n"))
+	}
+
+	got := runProgram(t, filepath.Join(h.mod, "foreignlatest"))
+	if want := gcOutput(t, h); string(got) != string(want) {
+		t.Errorf("nanogo's program printed\n%s\nand gc's printed\n%s", got, want)
+	}
+}
