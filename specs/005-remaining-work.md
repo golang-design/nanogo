@@ -29,14 +29,21 @@ spec to grade itself against.
 
 | Gate | Counter | Today | Done |
 | --- | --- | --- | --- |
-| G-A | `internal/audit` probe classes | 70 ok, 25 refused, 0 wrong | 95 ok |
-| G-B | `internal/gotest` corpus passes | 119 of 356, 0 miscompilations | all passing |
+| G-A | `internal/audit` probe classes | 95 ok, 3 refused, 0 wrong, of 98 | all ok |
+| G-B | `internal/gotest` corpus passes | 209 of 356, 0 miscompilations | all passing |
 | G-C | [020](020-ir.md) Go-specific rows | see the correction below | all built |
-| G-D | bootstrap standard library closure | 8 of 27 packages | 27 |
+| G-D | bootstrap standard library closure | 18 of 28 compile invocations | 28 |
 
-G-A and G-B moved a long way in one sitting and the movement is recorded in
-`internal/audit/testdata/ratchet.txt` and `internal/gotest/testdata/ratchet.txt`,
-which are the files that decide these rows rather than this prose.
+G-A and G-B are decided by `internal/audit/testdata/ratchet.txt` and
+`internal/gotest/testdata/ratchet.txt` rather than by this prose, and a
+regression in either fails the build.
+
+G-D is a reading and not a gate. The closure is the installed Go
+distribution's, so it moves with every Go release, and a ratchet on it would
+fail the build on a toolchain upgrade. `internal/selfhost` takes the reading in
+one command and [060](060-selfhost.md) states what it found. Its own 19
+packages are ratcheted, because those do not move under anybody else's
+release.
 
 Then the three gates of [001](001-bootstrap-gates.md): G1 self-host, G2
 toolchain independence, G3 the distribution.
@@ -50,61 +57,105 @@ they have different answers and very different sizes.
 
 ## The graph
 
+Every construct the first version of this graph ordered is built. The graph
+below is what measurement left, and it is a different shape: what remains
+between here and the gates is not the language.
+
 ```mermaid
 graph TD
-  classDef free fill:#e8f5e9,stroke:#2e7d32
+  classDef done fill:#e8f5e9,stroke:#2e7d32
   classDef key fill:#fff3e0,stroke:#e65100,stroke-width:2px
   classDef gate fill:#e3f2fd,stroke:#1565c0
 
-  FLOAT["floats<br/>ssagen only"]:::free
-  WIDE["wide struct return<br/>decompose + ABI"]:::free
-  SCRATCH["regalloc scratch<br/>three where two"]:::free
-  DRIVER["modinfo, go:embed<br/>driver only"]:::free
-  SEQ["append, string conversions<br/>range over string"]:::free
-  SENDRECV["send, recv, select, delete<br/>nothing but the work"]:::free
+  LANG["the language subset<br/>all 19 of nanogo's packages compile"]:::done
+  READ["export data reading<br/>stage 1 runs against nanogo archives"]:::done
 
-  DESC["TYPE DESCRIPTORS<br/>method signatures, itabs"]:::key
-  CTX["CONTEXT REGISTER<br/>an SSA op that reads R26"]:::key
+  MSET["FOREIGN INSTANTIATION METHOD SET<br/>the descriptor names four, the object defines two"]:::key
+  DESC["two descriptor rows<br/>an array's element, a promoted value receiver"]
+  DET["determinism<br/>N2 equals N3 byte for byte"]
 
-  IFACE["interface conversion<br/>assertion, switch"]
-  MAPS["maps"]
-  CHANS["channels, select"]
-  CAPT["defer and go with arguments<br/>method values"]
-  RANGE["range over map, chan, func"]
-  GEN["generics stenciling"]
+  ASM["ABI0 WRAPPERS<br/>an assembly definition, a Go call"]:::key
+  HDR["-asmhdr and symabis<br/>driver"]
+  ASSEM["nanogo's own assembler"]
+  LOWER["two lowering rows<br/>unsafe.Slice, unsafe.String"]
 
-  DESC --> IFACE
-  DESC --> MAPS
-  DESC --> CHANS
-  CTX --> CAPT
-  MAPS --> RANGE
-  CHANS --> RANGE
-  CTX --> RANGE
-  IFACE --> GEN
-  DESC --> GEN
-
-  IFACE --> G1
-  CAPT --> G1
-  MAPS --> G1
-  SEQ --> G1
-  GEN --> G1
-  SCRATCH --> G1
-  WIDE --> G1
+  LINK["nanogo's own linker"]
+  LOAD["package loader without go list"]
 
   G1["G1 self-host<br/>N2 equals N3, exact bytes"]:::gate
-  G2["G2 nanogo's own linker<br/>pclntab, moduledata"]:::gate
+  G2["G2 toolchain independence<br/>no go command"]:::gate
   G3["G3 compile the distribution"]:::gate
-  G1 --> G2 --> G3
+
+  LANG --> G1
+  READ --> G1
+  MSET --> G1
+  DESC --> G1
+  DET --> G1
+
+  G1 --> G2
+  LINK --> G2
+  LOAD --> G2
+
+  G1 --> G3
+  ASM --> HDR
+  HDR --> G3
+  ASSEM --> G3
+  LOWER --> G3
 ```
 
-Tier 0 and the two keystones have no incoming edge. They can all start at once.
-Everything in Tier 2 waits on a keystone or on nothing at all, and the column of
-Tier 2 items with no incoming edge is the work that is available whenever a
-builder is free.
+Two rows carry the weight now and neither is a construct.
 
-## The two keystones
+**A foreign generic instantiation's method set is what G1 waits on.**
+[017](017-export-data-reading.md) measured stage 1 and it runs: all 19 packages
+compile against dependencies nanogo built, and the reader reads every archive
+nanogo writes. The build then stops at the linker, with seven relocations in
+three classes. The one that owns the gate is this: `ir/stencil.go` builds a
+method of a foreign instantiation only where that method is called, so the
+descriptor of `sync/atomic.Pointer[[]*syntax.SrcFile]` promises four methods
+and `syntax`'s object defines the two it calls.
 
-Nothing else in the graph unblocks as much.
+The gap is not new at G1 and it is not caused by G1. It is **revealed** there.
+`gc` emits a whole instantiation `dupok` in every package that reaches it, and
+in today's build six `gc`-compiled importers of `syntax` each supply all four
+definitions. Put every importer on the allowlist and the six go with them.
+That is worth stating on its own: a build in which `gc` compiles anything can
+hide a symbol nanogo never emits, so a gap of this kind cannot be found by any
+measurement short of stage 1.
+
+**ABI0 wrappers are what the distribution waits on.** 8 of the 27 standard
+library archives the smallest Go program needs are refused for one reason, and
+`runtime` is one of the eight. An assembly definition uses ABI0 and a Go call
+uses ABIInternal, and nanogo generates no wrapper between the two, no `-asmhdr`
+header for the assembly sources to include, and no reader for the `symabis`
+file the go command produces. [047](047-abi-wrappers.md) is the design and it
+stages the work. This is a G3 row and not a G1 one: nanogo's own source has no
+assembly in it, and at G1 `gc` still builds the standard library
+([001](001-bootstrap-gates.md)'s hosted-mode allowance).
+
+### What this graph replaced, and why the shape changed
+
+The first version ordered thirteen constructs behind two keystones and put G1
+behind seven of them: interface conversion, `defer` and `go` with arguments,
+maps, `append` and the string conversions, generics stenciling, the register
+allocator's scratch registers, and the wide struct return. All of them are
+built, and the section below keeps the two keystones because the record of what
+unblocked what is worth more than the claim it replaced.
+
+The shape changed because the graph ordered the wrong thing. It ordered the
+language, and the language was never what G1 measures.
+
+It was then wrong a second time, in this document, for a day. The row above
+read "export data reading" because this file said the reading half had not
+started, and that sentence had gone stale the way every other number here went
+stale. [017](017-export-data-reading.md) ran stage 1 and the reader works. The
+correction is recorded rather than quietly applied, because the sentence that
+was wrong is the same kind of sentence as the ones still here: a claim about
+what is unbuilt, taken on trust, that nobody had re-measured.
+
+## The two keystones that were
+
+Both are built. Nothing else in the first graph unblocked as much, and this is
+the record of what each one carried.
 
 **Type descriptors with method sets, and itabs.** Thirteen refused probes trace
 here: every interface conversion, every type assertion, the type switch, method
@@ -277,8 +328,14 @@ Each of nanogo's own 19 library packages is compiled on its own, with an
 allowlist holding that package alone, so that a failure upstream cannot hide
 one downstream. A whole-tree build stops at the first failure and reports
 nothing about the rest, which is why the numbers below were wrong before they
-were measured this way. The two commands are not in the count: the harness
-delegates them.
+were measured this way. The two commands are not in the count: they are `main`
+packages, which the go command builds into executables rather than archives an
+importer reads.
+
+`internal/selfhost` runs this measurement and `internal/selfhost/testdata/ratchet.txt`
+records it, so a package that leaves the set now fails the build.
+[060](060-selfhost.md) states the three traps the harness defends against, each
+of which produced a confident wrong number while this was done by hand.
 
 **All 19 compile**: the root package, `dist`, `driver`, `export`,
 `export/pkgbits`, `ir`, `link`, `loader`, `obj`, `obj/arm64`, `rtsym`, `rtype`,

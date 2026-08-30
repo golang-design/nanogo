@@ -144,7 +144,7 @@ believed.
 
 | | | | |
 | --- | --- | --- | --- |
-| [060](060-selfhost.md) | G1 self-hosting | `draft` | not reached |
+| [060](060-selfhost.md) | G1 self-hosting | `in progress` | the gate is not reached; the measurement under it is built and gated, and all 19 of nanogo's own packages compile on their own |
 | [061](061-toolchain-independence.md) | G2 toolchain independence | `draft` | not reached |
 | [062](062-distribution-build.md) | G3 compiling the distribution | `draft` | not reached |
 

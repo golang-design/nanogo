@@ -1,0 +1,49 @@
+# Which packages nanogo compiled, on the day this was written.
+#
+# Written by internal/selfhost. Refresh it with
+#
+#	NANOGO_REQUIRE_CORPUS=1 NANOGO_REFRESH_RATCHET=1 go test ./internal/selfhost/
+#
+# and read the diff before committing. A line that disappeared is a package
+# that used to compile and no longer does, which is a regression and not a
+# refresh.
+#
+# Two kinds of line:
+#
+#	packages N     how many packages were measured
+#	compiles PATH  a package nanogo compiled on its own
+#
+# "On its own" is the whole method. Each package is built with an allowlist
+# naming that package alone, against dependencies gc built, because a
+# whole-tree build stops at the first failure and reports nothing about the
+# rest. A compile means nanogo produced an archive the go command accepted. It
+# does not mean the archive is correct, and nothing here is linked or run.
+#
+# A refusal is never recorded: recording one would freeze a gap in place and
+# call it progress. Read specs/060-selfhost.md for what this measures and what
+# it does not.
+#
+# Sorted, so a refresh produces a diff and not a reshuffle
+# (specs/053-determinism.md).
+
+packages 19
+
+compiles golang.design/x/nanogo
+compiles golang.design/x/nanogo/dist
+compiles golang.design/x/nanogo/driver
+compiles golang.design/x/nanogo/export
+compiles golang.design/x/nanogo/export/pkgbits
+compiles golang.design/x/nanogo/ir
+compiles golang.design/x/nanogo/link
+compiles golang.design/x/nanogo/loader
+compiles golang.design/x/nanogo/obj
+compiles golang.design/x/nanogo/obj/arm64
+compiles golang.design/x/nanogo/rtsym
+compiles golang.design/x/nanogo/rtype
+compiles golang.design/x/nanogo/ssa
+compiles golang.design/x/nanogo/ssa/rules
+compiles golang.design/x/nanogo/ssagen
+compiles golang.design/x/nanogo/syntax
+compiles golang.design/x/nanogo/types2
+compiles golang.design/x/nanogo/types2/errors
+compiles golang.design/x/nanogo/types2/gen

@@ -1,6 +1,6 @@
 ---
 title: "G1: self-hosting"
-status: draft
+status: in progress
 layer: gate
 gate: G1
 depends_on:
@@ -12,53 +12,80 @@ depends_on:
 
 The G1 gate of [001](001-bootstrap-gates.md), as a procedure that can be run.
 
-## This procedure cannot be run yet
+## Where this procedure stands
 
-Stage 1 does not start. The blocker is not a percentage of the language, it is
-what `driver.Compile` refuses, and nanogo's own packages trip it:
+Stage 1 does not start, and what stops it is no longer the language. All 19 of
+nanogo's own library packages compile, each measured on its own, and the
+section below records that and the harness that keeps it true.
 
-| Refused | Why | Owner |
+What stops stage 1 is that nanogo has never read export data nanogo wrote.
+Every package it compiles today imports archives `gc` produced, so the second
+half of the round trip has never been exercised. [005](005-remaining-work.md)
+carries that row and the graph it now sits in.
+
+### What used to stop it
+
+Four refusals did, and all four are closed. They are kept because each one
+moved the measurement in a way the refusal message did not predict.
+
+| Refused | Why | What closed it |
 | --- | --- | --- |
-| a package with assembly | an assembly definition is ABI0 and needs a wrapper | [030](030-abi.md) |
-| a declared type an importer would need a descriptor for | `rtype` cannot fill the bytes in: a method's signature and the two ABI wrappers beside it, a generated equality function, or a distinction [020](020-ir.md)'s type boundary drops | [032](032-type-descriptors-and-itabs.md) |
+| a package with assembly | an assembly definition is ABI0 and needs a wrapper | still open, and it blocks no package of nanogo's own: [047](047-abi-wrappers.md) owns it and it is a G3 row |
+| a declared type an importer would need a descriptor for | `rtype` could not fill the bytes in | [032](032-type-descriptors-and-itabs.md) |
 | a package-level variable whose type holds a pointer and whose descriptor `rtype` cannot build | the collector reads a data symbol's pointer map through its type descriptor | [032](032-type-descriptors-and-itabs.md) |
-| a function the register allocator's output asks `ssagen` for a move or a scratch register it does not have | there is no case for an edge move between two spill slots, and the target reserves two integer scratch registers where an indexed store wants three | `ssagen`, which [000](000-decisions.md) decision 5 records has no spec of its own |
+| a function whose register allocation asks `ssagen` for a move or a scratch register it does not have | no case for an edge move between two spill slots, and two integer scratch registers where an indexed store wants three | `ssagen`, which [000](000-decisions.md) decision 5 records has no spec of its own |
 
-The second row is the one nanogo's own packages hit first. `driver/types.go`
+The second row is the one nanogo's own packages hit first, and it is the reason
+this document stopped reasoning about the language subset. `driver/types.go`
 walks a package's scope in sorted order and refuses on the first declared type
-whose descriptor `rtype` cannot write, so the message names one type per package
-and says nothing about how many are behind it: `syntax` names `ArrayType`, `ir`
-names `Class`, `obj` names `Aux`, `rtsym` names `Group`, and `driver` names
+whose descriptor `rtype` cannot write, so the message named one type per package
+and said nothing about how many were behind it: `syntax` named `ArrayType`, `ir`
+named `Class`, `obj` named `Aux`, `rtsym` named `Group`, and `driver` named
 `Allowlist`. The count of nanogo packages that nanogo compiles is the measure,
-and no arithmetic over the language subset stands in for it. It is four of
-nineteen, and the section that measures it names the three packages that block
-the rest.
+and no arithmetic over the language subset stands in for it.
 
-What is left is [032](032-type-descriptors-and-itabs.md)'s encoder gap, which
-rows two and three above both name, [030](030-abi.md)'s wrapper, and the fourth
-row, which belongs to no spec. Measured over the 28 packages a `func main() {}`
-needs, nanogo compiles 9 and refuses 19:
+Measured over the 28 compile invocations a `func main() {}` needs, nanogo
+compiles **18** and refuses 10. `internal/selfhost` takes the reading:
 
-| Packages | Refused for |
+```
+NANOGO_MEASURE_CLOSURE=1 go test ./internal/selfhost/
+```
+
+| Packages | Refused for | Owner |
+| --- | --- | --- |
+| 8 | a package with assembly in it | [047](047-abi-wrappers.md) |
+| 2 | a row of [020](020-ir.md)'s lowering table: `unsafe.Slice` in `internal/runtime/gc/scan`, `unsafe.String` in `internal/stringslite` | [020](020-ir.md) |
+
+One reason holds eight of the ten, and `runtime` is one of the eight. An
+assembly definition uses ABI0 and a Go call uses ABIInternal, and nanogo
+generates no wrapper between them, no `-asmhdr` header for the assembly sources
+to include, and no reader for the `symabis` file the go command produces.
+[047](047-abi-wrappers.md) is the design.
+
+The other two are one row of the lowering table each and they are the same kind
+of gap.
+
+### What this table looked like before it was re-measured
+
+Every other row is gone, and the way they went is the reason this document now
+says how to take the reading rather than only what it said.
+
+| Was refused for | What happened |
 | --- | --- |
-| 8 | assembly |
-| 7 | a declared type's descriptor |
-| 2 | the register allocator's output, in `internal/stringslite` and `internal/runtime/gc` |
-| 1 | a package-level variable of type `error`, `math/bits` |
-| 1 | a row of [020](020-ir.md)'s lowering table, `append` in `internal/byteorder` |
+| 7, a declared type's descriptor | [032](032-type-descriptors-and-itabs.md) closed it. The row was one count and four reasons, so it did not shorten by one per fix |
+| 2, the register allocator's output | closed; the two packages moved on to other reasons and then compiled |
+| 1, a package-level variable of type `error` in `math/bits` | closed |
+| 1, `append` in `internal/byteorder` | closed, a row of [020](020-ir.md)'s lowering table |
 
-The 9 that compile are the `main` package itself, `internal/goarch`,
-`internal/goexperiment`, `internal/goos`, `internal/profilerecord`,
-`internal/asan`, `internal/msan`, `internal/race` and `internal/runtime/math`.
-The seven descriptor refusals split four ways, which is why the row is one
-count and not one reason: three want the generated equality function
-`internal/coverage/rtcov`, `internal/godebugs` and
-`internal/runtime/pprof/label` each need, two want a method's signature
-(`internal/strconv`, `internal/trace/tracev2`), one a function's signature
-(`internal/runtime/exithook`) and one a type parameter's run-time
-representation (`internal/runtime/gc/scan`).
-None of these counts is in `internal/hygiene/testdata/facts.json`, so nothing
-gates them and each Go release moves them. They are a reading of one toolchain,
+The count went from 9 to 18 and only one of the original five reasons is left.
+A table of reasons written once and re-read later describes a compiler that no
+longer exists, which is why the recipe is in code now.
+
+None of these counts is in `internal/hygiene/testdata/facts.json` and none is
+ratcheted, on purpose. The closure is the installed Go distribution's, so it
+moves with every Go release: a package appears, a package grows an assembly
+file, a generic body changes shape. A gate on it would fail the build on a
+toolchain upgrade, which is not a regression in nanogo. This is a reading of
 `go1.27.0` on `darwin/arm64`, which is `driver.PinnedGoVersion` and
 `driver.TargetArch`, the only pair nanogo emits code for.
 
@@ -214,27 +241,81 @@ generated equality function that spec owes, and only two want anything to do
 with a method. A reason stated once and never re-read outlives the fact it was
 taken from.
 
-## The closure measured against nanogo's own packages
+## nanogo's own packages, measured
 
-The count above is over the packages a `func main() {}` needs. This is the
-narrower and more useful measure: nanogo's own nineteen, compiled by nanogo under
-an allowlist that names all of them.
+This is the narrower and more useful measure: nanogo's own library packages,
+each compiled by nanogo on its own.
 
-**Five of nineteen compile, and two reasons block the rest.** The other
-fourteen fail on an import rather than on themselves, so the work list is the
-two rows below, and they are two different reasons. `rtsym`, `types2/errors`,
-`obj`, `obj/arm64` and `export/pkgbits` compile.
+**19 of 19 compile**, and the list is derived rather than written down. It is
+every package in the module that is not a `main` package and is not under
+`internal/`, which is the compiler and not the harnesses that run it. A package
+added to the compiler joins the measurement without anybody remembering to add
+it, because a written list is how a package gets left out while the total goes
+up anyway.
 
-| Package | What stops it |
-| --- | --- |
-| `syntax` | `ir: sync/atomic.(*Pointer).Store is a method of sync/atomic.Pointer[[]*syntax.SrcFile] and an instantiation of a generic type another package declares is not built`, reached through `FileSet`. The stenciler builds the methods of a generic type **this** package declares; the bodies of one another package declares live in that package's archive, and [013](013-generics.md) and [015](015-export-data.md) both record that they are not read |
-| `dist` | `rtype: the method exited of *os/exec.ExitError is unexported and declared in os, so its name needs a package path, which the name encoder does not write`. [032](032-type-descriptors-and-itabs.md) owns the encoder |
+**Compiling every package is not G1.** Each is compiled on its own against
+dependencies `gc` built, and a compile means nanogo produced an archive the go
+command accepted. Nothing is linked and nothing is run. What G1 asks for is a
+compiler that builds itself and then builds itself again to the same bytes, and
+the export data reader below is what stands between the two.
 
-`loader` and `types2` wait on `syntax`. `export` waits on `pkgbits`. `link`,
-`rtype`, `ir`, `ssa`, `ssagen` and `driver` wait on what is above them.
+### The measurement, and the three traps in it
 
-Every blocker this table has named so far is closed, and each time the package
-moved to the next reason rather than to the compiling column. `rtsym` wanted a
+`internal/selfhost` runs it and `internal/selfhost/testdata/ratchet.txt`
+records it. Refresh with
+
+```
+NANOGO_REQUIRE_CORPUS=1 NANOGO_REFRESH_RATCHET=1 go test ./internal/selfhost/
+```
+
+The number was measured by hand before that package existed and it was wrong
+three times, for three different reasons. Each is now defended against in code
+rather than described somewhere and forgotten.
+
+- **Exit status carries no information.** A `-toolexec` build hands `gc` every
+  package nanogo cannot compile, so the build succeeds either way. The only
+  evidence is the line nanogo writes to `NANOGO_LOG`. The measurement reads
+  that line and discards the status.
+- **An empty `NANOGO_ALLOWLIST` is not "everything".** It is nothing: every
+  package goes to `gc` and the build still succeeds. The first attempt at this
+  measurement reported twelve of twelve for exactly that reason. The allowlist
+  is written per package and read back before the build.
+- **A cached compile action means nanogo never runs.** A package `gc` built as
+  a dependency earlier has the same action ID when it becomes the allowlisted
+  target later, so `-toolexec` is skipped and the log holds no line for it.
+  Each package gets its own `GOCACHE`, and a package with no line is reported
+  as not reached rather than counted as either answer.
+
+A fourth trap is the reason each package is measured alone. A whole-tree build
+stops at the first failure and says nothing about the rest, so it reports the
+deepest package's blocker as though it were the only one.
+
+### What the ratchet is for
+
+Nothing else in this repository can see a package leaving this set. The corpus
+of [004](004-conformance.md) watches Go's own test files and says nothing about
+nanogo's source, and each package's unit tests test the compiler rather than
+what the compiler does to itself. A refusal added anywhere in the pipeline can
+take a package out with every other gate green.
+
+That is not hypothetical. The wrapper generator refused a variadic method, for
+a reason that turned out to be a misreading of where a call's arguments are
+packed, and it took `syntax` out of this set at
+`syntax.(*parser).errorfAt`. Nothing failed. It was found days later by running
+the measurement by hand, which is the same way the number had been wrong three
+times before.
+
+The ratchet records the compiled set and the package count and nothing else. A
+refusal is never recorded: recording one freezes a gap in place and calls it
+progress. Growth does not fail the build, and a run that compiles more says so
+and prints the refresh command.
+
+### How each blocker closed
+
+Every blocker this measurement named is closed, and each time the package moved
+to the next reason rather than to the compiling column. That is the shape of
+the record and the reason it is kept: a work list that shortens by one item per
+fix is not what this measurement produced. `rtsym` wanted a
 frame object past the twelve-bit `ADD` immediate, which is the R27 expansion
 [042](042-arm64-backend.md) already had for `subSP`. `obj` wanted a result that
 arrives in the frame to be read there, which [030](030-abi.md) now does at the
@@ -245,13 +326,15 @@ their own next reason. `dist` then wanted the body of the hash its
 `map[Producer]int` names, which [032](032-type-descriptors-and-itabs.md) now
 generates, and moved to the generic instantiation `syntax` waits on: two of
 the three rows are one row. `export/pkgbits` wanted a named result its `DumpTo`
-captures, which [033](033-closures-defer-panic.md) now builds, and it compiles. A work list that shortens by one item per fix is not
-what this measurement shows: it shows how deep each package's stack of reasons
-is, and only the count of compiling packages moves.
+captures, which [033](033-closures-defer-panic.md) now builds, and it compiles.
+`syntax` was last and cleared four: the foreign walk now carries the statement
+forms its instantiations reach, a range over a function is built, a method
+value whose receiver is an interface is built, and the wrapper generator
+forwards a variadic method's slice instead of refusing it.
 
-The measurement is worth repeating rather than quoting, and it has one trap in
-it. `go build -toolexec` with no `NANOGO_ALLOWLIST` compiles **nothing** with
-nanogo: an unset variable is an empty list and every package goes to `gc`, so
-the build succeeds and proves only that `gc` works. The allowlist must name the
-packages, and the first attempt at this measurement reported twelve of twelve
-for exactly that reason.
+Each package's stack of reasons was deeper than its refusal said, because a
+refusal names what stopped first and not what the package needs. An earlier
+version of this document read one message as a work list and reported the wrong
+owner for three packages: the refusal named `sync/atomic.Load`, which reads
+like a local declaration, but `objName` joins the package path to the object's
+name, so it was always a foreign object.
