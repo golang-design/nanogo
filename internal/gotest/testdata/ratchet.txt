@@ -92,6 +92,7 @@ pass rejected convlit.go
 pass rejected convlit1.go
 pass matched copy.go
 pass rejected copy1.go
+pass matched ddd.go
 pass rejected ddd1.go
 pass matched decl.go
 pass rejected declbad.go
@@ -240,7 +241,9 @@ pass rejected typeswitch2b.go
 pass rejected typeswitch3.go
 pass rejected undef.go
 pass matched unsafe_slice_data.go
+pass matched unsafe_string.go
 pass matched unsafe_string_data.go
+pass matched unsafebuiltins.go
 pass rejected used.go
 pass matched utf.go
 pass rejected varerr.go
