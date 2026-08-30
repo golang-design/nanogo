@@ -778,7 +778,7 @@ func coverageFacts(t *testing.T, root string) map[string]float64 {
 	}
 	cmd := exec.Command("go", "run", "./internal/covercheck", "-profile="+profile)
 	cmd.Dir = root
-	cmd.Env = childEnv()
+	cmd.Env = childEnv(t.TempDir())
 	// The exit status is not checked. covercheck exits non-zero when a
 	// package is below the gate, and that is a report this wants to read
 	// rather than a reason to stop: the number is still measured, and a
@@ -823,7 +823,7 @@ func goTest(t *testing.T, root string, corpus bool, args ...string) string {
 	}
 	cmd := exec.Command("go", args...)
 	cmd.Dir = root
-	env := childEnv()
+	env := childEnv(t.TempDir())
 	if corpus {
 		env = append(env, "NANOGO_REQUIRE_CORPUS=1")
 	} else {
@@ -858,18 +858,32 @@ func skipUnderDerivation(t *testing.T) {
 // its children.
 const factsChildEnv = "NANOGO_FACTS_CHILD"
 
-// childEnv is this process's environment, with the refresh switch removed and
-// the recursion mark set.
-func childEnv() []string {
+// childEnv is this process's environment, with the refresh switch removed, the
+// recursion mark set, and TMPDIR pointed at a directory this test owns.
+//
+// The derivation starts a whole `go test ./...` and that tree starts compilers
+// of its own, some of them under a context with a deadline. A process killed
+// on its deadline does not run its deferred cleanup, so the scratch directory
+// it made under TMPDIR outlives it, and the parent is the only thing left that
+// can remove it. Pointing the child tree at a directory this test removes
+// contains every such leak whatever caused it, rather than chasing whichever
+// compile happened to be too slow on the day.
+//
+// This is not hypothetical and it is not the child's fault. CI reported two
+// nanogo-build directories surviving a run, on the arm64 runner only, where
+// the derivation runs the suite again under coverage instrumentation and every
+// compile is slower.
+func childEnv(tmp string) []string {
 	var out []string
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "NANOGO_REFRESH_FACTS=") ||
-			strings.HasPrefix(kv, factsChildEnv+"=") {
+			strings.HasPrefix(kv, factsChildEnv+"=") ||
+			strings.HasPrefix(kv, "TMPDIR=") {
 			continue
 		}
 		out = append(out, kv)
 	}
-	return append(out, "NANOGO_REFRESH_FACTS=", factsChildEnv+"=1")
+	return append(out, "NANOGO_REFRESH_FACTS=", factsChildEnv+"=1", "TMPDIR="+tmp)
 }
 
 func readFacts(t *testing.T, path string) map[string]float64 {
@@ -1003,4 +1017,45 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// TestChildEnvOwnsTheChildTreesTemporaryDirectory pins the containment.
+//
+// The derivation starts a `go test ./...` that starts compilers of its own,
+// some under a context with a deadline. A process killed on its deadline does
+// not run its deferred cleanup, so whatever it made under TMPDIR outlives it
+// and only the parent can remove it. The child tree therefore has to write
+// into a directory this package owns.
+//
+// The old environment is dropped rather than appended to, because a variable
+// set twice is read by the last one on some systems and the first on others,
+// and a containment that depends on that is not a containment.
+func TestChildEnvOwnsTheChildTreesTemporaryDirectory(t *testing.T) {
+	// Taken before TMPDIR is overridden, because t.TempDir reads it.
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", filepath.Join(dir, "not-this-one"))
+	t.Setenv("NANOGO_REFRESH_FACTS", "1")
+	var tmpdirs, refresh, marks []string
+	for _, kv := range childEnv(dir) {
+		switch k, v, _ := strings.Cut(kv, "="); k {
+		case "TMPDIR":
+			tmpdirs = append(tmpdirs, v)
+		case "NANOGO_REFRESH_FACTS":
+			refresh = append(refresh, v)
+		case factsChildEnv:
+			marks = append(marks, v)
+		}
+	}
+	if len(tmpdirs) != 1 || tmpdirs[0] != dir {
+		t.Errorf("TMPDIR is %v, want exactly one entry naming %q", tmpdirs, dir)
+	}
+	// The refresh switch has to be off in the child or the child refreshes the
+	// facts it was started to measure, and the mark has to be on or the child
+	// starts a derivation of its own, and so does its child.
+	if len(refresh) != 1 || refresh[0] != "" {
+		t.Errorf("NANOGO_REFRESH_FACTS is %v, want exactly one empty entry", refresh)
+	}
+	if len(marks) != 1 || marks[0] != "1" {
+		t.Errorf("%s is %v, want exactly one entry set to 1", factsChildEnv, marks)
+	}
 }
