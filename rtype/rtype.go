@@ -659,7 +659,31 @@ func RuntimeOwned(t *ir.Type) bool {
 		return false
 	}
 	if t.Kind == ir.Slice && t.Name == "" {
-		return RuntimeOwned(t.Elem)
+		// One level, and never a second. gc writes the basic types, any,
+		// error, and a slice of one of those, so it strips a slice once and
+		// then asks whether what is left is basic. writtenByWriteBasicTypes
+		// spells that with an if and not a loop, under the comment "Now we
+		// have left the basic types plus any and error, plus slices of them.
+		// Strip the slice."
+		//
+		// Recursing here claimed the runtime owns [][]string, because it
+		// reduces to []string and then to string. The runtime owns neither
+		// [][]string nor any deeper nesting, so the descriptor of [10][]string
+		// referred to a symbol nothing defined and the link failed with
+		// "relocation target type:[][]string not defined". That is a link
+		// failure and not a wrong answer, but it is one only because the
+		// linker checks: a rule that decides somebody else defines a symbol is
+		// wrong in the direction that cannot be caught by running the program.
+		return isBasicDescriptor(t.Elem)
+	}
+	return isBasicDescriptor(t)
+}
+
+// isBasicDescriptor reports whether the runtime writes t's descriptor, with no
+// slice left to strip.
+func isBasicDescriptor(t *ir.Type) bool {
+	if t == nil {
+		return false
 	}
 	if t.Kind == ir.Interface && t.Name == "" && t.EmptyIface {
 		// any, spelled as a type literal.
