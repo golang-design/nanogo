@@ -100,7 +100,7 @@ believed.
 | [020](020-ir.md) | Typed IR | `in progress` | the node set, and the lowering table with a state per row |
 | [021](021-ssa-construction.md) | SSA construction | `in progress` | memory as a value, on-the-fly phis |
 | [022](022-optimization-passes.md) | Optimization passes | `draft` | the pass list; no pass is written |
-| [023](023-escape-analysis.md) | Escape analysis | `draft` | not written; every allocation goes to the heap, and an address-taken local does not, which is a miscompile |
+| [023](023-escape-analysis.md) | Escape analysis | `draft` | not written, so every allocation goes to the heap. The address-taken local it used to miscompile is closed by the interim rule. It now blocks the mixed build of [051](051-build-integration.md): `gc` reads nanogo's empty escape note as a heap leak and refuses every package on `objabi.runtimePkgs` |
 | [024](024-inlining-and-devirtualization.md) | Inlining and devirtualization | `draft` | not written |
 | [025](025-lowering-and-rules.md) | Lowering | `complete` | rewrite rules, the target boundary |
 | [026](026-register-allocation.md) | Register allocation | `complete` | linear scan; no callee-saved registers |

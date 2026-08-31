@@ -61,6 +61,29 @@ a package that imports one of its own and a package that imports `math/bits`
 and `strconv`. No allowlist file is committed, so a checkout still compiles
 nothing until a build names one.
 
+## What the mixed build stops on today
+
+A mixed build in which nanogo owns the standard library packages beneath
+`runtime` and `gc` owns `runtime` does not get as far as the linker, and the
+reason is in the export data rather than in any pass.
+
+`gc` compiles the 24 packages of `cmd/internal/objabi`'s `runtimePkgs` under a
+rule that forbids a heap escape, and it decides a call's escapes from the note
+the callee's archive carries. nanogo writes the empty note, which `gc` reads as
+"leaks to the heap", so a runtime package that hands the address of a local to
+a nanogo-compiled function is refused:
+
+```
+runtime_fast32.go:479:57: key escapes to heap, not allowed in runtime
+```
+
+17 of the 23 standard library packages nanogo compiles in
+[060](060-selfhost.md)'s bootstrap closure are on that list.
+[023](023-escape-analysis.md) owns the note, records why the empty one is the
+only sound answer nanogo can give today, and states what a note claiming
+otherwise would cost. `cmd/nanogo/escapenote_test.go` is the mechanism in eight
+lines of Go.
+
 ## `-toolexec`
 
 ```

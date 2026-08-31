@@ -2,7 +2,7 @@
 title: "Escape analysis"
 status: draft
 layer: middle end
-gate: "optional at G1, required at G3"
+gate: "required at G1 for a package on objabi.runtimePkgs, required everywhere at G3"
 depends_on:
   - 020-ir.md
   - 022-optimization-passes.md
@@ -68,6 +68,135 @@ iteration, so `for i := range s { gp = &i }` hands out a different pointer each
 time round. `ir/closure.go`'s `placeCells` is where that is done, and a
 parameter's and a named result's cell is at the entry because the signature is
 where those are declared.
+
+## What the missing pass blocks in a mixed build
+
+`export/writer.go` writes one escape analysis note per receiver and parameter,
+and every one of them is the empty string. **That is not a missing note and
+`gc` does not reject it.** It is the short encoding of the most pessimistic
+answer there is, and reading it as anything else has sent one investigation
+down the wrong path already.
+
+`cmd/compile/internal/escape`'s `leaks` is eight bytes, one per destination,
+each holding a minimum dereference count offset by one. `Encode` has exactly
+one special case:
+
+```go
+func (l leaks) Encode() string {
+	if l.Heap() == 0 {
+		// Space optimization: empty string encodes more
+		// efficiently in export data.
+		return ""
+	}
+	...
+```
+
+`parseLeaks` is the other half and agrees:
+
+```go
+func parseLeaks(s string) leaks {
+	var l leaks
+	if !strings.HasPrefix(s, "esc:") {
+		l.AddHeap(0)
+		return l
+	}
+	copy(l[:], s[4:])
+	return l
+}
+```
+
+The empty note round-trips as "leaks to the heap at zero dereferences", which
+is the top of the lattice. **`gc` has no encoding that means "I do not know",
+and it needs none: not knowing and leaking to the heap are the same claim
+about a caller's obligations, so the common one got the shortest encoding.**
+What nanogo writes today is therefore already the only sound note available
+without this pass, and the two `esc:` forms below are the only others.
+
+### The cost is a refusal and not a slower program
+
+For a package outside the runtime the note costs allocation. For a package
+inside it the note is fatal, because `gc` compiles those under a rule that
+forbids a heap escape outright:
+
+```go
+if loc.hasAttr(attrEscapes) {
+	if n.Op() == ir.ONAME {
+		if base.Flag.CompilingRuntime {
+			base.ErrorfAt(n.Pos(), 0, "%v escapes to heap, not allowed in runtime", n)
+		}
+```
+
+`base.Flag.CompilingRuntime` is set by `-+`, which `cmd/compile`'s flag parser
+also derives from `-std` and `objabi.LookupPkgSpecial(Ctxt.Pkgpath).Runtime`.
+`cmd/internal/objabi`'s `runtimePkgs` is that list, it holds 24 packages, and
+**17 of the 23 standard library packages nanogo compiles in
+[060](060-selfhost.md)'s bootstrap closure are on it.** So the configuration
+[051](051-build-integration.md) exists for, nanogo owning the closure and `gc`
+owning `runtime`, stops the first time a package on that list hands the address
+of a local to a function nanogo compiled.
+
+Measured on `go1.27.0` `darwin/arm64` with nanogo owning all 24 compile
+invocations it can, the first failure is `internal/runtime/maps`, at three
+sites of the shape `m.Delete(typ, abi.NoEscape(unsafe.Pointer(&key)))`:
+
+```
+runtime_fast32.go:479:57: key escapes to heap, not allowed in runtime
+runtime_fast64.go:544:57: key escapes to heap, not allowed in runtime
+runtime_faststr.go:409:58: key escapes to heap, not allowed in runtime
+```
+
+### Two independent gaps stack at `abi.NoEscape`, and only one is this spec's
+
+A note is read only for a call that survives as a call. `tagHole` in
+`cmd/compile/internal/escape/call.go` is the only reader of `param.Note`, and
+it is reached from the walk over a call's arguments, so an inlined body is
+analysed on its own and its callee's notes are never consulted. `gc` compiles
+those three sites against its own archives without a word and it inlines
+`abi.NoEscape` at all three.
+
+That the inlining is what makes the difference was checked on a pair rather
+than inferred from the pair of counts. Two copies of `NoEscape`'s body were put
+in one package, one carrying `//go:nosplit` and `//go:nocheckptr` and one
+carrying nothing, and a consumer compiled with `-+` called both. nanogo offered
+the body of the second, `gc` inlined it, and that call did not fail. nanogo
+offered no body for the first, the call survived, and it failed.
+
+nanogo offers no body for `abi.NoEscape`. `driver/export.go`'s
+`exportableDecl` withholds the body of any declaration carrying a directive
+the driver records, because the writer carries no directive at all
+([016](016-directives-and-pragmas.md)), and `NoEscape` carries `//go:nosplit`
+and `//go:nocheckptr`. That refusal is right on its own terms: a body offered
+without its pragma is a body `gc` would inline where the source forbade it.
+
+So those three sites are held by two gaps and closing either one frees them.
+**The blocker this spec owns is the general one and survives either fix.** Any
+nanogo-compiled function `gc` does not inline, with a pointer-bearing
+parameter, called by a package on the runtime list with the address of a
+local, fails. `cmd/nanogo/escapenote_test.go` is that case in eight lines of
+Go, with `//go:noinline` as the only directive, and it asserts all four halves:
+`gc`'s archive carries an `esc:` tag, nanogo's carries none, `gc` compiles the
+consumer against `gc`'s archive under `-+`, and it refuses the same consumer
+against nanogo's.
+
+### The two sound notes available without the pass
+
+Both are `gc`'s own, taken from `paramTag`. Neither is written today, because
+neither moves the blocker and an unexercised note-writing path is where the
+next unsound note gets introduced.
+
+| Case | Sound note | Why it is sound |
+| --- | --- | --- |
+| A parameter that is unnamed or `_` | `esc:`, the encoding of no flow to anywhere | The body cannot name the parameter, so nothing can flow out of it |
+| A bodyless declaration carrying `//go:noescape` | mutator and callee at 0, no heap flow | The pragma is an assertion by the author, and `gc` honours it without proof for the same reason |
+
+Every other note needs the graph below. **A note saying a parameter does not
+escape, written without proving it, is not a pessimisation that costs an
+allocation. It tells `gc` it may leave a caller's local in the frame while
+nanogo's callee retains a pointer to it, and the collector then holds a
+pointer into a frame that is gone.** Writing `esc:` for every parameter was
+tried in `cmd/nanogo/escapenote_test.go`'s fixture and it makes the refusal go
+away. That is the reason it must not be done: the refusal leaves the build log
+and the miscompile does not.
 
 The design below stands. It was reviewed and not disproved, only deferred.
 

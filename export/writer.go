@@ -1103,9 +1103,19 @@ func (w *writer) funcExt(fn *types2.Func, sig *types2.Signature, isMethod bool) 
 	w.Uint64(uint64(obj.ABIInternal))
 
 	// One escape analysis result per receiver and parameter, in that order.
-	// An empty note parses as "leaks to the heap", which is the conservative
-	// answer and the one a caller must assume when nanogo has run no escape
-	// analysis (specs/026-escape-analysis.md is unbuilt).
+	// An empty note parses as "leaks to the heap at zero dereferences", which
+	// is the top of gc's leaks lattice, the conservative answer, and the one a
+	// caller must assume when nanogo has run no escape analysis. gc has no
+	// encoding that means "unknown" and needs none, because unknown and
+	// leaks-to-heap are the same claim about a caller.
+	//
+	// This is the only sound note available while
+	// specs/023-escape-analysis.md is unbuilt, and it is what stops gc
+	// compiling a package on objabi.runtimePkgs against these archives: that
+	// rule forbids a heap escape outright. Two notes need no analysis and are
+	// not written, one for an unnamed parameter and one for a //go:noescape
+	// declaration, and 023 names both. Any other note here is a miscompile of
+	// the caller and not a missing optimisation.
 	n := sig.Params().Len()
 	if isMethod {
 		n++

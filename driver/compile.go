@@ -158,8 +158,9 @@ func checkSupported(cfg *Config) error {
 	// rules on and nanogo's refusal fired for none of them.
 	//
 	// What is refused here is package runtime itself. The property covers
-	// twenty-three packages and thirteen of them compile today, so refusing
-	// the property would be a regression rather than a repair, and it is far
+	// twenty-four packages, seventeen of the twenty-one this closure reaches
+	// compile today, so refusing the property would be a regression rather
+	// than a repair, and it is far
 	// coarser than what matters: base/flag.go's clauses are optimization and
 	// instrumentation policy, and the two that decide a program's meaning are
 	// per directive and per function. [RuntimeDirective] is that half, and
@@ -173,8 +174,9 @@ func checkSupported(cfg *Config) error {
 			Package: cfg.Package,
 			What:    "the runtime",
 			Detail: "it needs the write barriers of specs/034-write-barriers.md, the nosplit budget of " +
-				"specs/035-goroutines-and-stack-growth.md, and the 472 ABI wrappers of " +
-				"specs/047-abi-wrappers.md, none of which is built",
+				"specs/035-goroutines-and-stack-growth.md, the 472 ABI wrappers of " +
+				"specs/047-abi-wrappers.md, and the escape analysis of " +
+				"specs/023-escape-analysis.md, none of which is built",
 		}
 	}
 	if cfg.EmbedCfgFile != "" {

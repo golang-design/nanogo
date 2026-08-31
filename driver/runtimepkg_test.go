@@ -146,7 +146,13 @@ func TestRuntimeGateFiresForTheRightPackages(t *testing.T) {
 			name: "the runtime is refused with no -+ on the command line",
 			src:  plain,
 			edit: func(c *Config) { c.Package, c.Std = "runtime", true },
-			want: []string{"runtime: nanogo cannot compile the runtime", "specs/034", "specs/035", "specs/047"},
+			// specs/023 is named because a package under the runtime rules may
+			// not allocate implicitly and nanogo has no escape analysis, so
+			// every allocation goes to the heap. It is the fourth unbuilt
+			// spec in the way and it was missing from this list until the
+			// mixed build of specs/051-build-integration.md ran into it.
+			want: []string{"runtime: nanogo cannot compile the runtime",
+				"specs/023", "specs/034", "specs/035", "specs/047"},
 		},
 		{
 			name: "a runtime package that carries no such directive is not refused",

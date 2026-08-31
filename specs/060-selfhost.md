@@ -5,6 +5,7 @@ layer: gate
 gate: G1
 depends_on:
   - 001-bootstrap-gates.md
+  - 023-escape-analysis.md
   - 053-determinism.md
 ---
 
@@ -105,7 +106,7 @@ named `Class`, `obj` named `Aux`, `rtsym` named `Group`, and `driver` named
 and no arithmetic over the language subset stands in for it.
 
 Measured over the 28 compile invocations a `func main() {}` needs, nanogo
-compiles **20** and refuses 8. `internal/selfhost` takes the reading:
+compiles **24** and refuses 4. `internal/selfhost` takes the reading:
 
 ```
 NANOGO_MEASURE_CLOSURE=1 go test ./internal/selfhost/
@@ -113,30 +114,29 @@ NANOGO_MEASURE_CLOSURE=1 go test ./internal/selfhost/
 
 | Packages | Refused for | Owner |
 | --- | --- | --- |
-| 4 | `//go:nosplit` in a runtime package | [035](035-goroutines-and-stack-growth.md) |
-| 2 | an assembly call to a Go function, which needs the ABI0 wrapper | [047](047-abi-wrappers.md) stage 3 |
-| 1 | a `//go:linkname` that renames a definition nanogo emits | [047](047-abi-wrappers.md) |
-| 1 | `runtime` itself | [034](034-write-barriers.md), [035](035-goroutines-and-stack-growth.md), [047](047-abi-wrappers.md) |
+| 2 | a call to a symbol `//go:linkname` renames, which needs the reference half of the name model | [047](047-abi-wrappers.md) |
+| 1 | a method of a generic type whose dictionary is short by the slots its body names | [013](013-generics.md) |
+| 1 | `runtime` itself | [023](023-escape-analysis.md), [034](034-write-barriers.md), [035](035-goroutines-and-stack-growth.md), [047](047-abi-wrappers.md) |
 
-The count was 20 before stages 0, 1 and 2 of [047](047-abi-wrappers.md) and it
-is 20 after, and the table above is what changed. All eight used to give one
-message, "a package with assembly in it", which was one refusal standing in
-front of four separate pieces of missing work.
+The two held by `//go:linkname` are `internal/bytealg` and
+`internal/runtime/maps`. The one held by [013](013-generics.md) is
+`internal/runtime/atomic`. `runtime` needs three unbuilt specs at once and is
+the only package here that does.
 
-Stages 0 and 1 split that one message into four true ones. Stage 2 built the
-ABIInternal wrapper, the argument map that goes with it and the
-`//go:linkname` name model, and five of the eight moved again.
-`internal/runtime/atomic` and `internal/runtime/sys` are now held by
-`//go:nosplit` alone, which is the largest single thing this closure is
-waiting on: four of the eight are there.
-`internal/cpu` and `internal/bytealg` need the ABI0 wrapper of stage 3.
-`internal/runtime/maps` needs the other half of the `//go:linkname` model,
-which is emitting a definition under the renamed symbol.
+`//go:nosplit` holds nothing in this closure any more and neither does the ABI0
+wrapper. Those two reasons held six packages at the previous reading and hold
+none at this one, which is what took the count from 20 to 24. The previous
+reading is below.
 
-The useful reading is that [047](047-abi-wrappers.md) now holds three of the
-eight rather than five, and that
-[035](035-goroutines-and-stack-growth.md) holds four rather than two. The
-work moved rather than the count.
+### What this reading looked like at 20
+
+The eight refusals split four ways: four on `//go:nosplit` in a runtime
+package, two on an assembly call to a Go function needing the ABI0 wrapper, one
+on a `//go:linkname` renaming a definition nanogo emits, and `runtime`. Before
+that, all eight gave one message, "a package with assembly in it", which was
+one refusal standing in front of four separate pieces of missing work. Stages 0
+and 1 of [047](047-abi-wrappers.md) split that message into four true ones
+without moving the count.
 
 Nothing in the closure is now refused for a reason in the language. The last
 two that were, `internal/runtime/gc/scan` and `internal/stringslite`, wanted
@@ -166,6 +166,47 @@ file, a generic body changes shape. A gate on it would fail the build on a
 toolchain upgrade, which is not a regression in nanogo. This is a reading of
 `go1.27.0` on `darwin/arm64`, which is `driver.PinnedGoVersion` and
 `driver.TargetArch`, the only pair nanogo emits code for.
+
+### What this count cannot see, and the edge it hides
+
+The measurement builds each package on its own against **`gc`-built**
+dependencies, for the reason `internal/selfhost/measure.go` gives: a whole-tree
+build stops at the first failure and reports the deepest package's blocker as
+though it were the only one. That isolation costs one thing. No `gc` compile in
+this harness ever reads an archive nanogo wrote, so nothing this count reports
+can depend on what nanogo puts in one.
+
+The mixed build of [051](051-build-integration.md) does read them, and it stops
+on something this count is structurally unable to show. `gc` compiles the 24
+packages of `cmd/internal/objabi`'s `runtimePkgs` under a rule that forbids a
+heap escape, and **17 of the 23 standard library packages nanogo compiles here
+are on that list.** `export/writer.go` writes an empty escape analysis note for
+every receiver and parameter, `gc` reads an empty note as "leaks to the heap at
+zero dereferences", and a runtime package that hands the address of a local to
+a nanogo-compiled function is then refused:
+
+```
+runtime_fast32.go:479:57: key escapes to heap, not allowed in runtime
+```
+
+The note nanogo writes is correct. It is the most pessimistic answer in `gc`'s
+encoding and the only sound one available without
+[023](023-escape-analysis.md), which is unbuilt. So **the mixed build now
+depends on [023](023-escape-analysis.md)**, and no amount of work on the four
+refusals above will show it.
+
+The dependency does not go away when nanogo owns `runtime` as well, and it is
+not `gc`'s rule that keeps it. `cmd/internal/objabi.PkgSpecial` says what the
+list is for, and the first line of it is "implicit allocation is disallowed".
+A compiler that puts every allocation on the heap ([023](023-escape-analysis.md)
+records that nanogo does) cannot compile a package under that constraint,
+whichever compiler is enforcing it. That is the fourth spec on `runtime`'s row
+in the table above, and it was not there before this was measured.
+
+`cmd/nanogo/escapenote_test.go` holds the mechanism as a test, and
+[023](023-escape-analysis.md) holds the encoding, the two sound notes that need
+no analysis, and why writing any other one is a miscompile rather than a
+shortcut.
 
 One export-data limit is in the way of this gate specifically.
 `export/writer.go` refuses a generic declaration on purpose, and nanogo's own
