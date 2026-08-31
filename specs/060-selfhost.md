@@ -20,6 +20,30 @@ objects link, and $N_2$ runs and reports its version. $N_2$ is a working
 compiler on ordinary input: it builds a Go program that prints 42, and the
 program runs.
 
+**What stage 2's remaining fault is not.** The hypothesis space has been cut by
+measurement rather than by argument, and each line below is a probe over the
+failing compile rather than a reading of the code:
+
+| Ruled out | How |
+| --- | --- |
+| a lost object | `gccheckmark=1` reports nothing across 10 of 10 failing runs, and it is functional under Green Tea: `tryDeferToSpanScan` returns false when `useCheckmark`, so the verifying scan runs |
+| a missing scalar barrier | forcing a barrier on every store to a non-frame address, whatever the value's type, leaves the fault at 10 of 10 |
+| a missing bulk barrier | 1994 bulk moves in one build, none with a size mismatch, an unlaid type, or a source and destination that disagree |
+| wrongly emitted barrier code | all 11,200 nanogo call sites disassembled: every one has the buffer pointer move after the call and both stores through that register |
+| stack maps, stack copying, async preemption | `gcstoptheworld=1` is 0 of 10 where the default is 6 of 10, and `asyncpreemptoff=1` is 10 of 10 |
+| parallelism | `GOMAXPROCS=1` is 10 of 10 |
+
+What is left is a wrong value written into a slot the pointer map calls a
+pointer, by code that runs only while the mutator and the collector overlap on
+one processor. `gcshrinkstackoff=1` at 8 of 10 does not clear stack copying, so
+`adjustpointers` rewriting a frame slot the locals bitmap wrongly calls a
+pointer is still open, and mark assists on the mutator goroutine are the other
+half.
+
+The loop for it is one second, not ten minutes: `go build -work -x` on stage 2
+keeps the work tree and prints the single failing compile invocation, and
+`GOGC=1` makes that invocation fail deterministically.
+
 **Stage 2 fails, and it fails in a way only stage 2 could show.** Every fault
 below is a miscompilation in code $N_2$ contains, and none is reachable by any
 test in this repository: every one of them runs a compiler that `gc` built, and
@@ -309,6 +333,37 @@ order, because the cheap check eliminates the expensive investigation:
 The bisection in step 2 is the reason [040](040-object-format.md) requires
 deterministic object bytes rather than only deterministic executables. Comparing
 executables tells you that something is wrong; comparing objects tells you what.
+
+### Bisecting by allowlist does not work, and cannot
+
+A mixed build, where nanogo owns some packages and `gc` owns the rest, carries
+faults of its own that mask whatever is being looked for. That is not bad luck
+and it is not a bug to be fixed on the way past. It has one cause: nanogo writes
+a type descriptor and an itab into the named non-package definition space, which
+the linker dedupes by name, and `gc` writes them into its content-addressable
+hashed space. The two never merge, so a type that both compilers reach exists
+twice.
+
+It fires two ways, with different triggers.
+
+- **A duplicate itab**, when a body is exported. `gc` inlines a nanogo function
+  that builds an interface, emits its own itab in the hashed space with weak
+  `Fun` relocations, and the nanogo definition survives only in the named space
+  where nothing reaches it. `cmd/link`'s `data.go` redirects a weak unreachable
+  address to `runtime.unreachableMethod`, so the call goes to an unslid address
+  and faults rather than throwing.
+- **A duplicate descriptor**, from a plain import. A `gc`-compiled package that
+  type-switches on a type nanogo declared emits its own descriptor for it, and
+  the switch misses nanogo's.
+
+The second needs only an import, so any mixed build can hit it. The measured
+symptoms are `unknown syntax.Decl node *syntax.ImportDecl` and
+`the type checker panicked: unreachable`, and they are the harness talking about
+itself rather than about the program.
+
+So step 2's bisection is by object and by package, never by allowlist. This
+stays true until descriptors and itabs move into the content-addressable space
+[032](032-type-descriptors-and-itabs.md) owns.
 
 ## What the gate does not prove
 
