@@ -53,6 +53,20 @@ type Source struct {
 	// one file. See [pkgWriter.posBaseIdx].
 	File func(string) string
 
+	// Notes is one escape analysis note per receiver and parameter, keyed
+	// by the function's linker symbol name: the package path joined to
+	// gc's own spelling of the declaration, which is [SymName] with the
+	// path in front of it. It is nil for a package written without the
+	// analysis, and then every parameter takes the conservative note.
+	//
+	// The list is in gc's order, the receiver first and then the declared
+	// parameters, which is the order types.Type.RecvParams gives and the
+	// order gc's reader consumes them in. [writer.funcExt] checks the
+	// length against the signature it is writing and drops the whole entry
+	// when the two disagree: a note in the wrong position is the one thing
+	// here that is a wrong answer rather than a missing one.
+	Notes map[string][]string
+
 	// Archives are the compiled packages -importcfg named, in any order.
 	//
 	// They are what the writer copies a generic declaration of another

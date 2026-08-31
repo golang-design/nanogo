@@ -561,3 +561,96 @@ func TestWriteCarriesTheInitialisationFlag(t *testing.T) {
 		}
 	}
 }
+
+// The escape analysis notes the writer carries.
+//
+// escape.Params proves them and this package positions them. The two failures
+// are not the same kind: a note nobody proved is refused where it is decided,
+// and a note in the wrong position is refused here, because a proved note
+// landing on an unanalysed parameter is a claim gc's caller acts on and nanogo
+// never made.
+
+// notesOf returns every escape analysis note the payload holds, in the order
+// the string section stores them.
+func notesOf(t *testing.T, path string, payload []byte) []string {
+	t.Helper()
+	dec := pkgbits.NewPkgDecoder(path, string(payload))
+	var out []string
+	for i := range dec.NumElems(pkgbits.SectionString) {
+		if s := dec.StringIdx(pkgbits.Index(i)); strings.HasPrefix(s, "esc:") {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+const noteSource = `package n
+
+func One(p *int) int { return *p }
+`
+
+// TestWriterCarriesTheProvedNote is the positive half.
+func TestWriterCarriesTheProvedNote(t *testing.T) {
+	const path = "nanogo.example/note"
+	pkg, fset, _ := buildSource(t, path, noteSource)
+	payload, _, err := Write(pkg, false, &Source{
+		Fset:  fset,
+		Notes: map[string][]string{path + ".One": {"esc:"}},
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := notesOf(t, path, payload); len(got) != 1 || got[0] != "esc:" {
+		t.Errorf("the payload carries %q, want one proved note", got)
+	}
+}
+
+// TestWriterDropsMisalignedNotes is the guard.
+//
+// The notes are positional on both sides, so a list of the wrong length does
+// not lose its last entry: it moves every entry after the gap onto another
+// parameter. Dropping the whole list costs the caller an allocation per
+// parameter, which is what nanogo wrote before the analysis existed.
+func TestWriterDropsMisalignedNotes(t *testing.T) {
+	const path = "nanogo.example/note"
+	pkg, fset, _ := buildSource(t, path, noteSource)
+	for _, notes := range [][]string{
+		{},                    // too few
+		{"esc:", "esc:"},      // too many
+		{"esc:", "esc:", "x"}, // too many again
+	} {
+		payload, _, err := Write(pkg, false, &Source{
+			Fset:  fset,
+			Notes: map[string][]string{path + ".One": notes},
+		})
+		if err != nil {
+			t.Fatalf("Write with %d notes: %v", len(notes), err)
+		}
+		if got := notesOf(t, path, payload); len(got) != 0 {
+			t.Errorf("a list of %d notes for a declaration with one parameter reached the payload as %q",
+				len(notes), got)
+		}
+	}
+}
+
+// TestWriterHasNoNoteForAnotherPackage records what a declaration nanogo
+// compiled nothing for gets.
+//
+// The writer walks declarations of other packages too, writing them out in
+// full because the linked form has no stubs. nanogo analysed no body for one
+// of those, so the lookup misses and every parameter takes the conservative
+// note.
+func TestWriterHasNoNoteForAnotherPackage(t *testing.T) {
+	const path = "nanogo.example/note"
+	pkg, fset, _ := buildSource(t, path, noteSource)
+	payload, _, err := Write(pkg, false, &Source{
+		Fset:  fset,
+		Notes: map[string][]string{"other/pkg.One": {"esc:"}},
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := notesOf(t, path, payload); len(got) != 0 {
+		t.Errorf("a note keyed by another package's path reached the payload as %q", got)
+	}
+}

@@ -7,6 +7,7 @@ package driver
 import (
 	"strings"
 
+	"golang.design/x/nanogo/escape"
 	"golang.design/x/nanogo/syntax"
 )
 
@@ -470,4 +471,23 @@ func NoSplit(p syntax.Pragma) bool {
 func asPragma(p syntax.Pragma) *pragma {
 	q, _ := p.(*pragma)
 	return q
+}
+
+// EscapeDirectives returns the directives that decide a parameter's escape
+// analysis note (specs/023-escape-analysis.md).
+//
+// //go:noescape is an assertion about a declaration with no body, and the two
+// uintptr directives are an obligation on the caller that nanogo refuses to
+// compile. Both answers belong to the parser's record, which is why the
+// package that writes the note asks for them here rather than reading
+// ir.Func.Pragma itself.
+func EscapeDirectives(p syntax.Pragma) escape.Directives {
+	q := asPragma(p)
+	if q == nil {
+		return escape.Directives{}
+	}
+	return escape.Directives{
+		Noescape:       q.flag&noescape != 0,
+		UintptrEscapes: q.flag&lifetimePragmas != 0,
+	}
 }

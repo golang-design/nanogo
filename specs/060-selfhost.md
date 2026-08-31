@@ -15,7 +15,7 @@ The G1 gate of [001](001-bootstrap-gates.md), as a procedure that can be run.
 
 ## Where this procedure stands
 
-**Stage 1 passes.** nanogo compiles all 19 of its own packages and `main`, the
+**Stage 1 passes.** nanogo compiles all 20 of its own packages and `main`, the
 objects link, and $N_2$ runs and reports its version. $N_2$ is a working
 compiler on ordinary input: it builds a Go program that prints 42, and the
 program runs.
@@ -99,7 +99,7 @@ the construct is ordinary and it took a compiler nanogo built to reach it.
 
 ### What used to stop stage 1 from starting
 
-The language, and then three classes of relocation. All 19 of
+The language, and then three classes of relocation. All 20 of
 nanogo's own library packages compile, each measured on its own, and the
 section below records that and the harness that keeps it true.
 
@@ -420,7 +420,7 @@ taken from.
 This is the narrower and more useful measure: nanogo's own library packages,
 each compiled by nanogo on its own.
 
-**19 of 19 compile**, and the list is derived rather than written down. It is
+**20 of 20 compile**, and the list is derived rather than written down. It is
 every package in the module that is not a `main` package and is not under
 `internal/`, which is the compiler and not the harnesses that run it. A package
 added to the compiler joins the measurement without anybody remembering to add

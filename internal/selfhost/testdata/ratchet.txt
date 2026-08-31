@@ -26,11 +26,12 @@
 # Sorted, so a refresh produces a diff and not a reshuffle
 # (specs/053-determinism.md).
 
-packages 19
+packages 20
 
 compiles golang.design/x/nanogo
 compiles golang.design/x/nanogo/dist
 compiles golang.design/x/nanogo/driver
+compiles golang.design/x/nanogo/escape
 compiles golang.design/x/nanogo/export
 compiles golang.design/x/nanogo/export/pkgbits
 compiles golang.design/x/nanogo/ir

@@ -112,6 +112,10 @@ func Compile(cfg *Config) error {
 	if err := checkIR(cfg, p, fset); err != nil {
 		return err
 	}
+	// The escape analysis notes are taken here and not below, because ir.Lower
+	// runs inside emitPackage and rewrites the tree the analysis reads
+	// (specs/023-escape-analysis.md).
+	notes := escapeNotes(p)
 	// The assembly gate runs here rather than in checkSupported, because the
 	// question it asks is which of this package's declarations the assembly
 	// defines, and that needs the declarations.
@@ -131,7 +135,7 @@ func Compile(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return writeOutput(cfg, out, pkg, hasInit, exportBodies(cfg, pkg, info, fset, files))
+	return writeOutput(cfg, out, pkg, hasInit, exportBodies(cfg, pkg, info, fset, files, notes))
 }
 
 // checkSupported refuses the inputs nanogo has no answer for, before it reads

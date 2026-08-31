@@ -39,8 +39,13 @@ and the foreign walk does not have that case yet.
 
 ## The finding that changes the shape of the work
 
-Stage 1 runs. All 19 packages compile against nanogo-built dependencies, and
-the reader reads every archive nanogo wrote.
+Stage 1 runs. Every one of nanogo's library packages compiles against
+nanogo-built dependencies, and the reader reads every archive nanogo wrote.
+
+The transcript below is the run that first showed it, over the 19 packages
+there were then. It was re-run over the 20 there are now, after
+[023](023-escape-analysis.md) added `escape/`, with the same result: 20
+compiled, exit status 0.
 
 `allow19.txt` holds the 19 library packages, one import path per line.
 

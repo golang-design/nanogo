@@ -76,11 +76,14 @@ func Write(pkg *types2.Package, hasInit bool, src *Source) (data []byte, fingerp
 	var fset *syntax.FileSet
 	var file func(string) string
 	var archives []Archive
+	var notes map[string][]string
 	if src != nil {
 		fset, file, bodies, archives = src.Fset, src.File, src.Funcs, src.Archives
+		notes = src.Notes
 		funcs = writableBodies(pkg, fset, file, src.Funcs, archives)
 	}
 	pw := newPkgWriter(pkg, funcs, bodies, fset, file, archives)
+	pw.notes = notes
 
 	// A declaration the writer cannot encode is reported by panicking, the
 	// way the reader reports a stream it cannot decode: the refusal is found
@@ -217,6 +220,13 @@ type pkgWriter struct {
 	// the file's dictionary is written from, so a generic declaration with
 	// no entry here cannot be written at all.
 	bodies map[types2.Object]*InlineFunc
+
+	// notes holds the escape analysis note of every receiver and parameter
+	// of every function the package declares, keyed as [Source.Notes]
+	// describes. A declaration with no entry takes the conservative note,
+	// which is what a declaration of another package always takes: nanogo
+	// compiled no body for it and has nothing to analyse.
+	notes map[string][]string
 
 	// lits holds the element claimed for each function literal a body
 	// named, which is filled in after the body that named it.
@@ -1105,23 +1115,20 @@ func (w *writer) funcExt(fn *types2.Func, sig *types2.Signature, isMethod bool) 
 	// One escape analysis result per receiver and parameter, in that order.
 	// An empty note parses as "leaks to the heap at zero dereferences", which
 	// is the top of gc's leaks lattice, the conservative answer, and the one a
-	// caller must assume when nanogo has run no escape analysis. gc has no
-	// encoding that means "unknown" and needs none, because unknown and
+	// caller must assume when nanogo proved nothing about a parameter. gc has
+	// no encoding that means "unknown" and needs none, because unknown and
 	// leaks-to-heap are the same claim about a caller.
 	//
-	// This is the only sound note available while
-	// specs/023-escape-analysis.md is unbuilt, and it is what stops gc
-	// compiling a package on objabi.runtimePkgs against these archives: that
-	// rule forbids a heap escape outright. Two notes need no analysis and are
-	// not written, one for an unnamed parameter and one for a //go:noescape
-	// declaration, and 023 names both. Any other note here is a miscompile of
-	// the caller and not a missing optimisation.
+	// escape.Params proves the notes that are not that one
+	// (specs/023-escape-analysis.md), and a declaration with no entry keeps
+	// the conservative one. A declaration of another package always has none:
+	// nanogo compiled no body for it and analysed nothing.
 	n := sig.Params().Len()
 	if isMethod {
 		n++
 	}
-	for i := 0; i < n; i++ {
-		w.String("")
+	for _, note := range w.p.paramNotes(fn, n) {
+		w.String(note)
 	}
 
 	// Whether the file carries a body an importer can inline, and what it
@@ -1137,6 +1144,38 @@ func (w *writer) funcExt(fn *types2.Func, sig *types2.Signature, isMethod bool) 
 		w.Bool(false)
 	}
 	w.Sync(pkgbits.SyncEOF)
+}
+
+// paramNotes returns the n escape analysis notes to write for fn.
+//
+// The key is the one [Source.Notes] describes, and it is rebuilt here from
+// what the checker recorded rather than carried from the analysis, because the
+// writer walks declarations of other packages too and those have no analysis
+// at all.
+//
+// A list whose length is not n is dropped in full. The notes are positional on
+// both sides, so a list one short does not lose the last note: it moves every
+// note after the gap onto the wrong parameter, and a proved note landing on an
+// unanalysed parameter is a claim gc acts on and nanogo never made. Every
+// other disagreement here costs an allocation, and this one does not, so it is
+// the only one checked.
+func (pw *pkgWriter) paramNotes(fn *types2.Func, n int) []string {
+	notes := pw.lookupNotes(fn, n)
+	if len(notes) != n {
+		notes = make([]string, n)
+	}
+	return notes
+}
+
+func (pw *pkgWriter) lookupNotes(fn *types2.Func, n int) []string {
+	if pw.notes == nil || fn == nil || fn.Pkg() == nil {
+		return nil
+	}
+	name, ok := SymName(fn)
+	if !ok {
+		return nil
+	}
+	return pw.notes[fn.Pkg().Path()+"."+name]
 }
 
 // typeExt writes the extension data of a defined type.

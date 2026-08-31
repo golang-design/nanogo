@@ -67,7 +67,7 @@ graph TD
   classDef key fill:#fff3e0,stroke:#e65100,stroke-width:2px
   classDef gate fill:#e3f2fd,stroke:#1565c0
 
-  LANG["the language subset<br/>all 19 of nanogo's packages compile"]:::done
+  LANG["the language subset<br/>all 20 of nanogo's packages compile"]:::done
   READ["export data reading<br/>stage 1 runs against nanogo archives"]:::done
 
   MSET["FOREIGN INSTANTIATION METHOD SET<br/>the descriptor names four, the object defines two"]:::key
@@ -104,7 +104,7 @@ graph TD
 Two rows carry the weight now and neither is a construct.
 
 **A foreign generic instantiation's method set is what G1 waits on.**
-[017](017-export-data-reading.md) measured stage 1 and it runs: all 19 packages
+[017](017-export-data-reading.md) measured stage 1 and it runs: all 20 packages
 compile against dependencies nanogo built, and the reader reads every archive
 nanogo writes. The build then stopped at the linker, with seven relocations in
 three classes. Two of the classes are closed and this is the third, which owns
@@ -114,7 +114,7 @@ that method is called, so the descriptor of
 object defines the two it calls.
 
 **Every relocation is closed and stage 1 of the three-stage build passes.**
-nanogo compiles all 19 of its own packages and `main`, the objects link, and
+nanogo compiles all 20 of its own packages and `main`, the objects link, and
 the executable runs:
 
 ```

@@ -10,14 +10,22 @@ depends_on:
 
 # Escape analysis
 
-**No analysis in this spec is built.** There is no pass, no graph, no summary
-and no `-m` output. `ir/` holds a builder, a type layout, a node set, a
-converter, the lowering pass of [020](020-ir.md) and the descriptor naming of
+**Stage 1 is built and it decides one thing, what the export data tells
+`gc`.** `escape/` answers one question per parameter, does the value the caller
+passed flow anywhere at all, and `export/writer.go` writes the answer as the
+note gc reads. Nothing else in this spec is built: there is no flow graph, no
+summary across a call, no `-m` output, and **no consumer inside nanogo**. Every
+allocation still goes to the heap and every address-taken variable still goes
+to a cell, so stage 1 changes what `gc` may do with nanogo's archives and
+changes nothing about the code nanogo emits.
+
+`ir/` holds a builder, a type layout, a node set, a converter, the lowering
+pass of [020](020-ir.md) and the descriptor naming of
 [032](032-type-descriptors-and-itabs.md), and no analysis over any of them.
-What exists is `ir.Object.Escapes`, which now carries the interim answer rather
-than the analysis's: `ir.Build` sets it where the **source** takes a variable's
-address and where a literal captures one, and `ir/lower.go` moves every
-variable it names into a heap cell.
+What decides nanogo's own lowering is still `ir.Object.Escapes`, which carries
+the interim answer rather than the analysis's: `ir.Build` sets it where the
+**source** takes a variable's address and where a literal captures one, and
+`ir/lower.go` moves every variable it names into a heap cell.
 
 The safe answer is taken by default at every site that allocates, and that is
 what makes the absence tolerable: the compiler allocates more than it needs to.
@@ -69,13 +77,13 @@ time round. `ir/closure.go`'s `placeCells` is where that is done, and a
 parameter's and a named result's cell is at the entry because the signature is
 where those are declared.
 
-## What the missing pass blocks in a mixed build
+## What the note decides in a mixed build
 
 `export/writer.go` writes one escape analysis note per receiver and parameter,
-and every one of them is the empty string. **That is not a missing note and
-`gc` does not reject it.** It is the short encoding of the most pessimistic
-answer there is, and reading it as anything else has sent one investigation
-down the wrong path already.
+and until stage 1 every one of them was the empty string. **That was not a
+missing note and `gc` does not reject it.** It is the short encoding of the
+most pessimistic answer there is, and reading it as anything else has sent one
+investigation down the wrong path already.
 
 `cmd/compile/internal/escape`'s `leaks` is eight bytes, one per destination,
 each holding a minimum dereference count offset by one. `Encode` has exactly
@@ -109,8 +117,8 @@ The empty note round-trips as "leaks to the heap at zero dereferences", which
 is the top of the lattice. **`gc` has no encoding that means "I do not know",
 and it needs none: not knowing and leaking to the heap are the same claim
 about a caller's obligations, so the common one got the shortest encoding.**
-What nanogo writes today is therefore already the only sound note available
-without this pass, and the two `esc:` forms below are the only others.
+The empty note was therefore the only sound note available without an
+analysis, and stage 1 is what replaces it where the value flows nowhere.
 
 ### The cost is a refusal and not a slower program
 
@@ -172,33 +180,166 @@ So those three sites are held by two gaps and closing either one frees them.
 **The blocker this spec owns is the general one and survives either fix.** Any
 nanogo-compiled function `gc` does not inline, with a pointer-bearing
 parameter, called by a package on the runtime list with the address of a
-local, fails. `cmd/nanogo/escapenote_test.go` is that case in eight lines of
-Go, with `//go:noinline` as the only directive, and it asserts all four halves:
-`gc`'s archive carries an `esc:` tag, nanogo's carries none, `gc` compiles the
-consumer against `gc`'s archive under `-+`, and it refuses the same consumer
-against nanogo's.
+local, fails when nanogo proved nothing about that parameter.
 
-### The two sound notes available without the pass
+## Stage 1: the note, and only the note
 
-Both are `gc`'s own, taken from `paramTag`. Neither is written today, because
-neither moves the blocker and an unexercised note-writing path is where the
-next unsound note gets introduced.
+`escape/` is the pass and `escape.Params` is its entry point. It answers one
+question per receiver and parameter, **does the value the caller passed flow
+anywhere at all**, and there is no third answer. `esc:` says it flows nowhere
+and is written only where the walk proved it. Everything else takes the empty
+note, which `gc` reads as a flow to the heap at zero dereferences and which is
+what nanogo wrote for every parameter before.
 
-| Case | Sound note | Why it is sound |
+The branch order is `cmd/compile/internal/escape.(*batch).paramTag`'s, so the
+two can be read side by side, and the encoding in `escape/leaks.go` is a
+transcription of `cmd/compile/internal/escape/leaks.go` rather than an
+equivalent. The bytes were checked against `gc`'s own archives and not against
+`gc`'s source: `cmd/nanogo/escapenote_test.go`'s `TestEscapeNoteMatchesGC`
+compiles each case with the toolchain, decodes the export data's string
+section, and asserts the note `gc` wrote.
+
+### The four notes stage 1 writes
+
+| Case | Note | Why it is sound |
 | --- | --- | --- |
-| A parameter that is unnamed or `_` | `esc:`, the encoding of no flow to anywhere | The body cannot name the parameter, so nothing can flow out of it |
-| A bodyless declaration carrying `//go:noescape` | mutator and callee at 0, no heap flow | The pragma is an assertion by the author, and `gc` honours it without proof for the same reason |
+| A parameter whose type has no pointer word | empty | `gc` writes the same, and no scalar can carry a reference for a caller to worry about |
+| A parameter that is unnamed or `_` | `esc:` | The body cannot name it, so nothing can flow out of it. `gc`'s own branch |
+| A bodyless declaration carrying `//go:noescape` | `esc:\x00\x01\x01`, a mutator flow and a callee flow at 0 | The pragma is an assertion by the author, and `gc` honours it without proof for the same reason. The bytes are `gc`'s own and are **not** `esc:`, which claims more than the pragma does |
+| A parameter the walk proved flows nowhere | `esc:` | The section below |
 
-Every other note needs the graph below. **A note saying a parameter does not
-escape, written without proving it, is not a pessimisation that costs an
-allocation. It tells `gc` it may leave a caller's local in the frame while
-nanogo's callee retains a pointer to it, and the collector then holds a
-pointer into a frame that is gone.** Writing `esc:` for every parameter was
-tried in `cmd/nanogo/escapenote_test.go`'s fixture and it makes the refusal go
-away. That is the reason it must not be done: the refusal leaves the build log
-and the miscompile does not.
+Everything else takes the empty note, including every parameter of a function
+carrying `//go:uintptrescapes` or `//go:uintptrkeepalive`. `gc` keeps analysing
+the parameters of such a function that are not `uintptr`; nanogo refuses to
+compile the function at all (`driver.LifetimeDirective`), so the answer that
+costs nothing is the one that cannot be wrong.
 
-The design below stands. It was reviewed and not disproved, only deferred.
+### What the walk proves, and the shape that makes it safe
+
+The walk is a taint set over one function's body for one parameter. The set
+starts as the parameter itself and grows by whole variables: an assignment
+whose source can carry a reference derived from the set taints the variable
+its destination names. It iterates to a fixed point, so a flow that runs
+backwards round a loop is seen.
+
+**Every switch in the walk is an allowlist and the default case is a leak.**
+An operation the pass does not name may store, mutate through, or call
+anything it is given, so a tainted variable anywhere below one refuses the
+parameter. Adding an operation is what makes the analysis see more; forgetting
+one costs an allocation. The inverse shape, a list of sinks with everything
+else assumed harmless, makes a forgotten operation a wrong answer, and a wrong
+answer here lands in a caller `gc` compiled.
+
+A leak is recorded at five kinds of position, and each is a claim in `gc`'s
+own lattice that `esc:` denies:
+
+| Position | `gc`'s flow |
+| --- | --- |
+| A value derived from the parameter is returned | result |
+| It is assigned to a global, or through a pointer, a slice element or a map | heap |
+| The destination of an assignment is reached through a value derived from the parameter | mutator |
+| It is an argument of a call, or the value being called | heap, callee |
+| It is converted to an interface, or to a word with no pointer in it | heap, and see below |
+
+The last row is two refusals with different reasons. A conversion to an
+interface is refused **because of nanogo and not because of the source**:
+nanogo boxes on the heap, since the pass that would decide otherwise is this
+one, so the value is in the heap whether or not the interface goes anywhere. A
+conversion to `uintptr` is refused because the reference survives in a word the
+collector does not trace, and a later flow of that word is a flow no analysis
+can follow. `gc` has that same hole and closes it with `//go:uintptrescapes`;
+stage 1 refuses instead.
+
+Reading is not a leak, and it is what makes the pass find anything at all.
+`b[0]`, `*p`, `t.f`, `len(b)` and `b[1:]` are reads, and a read of a value
+whose type has no pointer word cannot carry a reference onwards, which is what
+stops `uint64(b[0])` from tainting the integer it produces.
+
+### The one rule that is about nanogo and not about Go
+
+**A parameter with `ir.Object.Escapes` set takes the empty note, whatever the
+body does.** `ir.Build` sets the mark where the source takes a variable's
+address and where a literal captures one, and `ir/lower.go` moves every such
+variable into a heap cell. So nanogo's own callee puts that parameter's value
+in the heap before the body runs, and `esc:` would be false about nanogo's code
+generation rather than about the source. `gc` reaches a different answer for
+some of those cases because `gc` asks whether the address escapes; nanogo does
+not ask, so nanogo cannot claim the parameter stayed out of the heap.
+
+### What stops a proved note landing on the wrong parameter
+
+The notes are positional on both sides. `export/writer.go` writes
+`sig.Params().Len()` of them plus one for a receiver, and
+`cmd/compile/internal/noder`'s `funcExt` reads them over
+`types.Type.RecvParams`. Every other failure in this path produces the empty
+note; this one produces a proved note on a parameter nothing was proved about.
+
+Two things guard it. `driver.escapeNotes` keys the map by `ir.Func.Sym` and
+**drops a key two functions share** rather than letting the second overwrite
+the first. `export/writer.go`'s `paramNotes` rebuilds the same key from what
+the checker recorded and **drops a list whose length is not the one it is about
+to write**, in full, because a list one short does not lose its last entry: it
+moves every entry after the gap onto another parameter.
+
+### What stage 1 moved, and what it did not
+
+`cmd/nanogo/escapenote_test.go` is the blocker's mark. `lib.Load(b []byte)`
+reads `b` and keeps nothing, nanogo proves it, and `gc` now compiles a consumer
+of it under `-+` that hands it a slice of an array in its own frame. The same
+file's `lib.Keep`, which stores its parameter in a global, still stops that
+build with `escapes to heap, not allowed in runtime`, which is the edge that
+must not move with the first half.
+
+**The closure reading did not move: 24 of 28, the same four refusals.** That
+measurement compiles each package alone against dependencies `gc` built, so no
+nanogo-written note is ever read in it.
+
+**The whole-closure build did not move either, and the reason is exact.** With
+nanogo owning all 24 compile invocations it can, `internal/runtime/maps` still
+fails at the same three sites:
+
+```
+runtime_fast32.go:479:57: key escapes to heap, not allowed in runtime
+runtime_fast64.go:544:57: key escapes to heap, not allowed in runtime
+runtime_faststr.go:409:58: key escapes to heap, not allowed in runtime
+```
+
+`abi.NoEscape` is `func(p unsafe.Pointer) unsafe.Pointer { return p }`. Its
+note is a flow to result 0 at zero dereferences, `esc:\x00\x00\x00\x01`, and
+stage 1 has no encoding for it by construction: it says "flows nowhere" or it
+says nothing. **So the measured blocker is stage 3's and not stage 1's**, and
+that is the reason stage 3 is result flows rather than anything else.
+
+## The staging
+
+Every stage keeps the notes sound. A stage that writes a note it cannot prove
+is worse than no stage, because the wrong answer lands in a caller `gc`
+compiled and not in anything nanogo compiled.
+
+| Stage | What it adds | What it unblocks | State |
+| --- | --- | --- | --- |
+| 1 | "Flows nowhere" per parameter, from a body walk with an allowlist of operations | A runtime-rule package that hands a local to a nanogo function that keeps nothing | built |
+| 2 | More operations in the allowlist: `range`, the type switch, the composite literal that stays in the frame | The same, for bodies stage 1 refuses on sight | not built |
+| 3 | Result flows, so a parameter that leaves through a result is described rather than refused | `abi.NoEscape` and every identity-shaped function, which is the measured blocker above | not built |
+| 4 | Dereference counts, the flow graph below, and summaries across a call | A parameter that reaches a callee that keeps nothing | not built |
+| 5 | A consumer inside nanogo: the allocation decision the rest of this spec is about | The five sites in the opening table, and [022](022-optimization-passes.md)'s G3 gate | not built |
+
+Stages 1 to 4 decide only what nanogo tells `gc`. Stage 5 is the first that
+changes the code nanogo emits, and it is the one the opening table waits for.
+
+**A note saying a parameter does not escape, written without proving it, is not
+a pessimisation that costs an allocation. It tells `gc` it may leave a caller's
+local in the frame while nanogo's callee retains a pointer to it, and the
+collector then holds a pointer into a frame that is gone.** Writing `esc:` for
+every parameter was tried in `cmd/nanogo/escapenote_test.go`'s fixture and it
+makes the refusal go away. That is the reason it must not be done: the refusal
+leaves the build log and the miscompile does not.
+
+## The full design, which stages 4 and 5 build
+
+The design below stands and stage 1 does not replace it. Stage 1 is a walk over
+one body with two answers; this is the graph the later stages need, and it was
+reviewed and not disproved, only deferred.
 
 Escape analysis decides, for each allocation, whether it can live in the
 caller's stack frame or must go on the heap. It runs on the IR of
@@ -304,8 +445,26 @@ other.
 
 ## Testing
 
-None of this is written. Recorded because the oracle is the reason this pass is
-cheap to get right, and it should be set up before the first line of the pass:
+What stage 1 has:
+
+- `escape/escape_test.go` is the note table, one case per shape the walk
+  proves and one per shape it refuses, built through `ir.Build` from source.
+  Every proved case names the reason, and every refused case names the flow.
+- `cmd/nanogo/escapenote_test.go`'s `TestEscapeNoteMatchesGC` is the oracle.
+  Each case is a package with one pointer-bearing parameter, compiled twice,
+  and it asserts three things: the note `gc` wrote, the note nanogo wrote, and
+  that nanogo's note is `gc`'s own note or the empty one. The third is the
+  ratchet, and it holds for every case added later. One parameter per package
+  is what makes it a per-parameter reading: the notes sit in the export data's
+  string section with nothing between them, so a package with two of them
+  cannot be read back without decoding the stream.
+- `TestProvedNoteUnblocksTheRuntimeRule` is the blocker's mark, both halves: a
+  proved note lets `gc` compile a consumer under `-+`, and an unproved one
+  still stops it with the runtime rule's own words.
+- `export/writer_test.go` covers the positional guard, and
+  `driver/escapenotes_test.go` covers the shared-symbol drop.
+
+What the later stages still need:
 
 - `gc` has `-m` output stating each decision, and Go's `test/escape*.go` corpus
   annotates the expected decisions. nanogo is to emit the same shape of output
@@ -313,7 +472,8 @@ cheap to get right, and it should be set up before the first line of the pass:
   having a ready-made external oracle, and it should be used. nanogo parses `-m`
   today and prints nothing ([050](050-driver.md)).
 - Differential execution with the pass off, per
-  [022](022-optimization-passes.md): identical output required.
+  [022](022-optimization-passes.md): identical output required. This begins at
+  stage 5, which is the first stage that changes what nanogo emits.
 - A corpus for the three directives, checked in generated code.
 
 ## What was wrong

@@ -5,7 +5,9 @@
 package driver
 
 import (
+	"golang.design/x/nanogo/escape"
 	"golang.design/x/nanogo/export"
+	"golang.design/x/nanogo/ir"
 	"golang.design/x/nanogo/syntax"
 	"golang.design/x/nanogo/types2"
 )
@@ -31,11 +33,12 @@ import (
 // inline the call rather than a package that does not compile. The one thing
 // that would be a wrong answer, a body gc's inliner must not be given, is
 // refused by name inside export.
-func exportBodies(cfg *Config, pkg *types2.Package, info *types2.Info, fset *syntax.FileSet, files []*syntax.File) *export.Source {
+func exportBodies(cfg *Config, pkg *types2.Package, info *types2.Info, fset *syntax.FileSet, files []*syntax.File, notes map[string][]string) *export.Source {
 	bodies := &export.Source{
 		Fset:     fset,
 		File:     func(name string) string { return TrimPath(cfg.TrimRewrites, name) },
 		Archives: archives(cfg.ImportCfg),
+		Notes:    notes,
 	}
 	source := export.NewBodySource(pkg, info, fset)
 
@@ -184,4 +187,42 @@ func exportableDecl(fd *syntax.FuncDecl) bool {
 	}
 	p := asPragma(fd.Pragma)
 	return p == nil || p.flag == 0
+}
+
+// escapeNotes returns one escape analysis note per receiver and parameter of
+// every function the package declares, keyed by the function's linker symbol
+// name.
+//
+// The key is ir.Func.Sym, which is the package path joined to gc's own
+// spelling of the declaration: "path.F" for a function and "path.T.M" or
+// "path.(*T).M" for a method. export.SymName gives the second half of that
+// same string, so the writer rebuilds the key from what the checker recorded
+// and the two halves agree by construction. exportBodies above keys the
+// private root's body list the same way.
+//
+// It must run before ir.Lower. The analysis reads ir.Object.Escapes, which
+// ir.Build sets and nothing after it does, and it reads the tree the source
+// wrote rather than the one lowering leaves behind.
+//
+// A symbol two functions share is dropped rather than resolved. The notes of
+// one function landing on another is the one failure of this path that is not
+// a refusal, and a missing key is read as the conservative note.
+func escapeNotes(p *ir.Package) map[string][]string {
+	out := make(map[string][]string, len(p.Funcs))
+	dropped := make(map[string]bool)
+	for _, fn := range p.Funcs {
+		if fn == nil || fn.Sym == "" {
+			continue
+		}
+		if dropped[fn.Sym] {
+			continue
+		}
+		if _, seen := out[fn.Sym]; seen {
+			delete(out, fn.Sym)
+			dropped[fn.Sym] = true
+			continue
+		}
+		out[fn.Sym] = escape.Params(fn, EscapeDirectives(fn.Pragma))
+	}
+	return out
 }

@@ -100,7 +100,7 @@ believed.
 | [020](020-ir.md) | Typed IR | `in progress` | the node set, and the lowering table with a state per row |
 | [021](021-ssa-construction.md) | SSA construction | `in progress` | memory as a value, on-the-fly phis |
 | [022](022-optimization-passes.md) | Optimization passes | `draft` | the pass list; no pass is written |
-| [023](023-escape-analysis.md) | Escape analysis | `draft` | not written, so every allocation goes to the heap. The address-taken local it used to miscompile is closed by the interim rule. It now blocks the mixed build of [051](051-build-integration.md): `gc` reads nanogo's empty escape note as a heap leak and refuses every package on `objabi.runtimePkgs` |
+| [023](023-escape-analysis.md) | Escape analysis | `draft` | stage 1 of 5 is built: `escape/` proves "this parameter flows nowhere" and `export/` writes the note, so `gc` compiles a package on `objabi.runtimePkgs` against nanogo's archive where nanogo proved it. Nothing inside nanogo reads the answer, so every allocation still goes to the heap. The measured blocker of [051](051-build-integration.md) is now stage 3's: `abi.NoEscape` returns its parameter, and stage 1 has no encoding for a result flow |
 | [024](024-inlining-and-devirtualization.md) | Inlining and devirtualization | `draft` | not written |
 | [025](025-lowering-and-rules.md) | Lowering | `complete` | rewrite rules, the target boundary |
 | [026](026-register-allocation.md) | Register allocation | `complete` | linear scan; no callee-saved registers |
@@ -144,7 +144,7 @@ believed.
 
 | | | | |
 | --- | --- | --- | --- |
-| [060](060-selfhost.md) | G1 self-hosting | `in progress` | the gate is not reached; the measurement under it is built and gated, and all 19 of nanogo's own packages compile on their own |
+| [060](060-selfhost.md) | G1 self-hosting | `in progress` | the gate is not reached; the measurement under it is built and gated, and all 20 of nanogo's own packages compile on their own |
 | [061](061-toolchain-independence.md) | G2 toolchain independence | `draft` | not reached |
 | [062](062-distribution-build.md) | G3 compiling the distribution | `draft` | not reached |
 
