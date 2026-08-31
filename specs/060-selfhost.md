@@ -20,64 +20,140 @@ objects link, and $N_2$ runs and reports its version. $N_2$ is a working
 compiler on ordinary input: it builds a Go program that prints 42, and the
 program runs.
 
-**What stage 2's remaining fault is not.** The hypothesis space has been cut by
-measurement rather than by argument, and each line below is a probe over the
-failing compile rather than a reading of the code:
+**Stage 2 passes, and $N_2$ equals $N_3$ byte for byte.** $N_2$ compiles the
+same 17 packages the go command asks $N_1$ for, the objects link, and the two
+executables compare equal. That is the G1 fixed point of
+[001](001-bootstrap-gates.md).
 
-| Ruled out | How |
-| --- | --- |
-| a lost object | `gccheckmark=1` reports nothing across 10 of 10 failing runs, and it is functional under Green Tea: `tryDeferToSpanScan` returns false when `useCheckmark`, so the verifying scan runs |
-| a missing scalar barrier | forcing a barrier on every store to a non-frame address, whatever the value's type, leaves the fault at 10 of 10 |
-| a missing bulk barrier | 1994 bulk moves in one build, none with a size mismatch, an unlaid type, or a source and destination that disagree |
-| wrongly emitted barrier code | all 11,200 nanogo call sites disassembled: every one has the buffer pointer move after the call and both stores through that register |
-| stack maps, stack copying, async preemption | `gcstoptheworld=1` is 0 of 10 where the default is 6 of 10, and `asyncpreemptoff=1` is 10 of 10 |
-| parallelism | `GOMAXPROCS=1` is 10 of 10 |
+It is a procedure and not yet a job. `internal/selfhost` gates the per-package
+measurement under the fixed point and nothing runs the three stages in CI, so
+"The build" below is what a reader runs to check the paragraph above. Each
+stage takes minutes, which is the reason it is not a job and is the decision to
+make rather than assume.
 
-What is left is a wrong value written into a slot the pointer map calls a
-pointer, by code that runs only while the mutator and the collector overlap on
-one processor. `gcshrinkstackoff=1` at 8 of 10 does not clear stack copying, so
-`adjustpointers` rewriting a frame slot the locals bitmap wrongly calls a
-pointer is still open, and mark assists on the mutator goroutine are the other
-half.
+### The fault that stopped stage 2, and why every collector probe was negative
 
-The loop for it is one second, not ten minutes: `go build -work -x` on stage 2
-keeps the work tree and prints the single failing compile invocation, and
-`GOGC=1` makes that invocation fail deterministically.
+One defect held the whole of stage 2, and it is a frame layout fault and not a
+collector fault. It presented as three unrelated failures, all of them in code
+$N_1$ compiled: a bad pointer in a heap object while marking, an export data
+reader that read a desync out of a file `gc` wrote, and a slice header with a
+length no allocation could produce.
 
-**Stage 2 fails, and it fails in a way only stage 2 could show.** Every fault
-below is a miscompilation in code $N_2$ contains, and none is reachable by any
-test in this repository: every one of them runs a compiler that `gc` built, and
-these need a compiler that nanogo built, over input large enough to reach the
-fault. The smallest program compiled by $N_2$ is correct, so none of them is in
-the common path.
+**The outgoing argument area belongs to the callee for the whole of a call.**
+Go's register ABI gives every register-assigned parameter a home in the
+**caller's** argument area, at `abi.ABIParamResultInfo.SpillAreaOffset`, and
+the callee's register allocator spills the parameter there whenever it is live
+across a call the callee makes. `cmd/compile/internal/abi/abiutils.go` lays the
+area out as the stack arguments, then the stack results, then that spill area.
 
-That is the whole argument for running a stage before it can pass. This
-document predicted the shape and could not predict any of the faults.
-
-$N_2$ compiles `rtsym` and `types2/errors` and fails on the rest. Two faults are
-in the way, measured over three runs from a clean build cache that gave the same
-answer each time.
-
-**A heap object with a bad pointer in it**, on `obj/arm64`:
+`runtime.typedmemmove` is such a callee. Its three parameters are
+register-assigned, and when `runtime.writeBarrier.enabled` is set it spills all
+three into the caller's area at offsets 0, 8 and 16 before calling
+`runtime.bulkBarrierPreWrite`:
 
 ```
-runtime: pointer 0x... to unallocated span span.base()=0x... span.state=0
-fatal error: found bad pointer in Go heap (incorrect use of unsafe or cgo?)
+MOVBU  writeBarrier.enabled, R4
+TBZ    $0, R4, skip
+MOVD   8(R0), R4            // typ.PtrBytes
+CBZ    R4, skip
+MOVD   R0, 56(RSP)          // = caller's SP + 8
+MOVD   R1, 64(RSP)
+MOVD   R2, 72(RSP)
+CALL   runtime.bulkBarrierPreWrite
 ```
 
-The collector throws it while marking, in `scanObjectSmall`, so it is a word of
-a heap object and not of a frame. Unowned.
-
-**The export data reader**, on `syntax`, `obj`, `dist` and `export/pkgbits`:
+A result the registers cannot hold sits in that same area. `ssa/abi.go`'s
+`readFromArea` turned the call site's store of such a result into a block move
+whose **source was the area**, and `ssa/rules` lowers a move into the heap to
+`runtime.typedmemmove`. So the barrier call replaced the first three words of
+its own source with `{type, dst, src}` and then copied them to the
+destination. In `export.(*Reader).Read`:
 
 ```
-cannot import "errors" from $WORK/b004/_pkg_.a:
-runtime error: index out of range [0] with length 0
+CALL  pkgbits.NewPkgDecoder      // 128-byte result at 8(RSP)
+ADRP/ADD -> R0 = type:pkgbits.PkgDecoder
+MOVD  248(RSP), R1               // dst = the heap PkgDecoder
+ADD   $8, RSP, R2                // src = the result area
+CALL  runtime.typedmemmove
 ```
 
-Unowned.
+The dump of the destination is the three arguments, word for word, with the
+rest of the value intact:
 
-### The fault that is closed
+```
+*(pr+0)  = 0x1052bd978           // type:pkgbits.PkgDecoder
+*(pr+8)  = 0x763130a15200        // dst
+*(pr+16) = 0x76313081c468        // src
+*(pr+24) = 0x76313096868c        // elemData, correct
+*(pr+32) = 0x40ef
+```
+
+`version` and `sync` share word 0, so the decoder then believed the file
+carried sync markers, and the first `Decoder.Sync` on data `gc` wrote without
+them reported a desync. The same three words landed in a scanned heap object
+elsewhere and the collector threw on them.
+
+**Why the collector probes all read negative.** Every row of the table below
+was a true measurement of a fault that was not there. The write barrier is the
+only thing that decides whether `runtime.typedmemmove` takes the spilling path,
+so every switch that turns the barrier off cleared the fault and every switch
+that left it on did not.
+
+| Probe | Reading | What it was really measuring |
+| --- | --- | --- |
+| `gccheckmark=1` | silent over 10 of 10 failing runs | nothing was lost, so there was nothing to report |
+| a barrier forced on every store | 10 of 10 | no store was missing one |
+| bulk barriers | 1994 moves, none wrong | the barrier was correct, its argument area was not |
+| the 11,200 emitted barrier sites | all correct | same |
+| `GOGC=off` | 0 of 10 | the barrier is never enabled, so `typedmemmove` never spills |
+| `gcstoptheworld=1` | 0 of 10 | user goroutines are descheduled for the whole mark, so no `typedmemmove` runs while the barrier is on |
+| `asyncpreemptoff=1` | 10 of 10 | preemption is not involved |
+| `gcshrinkstackoff=1` | 10 of 10 | stack copying is not involved |
+| `GOMAXPROCS=1` | 10 of 10, and 7 of 10 over a second $N_2$ | it is not a race |
+
+The two that read 0 of 10 are one switch spelled two ways: each takes the write
+barrier out of the mutator's path, so `runtime.typedmemmove` never reaches the
+branch that spills. Every other row leaves it in, so every other row read the
+fault whatever it was aimed at. That is what a probe over a symptom costs when
+the mechanism is one layer below it.
+
+**The fix is `stageArea` in `ssa/abi.go`, and it is gc's.** A move that
+`ssa/bulkbarrier.go` will give a barrier may not read the outgoing argument
+area. The result is copied into a frame slot first, and the barrier move reads
+that slot. The staging copy may read the area, because its destination is a
+frame slot: it gets no barrier and lowers to `runtime.memmove`, which is
+`NOSPLIT|NOFRAME` hand-written assembly and has no spill home to write. gc
+solves the same problem the same way, in `ssa/writebarrier.go`, where
+`isVolatile` names an address in the argument area and the pass copies it to a
+local before it can be an operand of `runtime.wbMove`.
+
+`ssa/abi_test.go` holds the layout as an assertion, over the pass and with no
+collector in it, because the miscompile is in every build and only its trigger
+is timing dependent. `internal/e2e/argarea_test.go` holds it as a program: a
+call whose result the registers cannot hold, stored through a pointer, with
+`debug.SetGCPercent(1)` keeping a collection in flight. Without the fix the
+program reports 888 corrupted words of 64,000 and with it none.
+
+**The loop that found it.** `go build -work -x` on stage 2 keeps the work tree
+and prints the failing `compile` invocation. Re-running that one argv
+reproduces in about a second, `GOGC=1` makes it deterministic, and
+`GOEXPERIMENT=nogreenteagc` on the stage 1 build is what makes the collector
+name the object it threw on: the classic `scanobject` passes `refBase` and
+`refOff` to `findObject`, so `badPointer` prints the holder and its contents,
+and Green Tea's `scanObjectsSmall` passes zeros and prints neither.
+
+**Use a fresh `GOCACHE` for every $N_2$ build.** nanogo's `-V=full` string
+changes only with the commit, not with its source, so the go command's tool ID
+is stale and the cache silently mixes objects from different nanogo binaries.
+
+### What stage 2 could show that nothing else could
+
+Every fault stage 2 found is a miscompilation in code $N_2$ contains, and none
+was reachable by any test in this repository at the time: every one of them
+runs a compiler that `gc` built, and these need a compiler that nanogo built,
+over input large enough to reach the fault. Each is a test now.
+
+### The other fault stage 2 found
 
 **A frame object the collector read before anything wrote it.** $N_2$ died with
 
@@ -93,9 +169,8 @@ safepoints before that write. The stack copier read one of the claimed words and
 found what the previous frame had left there.
 [027](027-liveness-and-stackmaps.md) owns the rule and `ssagen`'s
 `zeroFrameObjects` is the fix, which is `gc`'s `Needzero` for the same class of
-variable. `internal/e2e/framezero_test.go` is the shape as a program, and it is
-the answer to the point below about what stage 2 can see that nothing else can:
-the construct is ordinary and it took a compiler nanogo built to reach it.
+variable. `internal/e2e/framezero_test.go` is the shape as a program: the
+construct is ordinary and it took a compiler nanogo built to reach it.
 
 ### What used to stop stage 1 from starting
 
@@ -103,10 +178,10 @@ The language, and then three classes of relocation. All 20 of
 nanogo's own library packages compile, each measured on its own, and the
 section below records that and the harness that keeps it true.
 
-What stops stage 1 is that nanogo has never read export data nanogo wrote.
-Every package it compiles today imports archives `gc` produced, so the second
-half of the round trip has never been exercised. [005](005-remaining-work.md)
-carries that row and the graph it now sits in.
+The row after that was that nanogo had never read export data nanogo wrote.
+Stage 2 closes it: $N_2$ compiles `driver` against the `export` archive $N_2$
+itself produced, so the second half of the round trip runs on every stage 2
+build. [005](005-remaining-work.md) carries that row and the graph it sits in.
 
 ### What used to stop it
 
@@ -280,6 +355,33 @@ delegating it to `gc`.
 
 The gate compares the linked executables. `go tool link` produces both, from the
 same objects in the same order, so any difference is in the objects.
+
+### Running it
+
+The allowlist is nanogo's own packages and `main`. Each stage gets a build
+cache of its own, for the reason above: nanogo's `-V=full` string moves with
+the commit and not with the source, so one cache shared between two stages
+replays objects the other stage's compiler wrote.
+
+```sh
+D=$(mktemp -d)
+L=$D/allowlist
+go list ./... | grep -vE '/(cmd|internal)/' > $L && echo main >> $L
+
+go build -o $D/n1 ./cmd/nanogo                                    # stage 0
+
+NANOGO_ALLOWLIST=$L GOCACHE=$D/c1 \
+  go build -toolexec=$D/n1 -o $D/n2 ./cmd/nanogo                  # stage 1
+
+NANOGO_ALLOWLIST=$L GOCACHE=$D/c2 \
+  go build -toolexec=$D/n2 -o $D/n3 ./cmd/nanogo                  # stage 2
+
+cmp $D/n2 $D/n3                                                   # the gate
+```
+
+Add `-work -x` to a stage that fails. The go command then keeps the work tree
+and prints the `compile` invocation that failed, and re-running that one argv
+is a one-second loop rather than a ten-minute one.
 
 ## What nanogo's own source requires
 

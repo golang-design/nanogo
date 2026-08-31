@@ -819,6 +819,9 @@ type abiPass struct {
 	// spills counts the frame slots spillResults has made, so that each one
 	// has a name of its own in a dump.
 	spills int
+
+	// staged counts the frame slots stageArea has made, for the same reason.
+	staged int
 }
 
 func (a *abiPass) run() error {
@@ -2340,11 +2343,89 @@ func (a *abiPass) readFromArea(call, sel, st *Value, av *ABIValue, mem *Value, n
 	src.Aux = o
 	dst := st.Args[0]
 	prev := st.Args[2]
+	if a.barrierCopiesArea(dst) {
+		src, prev = a.stageArea(st, src, av.Type, prev)
+	}
 	st.Op = OpMove
 	st.Type = MemType
 	st.AuxInt = av.Type.Size
 	setArgs(st, dst, src, prev)
 	a.touched[st.Block.ID] = true
+}
+
+// barrierCopiesArea reports whether a move out of the outgoing argument area
+// into dst is one ssa/bulkbarrier.go will give a barrier, which is the one
+// case where the area cannot be the move's source.
+//
+// The predicate is bulkBarrierType's and it asks the same two questions in the
+// same order: is the destination a frame slot, and does the type being moved
+// hold a pointer. It asks them of the destination's own element type, which is
+// the type bulkBarrierType reads, so the two cannot disagree and leave a move
+// that gets a barrier without being staged. That is the one direction that
+// matters: staging a copy the barrier pass then declines costs a memmove, and
+// missing one corrupts the source with no diagnostic.
+//
+// An address of unknown shape, or one of a type ir.Layout never ran on, is the
+// heap, for the reason ssa/rules' hasPointers assumes pointers for one: a
+// destination this pass cannot read is not one it has proved is a frame slot.
+// bulkBarrierType refuses both rather than answering, so nothing is emitted for
+// them either way, and the superset is what keeps the two from drifting apart.
+func (a *abiPass) barrierCopiesArea(dst *Value) bool {
+	if dst == nil {
+		return false
+	}
+	if dst.Op == OpLocalAddr {
+		return false
+	}
+	if dst.Type == nil || dst.Type.Elem == nil || dst.Type.Elem.Align == 0 {
+		return true
+	}
+	return dst.Type.Elem.HasPointers()
+}
+
+// stageArea copies a result out of the outgoing argument area into a frame
+// slot and returns the address of that slot and the memory the copy left.
+//
+// The outgoing argument area is the callee's, for the whole of a call and not
+// only while the arguments are being written. Go's register ABI gives every
+// register-assigned parameter a home in the CALLER's argument area, at
+// abi.ABIParamResultInfo.SpillAreaOffset, and the callee's register allocator
+// spills the parameter there whenever it is live across a call the callee
+// makes. runtime.typedmemmove is such a callee: its three parameters are
+// register-assigned, and when runtime.writeBarrier.enabled is set it spills
+// all three into the caller's area at offsets 0, 8 and 16 before calling
+// runtime.bulkBarrierPreWrite.
+//
+// A call's stack result sits in that same area. Handing its address to
+// runtime.typedmemmove as the source therefore replaces the first three words
+// of the value with {type, dst, src} and copies them to the destination. The
+// fault is a corrupted heap object rather than a collector fault, it is
+// silent, and it only appears while the write barrier is on, which is what
+// made specs/060-selfhost.md read it as a collector bug for as long as it did.
+//
+// The staging copy is safe where the barrier move is not: its destination is a
+// frame slot, so ssa/bulkbarrier.go gives it no barrier and ssa/rules lowers it
+// to runtime.memmove, which is NOSPLIT|NOFRAME hand-written assembly and has no
+// spill home to write. gc solves the same problem the same way, in
+// ssa/writebarrier.go, where isVolatile names an address in the argument area
+// and the pass copies it to a local before it can be an operand of wbMove.
+func (a *abiPass) stageArea(st, src *Value, t *ir.Type, mem *Value) (*Value, *Value) {
+	o := &ir.Object{
+		Name:  fmt.Sprintf("~a%d", a.staged),
+		Type:  t,
+		Class: ir.ClassLocal,
+	}
+	a.staged++
+	a.f.Frame = append(a.f.Frame, o)
+
+	b := st.Block
+	dst := a.mk(st, b, st.Pos, OpLocalAddr, abiPtrTo(t), mem)
+	dst.Aux = o
+	mv := a.mk(st, b, st.Pos, OpMove, MemType, dst, src, mem)
+	mv.AuxInt = t.Size
+	out := a.mk(st, b, st.Pos, OpLocalAddr, abiPtrTo(t), mv)
+	out.Aux = o
+	return out, mv
 }
 
 // resultStore returns the store that writes a whole call result into one

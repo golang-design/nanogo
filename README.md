@@ -410,15 +410,25 @@ that no pass performs, or the type descriptor those rows need.
 So the back half of the compiler is real and the front of the middle end is not
 finished.
 
-What stands between here and [`specs/060`](specs/060-selfhost.md)'s fixed point
-is no longer the language. Every one of nanogo's own 19 library packages now
-compiles, each measured on its own against dependencies `gc` built, and
-`internal/selfhost` runs that measurement so a package leaving the set fails
-the build. Two things are left and neither is a construct. nanogo has to read
-export data nanogo wrote, because today every package it compiles imports
-archives `gc` produced, and it has to write the wrapper between an assembly
-definition and a Go call, which is what refuses 8 of the 27 standard library
-packages the smallest program needs.
+[`specs/060`](specs/060-selfhost.md)'s fixed point is reached. Every one of
+nanogo's own 19 library packages compiles, each measured on its own against
+dependencies `gc` built, and `internal/selfhost` runs that measurement so a
+package leaving the set fails the build. On top of that, a nanogo that nanogo
+built compiles nanogo, and the two executables compare equal byte for byte. So
+nanogo reads export data nanogo wrote, which was the last thing that had never
+been exercised.
+
+The fixed point is self-consistency and not conformance, which
+[`specs/001`](specs/001-bootstrap-gates.md) says in the same words. It runs
+under the `go` command, with `gc` compiling the standard library underneath.
+Running the same three stages with no `go` command is
+[`specs/061`](specs/061-toolchain-independence.md), and what refuses a standard
+library package there is listed in [`specs/060`](specs/060-selfhost.md).
+
+The three stages are a procedure and not yet a CI job. `internal/selfhost`
+gates the per-package measurement under the fixed point, not the fixed point
+itself, so the commands in [`specs/060`](specs/060-selfhost.md) are what a
+reader runs to check this paragraph.
 
 ## Specs
 

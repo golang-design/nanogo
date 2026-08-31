@@ -1075,6 +1075,104 @@ func TestAssignABIReadsAResultTheRegistersCannotHold(t *testing.T) {
 	}
 }
 
+// abiPtrStruct is abiStruct with a pointer map, so that a move of the value is
+// one ssa/bulkbarrier.go gives a barrier.
+func abiPtrStruct(name string, n int) *ir.Type {
+	s := abiStruct(name, n, abiTPtr)
+	s.PtrBits = make([]byte, (n+7)/8)
+	for i := 0; i < n; i++ {
+		s.PtrBits[i/8] |= 1 << uint(i%8)
+	}
+	return s
+}
+
+// TestAssignABIStagesAResultTheBarrierMoveWouldReadOutOfTheArea is the fault
+// that stopped stage 2 of specs/060-selfhost.md.
+//
+// A result the registers cannot hold sits in the outgoing argument area, and
+// Go's register ABI gives every register-assigned parameter of a callee a home
+// in that same area, at abi.ABIParamResultInfo.SpillAreaOffset. A move of such
+// a result into the heap is lowered to runtime.typedmemmove, whose three
+// parameters are register-assigned and whose register allocator spills all
+// three into the caller's area at offsets 0, 8 and 16 as soon as
+// runtime.writeBarrier.enabled is set. A move that reads its source out of the
+// area therefore copies the call's own arguments over the first three words of
+// the value.
+//
+// The move the pass leaves has to read a frame slot. The copy that fills the
+// slot may read the area, because its destination is a frame slot: it gets no
+// barrier and lowers to runtime.memmove, which is NOSPLIT|NOFRAME and has no
+// spill home to write.
+func TestAssignABIStagesAResultTheBarrierMoveWouldReadOutOfTheArea(t *testing.T) {
+	tg := NewArm64Target()
+	typ := abiPtrStruct("p20", 20)
+	f := NewFunc("f")
+	b := f.Entry
+	b.Kind = BlockRet
+	mem := b.NewValue(0, OpInitMem, MemType)
+	// The destination is a parameter and not a frame address, so the move into
+	// it is one the bulk barrier pass gives a barrier.
+	dst := b.NewValue(0, OpArg, abiTPtr)
+	call := b.NewValue(0, OpStaticCall, MemType, mem)
+	call.Aux = &ir.Object{Name: "main.g"}
+	sel := b.NewValue(0, OpSelectN, typ, call)
+	st := b.NewValue(0, OpStore, MemType, dst, sel, call)
+	st.AuxInt = typ.Size
+	b.Control = b.NewValue(0, OpMakeResult, MemType, st)
+
+	Decompose(f)
+	if err := AssignABI(f, tg); err != nil {
+		t.Fatalf("a twenty-word result stored into the heap was refused: %v\n%s", err, f)
+	}
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("the function did not verify: %v\n%s", vs, f)
+	}
+
+	var moves []*Value
+	for _, v := range b.Values {
+		if v.Op == OpMove {
+			moves = append(moves, v)
+		}
+	}
+	if len(moves) != 2 {
+		t.Fatalf("the call site makes %d block moves, want two\n%s", len(moves), f)
+	}
+	inArea := func(v *Value) bool {
+		o, _ := v.Aux.(*ir.Object)
+		if o == nil {
+			return false
+		}
+		for _, h := range f.ABI.Homes {
+			if h.Obj == o {
+				return !h.Incoming
+			}
+		}
+		return false
+	}
+	// The staging copy reads the area and writes a frame slot.
+	if src := moves[0].Args[1]; src.Op != OpLocalAddr || !inArea(src) {
+		t.Errorf("the staging copy does not read the outgoing argument area\n%s", f)
+	}
+	if d := moves[0].Args[0]; d.Op != OpLocalAddr || inArea(d) {
+		t.Errorf("the staging copy does not write a frame slot\n%s", f)
+	}
+	// The move that becomes runtime.typedmemmove reads that slot and not the
+	// area. This is the assertion the fault is about.
+	if src := moves[1].Args[1]; src.Op != OpLocalAddr || inArea(src) {
+		t.Errorf("the barrier move reads the outgoing argument area, which runtime.typedmemmove overwrites with its own arguments\n%s", f)
+	}
+	if moves[1].Args[0] != dst {
+		t.Errorf("the barrier move does not write the destination the store named\n%s", f)
+	}
+	if moves[0].AuxInt != typ.Size || moves[1].AuxInt != typ.Size {
+		t.Errorf("the two moves copy %d and %d bytes, want %d each\n%s", moves[0].AuxInt, moves[1].AuxInt, typ.Size, f)
+	}
+	// The slot the barrier move reads is the one the staging copy filled.
+	if moves[0].Args[0].Aux != moves[1].Args[1].Aux {
+		t.Errorf("the barrier move reads a slot the staging copy did not fill\n%s", f)
+	}
+}
+
 // TestAssignABISpillsAFrameResultWithNowhereToPutIt covers a result the
 // registers could not hold that the call site hands straight to another call.
 //

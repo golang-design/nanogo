@@ -144,7 +144,7 @@ believed.
 
 | | | | |
 | --- | --- | --- | --- |
-| [060](060-selfhost.md) | G1 self-hosting | `in progress` | the gate is not reached; the measurement under it is built and gated, and all 20 of nanogo's own packages compile on their own |
+| [060](060-selfhost.md) | G1 self-hosting | `in progress` | the gate is reached: $N_2$ equals $N_3$ byte for byte, and all 20 of nanogo's own packages compile on their own. What is left is the closure the toolchain-independent form needs |
 | [061](061-toolchain-independence.md) | G2 toolchain independence | `draft` | not reached |
 | [062](062-distribution-build.md) | G3 compiling the distribution | `draft` | not reached |
 
