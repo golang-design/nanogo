@@ -356,6 +356,38 @@ func (l *lowerer) cellOf(o *Object, pos syntax.Pos) Expr {
 	return &Node{Op: OConvert, Pos: pos, Type: l.ptrTo(o.Type), X: word}
 }
 
+// varRef is how a statement this pass writes names a variable of the source.
+//
+// [lowerer.openCaptures] runs before the lowering walk, and it rewrote every
+// reference the tree held at that moment into a load through the variable's
+// heap cell. A reference this pass makes afterwards was not in that tree, so
+// it has to be spelled the same way here or it names the frame slot of a
+// variable that no longer lives in the frame.
+//
+// One statement makes such a reference: the binding of a type switch's clause
+// variable. The checker records one variable per clause and the source writes
+// no assignment for it, so the binding does not exist until typeSwitchCase
+// writes it, which is after the rewrite. A clause variable that a function
+// literal captured was then written to the frame and read out of the cell, and
+// the cell held the zero it was allocated with. In nanogo's own types2 that is
+// a nil *syntax.MapType in the map case of typInternal, and the compiler it
+// built died in its own type checker.
+//
+// A lowerer temporary needs no cell and gets none: [lowerer.cellOf] answers
+// only for a variable that ir.Build marked, and nothing this pass creates is
+// captured by a literal.
+//
+// [lowerer.rewriteCaptured] clears Op1 when it rewrites a destination this way,
+// because an assignment that declared a name no longer does once it writes
+// through a pointer. Nothing is owed here: the binding is built with [Assign]
+// and not with define, so its Op1 is already zero.
+func (l *lowerer) varRef(o *Object, pos syntax.Pos) Expr {
+	if cell := l.cellOf(o, pos); cell != nil {
+		return &Node{Op: ODeref, Pos: pos, Type: o.Type, X: cell}
+	}
+	return ref(o, pos)
+}
+
 // rewriteCaptured points every reference to a captured variable at its cell.
 //
 // A reference becomes a load through the cell pointer, and the capture list of

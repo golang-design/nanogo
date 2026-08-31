@@ -1015,10 +1015,8 @@ func foldAddress(v *ssa.Value, e *ssa.Edit) bool {
 // register in between. Anything else is a boolean in a register, and the
 // compare-and-branch instruction tests it without a compare at all.
 //
-// The fold is guarded on the flags being produced in this block. A flags value
-// is dead at the end of a block because every instruction in between may write
-// the condition codes, and the graph does not say so: nothing stops a
-// conditional set in a dominating block from being the control here.
+// The fold is guarded on the flags still holding where the block branches on
+// them, which [flagsReachTheBranch] is the test for.
 func lowerBlock(b *ssa.Block, e *ssa.Edit) bool {
 	c := b.Control
 	if c == nil {
@@ -1028,7 +1026,7 @@ func lowerBlock(b *ssa.Block, e *ssa.Edit) bool {
 	case ssa.OpARM64BRcond, ssa.OpARM64CBZ, ssa.OpARM64CBNZ:
 		return false
 	}
-	if c.Op == ssa.OpARM64CSET && c.Block == b && c.Args[0].Block == b {
+	if c.Op == ssa.OpARM64CSET && flagsReachTheBranch(b, c) {
 		br := e.Insert(c.Pos, ssa.OpARM64BRcond, ssa.FlagsType, c.Args[0])
 		br.Aux = c.Aux
 		b.Control = br
@@ -1037,6 +1035,48 @@ func lowerBlock(b *ssa.Block, e *ssa.Edit) bool {
 	br := e.Insert(c.Pos, ssa.OpARM64CBNZ, ssa.FlagsType, c)
 	b.Control = br
 	return true
+}
+
+// flagsReachTheBranch reports whether the flags the conditional set c reads
+// still hold where the block branches on them.
+//
+// The condition codes are not in the graph. A flags value takes no register,
+// nothing records which instructions write the condition codes, and no pass
+// keeps a flags value alive, so the only sound fold is one with nothing in
+// between: the compare, the set and the branch have to be the last three
+// instructions of the block, in that order.
+//
+// Membership of one block is not that test, and reading it as one is what the
+// compiler nanogo builds died of. A function whose value is set by a compare
+// and read by a branch further down the same block
+//
+//	constArg := m == 4
+//	sink = func() bool { return T == 9 }
+//	if constArg && T == 1 {
+//
+// puts the allocation of the literal's capture cell between the two, and
+// runtime.newobject writes the condition codes. The branch read whatever the
+// call left, so the body ran with constArg false. In nanogo's own types2 the
+// shape is conversions.go's "case constArg && isConstType(T)", and the
+// compiler took the constant path for a variable and dereferenced a nil
+// constant.Value in its own type checker.
+//
+// The three stay adjacent through what follows. ssa.WriteBarriers cuts a block
+// at a pointer store and carries the whole tail into the continuation, so a
+// compare, set and branch at the end of a block are at the end of the
+// continuation. Register allocation inserts moves, loads, stores and
+// rematerialised constants and addresses, and no arm64 instruction it emits
+// writes the condition codes. Nothing else runs before the emitter.
+func flagsReachTheBranch(b *ssa.Block, c *ssa.Value) bool {
+	if c.Block != b || len(c.Args) == 0 {
+		return false
+	}
+	flags := c.Args[0]
+	if flags == nil || flags.Block != b {
+		return false
+	}
+	n := len(b.Values)
+	return n >= 2 && b.Values[n-1] == c && b.Values[n-2] == flags
 }
 
 // ---------------------------------------------------------------------------

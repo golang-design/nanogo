@@ -5771,11 +5771,11 @@ func (l *lowerer) typeSwitchCaseGrouped(n, c *Node, index int, x *ifaceRef, tab 
 				ok = false
 				break
 			}
-			l.emit(Assign(pos, ref(o, pos), l.makeIface(single, word, x.word(ifaceData), pos)))
+			l.emit(Assign(pos, l.varRef(o, pos), l.makeIface(single, word, x.word(ifaceData), pos)))
 		case o.Type.Kind == Interface:
 			// The default clause, a clause listing several types, and case
 			// nil. The variable keeps the guard's type and its value.
-			l.emit(Assign(pos, ref(o, pos), x.value()))
+			l.emit(Assign(pos, l.varRef(o, pos), x.value()))
 		case single != nil:
 			v, why := l.ifaceValue(x.word(ifaceData), o.Type, pos)
 			if v == nil {
@@ -5783,7 +5783,7 @@ func (l *lowerer) typeSwitchCaseGrouped(n, c *Node, index int, x *ifaceRef, tab 
 				ok = false
 				break
 			}
-			l.emit(Assign(pos, ref(o, pos), v))
+			l.emit(Assign(pos, l.varRef(o, pos), v))
 		default:
 			l.refuse(n, "a clause whose variable is a "+o.Type.Kind.String()+" and whose case list is not one type")
 			ok = false
@@ -5864,7 +5864,7 @@ func (l *lowerer) typeSwitchCase(n, c *Node, x *ifaceRef) bool {
 		case o.Type.Kind == Interface:
 			// The default clause, a clause listing several types, and case
 			// nil. The variable keeps the guard's type and its value.
-			l.emit(Assign(pos, ref(o, pos), x.value()))
+			l.emit(Assign(pos, l.varRef(o, pos), x.value()))
 		case single != nil:
 			v, why := l.ifaceValue(x.word(ifaceData), o.Type, pos)
 			if v == nil {
@@ -5872,7 +5872,7 @@ func (l *lowerer) typeSwitchCase(n, c *Node, x *ifaceRef) bool {
 				ok = false
 				break
 			}
-			l.emit(Assign(pos, ref(o, pos), v))
+			l.emit(Assign(pos, l.varRef(o, pos), v))
 		default:
 			l.refuse(n, "a clause whose variable is a "+o.Type.Kind.String()+" and whose case list is not one type")
 			ok = false
