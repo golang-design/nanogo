@@ -559,6 +559,118 @@ func (e *emitter) prologue() {
 	e.wordIf(w, ok, "SUB $8, RSP, R29")
 }
 
+// zeroUnroll is the number of words this file stores one at a time.
+//
+// Above it the loop below is shorter: it is five instructions whatever the
+// span, and the straight sequence is one per word plus the expansion an
+// offset past the unsigned-offset form needs. gc draws the same line, between
+// a few stores, DUFFZERO and a loop, and the exact place is a size choice and
+// not a correctness one.
+const zeroUnroll = 16
+
+// zeroFrameObjects writes nil into every pointer word of every frame object.
+//
+// # Why the collector may read a word the generator has not written
+//
+// A frame object is described to the collector in two ways and neither is
+// bounded by a write this package can point to.
+//
+// The locals bitmap is the first. ssa/liveness.go computes an object's
+// lifetime backwards from its uses, and taking its address is a use, so the
+// object is live from the point of its last access up to the function entry.
+// Nothing emits the OpVarDef of specs/025-lowering-and-rules.md, so nothing
+// ends that range below the entry, and the bitmap therefore claims the
+// object's pointer words at every safepoint above the last access, including
+// the ones before anything wrote it. rtype.fieldName is the shape: it returns
+// a struct too large for the registers, so the result lives in a frame object
+// whose only write is the copy after the last call, and the two calls before
+// that copy were described with the words the previous frame left there.
+//
+// The stack objects table is the second, and it is read at safepoints the
+// bitmap does not cover: below the last address taken, the collector reaches
+// the object through the pointer that was taken and scans it by its type's
+// mask. That path has no liveness in it at all.
+//
+// # Why zeroing is the answer and not a narrower map
+//
+// Whether a word holds a pointer is exact and whether a slot is live is a
+// may-analysis, so a map that leaves out a word the program may have written
+// frees a live object. Narrowing the claim needs a definitely-written
+// analysis, and "definitely" is the wrong direction: on the path that did
+// write, the pointer would go undescribed. gc resolves this with an explicit
+// VARDEF that says the previous contents are dead, and zeroes whatever is left
+// over (cmd/compile/internal/liveness, Needzero). nanogo has no marker yet, so
+// every pointer-holding frame object is in the leftover class.
+//
+// The stores run inside the prologue's unsafe range, so no asynchronous
+// preemption stops among them, and the frame is pushed before the first one,
+// so they are inside this frame and not the caller's.
+//
+// # What this costs and what would remove it
+//
+// One store per pointer word of every frame object that holds a pointer, on
+// every call. An OpVarDef emitted where a whole object is overwritten would
+// take the objects filled before their first safepoint out of this, which is
+// most of them. That is specs/025-lowering-and-rules.md's marker and
+// specs/027-liveness-and-stackmaps.md's analysis, and it is an optimisation
+// over a correct map rather than a fix for a wrong one.
+func (e *emitter) zeroFrameObjects() {
+	if e.frame.size == 0 {
+		return
+	}
+	for i := range e.items {
+		it := &e.items[i]
+		// A spill slot is not here. Its liveness is an ordinary def-use
+		// dataflow with a kill at every definition, so it is live only where
+		// the allocator has stored a value in it, and a slot live at the
+		// entry would be a value read before it was written.
+		if it.Kind != ssa.ItemObject || !it.HasPointers() {
+			continue
+		}
+		// PtrBytes and not Size: the words above the last pointer are never
+		// in the bitmap and never in the type's mask, so nothing reads them
+		// before the generator writes them.
+		n := it.Type.PtrBytes()
+		// checkFrame proves that the frame the prologue builds is the frame
+		// the layout described, and it runs before this code exists. This is
+		// the same obligation for these stores: a pointer word above Varp
+		// would be written over the caller's saved frame pointer or over the
+		// return address, and a word below PtrBase is one the bitmap cannot
+		// reach anyway.
+		if it.Off < e.fr.PtrBase || it.Off+n > e.fr.Varp {
+			e.fail("%s holds pointers in [%d,%d), outside the scanned area [%d,%d)",
+				it.Name, it.Off, it.Off+n, e.fr.PtrBase, e.fr.Varp)
+			return
+		}
+		e.zeroRange(it.Off, n)
+	}
+}
+
+// zeroRange stores the zero register over [off, off+size) of this frame.
+func (e *emitter) zeroRange(off, size int64) {
+	words := size / 8
+	if words <= 0 {
+		return
+	}
+	if words <= zeroUnroll {
+		for w := int64(0); w < words; w++ {
+			e.mem(arm64.StoreX, arm64.ZR, arm64.RSP, off+w*8)
+		}
+		return
+	}
+	// The cursor and the limit go in the two trampoline registers, which the
+	// stack check above finished with and which the allocator never chooses.
+	// The post-indexed store advances the cursor, so the loop is one store,
+	// one compare and one branch.
+	e.addSP(arm64.RegTrampLo, off)
+	e.addSP(arm64.RegTrampHi, off+words*8)
+	top := e.pc()
+	e.memIf(arm64.MemPostIndex, arm64.StoreX, arm64.ZR, arm64.RegTrampLo, 8)
+	e.word(arm64.CmpRegReg(arm64.Size64, arm64.RegTrampLo, arm64.RegTrampHi))
+	e.fixups = append(e.fixups, fixup{at: e.pc(), block: -1, pc: top, kind: fixCond, cond: arm64.NE})
+	e.word(0)
+}
+
 // subSP emits dst = RSP - imm, setting the flags when the caller asks.
 //
 // The immediate field is twelve bits with an optional twelve-bit shift, so a

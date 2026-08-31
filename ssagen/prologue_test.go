@@ -615,3 +615,124 @@ func TestStackDeltaTakesEffectAfterTheAdjustment(t *testing.T) {
 		}
 	}
 }
+
+// The clearing of the frame objects, compared against go tool asm.
+//
+// zeroFrameObjects is what makes the locals bitmap true about the frame rather
+// than only self-consistent, so a wrong encoding here is a wrong pointer the
+// collector follows and not a wrong answer a program prints. The two forms are
+// separate encodings and both are checked: a span of at most zeroUnroll words
+// is one store per word, and a longer one is the post-indexed loop.
+func TestZeroRangeMatchesTheAssembler(t *testing.T) {
+	cases := []struct {
+		off, size int64
+		want      []string
+		why       string
+	}{
+		{40, 24, []string{
+			"\tMOVD\tZR, 40(RSP)",
+			"\tMOVD\tZR, 48(RSP)",
+			"\tMOVD\tZR, 56(RSP)",
+		}, "three words, one store each"},
+		{0, 8, []string{"\tMOVD\tZR, (RSP)"}, "one word at the bottom of the frame"},
+		{40, zeroUnroll * 8, nil, "the largest span the straight sequence covers"},
+		{696, 304, []string{
+			"\tADD\t$696, RSP, R16",
+			"\tADD\t$1000, RSP, R17",
+			"loop:",
+			"\tMOVD.P\tZR, 8(R16)",
+			"\tCMP\tR17, R16",
+			"\tBNE\tloop",
+		}, "past it, so the loop"},
+	}
+	n := 0
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("off%dsize%d", tc.off, tc.size), func(t *testing.T) {
+			want := tc.want
+			if want == nil {
+				for w := int64(0); w < tc.size/8; w++ {
+					want = append(want, fmt.Sprintf("\tMOVD\tZR, %d(RSP)", tc.off+w*8))
+				}
+			}
+			e := &emitter{opt: Options{Sym: "test.f"}, syms: newSymbols(obj.NewPackage("test"))}
+			e.zeroRange(tc.off, tc.size)
+			e.patch()
+			if err := e.err(); err != nil {
+				t.Fatalf("%s: %v", tc.why, err)
+			}
+			got := e.text
+			asm := asmText(t, want)
+			if len(got) == 0 {
+				t.Fatalf("%s: nothing was emitted", tc.why)
+			}
+			if len(asm) < len(got) {
+				t.Fatalf("%s: %d instructions and the assembler produced %d", tc.why, len(got), len(asm))
+			}
+			for _, w := range asm[len(got):] {
+				if w != 0 {
+					t.Fatalf("%s: the assembler produced %d instructions and this package %d", tc.why, len(asm), len(got))
+				}
+			}
+			for i := range got {
+				if got[i] != asm[i] {
+					t.Errorf("%s: instruction %d is %#08x and the assembler produced %#08x", tc.why, i, got[i], asm[i])
+				}
+				n++
+			}
+		})
+	}
+	if n == 0 {
+		t.Fatal("no instruction was compared")
+	}
+	comparisons += n
+	t.Logf("%d clearing instructions compared against go tool asm", n)
+}
+
+// A frame object whose pointer words are outside the area the collector scans
+// is refused rather than cleared.
+//
+// The store would land on the caller's saved frame pointer or on the return
+// address, and the bitmap that named the word could not describe it either.
+// checkFrame makes the same claim about the frame the prologue builds, and
+// this is that claim for the words zeroFrameObjects writes.
+func TestZeroFrameObjectsRefusesAnObjectOutsideTheScannedArea(t *testing.T) {
+	ptr := &ir.Type{Kind: ir.Ptr, Size: 8, Align: 8, PtrBits: []byte{1}, Name: "*int"}
+	item := func(off int64) []ssa.FrameItem {
+		return []ssa.FrameItem{{
+			Kind: ssa.ItemObject, Name: "obj", Type: ptr, Size: 8, Align: 8, Off: off,
+		}}
+	}
+	newEmitter := func(off int64) *emitter {
+		e := &emitter{opt: Options{Sym: "test.f"}, syms: newSymbols(obj.NewPackage("test"))}
+		e.frame = frame{size: 64}
+		e.fr = &ssa.Frame{PtrBase: 16, Varp: 56}
+		e.items = item(off)
+		return e
+	}
+	for _, tc := range []struct {
+		off int64
+		why string
+	}{
+		{8, "below the pointer group"},
+		{56, "past the top of the locals"},
+	} {
+		e := newEmitter(tc.off)
+		e.zeroFrameObjects()
+		if e.err() == nil {
+			t.Errorf("an object %s was cleared rather than refused", tc.why)
+		}
+		if len(e.text) != 0 {
+			t.Errorf("an object %s was refused and %d instructions were emitted anyway", tc.why, len(e.text))
+		}
+	}
+	// The same object inside the area is cleared, so the refusals above are
+	// the bound and not a check that never passes.
+	e := newEmitter(48)
+	e.zeroFrameObjects()
+	if err := e.err(); err != nil {
+		t.Fatalf("an object inside the area was refused: %v", err)
+	}
+	if len(e.text) != 1 {
+		t.Fatalf("an object inside the area emitted %d instructions, want one store", len(e.text))
+	}
+}

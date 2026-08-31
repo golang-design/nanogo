@@ -19,24 +19,58 @@ objects link, and $N_2$ runs and reports its version. $N_2$ is a working
 compiler on ordinary input: it builds a Go program that prints 42, and the
 program runs.
 
-**Stage 2 fails, and it fails in a way only stage 2 could show.** $N_2$
-compiling nanogo's own source panics inside its own type checker:
-
-```
-nanogo: golang.design/x/nanogo/rtsym: the type checker panicked:
-runtime error: invalid memory address or nil pointer dereference
-```
-
-`rtsym`, `types2/errors` and `obj/arm64` are among the packages that do it, so
-$N_2$ compiles none of nanogo and $N_3$ does not exist. The fault is a
-miscompilation in code $N_2$ contains. It is not reachable by any test in this
-repository: every one of them runs a compiler that `gc` built, and this needs a
-compiler that nanogo built, over input large enough to reach the fault. The
-smallest program compiled by $N_2$ is correct, so the fault is not in the
-common path.
+**Stage 2 fails, and it fails in a way only stage 2 could show.** Every fault
+below is a miscompilation in code $N_2$ contains, and none is reachable by any
+test in this repository: every one of them runs a compiler that `gc` built, and
+these need a compiler that nanogo built, over input large enough to reach the
+fault. The smallest program compiled by $N_2$ is correct, so none of them is in
+the common path.
 
 That is the whole argument for running a stage before it can pass. This
-document predicted the shape and could not predict the fault.
+document predicted the shape and could not predict any of the faults.
+
+$N_2$ compiles `rtsym` and `types2/errors` and fails on the rest. Two faults are
+in the way, measured over three runs from a clean build cache that gave the same
+answer each time.
+
+**A heap object with a bad pointer in it**, on `obj/arm64`:
+
+```
+runtime: pointer 0x... to unallocated span span.base()=0x... span.state=0
+fatal error: found bad pointer in Go heap (incorrect use of unsafe or cgo?)
+```
+
+The collector throws it while marking, in `scanObjectSmall`, so it is a word of
+a heap object and not of a frame. Unowned.
+
+**The export data reader**, on `syntax`, `obj`, `dist` and `export/pkgbits`:
+
+```
+cannot import "errors" from $WORK/b004/_pkg_.a:
+runtime error: index out of range [0] with length 0
+```
+
+Unowned.
+
+### The fault that is closed
+
+**A frame object the collector read before anything wrote it.** $N_2$ died with
+
+```
+runtime: bad pointer in frame golang.design/x/nanogo/rtype.fieldName at 0x...: 0x97
+fatal error: invalid pointer found on stack
+```
+
+and it took `rtsym` with it. `fieldName` returns a struct too large for the
+argument registers, so the result is a frame object, its only write is the copy
+after the last call, and the locals bitmap claimed its pointer words at the two
+safepoints before that write. The stack copier read one of the claimed words and
+found what the previous frame had left there.
+[027](027-liveness-and-stackmaps.md) owns the rule and `ssagen`'s
+`zeroFrameObjects` is the fix, which is `gc`'s `Needzero` for the same class of
+variable. `internal/e2e/framezero_test.go` is the shape as a program, and it is
+the answer to the point below about what stage 2 can see that nothing else can:
+the construct is ordinary and it took a compiler nanogo built to reach it.
 
 ### What used to stop stage 1 from starting
 

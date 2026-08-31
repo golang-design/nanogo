@@ -550,9 +550,15 @@ func (e *emitter) run() {
 	e.markLine(e.f.Pos)
 	e.markSP()
 	e.prologue()
+	// The frame objects are cleared with the frame pushed and before the
+	// first safepoint, so the collector's first reading of this frame finds
+	// nil where the generator has not written yet. See zeroFrameObjects.
+	e.zeroFrameObjects()
 	// The frame exists from here. Everything before it is a range no
 	// asynchronous preemption may stop in, because the frame it would read is
-	// half built (specs/027-liveness-and-stackmaps.md).
+	// half built (specs/027-liveness-and-stackmaps.md). The clearing above is
+	// inside it: an asynchronous preemption between two of its stores would
+	// read a frame that is half cleared.
 	e.prologueEnd = int64(e.pc())
 	e.entryArgs()
 

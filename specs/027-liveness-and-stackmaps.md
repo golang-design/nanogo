@@ -289,6 +289,42 @@ Setting a bit because a slot is live, without checking that the slot's type has
 a pointer there, is the mistake this section exists to prevent. It produces a
 map that is conservative in the wrong dimension.
 
+### A described word must also hold a pointer
+
+The two properties above make a map correct about the frame. Neither makes the
+frame correct about itself, and that is a third obligation on the code
+generator: a word the map describes has to hold a pointer or nil at every
+safepoint the map describes it at.
+
+A frame object is where the two come apart. Its lifetime is computed backwards
+from its uses, taking its address is a use, and nothing emits the `OpVarDef` of
+[025](025-lowering-and-rules.md), so the object is live from its last access up
+to the function entry. Every safepoint above the first write is therefore
+described with the words the previous frame left at that address. The stack
+objects table has the same gap and no liveness at all: below the last address
+taken, the collector reaches the object through the pointer and scans it by its
+type's mask, written or not.
+
+`ssagen`'s `zeroFrameObjects` closes it, by storing nil over the pointer words
+of every frame object in the prologue, inside the range no asynchronous
+preemption may stop in. That is the fallback the reference compiler uses for
+the same class, `Needzero` in `cmd/compile/internal/liveness`; the difference is
+that gc's `VARDEF` takes most objects out of the class first and nanogo's does
+not exist yet.
+
+Narrowing the map instead does not work and the reason is the asymmetry above.
+Leaving a word out needs a definitely-written analysis, and "definitely" is the
+unsafe direction: on the path that did write the object, the pointer would go
+undescribed and the collector would free it.
+
+The shape that found this is `rtype.fieldName`, in stage 2 of
+[060](060-selfhost.md). It returns a struct too large for the argument
+registers, so the result is a frame object whose only write is the copy after
+the last call, and the two calls before that copy were described with whatever
+the previous frame left there. The stack copier read one of those words as a
+pointer and threw `invalid pointer found on stack`.
+`internal/e2e/framezero_test.go` is that shape as a program.
+
 ## The failure mode, and testing
 
 A wrong stack map does not fail a unit test. It fails when a collection happens
