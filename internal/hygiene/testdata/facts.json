@@ -18,7 +18,7 @@
   "ir.corpus.packages": 536,
   "ir.lowered.reached": 41893,
   "loader.constraint.files": 6821,
-  "loader.golist.packages": 539,
+  "loader.golist.packages": 540,
   "rtsym.symbols": 131,
   "ssa.corpus.lowered": 21438,
   "ssa.corpus.mapped": 21438,

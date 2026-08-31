@@ -359,7 +359,7 @@ Coverage is stated rounded down, and the gate is 90% per package.
 | --- | --- | --- |
 | [`syntax`](syntax/) | 99% | 19,674 files agree with `go/scanner` on tokens and positions; 16,293 agree with `go/parser` on accept, reject and first error |
 | [`types2`](types2/) | see below | a fork of the Go type checker, re-pointed at nanogo's tree: 623 subtests, a 375-entry errorcheck corpus, and it type-checks nanogo's own source |
-| [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 539 packages agree with `go list` |
+| [`loader`](loader/) | 98% | 6,821 files on two platforms agree with `go/build`; 540 packages agree with `go list` |
 | [`obj`](obj/) | 98% | **`go tool link` links a nanogo object against the real Go runtime into a binary that runs** |
 | [`obj/arm64`](obj/arm64/) | 99% | 998,947 encodings agree with `go tool asm`, with none disagreeing |
 | [`ir`](ir/) | 90% | type layout agrees with `reflect`; the builder produces a typed tree for 536 packages of the Go distribution, 41,984 functions and 4,257,445 nodes |
