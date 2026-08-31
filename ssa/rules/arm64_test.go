@@ -1679,10 +1679,10 @@ func (imp *corpusImporter) check(path string) *corpusPkg {
 
 // corpusCounts is what one run of the corpus produced.
 type corpusCounts struct {
-	pkgs     int
-	funcs    int // functions that reached ssa.Build
-	built    int // functions ssa.Build produced
-	lowered  int // functions that lowered completely
+	pkgs      int
+	funcs     int // functions that reached ssa.Build
+	built     int // functions ssa.Build produced
+	lowered   int // functions that lowered completely
 	refused   map[string]int
 	verifyNG  int
 	barrierNG int
