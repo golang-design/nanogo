@@ -135,3 +135,78 @@ func TestWriteBarrierInsertsNoFalsePointer(t *testing.T) {
 		}
 	}
 }
+
+// wbStoreAt is wbStore with a displacement on the store, which is the shape a
+// field of a struct has: lowering folds the offset into the addressing mode
+// and leaves the base register alone.
+func wbStoreAt(name string, off int64) (*Func, *Block, *Value) {
+	f, e, st := wbStore(name)
+	st.AuxInt = off
+	return f, e, st
+}
+
+// barrierOld returns the load the barrier reads the overwritten word with.
+func barrierOld(t *testing.T, f *Func) *Value {
+	t.Helper()
+	var found []*Value
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpARM64MOVDload {
+				found = append(found, v)
+			}
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("the barrier reads the overwritten word once and %d loads were built:\n%s", len(found), f)
+	}
+	return found[0]
+}
+
+// The barrier must read the word the store is about to overwrite, and an
+// address on this target is a register and a displacement together.
+//
+// The load used to take the register alone. Every store to a field past the
+// first therefore recorded the wrong pair: the pointer being overwritten was
+// never shaded, so an object reachable only through that field could be freed
+// while the program still held it, and word 0 of the same object was shaded in
+// its place, which hands the collector a word that need not be a pointer at
+// all. Neither shows without the collector marking concurrently, which is why
+// it took a compiler nanogo built, over input large enough to allocate through
+// a mark phase, to reach it.
+func TestWriteBarrierReadsTheWordTheStoreOverwrites(t *testing.T) {
+	for _, off := range []int64{0, 8, 16, 4088} {
+		f, _, st := wbStoreAt("off", off)
+		WriteBarriers(f)
+		old := barrierOld(t, f)
+		if old.AuxInt != off {
+			t.Errorf("the store writes %d(base) and the barrier reads %d(base), so it records a word the store does not overwrite:\n%s",
+				off, old.AuxInt, f)
+		}
+		if old.Args[0] != st.Args[0] {
+			t.Errorf("the barrier reads through v%d and the store writes through v%d", old.Args[0].ID, st.Args[0].ID)
+		}
+	}
+}
+
+// An indexed store carries no displacement: the address is the base and the
+// index, which destination adds, so the load takes the sum and an offset of
+// zero. A displacement copied onto one of these would read past the element.
+func TestWriteBarrierIndexedStoreCarriesNoDisplacement(t *testing.T) {
+	for _, op := range []Op{OpARM64MOVDstoreidx, OpARM64MOVDstoreidx8} {
+		f, e, mem := raFunc("idx")
+		base := e.NewValue(0, OpArg, tIntPtr)
+		idx := e.NewValue(0, OpArg, tInt)
+		val := e.NewValue(0, OpArg, tIntPtr)
+		st := e.NewValue(0, op, MemType, base, idx, val, mem)
+		raRet(e, st)
+		WriteBarriers(f)
+
+		old := barrierOld(t, f)
+		if old.AuxInt != 0 {
+			t.Errorf("%v addresses with a register pair and the barrier's load carries a displacement of %d:\n%s", op, old.AuxInt, f)
+		}
+		if old.Args[0].Op != OpARM64ADD {
+			t.Errorf("%v: the barrier reads through v%d = %v and the address of an indexed store is a sum", op, old.Args[0].ID, old.Args[0].Op)
+		}
+	}
+}

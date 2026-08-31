@@ -235,11 +235,20 @@ func (w *barrierer) barrier(b *Block, at int) *Block {
 	// the base and the index apart, so the address is built the way the store
 	// builds it and the barrier reads the word the store is about to
 	// overwrite rather than the base.
-	dst, ok := w.destination(wb, st, pos)
+	dst, off, ok := w.destination(wb, st, pos)
 	if !ok {
 		return nil
 	}
 	old := wb.NewValue(pos, OpARM64MOVDload, w.ptrType(), dst, mem)
+	// The displacement is half of the store's address and the register is the
+	// other half. A load that takes the register and drops the displacement
+	// reads a different word of the same object, so the pair the barrier
+	// records is not the pair the store makes: the overwritten pointer is
+	// never shaded, and whatever word 0 of the object holds is shaded in its
+	// place. The first loses an object the collector is still to reach
+	// through this slot, and the second hands the collector a word that is
+	// not a pointer.
+	old.AuxInt = off
 	// The buffer pointer is typed as an integer and not as a pointer, which is
 	// the difference between a stack map that describes the frame and one that
 	// does not. It points into the P's own write barrier buffer, which is not
@@ -269,27 +278,29 @@ func (w *barrierer) barrier(b *Block, at int) *Block {
 	return cont
 }
 
-// destination returns the address a store writes through and the memory it
-// takes.
+// destination returns the register the barrier's load takes, the displacement
+// that goes with it, and the memory the store takes.
 //
-// A plain store already holds the address. An indexed store holds a base and an
-// index, and the address is the two added the way the store adds them, so the
-// barrier reads the old value from the word the store is about to overwrite
-// and not from the base.
-func (w *barrierer) destination(b *Block, st *Value, pos syntax.Pos) (*Value, bool) {
+// A plain store already holds the address, as a register and a displacement
+// that the addressing mode adds. The two are returned apart because the load
+// spells the address the same way and has to be given both halves. An indexed
+// store holds a base and an index instead, and the address is the two added
+// the way the store adds them, so the barrier reads the old value from the
+// word the store is about to overwrite and not from the base.
+func (w *barrierer) destination(b *Block, st *Value, pos syntax.Pos) (*Value, int64, bool) {
 	switch st.Op {
 	case OpARM64MOVDstore:
-		return st.Args[0], true
+		return st.Args[0], st.AuxInt, true
 	case OpARM64MOVDstoreidx:
-		return b.NewValue(pos, OpARM64ADD, w.ptrType(), st.Args[0], st.Args[1]), true
+		return b.NewValue(pos, OpARM64ADD, w.ptrType(), st.Args[0], st.Args[1]), 0, true
 	case OpARM64MOVDstoreidx8:
 		// The index is scaled by the width, which is what the 8 in the name
 		// says and what the store's own addressing mode does.
 		sh := b.NewValue(pos, OpARM64LSLconst, w.ptrType(), st.Args[1])
 		sh.AuxInt = 3
-		return b.NewValue(pos, OpARM64ADD, w.ptrType(), st.Args[0], sh), true
+		return b.NewValue(pos, OpARM64ADD, w.ptrType(), st.Args[0], sh), 0, true
 	}
-	return nil, false
+	return nil, 0, false
 }
 
 // storeMemory returns the memory a store takes, which is its last argument.
