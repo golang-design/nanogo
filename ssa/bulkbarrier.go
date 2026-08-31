@@ -116,16 +116,34 @@ func bulkBarrierType(f *Func, v *Value) (*ir.Type, bool, error) {
 			f.Name, v.ID, v.AuxInt, dst.Type)
 	}
 	t := dst.Type.Elem
-	if !t.HasPointers() {
-		return nil, false, nil
-	}
 	// The size is what says the type is the type being moved and not merely
 	// the type of the address. runtime.typedmemmove copies typ.Size_ bytes and
 	// reads typ.PtrBytes words of pointer map, so a type of the wrong size
 	// would copy the wrong number of bytes.
+	//
+	// It is asked before the pointer map, and the order is the whole of the
+	// check. "This type holds no pointer" is only an answer about the copy
+	// once the type is known to be the type the copy moves. Asked first, it
+	// returns "no barrier" for a pointer-free type of any size that merely
+	// happens to be what the address is spelled with, and the copy loses its
+	// barrier with nothing reported.
 	if t.Size != v.AuxInt {
 		return nil, false, fmt.Errorf("ssa: bulk barrier: %s: v%d copies %d bytes through an address of %s, which is %d bytes",
 			f.Name, v.ID, v.AuxInt, t, t.Size)
+	}
+	// A type ir.Layout never ran on has no pointer map rather than an empty
+	// one, and Type.HasPointers reads the two the same way. Layout's own
+	// invariant is that a laid-out type has a non-zero alignment, so this is
+	// the question that separates them. ssa/rules/arm64.go's hasPointers
+	// guards the same query for a clear, for the same reason, and the answers
+	// differ only in what each can do about it: a rule has no error to
+	// return, and this pass does.
+	if t.Align == 0 {
+		return nil, false, fmt.Errorf("ssa: bulk barrier: %s: v%d copies %s, which ir.Layout never ran on, so it has no pointer map to read",
+			f.Name, v.ID, t)
+	}
+	if !t.HasPointers() {
+		return nil, false, nil
 	}
 	return t, true, nil
 }

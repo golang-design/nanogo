@@ -147,3 +147,59 @@ func TestBulkBarrierReportsEachTypeOnce(t *testing.T) {
 		t.Errorf("two copies of one type reported %d descriptors, want 1", len(types))
 	}
 }
+
+// The order of the two questions is the whole of the check.
+//
+// "This type holds no pointer" is an answer about the copy only once the type
+// is known to be the type the copy moves, and the size is what knows that. A
+// pass that asks the pointer map first returns "no barrier" for a pointer-free
+// type that merely happens to be what the destination address is spelled with,
+// and the copy then loses its barrier with nothing reported. The error is not
+// the point: the point is that the silent answer is withdrawn.
+func TestBulkBarrierRefusesAPointerFreeCopyWhoseSizeDisagrees(t *testing.T) {
+	ty := mkType(&ir.Type{Kind: ir.Array, Elem: tInt, Len: 12})
+	f, mv := bbMove(ty, OpArg)
+	mv.AuxInt = ty.Size + 8
+
+	_, err := BulkBarriers(f)
+	if err == nil {
+		t.Fatalf("a copy of %d bytes through an address of %s, which is %d bytes, was skipped in silence rather than reported",
+			mv.AuxInt, ty, ty.Size)
+	}
+	if !strings.Contains(err.Error(), "bytes") {
+		t.Errorf("the error does not say the sizes disagree: %v", err)
+	}
+}
+
+// A type ir.Layout never ran on has no pointer map, and that is not the same
+// as having an empty one. ir.Type.HasPointers reads the two the same way, so
+// asking it about such a type answers "holds no pointer" about a type whose
+// contents are unknown, and a copy of it loses its barrier.
+//
+// Layout's own invariant is that a laid-out type has a non-zero alignment,
+// which is the question that separates the two. ssa/rules/arm64.go's
+// hasPointers guards the same query for a clear and names the same reason.
+func TestBulkBarrierRefusesACopyOfATypeLayoutNeverRanOn(t *testing.T) {
+	// Built by hand rather than through mkType, because running Layout is
+	// exactly what this type has not had done to it: Size is set so that the
+	// copy's byte count agrees, Align is zero and PtrBits is absent.
+	ty := &ir.Type{Kind: ir.Struct, Name: "unlaid", PkgPath: "main", Size: 16}
+	f, e, mem := raFunc("move")
+	pt := &ir.Type{Kind: ir.Ptr, Elem: ty, Size: ir.PtrSize, Align: ir.PtrSize}
+	dst := e.NewValue(0, OpArg, pt)
+	src := e.NewValue(0, OpArg, pt)
+	mv := e.NewValue(0, OpMove, MemType, dst, src, mem)
+	mv.AuxInt = ty.Size
+	raRet(e, mv)
+
+	_, err := BulkBarriers(f)
+	if err == nil {
+		t.Fatalf("a copy of %s, which ir.Layout never ran on, was read as holding no pointer and skipped in silence", ty)
+	}
+	if !strings.Contains(err.Error(), "pointer map") {
+		t.Errorf("the error does not say the type has no pointer map to read: %v", err)
+	}
+	if o := BulkBarrierDescriptor(mv); o != nil {
+		t.Errorf("the copy was marked with %s despite the type having no pointer map", o.Name)
+	}
+}
