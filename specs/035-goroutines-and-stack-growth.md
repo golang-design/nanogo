@@ -423,6 +423,27 @@ was in both and has been in every green run since `ab048d6`. Locally the same
 binary ran the file 25 times clean, and 10 more under `GOGC=1` with
 `gccheckmark=1,clobberfree=1`.
 
+**A mechanism that produces all three, found later.** The write barrier read
+the wrong word. For a pointer store past field 0 it shaded word 0 of the object
+instead of the word the store overwrites, so the overwritten pointer was never
+shaded and a word that need not be a pointer was. The first frees an object the
+collector has still to reach through that slot, and the second hands the
+collector a word to follow that is not a pointer.
+
+Those are the two symptoms above, in that order: a marked free object, and a
+bad pointer in the heap. `heapsampling.go` failed a third time on CI at
+`a6647f6` with the second of them, which is what led to the barrier.
+
+This is a mechanism and not a proof for these three runs. The fault needs the
+collector to be marking concurrently, so it is rare by construction: the same
+binary with the bug still in it ran this file clean three times in a row here,
+which is why no local run ever caught it and why the pair of CI runs above
+looked like it had no cause. What is established is that the barrier was wrong
+in exactly the way that produces this signature, and that it is right now
+(`ssa/writebarrier.go`, with the offsets read off two compiled binaries). If a
+fourth occurrence appears after that fix, this paragraph is what to disbelieve
+first.
+
 That leaves a defect that samples with the machine, which is the shape of the
 two symptoms above. Whether it is the same defect is unknown. The evidence to
 capture next time is the span address and `elemsize` the message prints,
