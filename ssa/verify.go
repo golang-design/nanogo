@@ -66,6 +66,11 @@ const (
 	// InvOneBase: a function has at most one stack pointer and one static
 	// base, and neither is described to the collector as a pointer.
 	InvOneBase
+
+	// InvFlagsLive: the condition codes a value reads are the ones the value
+	// that set them left. They are set in the same block, and between the two
+	// nothing writes them: no call, and no second flags value.
+	InvFlagsLive
 )
 
 var invariantNames = [...]string{
@@ -79,6 +84,7 @@ var invariantNames = [...]string{
 	InvReachable:    "every value is reachable from the entry",
 	InvGoSpecific:   "no Go-specific operation survives",
 	InvOneBase:      "one stack pointer and one static base, neither a pointer",
+	InvFlagsLive:    "the condition codes still hold where they are read",
 }
 
 func (i Invariant) String() string {
@@ -195,6 +201,7 @@ func Verify(f *Func) []Violation {
 			continue
 		}
 		v.checkBlock(b)
+		v.flags(b)
 		for _, val := range b.Values {
 			v.checkValue(b, val)
 		}
@@ -316,6 +323,74 @@ func (v *verifier) checkBlock(b *Block) {
 	for i, s := range b.Succs {
 		if predIndex(b, i) < 0 {
 			v.addBlock(InvBlockControl, b, "successor %v does not list %v as a predecessor", s, b)
+		}
+	}
+}
+
+// flags checks that the condition codes a value reads are the ones the value
+// that set them left.
+//
+// The condition codes are one implicit register and they are not in the graph.
+// A value of FlagsType names their contents at the point they were set, and
+// nothing after that point holds them: the value is zero width, so the
+// allocator gives it no register, liveness does not cover it, and no pass
+// records which instructions write the flags. The only sound distance between
+// a flags value and a value that reads it is therefore one with nothing that
+// writes the flags in between.
+//
+// Two kinds of value write them. A call writes them, because the callee is
+// arbitrary code. A second flags value writes them, because setting them is
+// what it is for. specs/025-lowering-and-rules.md's arm64 rules keep the
+// compare, the conditional set and the branch as the last three values of a
+// block for exactly this reason, and reading "in one block" as the rule is
+// what the compiler nanogo built died of: a runtime.newobject for a closure's
+// capture cell sat between the CMP and the BEQ, so the branch read what the
+// call left and the constant path ran for a variable.
+//
+// The span is read in the order the instructions run, which is not the order
+// of b.Values. A block's control transfer is emitted after every value of the
+// block, so when the reader is the control the span runs to the end of the
+// block rather than to the control's own place in the list. A call appended
+// behind the branch writes the flags before the branch reads them, and a check
+// that stopped at the control's index would not see it.
+func (v *verifier) flags(b *Block) {
+	for k, u := range b.Values {
+		for i, a := range u.Args {
+			if a == nil || a.dead || !IsFlags(a) {
+				continue
+			}
+			var def *Block
+			if int(a.ID) < len(v.owner) {
+				def = v.owner[a.ID]
+			}
+			if def != b {
+				v.add(InvFlagsLive, b, u, "argument %d, %v, sets the flags in %v, and no edge carries them", i, a, def)
+				continue
+			}
+			end := k
+			if u == b.Control {
+				end = len(b.Values)
+			}
+			at := int(v.index[a.ID])
+			if at < 0 || at >= end {
+				// The definition does not come first. That is
+				// InvArgDominates to report, and a second violation about the
+				// same pair would say nothing new.
+				continue
+			}
+			for _, w := range b.Values[at+1 : end] {
+				if w == u {
+					continue
+				}
+				if w.Op.IsCall() {
+					v.add(InvFlagsLive, b, u, "argument %d, %v, sets the flags and %v calls before they are read", i, a, w)
+					break
+				}
+				if IsFlags(w) {
+					v.add(InvFlagsLive, b, u, "argument %d, %v, sets the flags and %v sets them again before they are read", i, a, w)
+					break
+				}
+			}
 		}
 	}
 }

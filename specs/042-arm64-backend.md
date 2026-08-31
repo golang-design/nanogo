@@ -267,6 +267,51 @@ Groups 1 to 6 are written and groups 7 and 8 are not. `ssa/rules/arm64.go`,
 `ssa/macharm64.go` and `obj/arm64` all stop at the same place, which is what
 keeps an unencodable operation from existing.
 
+### The condition codes are checked and not argued
+
+Group 4 folds a comparison into the branch that reads it, and the condition
+codes are the one result the graph does not describe. A flags value is zero
+width, so [026](026-register-allocation.md) gives it no register,
+[027](027-liveness-and-stackmaps.md) does not cover it, and no pass records
+which instructions write the flags. `lowerBlock` once read "the compare and the
+branch are in one block" as the fold's condition, and one block is not close
+enough: a `runtime.newobject` for a closure's capture cell sat between the `CMP`
+and the `BEQ`, the branch read what the call left, and nanogo's own types2 took
+the constant path for a variable. `flagsReachTheBranch` now requires the
+compare, the conditional set and the branch to be the last three values of the
+block.
+
+That rule is sufficient and it is not the property. `ssa/verify.go` carries the
+property as `InvFlagsLive`, next to `InvOneBase`: between a flags value and each
+value that reads it, in the same block, nothing writes the condition codes. Two
+kinds of value write them, a call and a second flags value, and the span is read
+in the order the instructions run rather than the order of `b.Values`, because a
+block's control transfer is emitted after every value of the block. So a call
+appended behind the branch is inside the span even though it is behind the
+branch in the list.
+
+The two are not the same test. `TestARM64Corpus` found a block where they
+differ, an `oplook.func1` under `cmd/internal/obj`, in which seven loads and
+constants sit behind the conditional set and none of them touches the flags. The
+fold refuses that block and the invariant accepts it, which is the difference
+between a sufficient condition and the property it is sufficient for.
+
+The invariant is not a restatement of the fold's own condition, and the
+e2e programs are where that shows. With the fold restored to the condition it
+had before the fix, `internal/e2e`'s branch-after-a-comparison program is
+refused at "verification after lowering" naming `InvFlagsLive`, where before the
+invariant it compiled and produced the wrong answer. The distribution corpus
+reports no violation with either fold, which says the class is absent from
+`GOROOT/src` and not that the check is idle: the miscompilation was in nanogo's
+own types2, which the corpus does not contain.
+
+One limit, because it is a property of the type and not of the check. A value
+that writes the condition codes is recognised by `FlagsType` or by `Op.IsCall`,
+and that is complete for this backend because `ssa/macharm64.go` has no
+flag-setting arithmetic: there is no `ADDS` and no `SUBS`, `LoweredNilCheck` is
+a `MOVBU` load, and `LoweredWB` is a call. A flag-setting operation added later
+and typed as a `bool` would fall outside the check without saying so.
+
 **Group 6 reaches an object.** `ssagen` refused a floating-point value at three
 doors, `incoming` and `reg` in `ssagen/ssagen.go` and `valuePlaces` in
 `ssagen/prologue.go`, and none of the three remains. What each needed is the

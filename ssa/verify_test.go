@@ -632,3 +632,115 @@ func TestVerifyCatchesAPointerTypedBase(t *testing.T) {
 	gentry.NewValue(0, OpSP, unsafePtrType)
 	wantOnly(t, g, Verify(g), InvOneBase)
 }
+
+// The condition codes are not in the graph: no register holds them, no
+// liveness covers them, and no pass keeps a flags value alive. The rules of
+// specs/025-lowering-and-rules.md therefore keep the compare, the conditional
+// set and the branch as the last three values of a block. The fixture below is
+// that shape and the four tests after it are the ways of breaking it.
+
+// loweredIf returns a diamond whose entry block ends in the shape the arm64
+// rules produce for a folded comparison: the compare, the conditional set that
+// reads it, and the branch that reads it, in that order and last.
+//
+// The compare and the memory come back with it, so that a test can put a value
+// between the compare and the branch and still leave one memory value live.
+func loweredIf() (f *Func, entry, join *Block, mem, cmp *Value) {
+	f, entry, _, _, join, mem = diamond()
+	entry.removeValue(entry.Control)
+	x := entry.NewValue(0, OpArg, tInt)
+	cmp = entry.NewValue(0, OpARM64CMP, FlagsType, x, x)
+	entry.NewValue(0, OpARM64CSET, tBool, cmp)
+	entry.Control = entry.NewValue(0, OpARM64BRcond, FlagsType, cmp)
+	return f, entry, join, mem, cmp
+}
+
+// appendControl moves the block's control back to the end of the value list,
+// which is where the fold leaves it.
+//
+// A test that inserts a value in front of the branch takes the branch out
+// first, and removeValue marks what it removes as no longer in the function.
+func appendControl(b *Block, c *Value) {
+	c.dead = false
+	b.Values = append(b.Values, c)
+	b.Control = c
+}
+
+// TestVerifyAcceptsAFoldedComparison is the other half of the invariant. The
+// fold the rules are allowed to make has to pass, or the check is a ban on
+// folding rather than a rule about it.
+func TestVerifyAcceptsAFoldedComparison(t *testing.T) {
+	f, _, _, _, _ := loweredIf()
+	if vs := Verify(f); len(vs) != 0 {
+		t.Fatalf("Verify reported %v on a compare, a set and a branch that are the last three values\n%s", vs, f)
+	}
+}
+
+// TestVerifyCatchesACallBetweenACompareAndItsBranch is the miscompilation.
+//
+// lowerBlock folded a comparison into the branch whenever the two were in one
+// block, and one block is not close enough. In nanogo's own types2 a
+// runtime.newobject for a closure's capture cell sat between the CMP and the
+// BEQ, so the branch read what the call left, the constant path ran for a
+// variable, and a nil constant.Value was dereferenced.
+func TestVerifyCatchesACallBetweenACompareAndItsBranch(t *testing.T) {
+	f, entry, join, mem, _ := loweredIf()
+	br := entry.Control
+	entry.removeValue(br)
+	call := entry.NewValue(0, OpARM64CALLstatic, MemType, mem)
+	appendControl(entry, br)
+	setRet(join, call)
+	wantOnly(t, f, Verify(f), InvFlagsLive)
+}
+
+// TestVerifyCatchesACallBehindTheBranch is the same clobber one place further
+// on, and it is the one a check that read b.Values in order would miss.
+//
+// A block's control transfer is emitted after every value of the block, so a
+// call that sits behind the branch in the list still runs before the branch
+// does.
+func TestVerifyCatchesACallBehindTheBranch(t *testing.T) {
+	f, entry, join, mem, _ := loweredIf()
+	call := entry.NewValue(0, OpARM64CALLstatic, MemType, mem)
+	setRet(join, call)
+	wantOnly(t, f, Verify(f), InvFlagsLive)
+}
+
+// TestVerifyCatchesASecondCompareBeforeTheBranch needs no call at all. The
+// second comparison writes the condition codes itself, so the branch reads an
+// answer to a question nobody asked and no call can be blamed for it.
+func TestVerifyCatchesASecondCompareBeforeTheBranch(t *testing.T) {
+	f, entry, _, _, _ := loweredIf()
+	br := entry.Control
+	entry.removeValue(br)
+	y := entry.NewValue(0, OpArg, tInt)
+	second := entry.NewValue(0, OpARM64CMP, FlagsType, y, y)
+	entry.NewValue(0, OpARM64CSET, tBool, second)
+	appendControl(entry, br)
+	wantOnly(t, f, Verify(f), InvFlagsLive)
+}
+
+// TestVerifyLeavesAFlagsValueOutOfOrderToTheDominanceCheck keeps one broken
+// pair to one invariant. A flags value that comes after the value reading it is
+// broken, and InvArgDominates already names how, so the flags check says
+// nothing about it.
+func TestVerifyLeavesAFlagsValueOutOfOrderToTheDominanceCheck(t *testing.T) {
+	f, entry, _, _, cmp := loweredIf()
+	for i, w := range entry.Values {
+		if w == cmp {
+			entry.Values[i], entry.Values[i+1] = entry.Values[i+1], entry.Values[i]
+			break
+		}
+	}
+	wantOnly(t, f, Verify(f), InvArgDominates)
+}
+
+// TestVerifyCatchesFlagsReadInAnotherBlock is the case dominance does not
+// cover. The entry dominates its successor, so the argument check is content,
+// and every instruction on the way there may write the condition codes.
+func TestVerifyCatchesFlagsReadInAnotherBlock(t *testing.T) {
+	f, entry, _, _, cmp := loweredIf()
+	then := entry.Succs[0]
+	then.NewValue(0, OpARM64CSET, tBool, cmp)
+	wantOnly(t, f, Verify(f), InvFlagsLive)
+}

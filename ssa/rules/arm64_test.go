@@ -1683,8 +1683,9 @@ type corpusCounts struct {
 	funcs    int // functions that reached ssa.Build
 	built    int // functions ssa.Build produced
 	lowered  int // functions that lowered completely
-	refused  map[string]int
-	verifyNG int
+	refused   map[string]int
+	verifyNG  int
+	barrierNG int
 }
 
 // TestARM64Corpus lowers every function of the standard library that reaches
@@ -1779,6 +1780,9 @@ func TestARM64Corpus(t *testing.T) {
 	if c.verifyNG > 0 {
 		t.Errorf("%d functions did not verify after lowering", c.verifyNG)
 	}
+	if c.barrierNG > 0 {
+		t.Errorf("%d functions did not verify after the write barriers", c.barrierNG)
+	}
 	if c.built == 0 {
 		t.Fatal("the corpus produced no function")
 	}
@@ -1839,6 +1843,24 @@ func lowerOne(t *testing.T, path string, fn *ir.Func, c *corpusCounts) {
 	}
 	encodeAll(t, f)
 	c.lowered++
+	// The barrier is the one pass that runs after selection and still rewrites
+	// blocks, and it is the pass the flags invariant depends on: it cuts a
+	// block at a pointer store and has to carry the compare, the conditional
+	// set and the branch into the continuation whole. specs/002's pipeline
+	// verifies after it, and this is the only place that does so over the
+	// distribution corpus rather than over a handful of e2e programs.
+	//
+	// It runs last, behind encodeAll, on purpose. This test encodes without an
+	// allocation, so the values the barrier inserts have no home to encode
+	// from, and running the pass earlier would ask encodeAll a question it
+	// cannot answer.
+	ssa.WriteBarriers(f)
+	if vs := ssa.Verify(f); len(vs) != 0 {
+		c.barrierNG++
+		if c.barrierNG < 4 {
+			t.Errorf("%s: %s did not verify after the write barriers: %v", path, fn.Name, vs)
+		}
+	}
 }
 
 // TestARM64ImmediateSweep is the range check specs/041 asks for, from the
