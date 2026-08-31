@@ -987,6 +987,215 @@ held by nothing else this spec knows of. The other five are held by
 [035](035-goroutines-and-stack-growth.md) alone, which is a smaller gate than
 the one they are behind today and is one gate rather than five.
 
+**Built, and one pre-existing miscompile had to be fixed to build it.**
+
+The wrapper itself is small, because stage 2 put every piece in place. What
+stage 3 adds is which side of the boundary is ABI0.
+
+`ir.Func.ABI0` and `ssa.Func.ABI0` say that a function's *own* convention is
+the stack-only one. `abiPass.own` reads it and hands `ABIWalk` the ABI0 target
+for the function's own placement alone. Every other use of the target in that
+pass is a call boundary, where the convention is the callee's and `ABITargetOf`
+reads it off the callee. Passing the ABI0 target in as the pass's target
+instead is one line away and would place the wrapper's own boundary correctly
+while laying the outgoing area of its ABIInternal inner call out with no
+registers, which is a caller writing its arguments into memory the callee never
+reads.
+
+`ssagen.Options.ABI` is now read, and it is a boolean rather than `obj.ABI`.
+`obj.ABI0` is that enum's zero value, so the declared-and-unread field the
+staging left here would have made any caller that forgot it emit an ABI0
+definition with no diagnostic. `emitter.result` also refuses a symbol whose
+claimed convention disagrees with the placement `ssa.Func.ABI0` produced,
+because each half is silent on its own.
+
+`ssagen.ABI0Wrapper` builds the wrapper through the same `finishWrapper` as
+every other generated function. Its callee is never marked
+`ir.Object.Assembly`: that field says the callee is ABI0, and this callee is
+ABIInternal whether the definition behind it is Go or assembly.
+`internal/bytealg` is the case that proves the distinction matters, because its
+assembly writes `TEXT runtime·cmpstring<ABIInternal>(SB)` and the wrapper this
+builds is the ABI0 half that pairs with it.
+
+The callee is always the wrapper's own symbol under ABIInternal, in every shape
+that reaches here, which is why no case analysis survives into the code. A Go
+body gives the ABIInternal definition; an ABIInternal assembly `def` gives it;
+an ABI0 `def` would have put ABI0 in `fn.ABI` and left `need` without it.
+
+**One name, two text symbols, and the auxiliary symbols had to follow.**
+`internal/cpu.sysctlEnabled` is a Go function under ABIInternal and an ABI0
+wrapper under the same name, both in one object. `gc` leaves its DWARF and
+`FuncInfo` symbols unnamed, because a linker resolves them through the text
+symbol's auxiliary entry and never by name, and nanogo names them only because
+`obj.checkSym` rejects an empty name. So `emitter.auxName` appends the
+convention for an ABI0 definition. `gc` has the same problem in the one place
+it names an auxiliary symbol after a function and takes the same answer:
+`EmitArgInfo` spells `"%s.arginfo%d"` with the function's own ABI, and
+`internal/cpu.sysctlEnabled` carries both `.arginfo0` and `.arginfo1`.
+
+No `args_stackmap` is written for an ABI0 wrapper and none is owed.
+`cmd/internal/obj` appends that `FUNCDATA` reference to every ABI0 text symbol
+*the assembler* produces, and this one the compiler produced. The wrapper's
+arguments bitmap is the ordinary `FUNCDATA $0` gclocals symbol
+[027](027-liveness-and-stackmaps.md) builds, over the same ABI0 placement.
+
+### The zero-size parameter was still a miscompile, on the callee side
+
+[030](030-abi.md) rule 2 was fixed in stage 2, inside `abiAssigner.place`.
+That is the walk. It is not the list the walk is given, and the list was wrong.
+
+`abiPass.collectArgs` built the parameter list by scanning the entry block for
+`OpArg` values. Decomposition deletes the `OpArg` of a zero-size parameter,
+because there is no word to decompose it into, so such a parameter never
+reached the walk and the alignment it forces was lost. For
+`func(a [3]int8, b [0]int64, c [3]int8) int8` nanogo placed `c` at 3 where `gc`
+places it at 8, and the result at 8 where `gc` puts it at 16.
+
+This was reachable **before** stage 3 and in **both** conventions. The existing
+`internal/e2e` zero-size test compiles the library with `gc` and the program
+with nanogo, so it covers nanogo as the *caller* and the callee side had no
+test at all. Worse than the divergence from `gc`: nanogo did not agree with
+itself, because a call site places the operands from the declared types and
+gets the alignment right, so a nanogo caller wrote `c` at 8 and a nanogo callee
+read it from 3.
+
+The fix is the declaration. `ssa.Func.Params` records the receiver and the
+declared parameters, `ssa.Build` fills it, and `collectArgs` seeds the list from
+it before attaching the `OpArg` values. It mirrors `declaredResults`, which
+already walks the declared result list and falls back to the values when the
+signature is absent. `TestAssignABIPlacesTheFunctionsOwnZeroSizeParameter` is
+the regression, in both conventions, against `gc`'s own numbers.
+
+### What is refused by name
+
+A method, in this direction as in the other, for the reason
+`makeABIWrapper` gives.
+
+A declaration with no Go body and no assembly definition whose `need` holds
+ABI0. `gc` builds the wrapper anyway and leaves the link to report an undefined
+ABIInternal target, which names neither the declaration nor the line that asked
+for it.
+
+`NOSPLIT` is still not set, following stage 2 and
+[035](035-goroutines-and-stack-growth.md). `gc`'s own comment in
+`makeABIWrapper` says this is the direction where omitting it "could cause
+problems when building the runtime (since there may be calls to asm routine in
+cases where it's not safe to grow the stack)". Nothing in the two packages this
+stage lifts reaches such a context, and the failure mode is a run-time throw
+naming `morestack on g0` rather than a wrong answer.
+
+### The two maps the spec warned about are discharged
+
+`driver.declaredSyms` and the `generated` set are `map[string]bool`, and the
+risk list said an ABI0 definition entered into either would make a descriptor
+reference resolve under the wrong ABI. Neither is entered: `addABIWrappers`
+does not touch them, and an ABI0 wrapper is never a descriptor target, because
+a func value and a method entry both name the ABIInternal definition. It was
+checked rather than left open.
+
+The arguments bitmap is checked against `gc`'s own bytes rather than against a
+rule restated in a test. `TestABI0WrapperArgumentsBitmapMatchesGc` reads the
+word set out of the `gclocals·` symbol each of five `gc` ABI0 wrappers names
+and compares it with what nanogo marks. The half that is easy to get wrong and
+that both obey: **a result that sits in the area is not marked.** It is written
+after the last safepoint, so at every safepoint those words still hold whatever
+the previous frame left, and marking them would make the collector follow it.
+`gc`'s map for `func(p *int, s string) *int` leaves word 3 clear, and word 3 is
+the pointer result.
+
+One divergence is recorded rather than hidden. `gc` sizes the map to the last
+word that can hold a pointer, counting a pointer result. `ssa.LayoutFrame`
+sizes it to the end of the last value in the area whether or not that value
+holds a pointer, and describes a result by an opaque type of the same width. The
+two disagree by a word in both directions: 1 against `gc`'s 0 for
+`func(int8) int8`, and 3 against `gc`'s 4 for `func(*int, string) *int`. Neither
+changes what is scanned, because every word the two widths differ over is
+unmarked in both. A width that was too small would not be silent either:
+`ssa.BuildStackMaps` refuses a marked word outside the map with an error naming
+the argument.
+
+### A renaming `//go:linkname` breaks a Go *reference*, not only a definition
+
+`checkLinknameRenames` let a bodyless declaration through, and its comment gave
+the reason: nanogo emits no definition for one, so no definition is named
+wrongly. That covers the definition and it does not cover the reference.
+
+nanogo derives a callee's symbol from the declaration in `ir.Build`, which
+knows nothing about the directive, so a Go call to such a declaration names the
+symbol the source wrote and not the one the directive renamed it to.
+`internal/bytealg` is exactly that shape: `CompareString` calls
+`abigen_runtime_cmpstring`, whose directive renames it to `runtime.cmpstring`.
+The package compiled, and the link failed with
+
+```
+strings.Compare: relocation target internal/bytealg.abigen_runtime_cmpstring not defined
+```
+
+This is the one outcome worse than a refusal, and it was found by linking and
+running a real program rather than by the closure measurement, which stops at
+compiling. The Go call is now refused by name, and only the Go call: the walk
+asks whether this package's own IR names the declaration's default symbol, so
+`internal/bytealg`'s two `memequal` declarations still pass, because the
+compiler emits `runtime.memequal` itself and no Go call in that package names
+them. The reference half of `//go:linkname` is a feature of its own and it is
+not this spec's.
+
+**Lifted `internal/cpu` to compiling. The closure moved from 23 of 28 to 24 of
+28.**
+
+| Package | before stage 3 | after stage 3 |
+| --- | --- | --- |
+| `internal/cpu` | an ABI0 wrapper for `sysctlEnabled` | compiles, links and runs |
+| `internal/bytealg` | an ABI0 wrapper for `abigen_runtime_cmpstring` | a Go call to a declaration `//go:linkname` renames |
+| `internal/runtime/atomic` | a generic method with no body, [017](017-export-data-reading.md) | unchanged |
+| `internal/runtime/maps` | a `//go:linkname` that renames `zeroVal` | a Go call to `bootstrapRand`, which the same directive renames |
+| `runtime` | the runtime, by name | unchanged |
+
+Two of the staging's claims above are wrong and are corrected here.
+`internal/runtime/maps` was said to be lifted by this stage; it is not, and its
+seventeen ABI0 wrappers are built and unreachable behind a `//go:linkname`
+refusal. `internal/bytealg` was said to be lifted; its three wrappers are built
+and correct, and what holds the package is the reference half of the same
+directive. One package moved, not three, and the ABI0 wrapper is not what holds
+the other two.
+
+**Evidence.**
+`internal/e2e.TestGcAndNanogoAgreeOnAnABI0Wrapper` is the differential build:
+eight Go functions carrying `//go:linkname`, a hand-written `.s` file whose
+ABI0 `CALL` reaches each one, compiled by nanogo, called from a `main` package
+compiled by `gc`, linked, run, and its output compared against an all-`gc`
+build of the same module. One call crosses the boundary four times: `gc`, the
+stage 2 ABIInternal wrapper, the assembly, the stage 3 ABI0 wrapper, the Go
+function. The signatures are the measured rows of the table above plus the
+zero-size case, and the program calls in a loop that allocates and collects
+while a pointer argument and a pointer result are live in the wrapper's
+incoming area.
+
+`internal/e2e.TestABI0WrapperObjectHoldsBothConventions` reads the archive with
+`go tool nm` and checks that three names each carry two `T` definitions, one
+per convention, and that the stage 2 `args_stackmap` symbols are still there.
+
+The emitted code was read out of the linked binary with `go tool objdump`
+rather than reasoned about. `sZeroSize`'s wrapper loads `a` from incoming 0 and
+`c` from 8 and stores the result at 16; `sPtrThrough`'s loads from 0, 8 and 16
+and stores at 24, 32 and 40; `sMix`'s loads from 0, 8, 16, 24 and 32 and stores
+at 40 and 48. Every one is `gc`'s own offset for the same signature.
+
+`internal/cpu` itself was linked and run, which is what the synthetic build
+cannot stand in for. A program that sorts, compares and hashes strings was
+built with `-toolexec=nanogo` and an allowlist naming `internal/cpu` alone, run,
+and its output compared against an all-`gc` build of the same program. The two
+are byte-identical. `internal/bytealg` is proven to compile its three wrappers
+and is **not** proven to run: the reference refusal above stands in front of it.
+
+Two divergences from `gc` are recorded rather than closed. The first is the
+arguments bitmap width above. The second is the auxiliary symbol name: reverting
+`emitter.auxName` does not fail the link on `darwin`, because `cmd/link`'s DWARF
+pass runs only under the dwarf5 experiment, which `internal/buildcfg` turns off
+for `darwin`, `ios` and `aix`. The duplicate `go:info.` symbol is latent there
+and would surface where that pass runs, so the change is defended by
+`ssagen.TestABI0WrapperIsDefinedUnderABI0` and not by the end-to-end link.
+
 ### Stage 4: not this spec
 
 `runtime` needs 472 wrappers, the write barriers of

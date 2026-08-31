@@ -535,6 +535,26 @@ type Func struct {
 	// definitions of one symbol, and the build stops on a duplicate that
 	// neither source file contains.
 	Dupok bool
+
+	// ABI0 records that this function's own calling convention is the
+	// stack-only one, so every parameter and every result is in memory at an
+	// offset of the incoming argument area and no register carries a value
+	// across the boundary.
+	//
+	// It is true of the ABI0 wrapper of specs/047-abi-wrappers.md stage 3 and
+	// of nothing else. Every Go function nanogo compiles is ABIInternal, which
+	// is why the sense is negative and a Func built by hand needs no field set.
+	// obj.ABI0 is the zero value of gc's own enum, so a field spelled as that
+	// enum would make a caller that forgot it emit an ABI0 definition in
+	// silence.
+	//
+	// It decides two separate things and both are read below the IR. The
+	// placement of this function's own parameters and results, which
+	// ssa.AssignABI takes from ssa.Target.ABI0Target, and the ABI half of the
+	// text symbol's identity, which ssagen.Options carries. It says nothing
+	// about the convention of anything this function calls: that travels with
+	// the callee, in [Object.Assembly].
+	ABI0 bool
 }
 
 // Package is one compiled package.

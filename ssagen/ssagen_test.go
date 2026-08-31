@@ -167,6 +167,17 @@ func compile(t *testing.T, src, name string) *compiled {
 	if err != nil {
 		t.Fatalf("ssa.Build: %v", err)
 	}
+	return pipeline(t, fn, f, fset, path)
+}
+
+// pipeline runs the back end over one function that ir.Build produced.
+//
+// It is split out of compile so that a function the compiler generates, an ABI
+// wrapper above all, goes through the same passes in the same order as one a
+// source file declared. A test that ran its own sequence would prove something
+// about that sequence and not about the compiler.
+func pipeline(t *testing.T, fn *ir.Func, f *ssa.Func, fset *syntax.FileSet, path string) *compiled {
+	t.Helper()
 	target := ssa.NewArm64Target()
 	// The pipeline of specs/002-architecture.md: decomposition, then
 	// specs/030-abi.md's assignment, then selection. The assignment runs

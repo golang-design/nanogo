@@ -32,7 +32,7 @@ spec to grade itself against.
 | G-A | `internal/audit` probe classes | 95 ok, 3 refused, 0 wrong, of 98 | all ok |
 | G-B | `internal/gotest` corpus passes | 209 of 356, 0 miscompilations | all passing |
 | G-C | [020](020-ir.md) Go-specific rows | see the correction below | all built |
-| G-D | bootstrap standard library closure | 20 of 28 compile invocations, all 8 refusals assembly | 28 |
+| G-D | bootstrap standard library closure | 24 of 28 compile invocations; the 4 refusals are a generic method with no body, two Go calls to a `//go:linkname` rename, and `runtime` | 28 |
 
 G-A and G-B are decided by `internal/audit/testdata/ratchet.txt` and
 `internal/gotest/testdata/ratchet.txt` rather than by this prose, and a

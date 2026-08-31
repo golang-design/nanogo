@@ -61,11 +61,24 @@ func TestABIWrapperGate(t *testing.T) {
 			symabis: "def main.FuncPCTestFn ABI0\nref main.FuncPCTestFnAddr ABI0\n",
 		},
 		{
+			// The ABI0 wrapper of stage 3. The assembly names the function
+			// under ABI0, the Go definition is ABIInternal, and the wrapper
+			// is the ABI0 half of the pair.
 			name:    "an ABI0 reference to a Go function owes an ABI0 wrapper",
 			src:     "package main\n\nfunc f(a int) int { return a }\n",
 			symabis: "ref main.f ABI0\n",
-			want: []string{"an assembly call to function f",
-				"specs/047-abi-wrappers.md stage 3"},
+		},
+		{
+			// Nothing defines the symbol under either convention, so the
+			// wrapper's inner call would name a symbol that does not exist.
+			// gc builds the wrapper anyway and leaves the link to report an
+			// undefined target that names neither the declaration nor the
+			// line that asked for it.
+			name:    "an ABI0 reference to a declaration with no definition is refused",
+			src:     "package main\n\nfunc f(a int) int\n\nfunc g() int { return f(1) }\n",
+			symabis: "ref main.f ABI0\n",
+			want: []string{"an ABI0 call to function f",
+				"no Go body and no assembly definition"},
 		},
 		{
 			// A ref under the ABI the function is already defined with adds
@@ -97,8 +110,19 @@ func TestABIWrapperGate(t *testing.T) {
 			name:    "a //go:linkname is matched against the def line",
 			src:     "package main\n\n//go:linkname f runtime.cmpstring\nfunc f(a, b string) int\n",
 			symabis: "def runtime.cmpstring ABIInternal\n",
-			want: []string{"an assembly call to function f",
-				"specs/047-abi-wrappers.md stage 3"},
+		},
+		{
+			// internal/bytealg.CompareString. The same declaration, with a Go
+			// call to it in the same package. The wrapper is right and the
+			// call is not: nanogo derives a callee's symbol from the
+			// declaration, so the call names main.f where the definition is
+			// runtime.cmpstring. It compiles and does not link, which is the
+			// one outcome worse than a refusal.
+			name:    "a Go call to a declaration a //go:linkname renames",
+			src:     "package main\n\n//go:linkname f runtime.cmpstring\nfunc f(a, b string) int\n\nfunc g(a, b string) int { return f(a, b) }\n",
+			symabis: "def runtime.cmpstring ABIInternal\n",
+			want: []string{"a Go call to f, which //go:linkname renames to runtime.cmpstring",
+				"the reference half of //go:linkname is unbuilt"},
 		},
 		{
 			// The one-argument form. noder fills the target in with the
@@ -109,8 +133,6 @@ func TestABIWrapperGate(t *testing.T) {
 			name:    "a one-argument //go:linkname over a Go body owes an ABI0 wrapper",
 			src:     "package main\n\n//go:linkname f\nfunc f(a int) int { return a }\n",
 			symabis: "",
-			want: []string{"an assembly call to function f",
-				"specs/047-abi-wrappers.md stage 3"},
 		},
 		{
 			// internal/runtime/atomic.storePointer and

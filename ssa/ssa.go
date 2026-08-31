@@ -332,6 +332,34 @@ type Func struct {
 	// FuncInfo carries as a funcID (ir.Func.Wrapper).
 	Wrapper bool
 
+	// Params lists the receiver and then the declared parameters, in
+	// declaration order, as specs/021-ssa-construction.md wrote them.
+	//
+	// It is the declaration, and the OpArg values in the entry block are the
+	// realisation. The two are not the same list: a parameter that no
+	// instruction reads loses its OpArg before AssignABI runs, and a
+	// zero-size parameter always does, because decomposition has no word to
+	// give it. The convention still places such a parameter, and the
+	// alignment it forces is what puts every parameter and every result after
+	// it where gc puts them (specs/030-abi.md rule 2).
+	//
+	// It is nil for a function no declaration produced, which is a graph a
+	// test built by hand. AssignABI then falls back to the OpArg values, the
+	// way declaredResults falls back to the values a return passes.
+	Params []*ir.Object
+
+	// ABI0 records that this function's own calling convention is the
+	// stack-only one (ir.Func.ABI0), so AssignABI places its parameters and
+	// its results with the target's register sets emptied.
+	//
+	// It describes this function's own boundary and no other. The convention
+	// of a callee travels with the callee, in the *ir.Object a static call
+	// carries, and ABITargetOf is what reads it: a pass that took this field
+	// for the boundary of a call would lay the outgoing area of an
+	// ABIInternal call out with no registers, and the callee would read words
+	// nothing wrote.
+	ABI0 bool
+
 	// Descriptors lists the types whose type descriptors this function's code
 	// names, in first-use order.
 	//

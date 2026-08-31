@@ -70,10 +70,19 @@ type Options struct {
 	// Sym is the linker symbol name. It defaults to the function's own.
 	Sym string
 
-	// ABI is the calling convention the symbol is defined with. nanogo emits
-	// ABIInternal for a Go function; ABI0 belongs to symbols defined in
-	// assembly (specs/030-abi.md).
-	ABI uint16
+	// ABI0 says the symbol is defined with the stack-only calling convention.
+	//
+	// nanogo emits ABIInternal for every Go function, so the zero value is
+	// the answer for all but one caller: the ABI0 wrapper of
+	// specs/047-abi-wrappers.md stage 3, which an assembly file calls. The
+	// field is a boolean and not obj.ABI, because obj.ABI0 is that enum's
+	// zero value and a caller that forgot to set it would emit an ABI0
+	// definition with no diagnostic.
+	//
+	// It must agree with ssa.Func.ABI0, which is what placed the function's
+	// parameters and results. A symbol that claimed ABI0 over an ABIInternal
+	// placement would name the convention it does not implement.
+	ABI0 bool
 
 	// File is the source file the pc-file table names, and Line is the line
 	// the function starts on.
@@ -1818,10 +1827,49 @@ func appendPC(list []obj.PCEntry, pc int32, value int32) []obj.PCEntry {
 // wrong one rather than a missing one.
 func (e *emitter) dwarfInfo() *obj.Symbol {
 	return &obj.Symbol{
-		Name:  dwarfInfoPrefix + e.opt.Sym,
+		Name:  dwarfInfoPrefix + e.auxName(),
 		Type:  obj.SDWARFFCN,
 		Align: 1,
 	}
+}
+
+// abi is the convention half of the text symbol's identity.
+func (e *emitter) abi() uint16 {
+	if e.opt.ABI0 {
+		return obj.ABI0
+	}
+	return obj.ABIInternal
+}
+
+// abiName spells a convention for a diagnostic.
+func abiName(abi0 bool) string {
+	if abi0 {
+		return "ABI0"
+	}
+	return "ABIInternal"
+}
+
+// auxName is the base an auxiliary symbol of this function is named from.
+//
+// It is the linker symbol, with the convention appended for an ABI0
+// definition. The suffix is not decoration: the ABI is half of a symbol's
+// identity, so one name can be two text symbols, and specs/047-abi-wrappers.md
+// stage 3 produces exactly that pair. internal/cpu.sysctlEnabled is a Go
+// function under ABIInternal and an ABI0 wrapper under the same name, both in
+// one object, and an auxiliary symbol named from the text symbol alone would
+// be defined twice.
+//
+// gc has the same problem in the one place it names an auxiliary symbol after
+// a function, and takes the same answer: EmitArgInfo spells the name
+// "%s.arginfo%d" with the function's own ABI, so internal/cpu.sysctlEnabled
+// carries both .arginfo0 and .arginfo1. Everything else gc writes here is
+// anonymous, because a linker resolves it through the text symbol's auxiliary
+// entry and never by name.
+func (e *emitter) auxName() string {
+	if !e.opt.ABI0 {
+		return e.opt.Sym
+	}
+	return e.opt.Sym + ".abi0"
 }
 
 // dwarfInfoPrefix is gc's name for a subprogram symbol
@@ -1876,9 +1924,18 @@ func (e *emitter) result() (*Result, error) {
 	for _, w := range e.text {
 		data = binary.LittleEndian.AppendUint32(data, w)
 	}
+	if e.f != nil && e.f.ABI0 != e.opt.ABI0 {
+		// The placement and the symbol would name two conventions. Both are
+		// silent on their own: an ABI0 symbol over an ABIInternal placement
+		// takes its arguments out of an area the caller never wrote, and an
+		// ABIInternal symbol over an ABI0 placement leaves the caller's
+		// registers unread.
+		return nil, fmt.Errorf("ssagen: %s: the symbol is emitted under %s and its arguments are placed under %s",
+			e.opt.Sym, abiName(e.opt.ABI0), abiName(e.f.ABI0))
+	}
 	text := &obj.Symbol{
 		Name: e.opt.Sym,
-		ABI:  obj.ABIInternal,
+		ABI:  e.abi(),
 		Type: obj.STEXT,
 		Size: uint32(size),
 		Data: data,

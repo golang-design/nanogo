@@ -36,8 +36,16 @@ import (
 // [ssagen.ABIWrapper] builds each one.
 //
 // A function assembly calls under ABI0, or one carrying a //go:linkname the
-// package defines, owes an ABI0 wrapper whose own convention is ABI0. That is
-// stage 3 and it is not built, so it is refused by name.
+// package defines, owes an ABI0 wrapper whose own convention is ABI0. It takes
+// every argument out of its own ABI0 area, calls the ABIInternal definition,
+// and writes the results back. That is stage 3 and it is built:
+// [abiWrapperSet] collects them beside the others and [ssagen.ABI0Wrapper]
+// builds each one.
+//
+// The two directions are one decision and not two. gc computes one need set
+// and calls one makeABIWrapper per ABI in it, and a function can owe a wrapper
+// in only one direction, because need excludes the convention the definition
+// already has.
 
 // abiWrapperSet is what a package's assembly asks the compiler for.
 type abiWrapperSet struct {
@@ -52,11 +60,26 @@ type abiWrapperSet struct {
 	// from a symabis def that matched a Go declaration, and GenABIWrappers
 	// then puts ABIInternal in need unconditionally.
 	Wrappers []*abiWrapper
+
+	// ABI0 holds one declaration per ABI0 wrapper owed, in declaration order.
+	//
+	// It is a second list because the two directions owe different symbols.
+	// An ABIInternal wrapper comes with the argument map the assembler's own
+	// FUNCDATA reference names; an ABI0 wrapper comes with nothing beside it,
+	// because the compiler and not the assembler produced the ABI0 text
+	// symbol and obj appends that reference only to what the assembler
+	// produced.
+	ABI0 []*abiWrapper
 }
 
-// abiWrapper is one bodyless declaration the assembly defines under ABI0.
+// abiWrapper is one declaration that owes a wrapper.
 type abiWrapper struct {
-	// Fn is the declaration. It has no body and nanogo compiles none for it.
+	// Fn is the declaration.
+	//
+	// In the ABIInternal direction it has no body and nanogo compiles none
+	// for it. In the ABI0 direction it has a body, which nanogo compiles as
+	// an ordinary ABIInternal function, or it is satisfied by an ABIInternal
+	// assembly definition.
 	Fn *ir.Func
 
 	// Sym is the linker symbol the assembly defines and the wrapper takes,
@@ -153,15 +176,6 @@ func checkABIWrappers(cfg *Config, s *SymABIs, seen *sourceDirectives, p *ir.Pac
 			continue
 		}
 		what := "function " + fn.Name + " at " + position(fset, fn.Pos, fn.Name)
-		if need.Has(obj.ABI0) {
-			return nil, &UnsupportedError{
-				Package: cfg.Package,
-				What:    "an assembly call to " + what,
-				Detail: "the assembly names it under ABI0, or a //go:linkname makes it callable under " +
-					"both conventions, and the Go definition is ABIInternal, so it needs the ABI0 " +
-					"wrapper of specs/047-abi-wrappers.md stage 3, which is unbuilt",
-			}
-		}
 		if fn.Recv != nil {
 			// gc errors with "makeABIWrapper support for wrapping methods not
 			// implemented", so refusing costs no compatibility. The receiver
@@ -176,17 +190,41 @@ func checkABIWrappers(cfg *Config, s *SymABIs, seen *sourceDirectives, p *ir.Pac
 					"(specs/047-abi-wrappers.md)",
 			}
 		}
-		if !fn.Bodyless {
-			// need holds ABIInternal and fn.ABI is ABIInternal, so this is
-			// unreachable by the arithmetic above. It is checked rather than
-			// assumed, because the wrapper below would define a second symbol
-			// under a name the ordinary pipeline is already defining.
-			return nil, fmt.Errorf("%s: %s owes an ABIInternal wrapper and has a Go body",
-				position(fset, fn.Pos, fn.Name), fn.Name)
-		}
 		w := &abiWrapper{Fn: fn, Sym: sym}
 		if l, ok := links.Of(fn.Name); ok && fn.Recv == nil {
 			w.Linkname, w.LinknameStd = !l.Std, l.Std
+		}
+		if need.Has(obj.ABI0) {
+			// The other direction. The declaration is ABIInternal, either
+			// because it has a Go body or because the assembly defines it
+			// under ABIInternal, and something names it under ABI0: an
+			// assembly file, through a ref line, or a //go:linkname, through
+			// the callable set. The wrapper is the ABI0 half of the pair.
+			if fn.Bodyless && !hasDef {
+				// Nothing defines the symbol under either convention, so the
+				// wrapper's inner call would name a symbol that does not
+				// exist. gc builds the wrapper anyway and leaves the link to
+				// report the undefined ABIInternal target, which names
+				// neither the declaration nor the line that asked for it.
+				return nil, &UnsupportedError{
+					Package: cfg.Package,
+					What:    "an ABI0 call to " + what,
+					Detail: "the declaration has no Go body and no assembly definition, so the ABI0 " +
+						"wrapper of specs/047-abi-wrappers.md stage 3 would call a symbol nothing " +
+						"defines",
+				}
+			}
+			set.ABI0 = append(set.ABI0, w)
+			continue
+		}
+		if !fn.Bodyless {
+			// need holds ABIInternal alone here and fn.ABI is ABIInternal, so
+			// this is unreachable by the arithmetic above. It is checked
+			// rather than assumed, because the wrapper below would define a
+			// second symbol under a name the ordinary pipeline is already
+			// defining.
+			return nil, fmt.Errorf("%s: %s owes an ABIInternal wrapper and has a Go body",
+				position(fset, fn.Pos, fn.Name), fn.Name)
 		}
 		set.Wrappers = append(set.Wrappers, w)
 	}
@@ -247,8 +285,30 @@ func checkLinknameRenames(cfg *Config, links *Linknames, p *ir.Package, fset *sy
 		default:
 			// A renaming directive over a bodyless declaration, or over a
 			// name this package does not define at all. Neither makes nanogo
-			// emit a definition, so the name is only ever matched and the
-			// match is built.
+			// emit a definition, so no definition is named wrongly.
+			//
+			// A *reference* is a different question and it is the one this
+			// pass missed. nanogo derives a callee's symbol from the
+			// declaration in ir.Build, which knows nothing about the
+			// directive, so a Go call to such a declaration names the symbol
+			// the source wrote rather than the one the directive renamed it
+			// to. internal/bytealg is exactly that shape: CompareString calls
+			// abigen_runtime_cmpstring, whose directive renames it to
+			// runtime.cmpstring, and the link fails with "relocation target
+			// internal/bytealg.abigen_runtime_cmpstring not defined". The
+			// package compiles and does not link, which is the one outcome
+			// worse than a refusal, so the call is what is refused.
+			if o := referencedBy(p, l.Default); o != nil {
+				return &UnsupportedError{
+					Package: cfg.Package,
+					What: "a Go call to " + l.Local + ", which //go:linkname renames to " + l.Target +
+						", at " + position(fset, o.Pos, l.Local),
+					Detail: "nanogo derives a callee's symbol from the declaration, so the call names " +
+						l.Default + " where the definition is " + l.Target + ", and the link fails on a " +
+						"target nothing defines; the reference half of //go:linkname is unbuilt " +
+						"(specs/047-abi-wrappers.md)",
+				}
+			}
 			continue
 		}
 		return &UnsupportedError{
@@ -322,6 +382,68 @@ func addABIWrappers(cfg *Config, out *obj.Package, target *ssa.Target, fset *syn
 		}
 		out.AddDef(stackmap)
 		out.AddDef(arginfo)
+	}
+	for _, w := range set.ABI0 {
+		where := "an ABI0 call to function " + w.Fn.Name + " at " + position(fset, w.Fn.Pos, w.Fn.Name)
+		fn, err := ssagen.ABI0Wrapper(w.Fn, w.Sym)
+		if err != nil {
+			return &UnsupportedError{Package: cfg.Package, What: where, Detail: err.Error()}
+		}
+		r, _, err := compileFunc(cfg, fn, target, out, fset)
+		if err != nil {
+			return err
+		}
+		// No argument map beside it. cmd/internal/obj appends the FUNCDATA
+		// reference to <sym>.args_stackmap to every ABI0 text symbol *the
+		// assembler* produces, and this one the compiler produced: its
+		// arguments bitmap is the ordinary FUNCDATA $0 gclocals symbol
+		// specs/027-liveness-and-stackmaps.md builds, over the same ABI0
+		// placement.
+		r.Text.Flag |= obj.SymFlagDupok
+		r.Text.Flag2 |= obj.SymFlagABIWrapper
+		if w.Linkname {
+			r.Text.Flag2 |= obj.SymFlagLinkname
+		}
+		if w.LinknameStd {
+			r.Text.Flag2 |= obj.SymFlagLinknameStd
+		}
+		if _, err := r.Add(out); err != nil {
+			return &UnsupportedError{Package: cfg.Package, What: where, Detail: err.Error()}
+		}
+	}
+	return nil
+}
+
+// referencedBy returns a node of p that names the function symbol sym, or nil.
+//
+// It walks the bodies rather than asking the object model, because the object
+// model has no list of the function objects a package references: ir.Build
+// caches one *ir.Object per checker object, and only a package-level variable
+// reaches ir.Package.Globals. The walk runs once at the gate and answers
+// exactly the question the refusal above asks rather than a wider one. A
+// declaration nothing calls is renamed harmlessly, which is what keeps
+// internal/bytealg's two memequal declarations from being refused for a
+// directive that costs them nothing: the compiler emits runtime.memequal
+// itself and no Go call in that package names them.
+func referencedBy(p *ir.Package, sym string) *ir.Node {
+	var found *ir.Node
+	look := func(n *ir.Node) bool {
+		if found != nil {
+			return false
+		}
+		if n.Obj != nil && n.Obj.Class == ir.ClassFunc && n.Obj.Name == sym {
+			found = n
+			return false
+		}
+		return true
+	}
+	for _, fn := range p.Funcs {
+		for _, st := range fn.Body {
+			ir.Walk(st, look)
+			if found != nil {
+				return found
+			}
+		}
 	}
 	return nil
 }

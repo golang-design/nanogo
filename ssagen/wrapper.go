@@ -711,3 +711,45 @@ func ABIWrapper(decl *ir.Func, sym string) (*ir.Func, error) {
 	callee.Assembly = true
 	return finishWrapper(fn, sym, decl.Type, nil, callee)
 }
+
+// ABI0Wrapper returns the ABI0 wrapper a Go function an assembly file calls
+// owes.
+//
+// It is the other direction of [ABIWrapper] and it is the same function built
+// the same way. gc has one makeABIWrapper for both, and the only thing that
+// differs between the two is which side of the boundary is ABI0: the
+// wrapper's own convention, or its inner call's. Here the wrapper's own
+// convention is ABI0, so it takes every argument out of its incoming argument
+// area, calls the Go function under ABIInternal, and writes every result back
+// into that area.
+//
+// decl is the Go declaration and sym is the linker symbol both this wrapper
+// and the ABIInternal definition carry, after the //go:linkname. The two are
+// one name and two symbols, which is what makes the wrapper's inner call
+// print the same name as its own TEXT in gc's listing of internal/cpu.
+//
+// The callee is never marked [ir.Object.Assembly]. That field says the callee
+// is ABI0 and this callee is ABIInternal whether the definition behind it is
+// Go or assembly: internal/bytealg's assembly writes
+// TEXT runtime·cmpstring<ABIInternal>(SB), which cmd/asm accepts because
+// objabi.LookupPkgSpecial allows the marker in that package, and the wrapper
+// this function builds is the ABI0 half that pairs with it.
+func ABI0Wrapper(decl *ir.Func, sym string) (*ir.Func, error) {
+	if decl == nil {
+		return nil, fmt.Errorf("ssagen: an ABI0 wrapper for no declaration")
+	}
+	if decl.Type == nil {
+		return nil, fmt.Errorf("ssagen: the ABI0 wrapper %s needs the signature of %s, which the IR does not carry", sym, decl.Name)
+	}
+	if decl.Recv != nil {
+		return nil, fmt.Errorf("ssagen: the ABI0 wrapper %s is for a method, and the receiver takes offset 0 of the ABI0 area (specs/047-abi-wrappers.md)", sym)
+	}
+	fn := &ir.Func{
+		Name:    decl.Name,
+		Sym:     sym,
+		Pos:     wrapperPos,
+		Wrapper: true,
+		ABI0:    true,
+	}
+	return finishWrapper(fn, sym, decl.Type, nil, wrapperCallee(sym, decl.Type))
+}

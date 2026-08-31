@@ -1329,7 +1329,7 @@ func compileFunc(cfg *Config, fn *ir.Func, target *ssa.Target, out *obj.Package,
 			file, line := fileAndLine(cfg, fset, fn.Pos)
 			r, err = ssagen.Emit(f, a, out, ssagen.Options{
 				Sym:           fn.Sym,
-				ABI:           obj.ABIInternal,
+				ABI0:          fn.ABI0,
 				File:          file,
 				Line:          line,
 				Fset:          fset,

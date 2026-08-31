@@ -158,7 +158,7 @@ func (e *emitter) buildTables(size int64) (*tables, error) {
 	// is the highest index this package writes, and a function with no stack
 	// object must keep a two-entry array rather than one with a hole in it,
 	// because the position of an entry is its index.
-	objects, err := m.ObjectsSym(e.opt.Sym+".stkobj", e.gcdata)
+	objects, err := m.ObjectsSym(e.auxName()+".stkobj", e.gcdata)
 	if err != nil {
 		return nil, err
 	}

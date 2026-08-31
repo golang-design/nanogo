@@ -842,7 +842,16 @@ func (a *abiPass) run() error {
 	// therefore walks both lists, with the register counters restarted between
 	// them: that restart is the only difference the spec names, and the
 	// shared stack counter is the one it does not.
-	in, out, argsSize, err := ABIWalk(a.t, types, a.declaredResults(), a.objs)
+	//
+	// The target is a.own() and not a.t, and the two differ for the ABI0
+	// wrapper of specs/047-abi-wrappers.md alone. Every other use of a.t in
+	// this pass is a call boundary, where the convention is the callee's and
+	// ABITargetOf reads it off the callee. Passing the ABI0 target in as a.t
+	// instead would place the wrapper's own boundary correctly and lay the
+	// outgoing area of its ABIInternal inner call out with no registers,
+	// which is a caller writing its arguments into memory the callee never
+	// reads.
+	in, out, argsSize, err := ABIWalk(a.own(), types, a.declaredResults(), a.objs)
 	if err != nil {
 		return fmt.Errorf("ssa: abi: %s: %w", a.f.Name, err)
 	}
@@ -858,6 +867,19 @@ func (a *abiPass) run() error {
 	}
 	a.compact()
 	return nil
+}
+
+// own returns the register sets this function's own boundary is placed with.
+//
+// It is [ABITargetOf] for a definition rather than for a call: the same
+// question, asked about the symbol being defined instead of about the symbol
+// being called. [Func.ABI0] is the answer and the ABI0 wrapper of
+// specs/047-abi-wrappers.md is the only function that answers yes.
+func (a *abiPass) own() *Target {
+	if !a.f.ABI0 {
+		return a.t
+	}
+	return a.t.ABI0Target()
 }
 
 // home makes an object that names one slot of an argument area.
@@ -908,6 +930,30 @@ func (a *abiPass) index() {
 // reaches the output.
 func (a *abiPass) collectArgs() {
 	index := make(map[*ir.Object]int)
+	// The declaration first, so that the walk sees every parameter the
+	// convention places and not only the ones an instruction still reads.
+	//
+	// Decomposition deletes the OpArg of a zero-size parameter, because there
+	// is no word to decompose it into, and a scan of the entry block therefore
+	// cannot see it. It still takes a stack slot at its own alignment
+	// (specs/030-abi.md rule 2), and the slot is what moves every parameter
+	// and every result after it. Dropping it put c at 3 in
+	// func(a [3]int8, b [0]int64, c [3]int8) int8 where gc puts it at 8, and
+	// the result at 8 where gc puts it at 16, in both conventions. The caller
+	// placed the same signature correctly, so a nanogo callee disagreed with a
+	// nanogo caller as well as with gc, and nothing said so.
+	for _, o := range a.f.Params {
+		if o == nil || o.Type == nil {
+			// An incomplete declaration is no declaration. Fall back to the
+			// values, which is what declaredResults does with an incomplete
+			// signature, rather than place a parameter with no type.
+			a.objs, a.args, index = nil, nil, make(map[*ir.Object]int)
+			break
+		}
+		index[o] = len(a.objs)
+		a.objs = append(a.objs, o)
+		a.args = append(a.args, nil)
+	}
 	for _, v := range a.f.Entry.Values {
 		if v.Op != OpArg {
 			continue

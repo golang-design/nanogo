@@ -62,6 +62,15 @@ func Build(fn *ir.Func) (*Func, error) {
 	b.f.Pos = fn.Pos
 	b.f.NeedCtxt = fn.Closure != nil
 	b.f.Wrapper = fn.Wrapper
+	b.f.ABI0 = fn.ABI0
+	// The declared parameter list, receiver first, which is the order entry()
+	// writes the OpArg values in and the order the convention places them in.
+	// It is recorded rather than recovered below, because a parameter can lose
+	// its OpArg and the convention still has to place it.
+	if fn.Recv != nil {
+		b.f.Params = append(b.f.Params, fn.Recv)
+	}
+	b.f.Params = append(b.f.Params, fn.Params...)
 
 	b.classify()
 	b.entry()
