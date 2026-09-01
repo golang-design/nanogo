@@ -10,14 +10,15 @@ depends_on:
 
 # Escape analysis
 
-**Stage 1 is built and it decides one thing, what the export data tells
-`gc`.** `escape/` answers one question per parameter, does the value the caller
-passed flow anywhere at all, and `export/writer.go` writes the answer as the
-note gc reads. Nothing else in this spec is built: there is no flow graph, no
-summary across a call, no `-m` output, and **no consumer inside nanogo**. Every
-allocation still goes to the heap and every address-taken variable still goes
-to a cell, so stage 1 changes what `gc` may do with nanogo's archives and
-changes nothing about the code nanogo emits.
+**Stages 1 to 3 are built and they decide one thing, what the export data
+tells `gc`.** `escape/` answers two questions per parameter: does the value the
+caller passed flow anywhere at all, and does it flow to one of the function's
+own results without a dereference on the way. `export/writer.go` writes the
+answer as the note gc reads. Nothing else in this spec is built: there is no
+flow graph, no summary across a call, no `-m` output, and **no consumer inside
+nanogo**. Every allocation still goes to the heap and every address-taken
+variable still goes to a cell, so what is built changes what `gc` may do with
+nanogo's archives and changes nothing about the code nanogo emits.
 
 `ir/` holds a builder, a type layout, a node set, a converter, the lowering
 pass of [020](020-ir.md) and the descriptor naming of
@@ -153,6 +154,45 @@ runtime_fast64.go:544:57: key escapes to heap, not allowed in runtime
 runtime_faststr.go:409:58: key escapes to heap, not allowed in runtime
 ```
 
+### What `abi.NoEscape` actually is, and what stage said so
+
+The first reading of these three sites was wrong about the note, and the error
+was in the source rather than in the measurement. This spec said
+`abi.NoEscape` is `func(p unsafe.Pointer) unsafe.Pointer { return p }` and that
+its note is a flow to result 0, `esc:\x00\x00\x00\x01`. That is not the body in
+`go1.27.0`:
+
+```go
+//go:nosplit
+//go:nocheckptr
+func NoEscape(p unsafe.Pointer) unsafe.Pointer {
+	x := uintptr(p)
+	return unsafe.Pointer(x ^ 0)
+}
+```
+
+**`gc`'s note for it is `esc:`, the value flows nowhere.** That was read out of
+`gc`'s own archive, and a pair of fixtures isolates the mechanism to one
+boundary:
+
+| Body | `gc`'s note |
+| --- | --- |
+| `x := uintptr(p); return unsafe.Pointer(x ^ 0)` | `esc:` |
+| `return unsafe.Pointer(uintptr(p) ^ 0)` | `esc:\x00\x00\x00\x01` |
+| `u := uintptr(unsafe.Pointer(p)); g = unsafe.Pointer(u)` | `esc:` |
+| `g = unsafe.Pointer(uintptr(unsafe.Pointer(p)))` | empty |
+
+The two halves of each pair differ only in whether the `uintptr` passes through
+a variable. `cmd/compile/internal/escape`'s `unsafeValue` is the reason: it
+follows a `uintptr` back through conversions and arithmetic and stops at
+anything else, and a variable is anything else.
+
+So **stage 3 never could have freed those three sites.** Stage 3 adds flows;
+`esc:` has none. What frees them is the rule in the section below, which is
+stage 2's, and the correction is recorded here rather than quietly fixed
+because the wrong body sent the staging table's "what it unblocks" column down
+the wrong row.
+
 ### Two independent gaps stack at `abi.NoEscape`, and only one is this spec's
 
 A note is read only for a call that survives as a call. `tagHole` in
@@ -182,14 +222,15 @@ nanogo-compiled function `gc` does not inline, with a pointer-bearing
 parameter, called by a package on the runtime list with the address of a
 local, fails when nanogo proved nothing about that parameter.
 
-## Stage 1: the note, and only the note
+## Stages 1 to 3: the note, and only the note
 
-`escape/` is the pass and `escape.Params` is its entry point. It answers one
-question per receiver and parameter, **does the value the caller passed flow
-anywhere at all**, and there is no third answer. `esc:` says it flows nowhere
-and is written only where the walk proved it. Everything else takes the empty
-note, which `gc` reads as a flow to the heap at zero dereferences and which is
-what nanogo wrote for every parameter before.
+`escape/` is the pass and `escape.Params` is its entry point. It answers two
+questions per receiver and parameter, **does the value the caller passed flow
+anywhere at all**, and **does it flow to one of this function's own results
+without a dereference on the way**. `esc:` says it flows nowhere. `esc:` with a
+result byte says it flows to that result and to nothing else. Everything else
+takes the empty note, which `gc` reads as a flow to the heap at zero
+dereferences and which is what nanogo wrote for every parameter before.
 
 The branch order is `cmd/compile/internal/escape.(*batch).paramTag`'s, so the
 two can be read side by side, and the encoding in `escape/leaks.go` is a
@@ -199,7 +240,7 @@ equivalent. The bytes were checked against `gc`'s own archives and not against
 compiles each case with the toolchain, decodes the export data's string
 section, and asserts the note `gc` wrote.
 
-### The four notes stage 1 writes
+### The five notes the pass writes
 
 | Case | Note | Why it is sound |
 | --- | --- | --- |
@@ -207,6 +248,38 @@ section, and asserts the note `gc` wrote.
 | A parameter that is unnamed or `_` | `esc:` | The body cannot name it, so nothing can flow out of it. `gc`'s own branch |
 | A bodyless declaration carrying `//go:noescape` | `esc:\x00\x01\x01`, a mutator flow and a callee flow at 0 | The pragma is an assertion by the author, and `gc` honours it without proof for the same reason. The bytes are `gc`'s own and are **not** `esc:`, which claims more than the pragma does |
 | A parameter the walk proved flows nowhere | `esc:` | The section below |
+| A parameter the walk measured into result *i* at zero dereferences, and nowhere else | `esc:` with byte $3+i$ set to 1 | The section below, and the depth rule under it |
+
+### Why the dereference count is only ever zero
+
+`gc`'s note holds a minimum dereference count per destination, so it can say
+"leaks to result 0 at one dereference", and `tagHole` reads that count back as
+`ks[i].shift(x)`. A larger `x` describes a **weaker** flow, so a count above
+the truth is the unsound direction and a count below it is the safe one.
+
+The walk counts dereferences and it only counts them upwards. Every operation
+adds one wherever it may read through a pointer, and an operation whose depth
+is not obvious adds one rather than none, so the count it holds is never below
+the true one. That leaves it unusable for writing a deep flow, because a count
+above `gc`'s own would be a claim `gc` did not make, and the note ratchet is
+that nanogo's note is `gc`'s or the empty one. **So a flow the walk measured at
+any depth but zero is refused, and stage 4 is what makes the deeper counts
+exact enough to write.**
+
+The depths the walk assigns, and the reading of `gc` that each was checked
+against:
+
+| Shape | Depth | `gc`'s note for it returned |
+| --- | --- | --- |
+| `p` | 0 | `esc:\x00\x00\x00\x01` |
+| `t.P`, `t` a struct by value | 0 | `esc:\x00\x00\x00\x01` |
+| `a[i]`, `a` an array | 0 | `esc:\x00\x00\x00\x01` |
+| `b[1:]`, `b` a slice or a string | 0 | `esc:\x00\x00\x00\x01` |
+| `&b[i]`, `&q.f` | 0 | `esc:\x00\x00\x00\x01` |
+| `T{P: p}` for a struct or an array | 0 | `esc:\x00\x00\x00\x01` |
+| `i.(*T)`, and a type switch clause variable of pointer shape | 0 | `esc:\x00\x00\x00\x01` |
+| `*q`, `t.P` through a pointer, `s[i]` on a slice | 1 and refused | `esc:\x00\x00\x00\x02` |
+| a range element, `i.(T)` for a value type | 1 and refused | `esc:\x00\x00\x00\x02` |
 
 Everything else takes the empty note, including every parameter of a function
 carrying `//go:uintptrescapes` or `//go:uintptrkeepalive`. `gc` keeps analysing
@@ -231,29 +304,60 @@ else assumed harmless, makes a forgotten operation a wrong answer, and a wrong
 answer here lands in a caller `gc` compiled.
 
 A leak is recorded at five kinds of position, and each is a claim in `gc`'s
-own lattice that `esc:` denies:
+own lattice that the notes here deny:
 
 | Position | `gc`'s flow |
 | --- | --- |
-| A value derived from the parameter is returned | result |
-| It is assigned to a global, or through a pointer, a slice element or a map | heap |
+| A value derived from the parameter is assigned to a global, or through a pointer, a slice element or a map | heap |
 | The destination of an assignment is reached through a value derived from the parameter | mutator |
 | It is an argument of a call, or the value being called | heap, callee |
-| It is converted to an interface, or to a word with no pointer in it | heap, and see below |
+| It is converted to an interface | heap |
+| It reaches a result at a depth other than zero, or a result past the fifth | result, at a count the pass cannot write |
 
-The last row is two refusals with different reasons. A conversion to an
-interface is refused **because of nanogo and not because of the source**:
-nanogo boxes on the heap, since the pass that would decide otherwise is this
-one, so the value is in the heap whether or not the interface goes anywhere. A
-conversion to `uintptr` is refused because the reference survives in a word the
-collector does not trace, and a later flow of that word is a flow no analysis
-can follow. `gc` has that same hole and closes it with `//go:uintptrescapes`;
-stage 1 refuses instead.
+A conversion to an interface is refused **because of nanogo and not because of
+the source**: nanogo boxes on the heap, since the pass that would decide
+otherwise is this one, so the value is in the heap whether or not the interface
+goes anywhere. A slice literal and a map literal are refused for the same
+reason and it is the same sentence: `ir/lower.go` allocates both, so an element
+of one is in the heap whatever this pass decides. A struct literal and an array
+literal are built in the frame, so they are not refused.
 
 Reading is not a leak, and it is what makes the pass find anything at all.
 `b[0]`, `*p`, `t.f`, `len(b)` and `b[1:]` are reads, and a read of a value
 whose type has no pointer word cannot carry a reference onwards, which is what
-stops `uint64(b[0])` from tainting the integer it produces.
+stops `uint64(b[0])` from tainting the integer it produces. Ranging is a read,
+and so is a type switch and a type assertion: each hands the value out and
+retains nothing of the operand.
+
+### The word the collector does not trace, and why its default is inverted
+
+A conversion of a pointer to `uintptr` **ends the flow**, and a conversion back
+picks it up again only inside the same expression. That is the one switch in
+the package whose default ends a flow where every other default refuses the
+parameter, and the inversion is the language's rule rather than this pass's
+judgement. `unsafe`'s rule (3) allows a pointer to travel through a `uintptr`
+only when both conversions and the arithmetic between them stand in one
+expression, and it names the other form invalid in its own words:
+
+```go
+// INVALID: uintptr cannot be stored in variable
+//  before conversion back to Pointer.
+u := uintptr(p)
+p = unsafe.Pointer(u + offset)
+```
+
+So a flow the walk stops following here is a flow no valid program has, and an
+operation the walk does not name costs precision rather than correctness.
+`cmd/compile/internal/escape.(*escape).unsafeValue` is the same walk over the
+same shapes, which is what keeps nanogo's note equal to `gc`'s wherever the
+pattern appears. The table in the `abi.NoEscape` section above is the reading
+that fixed the rule's shape: the flow survives the arithmetic and dies at the
+variable, in `gc` and here alike.
+
+Stage 1 refused this conversion instead, on the ground that the reference
+survives in a word the collector does not trace. The ground was right and the
+conclusion did not follow: a word the collector does not trace is a word no
+valid program recovers a pointer from, so there is nothing left to describe.
 
 ### The one rule that is about nanogo and not about Go
 
@@ -281,22 +385,35 @@ the checker recorded and **drops a list whose length is not the one it is about
 to write**, in full, because a list one short does not lose its last entry: it
 moves every entry after the gap onto another parameter.
 
-### What stage 1 moved, and what it did not
+### What stages 1 to 3 moved, and what they did not
 
-`cmd/nanogo/escapenote_test.go` is the blocker's mark. `lib.Load(b []byte)`
-reads `b` and keeps nothing, nanogo proves it, and `gc` now compiles a consumer
-of it under `-+` that hands it a slice of an array in its own frame. The same
-file's `lib.Keep`, which stores its parameter in a global, still stops that
-build with `escapes to heap, not allowed in runtime`, which is the edge that
-must not move with the first half.
+`cmd/nanogo/escapenote_test.go` holds the two marks.
+`TestProvedNoteUnblocksTheRuntimeRule` is stage 1's: `lib.Load(b []byte)` reads
+`b` and keeps nothing, nanogo proves it, and `gc` compiles a consumer of it
+under `-+` that hands it a slice of an array in its own frame. The same file's
+`lib.Keep`, which stores its parameter in a global, still stops that build with
+`escapes to heap, not allowed in runtime`, which is the edge that must not move
+with the first half.
 
-**The closure reading did not move: 24 of 28, the same four refusals.** That
-measurement compiles each package alone against dependencies `gc` built, so no
-nanogo-written note is ever read in it.
+`TestTheNoEscapeShapeBuildsAndRuns` is stage 2's, and it reads the program
+rather than the archive. `lib.NoEscape` is `internal/abi.NoEscape`'s body
+character for character, `user` is compiled with `-+` and hands the address of
+its own local through it to a callee `gc` may not inline, and `main` runs the
+result twice with a collection between the runs. Against the compiler before
+this change the build stops with `key escapes to heap, not allowed in runtime`;
+against the compiler after it, the binary prints what an all-`gc` build of the
+same source prints.
 
-**The whole-closure build did not move either, and the reason is exact.** With
-nanogo owning all 24 compile invocations it can, `internal/runtime/maps` still
-fails at the same three sites:
+**The closure reading did not move: 24 of 28, the same four refusals**
+(`internal/bytealg`, `internal/runtime/atomic`, `internal/runtime/maps` and
+`runtime`, none of them for a reason this spec owns). That measurement compiles
+each package alone against dependencies `gc` built, so no nanogo-written note
+is ever read in it, and no stage of this spec can move it.
+
+**The whole-closure build moved, and the three sites this spec named are
+gone.** With nanogo owning all 24 compile invocations it can,
+`internal/runtime/maps` now compiles under `-+`, and the same command against
+the compiler before this change still fails at all three:
 
 ```
 runtime_fast32.go:479:57: key escapes to heap, not allowed in runtime
@@ -304,11 +421,28 @@ runtime_fast64.go:544:57: key escapes to heap, not allowed in runtime
 runtime_faststr.go:409:58: key escapes to heap, not allowed in runtime
 ```
 
-`abi.NoEscape` is `func(p unsafe.Pointer) unsafe.Pointer { return p }`. Its
-note is a flow to result 0 at zero dereferences, `esc:\x00\x00\x00\x01`, and
-stage 1 has no encoding for it by construction: it says "flows nowhere" or it
-says nothing. **So the measured blocker is stage 3's and not stage 1's**, and
-that is the reason stage 3 is result flows rather than anything else.
+**The build now stops at `runtime` instead, and the shape of the new blocker is
+the next stage's rather than this one's.** Two kinds of site:
+
+```
+print.go:129:6:    buf escapes to heap, not allowed in runtime
+debuglog.go:507:6: b escapes to heap, not allowed in runtime
+```
+
+The first is `strconv.AppendFloat(buf[:0], ...)` into `internal/strconv`, and
+taking that package off nanogo's share makes those sites go away, which is how
+they were attributed. The second is `byteorder.LEPutUint64(b[:], x)` and its
+neighbours, which write through the slice they are given. **A parameter written
+through is `gc`'s mutator flow, `esc:\x00\x01`, and no stage here has an
+encoding for it**: the notes above say "no flow at all" or "a flow to a result
+and nothing else", and both deny the write. Describing it needs a note that
+carries a mutator flow beside the rest, which is stage 4's, along with the
+callee summaries the remaining sites want.
+
+No note this change writes can make a new site fail. The empty note is the top
+of `gc`'s lattice, so every note here is the one that was written before or one
+strictly below it, and a note below the top can only make `gc` assume less
+escape. The `runtime` sites were behind `internal/runtime/maps` all along.
 
 ## The staging
 
@@ -319,9 +453,9 @@ compiled and not in anything nanogo compiled.
 | Stage | What it adds | What it unblocks | State |
 | --- | --- | --- | --- |
 | 1 | "Flows nowhere" per parameter, from a body walk with an allowlist of operations | A runtime-rule package that hands a local to a nanogo function that keeps nothing | built |
-| 2 | More operations in the allowlist: `range`, the type switch, the composite literal that stays in the frame | The same, for bodies stage 1 refuses on sight | not built |
-| 3 | Result flows, so a parameter that leaves through a result is described rather than refused | `abi.NoEscape` and every identity-shaped function, which is the measured blocker above | not built |
-| 4 | Dereference counts, the flow graph below, and summaries across a call | A parameter that reaches a callee that keeps nothing | not built |
+| 2 | More operations in the allowlist: `range`, the type switch, the type assertion, the composite literal that stays in the frame, the string and slice conversion, and the round trip through a `uintptr` | The same, for bodies stage 1 refuses on sight. The `uintptr` row is the one that reaches `abi.NoEscape` | built |
+| 3 | Result flows at zero dereferences, so a parameter that leaves through a result is described rather than refused | Every identity-shaped function. **Not** `abi.NoEscape`, whose note has no flow at all: see the correction above | built |
+| 4 | Dereference counts deep enough to write, the flow graph below, and summaries across a call | A parameter that reaches a callee that keeps nothing, and every result flow the walk now measures at one or more | not built |
 | 5 | A consumer inside nanogo: the allocation decision the rest of this spec is about | The five sites in the opening table, and [022](022-optimization-passes.md)'s G3 gate | not built |
 
 Stages 1 to 4 decide only what nanogo tells `gc`. Stage 5 is the first that
@@ -337,9 +471,10 @@ leaves the build log and the miscompile does not.
 
 ## The full design, which stages 4 and 5 build
 
-The design below stands and stage 1 does not replace it. Stage 1 is a walk over
-one body with two answers; this is the graph the later stages need, and it was
-reviewed and not disproved, only deferred.
+The design below stands and the built stages do not replace it. What is built
+is a walk over one body with a taint set and a depth per name. This is the
+graph the later stages need, and it was reviewed and not disproved, only
+deferred.
 
 Escape analysis decides, for each allocation, whether it can live in the
 caller's stack frame or must go on the heap. It runs on the IR of
@@ -445,7 +580,7 @@ other.
 
 ## Testing
 
-What stage 1 has:
+What stages 1 to 3 have:
 
 - `escape/escape_test.go` is the note table, one case per shape the walk
   proves and one per shape it refuses, built through `ir.Build` from source.
@@ -454,13 +589,25 @@ What stage 1 has:
   Each case is a package with one pointer-bearing parameter, compiled twice,
   and it asserts three things: the note `gc` wrote, the note nanogo wrote, and
   that nanogo's note is `gc`'s own note or the empty one. The third is the
-  ratchet, and it holds for every case added later. One parameter per package
-  is what makes it a per-parameter reading: the notes sit in the export data's
-  string section with nothing between them, so a package with two of them
-  cannot be read back without decoding the stream.
-- `TestProvedNoteUnblocksTheRuntimeRule` is the blocker's mark, both halves: a
+  ratchet, and it holds for every case added later. **Every depth in the table
+  above was read out of `gc`'s archive here first**, which is what the table is
+  for: a depth guessed from `gc`'s source rather than measured is how a note
+  `gc` never wrote gets written.
+- One tagged declaration per package is what makes that a per-parameter
+  reading, and "one" counts every declaration the archive carries a note for.
+  A package that imports one whose functions carry notes re-exports those
+  notes into its own stream, and the string section is deduplicated, so a
+  callee whose note happens to equal the subject's leaves one entry that reads
+  back as the subject's. A case needing a callee cannot be written there at
+  all, in that package or in another, and the first attempt at one was found by
+  this and not by review.
+- `TestProvedNoteUnblocksTheRuntimeRule` is stage 1's mark, both halves: a
   proved note lets `gc` compile a consumer under `-+`, and an unproved one
   still stops it with the runtime rule's own words.
+- `TestTheNoEscapeShapeBuildsAndRuns` is stage 2's, and it runs the program.
+  `internal/abi.NoEscape`'s body, a consumer under `-+` handing it the address
+  of a local, a callee `gc` may not inline, and two runs with a collection
+  between them, checked against an all-`gc` build of the same source.
 - `export/writer_test.go` covers the positional guard, and
   `driver/escapenotes_test.go` covers the shared-symbol drop.
 
@@ -503,3 +650,26 @@ sound without an analysis, and says so.
 The spec listed `ir/` as holding a builder, a type layout, a node set and a
 converter. It also holds the lowering pass of [020](020-ir.md) and the
 descriptor naming of [032](032-type-descriptors-and-itabs.md).
+
+**The spec quoted a body `abi.NoEscape` does not have, and routed a whole stage
+off it.** It said `abi.NoEscape` is
+`func(p unsafe.Pointer) unsafe.Pointer { return p }` and that its note is
+`esc:\x00\x00\x00\x01`, and the staging table then gave stage 3 the three
+`internal/runtime/maps` sites as the thing it unblocks. The body in `go1.27.0`
+launders through a `uintptr` variable and `gc`'s note for it is `esc:`, a note
+stage 3 cannot produce because stage 3 only adds flows. What frees those sites
+is stage 2's `uintptr` row. The section above holds the reading, and the four
+paired fixtures that put the boundary at the variable rather than anywhere else.
+
+The lesson is narrower than "check the source". The note was stated from the
+body and the body was stated from memory, and both halves are things a
+`go build` answers in a second. Every note in this spec is now a number read
+out of an archive, and `TestEscapeNoteMatchesGC` re-reads all of them on every
+run so that a toolchain upgrade moves the table rather than silently
+invalidating it.
+
+**The spec said stage 1 refuses a conversion to a word with no pointer in it
+because the collector does not trace such a word.** The ground was right and
+the conclusion did not follow. A word the collector does not trace is a word no
+valid program recovers a pointer from, because `unsafe`'s rule (3) says so, so
+there is no flow left to describe rather than a flow too hard to follow.

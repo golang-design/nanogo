@@ -117,29 +117,69 @@ func TestStoreThroughADereferenceLeaks(t *testing.T) {
 	}
 }
 
-// TestAGlobalInTheTaintSetLeaks is the last reader of the set.
+// TestOutlivesFrame is the last reader of the taint set.
 //
 // [prover.store] refuses a store to a global already, so this is the second
 // guard. It stands because the set is read once more at the end and a reader
 // of it must not have to know what put a name in it.
-func TestAGlobalInTheTaintSetLeaks(t *testing.T) {
-	p := &ir.Object{Name: "p", Class: ir.ClassParam, Type: intPtr()}
-	g := &ir.Object{Name: "g", Class: ir.ClassGlobal, Type: intPtr()}
-	pr := &prover{tainted: map[*ir.Object]bool{p: true, g: true}}
-	if !hasEscapingHolder(pr) {
-		t.Error("a global in the taint set was not read as a flow that outlives the call")
+func TestOutlivesFrame(t *testing.T) {
+	cases := []struct {
+		name string
+		o    *ir.Object
+		want bool
+	}{
+		{"a global", &ir.Object{Name: "g", Class: ir.ClassGlobal, Type: intPtr()}, true},
+		{"a variable in a heap cell", &ir.Object{Name: "c", Class: ir.ClassLocal, Type: intPtr(), Escapes: true}, true},
+		{"a local", &ir.Object{Name: "x", Class: ir.ClassLocal, Type: intPtr()}, false},
+		{"a parameter", &ir.Object{Name: "p", Class: ir.ClassParam, Type: intPtr()}, false},
+		// A result is read by name at the call site and not by the frame it
+		// was written in, so [analyse] describes it rather than refusing it.
+		{"a result", &ir.Object{Name: "r", Class: ir.ClassResult, Type: intPtr()}, false},
+	}
+	for _, c := range cases {
+		if got := outlivesFrame(c.o); got != c.want {
+			t.Errorf("%s: outlivesFrame = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
-// hasEscapingHolder is the final loop of [escapes], lifted so that a test can
-// reach it without a body that puts a global in the set.
-func hasEscapingHolder(p *prover) bool {
-	for o := range p.tainted {
-		if o.Escapes || o.Class == ir.ClassResult || o.Class == ir.ClassGlobal {
-			return true
-		}
+// TestResultPastTheNoteLeaks covers the result no note can name.
+//
+// gc takes the heap flow for a result past numResults, and this refuses, which
+// is the same claim in the note that reaches gc.
+func TestResultPastTheNoteLeaks(t *testing.T) {
+	fn := &ir.Func{Name: "F"}
+	for i := 0; i < numResults+1; i++ {
+		fn.Results = append(fn.Results, &ir.Object{Name: "r", Class: ir.ClassResult, Type: intPtr()})
 	}
-	return false
+	if got := resultIndex(fn, fn.Results[numResults-1]); got != numResults-1 {
+		t.Errorf("the last result a note can name is at %d, want %d", got, numResults-1)
+	}
+	if got := resultIndex(fn, fn.Results[numResults]); got != -1 {
+		t.Errorf("a result past the note reported index %d, want -1", got)
+	}
+	if got := resultIndex(fn, &ir.Object{Name: "other"}); got != -1 {
+		t.Errorf("an object that is not a result of fn reported index %d, want -1", got)
+	}
+}
+
+// TestShiftCannotGoBelowZero guards the one arithmetic that subtracts.
+//
+// [prover.addr] shifts down by one less than the indirections it walked past,
+// so a negative depth is a defect in that arithmetic rather than a shape a
+// program writes. Zero is the strongest flow the note can describe, and a
+// clamp to it cannot make a flow shallower than it is.
+func TestShiftCannotGoBelowZero(t *testing.T) {
+	f := flow{derived: true, derefs: 0}
+	if got := f.shift(-3); got.derefs != 0 {
+		t.Errorf("a shift below zero reached %d", got.derefs)
+	}
+	if got := f.shift(maxDerefs + 5); got.derefs != maxDerefs {
+		t.Errorf("a shift past the byte reached %d, want the saturated %d", got.derefs, maxDerefs)
+	}
+	if got := noRef.shift(2); got.derived {
+		t.Error("shifting a value that carries nothing made it carry something")
+	}
 }
 
 func TestDestination(t *testing.T) {
@@ -173,8 +213,8 @@ func TestDestination(t *testing.T) {
 
 // TestTaintOfNothingLeaks covers the destination that names no variable.
 func TestTaintOfNothingLeaks(t *testing.T) {
-	p := &prover{tainted: map[*ir.Object]bool{}}
-	p.taint(nil)
+	p := &prover{tainted: map[*ir.Object]int{}}
+	p.taint(nil, 0)
 	if !p.leaked {
 		t.Error("tainting a variable that is not there was not read as a leak")
 	}

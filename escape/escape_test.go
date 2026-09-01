@@ -38,13 +38,22 @@ type T struct {
 
 var gp *int
 var gs []byte
+var gi any
+var gu unsafe.Pointer
 
 func use(*int) {}
+
+func two(p *int) (int, *int) { return 1, p }
 `
 
 // noFlow is the note for a parameter that flows nowhere: "esc:" and no bytes
 // after it, because leaks.Encode trims the trailing zeros of an empty set.
 const noFlow = "esc:"
+
+// result0 is the note for a parameter that flows to the first result at zero
+// dereferences and nowhere else, which is the one destination besides "nowhere"
+// that specs/023-escape-analysis.md's stage 3 can name.
+const result0 = "esc:\x00\x00\x00\x01"
 
 // noescapeNote is the note gc writes for a parameter of a bodyless
 // //go:noescape declaration: a mutator flow and a callee flow, both at zero
@@ -88,20 +97,20 @@ func TestParamNotes(t *testing.T) {
 		fn:   "Keep2",
 		want: map[string]string{"p": heapNote},
 	}, {
-		name: "a returned parameter leaks",
+		name: "a returned parameter is described as a flow to that result",
 		src:  `func Ret(p *int) *int { return p }`,
 		fn:   "Ret",
-		want: map[string]string{"p": heapNote},
+		want: map[string]string{"p": result0},
 	}, {
 		name: "a parameter passed to a call leaks",
 		src:  `func Pass(p *int) { use(p) }`,
 		fn:   "Pass",
 		want: map[string]string{"p": heapNote},
 	}, {
-		name: "a slice of a parameter that is returned leaks",
+		name: "a slice of a parameter that is returned keeps the parameter's own depth",
 		src:  `func Tail(b []byte) []byte { return b[1:] }`,
 		fn:   "Tail",
-		want: map[string]string{"b": heapNote},
+		want: map[string]string{"b": result0},
 	}, {
 		name: "a slice of a parameter that is only measured is proved",
 		src:  `func TailLen(b []byte) int { return len(b[1:]) }`,
@@ -133,10 +142,10 @@ func TestParamNotes(t *testing.T) {
 		fn:   "Elem",
 		want: map[string]string{"b": heapNote},
 	}, {
-		name: "a parameter laundered into a uintptr leaks",
+		name: "a parameter laundered into a uintptr flows nowhere the collector follows",
 		src:  `func Word(p *int) uintptr { return uintptr(unsafe.Pointer(p)) }`,
 		fn:   "Word",
-		want: map[string]string{"p": heapNote},
+		want: map[string]string{"p": noFlow},
 	}, {
 		name: "a parameter boxed into an interface leaks, because nanogo boxes on the heap",
 		src:  `func Box(p *int) { var i any = p; _ = i }`,
@@ -202,10 +211,10 @@ func TestParamNotes(t *testing.T) {
 		fn:   "Beside",
 		want: map[string]string{"b": noFlow, "ch": heapNote},
 	}, {
-		name: "a parameter assigned to a named result leaks",
+		name: "a parameter assigned to a named result is described by the taint set",
 		src:  `func Named(p *int) (r *int) { r = p; return }`,
 		fn:   "Named",
-		want: map[string]string{"p": heapNote},
+		want: map[string]string{"p": result0},
 	}, {
 		name: "a parameter deferred leaks",
 		src:  `func Def(p *int) { defer use(p) }`,
@@ -232,10 +241,10 @@ func TestParamNotes(t *testing.T) {
 		fn:   "Var",
 		want: map[string]string{"ps": noFlow},
 	}, {
-		name: "a variadic parameter that is returned leaks",
+		name: "a variadic parameter that is returned flows to that result",
 		src:  `func VarRet(ps ...*int) []*int { return ps }`,
 		fn:   "VarRet",
-		want: map[string]string{"ps": heapNote},
+		want: map[string]string{"ps": result0},
 	}, {
 		name: "a parameter used as a map key in a read is proved",
 		src:  `func Key(m map[string]int, k string) int { return m[k] }`,
@@ -256,7 +265,351 @@ func TestParamNotes(t *testing.T) {
 		src:  `func (t *T) N(p *int) int { return t.A + *p }`,
 		fn:   "(*T).N",
 		want: map[string]string{"t": noFlow, "p": noFlow},
-	}}
+	},
+
+		// Stage 3: the destinations a note can name besides "nowhere".
+		{
+			name: "a flow to a result past the first names its own position",
+			src:  `func Second(p *int) (int, *int) { return 1, p }`,
+			fn:   "Second",
+			want: map[string]string{"p": "esc:\x00\x00\x00\x00\x01"},
+		}, {
+			name: "a parameter returned twice names both results",
+			src:  `func Both(p *int) (*int, *int) { return p, p }`,
+			fn:   "Both",
+			want: map[string]string{"p": "esc:\x00\x00\x00\x01\x01"},
+		}, {
+			name: "the last result a note can name is the fifth",
+			src:  `func Five(p *int) (a, b, c, d, e *int) { e = p; return }`,
+			fn:   "Five",
+			want: map[string]string{"p": "esc:\x00\x00\x00\x00\x00\x00\x00\x01"},
+		}, {
+			name: "a result past the note leaks, because no byte holds it",
+			src:  `func Six(p *int) (a, b, c, d, e, f *int) { f = p; return }`,
+			fn:   "Six",
+			want: map[string]string{"p": heapNote},
+		}, {
+			name: "a parameter that reaches a result and the heap leaks",
+			src:  `func RetKeep(p *int) *int { gp = p; return p }`,
+			fn:   "RetKeep",
+			want: map[string]string{"p": heapNote},
+		}, {
+			name: "a parameter that reaches a result and an interface leaks",
+			src:  `func RetBox(p *int) *int { gi = p; return p }`,
+			fn:   "RetBox",
+			want: map[string]string{"p": heapNote},
+		}, {
+			name: "a parameter that reaches a result and a call leaks",
+			src:  `func RetPass(p *int) *int { use(p); return p }`,
+			fn:   "RetPass",
+			want: map[string]string{"p": heapNote},
+		}, {
+			name: "a result this pass cannot separate from a call's tuple leaks",
+			src:  `func RetTuple(p *int) (int, *int) { return two(p) }`,
+			fn:   "RetTuple",
+			want: map[string]string{"p": heapNote},
+		}, {
+			name: "the address of an element of a parameter is that parameter's own depth",
+			src:  `func AddrElem(b []byte) *byte { return &b[0] }`,
+			fn:   "AddrElem",
+			want: map[string]string{"b": result0},
+		}, {
+			name: "a field of a parameter passed by value is at the parameter's own depth",
+			src:  `func FieldVal(t T) *int { return t.P }`,
+			fn:   "FieldVal",
+			want: map[string]string{"t": result0},
+		}, {
+			name: "a field read through a parameter is one dereference down, so it is refused",
+			src:  `func FieldPtr(t *T) *int { return t.P }`,
+			fn:   "FieldPtr",
+			want: map[string]string{"t": heapNote},
+		}, {
+			name: "an element of an array parameter is at the parameter's own depth",
+			src:  `func ArrElem(a [2]*int) *int { return a[0] }`,
+			fn:   "ArrElem",
+			want: map[string]string{"a": result0},
+		}, {
+			name: "an element of a slice parameter is one dereference down, so it is refused",
+			src:  `func SliceElem(s []*int) *int { return s[0] }`,
+			fn:   "SliceElem",
+			want: map[string]string{"s": heapNote},
+		}, {
+			name: "a value read out of a map parameter is refused",
+			src:  `func MapElem(m map[int]*int) *int { return m[0] }`,
+			fn:   "MapElem",
+			want: map[string]string{"m": heapNote},
+		}, {
+			name: "a dereference of a parameter is refused, because its depth is not zero",
+			src:  `func Deep(q **int) *int { return *q }`,
+			fn:   "Deep",
+			want: map[string]string{"q": heapNote},
+		}, {
+			name: "a slice of a string parameter shares the string's own bytes",
+			src:  `func StrTail(s string) string { return s[1:] }`,
+			fn:   "StrTail",
+			want: map[string]string{"s": result0},
+		}, {
+			name: "a converted parameter is at the parameter's own depth",
+			src:  `func Conv(p *int) unsafe.Pointer { return unsafe.Pointer(p) }`,
+			fn:   "Conv",
+			want: map[string]string{"p": result0},
+		}, {
+			name: "a string converted to bytes copies, so nothing of it reaches the result",
+			src:  `func Bytes(s string) []byte { return []byte(s) }`,
+			fn:   "Bytes",
+			want: map[string]string{"s": noFlow},
+		}, {
+			name: "a byte slice converted to a string copies as well",
+			src:  `func Str(b []byte) string { return string(b) }`,
+			fn:   "Str",
+			want: map[string]string{"b": noFlow},
+		}, {
+			name: "a slice converted to an array reads its elements out, so it is one down",
+			src:  `func Arr(s []*int) [2]*int { return [2]*int(s) }`,
+			fn:   "Arr",
+			want: map[string]string{"s": heapNote},
+		}, {
+			name: "a slice converted to an array pointer keeps the pointer it held",
+			src:  `func ArrPtr(s []*int) *[2]*int { return (*[2]*int)(s) }`,
+			fn:   "ArrPtr",
+			want: map[string]string{"s": result0},
+		},
+
+		// Stage 2: the operations the walk gained.
+		{
+			name: "a range that only reads its operand is proved",
+			src: `func RangeRead(s []*int) int {
+	n := 0
+	for _, v := range s {
+		if v != nil {
+			n++
+		}
+	}
+	return n
+}`,
+			fn:   "RangeRead",
+			want: map[string]string{"s": noFlow},
+		}, {
+			name: "a range whose element reaches a global leaks",
+			src: `func RangeKeep(s []*int) {
+	for _, v := range s {
+		gp = v
+	}
+}`,
+			fn:   "RangeKeep",
+			want: map[string]string{"s": heapNote},
+		}, {
+			name: "a range element is one dereference down, so returning it is refused",
+			src: `func RangeRet(s []*int) *int {
+	for _, v := range s {
+		return v
+	}
+	return nil
+}`,
+			fn:   "RangeRet",
+			want: map[string]string{"s": heapNote},
+		}, {
+			name: "a range over a map is proved",
+			src: `func RangeMap(m map[string]int) int {
+	n := 0
+	for range m {
+		n++
+	}
+	return n
+}`,
+			fn:   "RangeMap",
+			want: map[string]string{"m": noFlow},
+		}, {
+			name: "a range over a string is proved",
+			src: `func RangeStr(s string) int {
+	n := 0
+	for _, c := range s {
+		n += int(c)
+	}
+	return n
+}`,
+			fn:   "RangeStr",
+			want: map[string]string{"s": noFlow},
+		}, {
+			name: "a range beside a parameter the walk refuses still proves the other",
+			src: `func RangeBeside(s []*int, ch chan int) int {
+	n := 0
+	for range s {
+		n++
+	}
+	ch <- n
+	return n
+}`,
+			fn:   "RangeBeside",
+			want: map[string]string{"s": noFlow, "ch": heapNote},
+		}, {
+			name: "a type switch that only reads is proved",
+			src: `func TypeSw(i any) int {
+	switch v := i.(type) {
+	case *T:
+		return v.A
+	}
+	return 0
+}`,
+			fn:   "TypeSw",
+			want: map[string]string{"i": noFlow},
+		}, {
+			name: "a type switch variable returned is at the interface's own depth",
+			src: `func TypeSwRet(i any) *int {
+	switch v := i.(type) {
+	case *int:
+		return v
+	}
+	return nil
+}`,
+			fn:   "TypeSwRet",
+			want: map[string]string{"i": result0},
+		}, {
+			name: "a type switch variable stored in a global leaks",
+			src: `func TypeSwKeep(i any) {
+	switch v := i.(type) {
+	case *int:
+		gp = v
+	}
+}`,
+			fn:   "TypeSwKeep",
+			want: map[string]string{"i": heapNote},
+		}, {
+			name: "a type assertion that only reads is proved",
+			src:  `func Assert(i any) int { return i.(*T).A }`,
+			fn:   "Assert",
+			want: map[string]string{"i": noFlow},
+		}, {
+			name: "a type assertion returned is at the interface's own depth",
+			src:  `func AssertRet(i any) *int { return i.(*int) }`,
+			fn:   "AssertRet",
+			want: map[string]string{"i": result0},
+		}, {
+			name: "a type assertion to a value type is one dereference down, so it is refused",
+			src:  `func AssertVal(i any) T { return i.(T) }`,
+			fn:   "AssertVal",
+			want: map[string]string{"i": heapNote},
+		}, {
+			name: "a struct literal built in the frame is proved",
+			src: `func Lit(p *int) int {
+	t := T{A: 1, P: p}
+	return *t.P
+}`,
+			fn:   "Lit",
+			want: map[string]string{"p": noFlow},
+		}, {
+			name: "a struct literal returned carries the parameter to that result",
+			src:  `func LitRet(p *int) T { return T{A: 1, P: p} }`,
+			fn:   "LitRet",
+			want: map[string]string{"p": result0},
+		}, {
+			name: "an array literal built in the frame is proved",
+			src: `func ArrLit(p *int) int {
+	a := [2]*int{p, nil}
+	return *a[0]
+}`,
+			fn:   "ArrLit",
+			want: map[string]string{"p": noFlow},
+		}, {
+			name: "a keyed array literal is proved",
+			src: `func KeyLit(p *int) int {
+	a := [4]*int{2: p}
+	return *a[2]
+}`,
+			fn:   "KeyLit",
+			want: map[string]string{"p": noFlow},
+		}, {
+			name: "a slice literal leaks, because ir/lower.go allocates it",
+			src: `func SliceLit(p *int) int {
+	s := []*int{p}
+	return *s[0]
+}`,
+			fn:   "SliceLit",
+			want: map[string]string{"p": heapNote},
+		}, {
+			name: "the address of a struct literal leaks, because ir/lower.go allocates it",
+			src: `func AddrLit(p *int) int {
+	t := &T{A: 1, P: p}
+	return *t.P
+}`,
+			fn:   "AddrLit",
+			want: map[string]string{"p": heapNote},
+		},
+
+		// Stage 2: the round trip through a word the collector does not trace.
+		{
+			name: "a uintptr held in a variable ends the flow, which is unsafe's own rule",
+			src: `func NoEscape(p unsafe.Pointer) unsafe.Pointer {
+	x := uintptr(p)
+	return unsafe.Pointer(x ^ 0)
+}`,
+			fn:   "NoEscape",
+			want: map[string]string{"p": noFlow},
+		}, {
+			name: "a round trip inside one expression keeps the flow",
+			src:  `func NoEscapeInline(p unsafe.Pointer) unsafe.Pointer { return unsafe.Pointer(uintptr(p) ^ 0) }`,
+			fn:   "NoEscapeInline",
+			want: map[string]string{"p": result0},
+		}, {
+			name: "a round trip inside one expression into a global leaks",
+			src:  `func RoundKeep(p *int) { gu = unsafe.Pointer(uintptr(unsafe.Pointer(p))) }`,
+			fn:   "RoundKeep",
+			want: map[string]string{"p": heapNote},
+		}, {
+			name: "a round trip through a variable into a global is the shape unsafe calls invalid",
+			src: `func RoundVarKeep(p *int) {
+	u := uintptr(unsafe.Pointer(p))
+	gu = unsafe.Pointer(u)
+}`,
+			fn:   "RoundVarKeep",
+			want: map[string]string{"p": noFlow},
+		}, {
+			name: "an offset inside one expression keeps the flow",
+			src:  `func Offset(p *int) unsafe.Pointer { return unsafe.Pointer(uintptr(unsafe.Pointer(p)) + 8) }`,
+			fn:   "Offset",
+			want: map[string]string{"p": result0},
+		},
+
+		// The fixed point. A flow that runs backwards round a loop is only
+		// seen on a later round, so a note written after the first one would
+		// describe a shallower flow than the body has.
+		{
+			name: "a result flow found on a later round is still described",
+			src: `func Round(p *int) *int {
+	var a, b *int
+	for i := 0; i < 2; i++ {
+		a = b
+		b = p
+	}
+	return a
+}`,
+			fn:   "Round",
+			want: map[string]string{"p": result0},
+		}, {
+			name: "a leak found on a later round refuses the parameter",
+			src: `func RoundLeak(p *int) {
+	var a, b *int
+	for i := 0; i < 2; i++ {
+		gp = a
+		a = b
+		b = p
+	}
+}`,
+			fn:   "RoundLeak",
+			want: map[string]string{"p": heapNote},
+		}, {
+			name: "a deeper flow found before a shallower one takes the shallower depth",
+			src: `func Shallow(q **int) *int {
+	var a *int
+	for i := 0; i < 2; i++ {
+		a = *q
+	}
+	_ = a
+	return nil
+}`,
+			fn:   "Shallow",
+			want: map[string]string{"q": noFlow},
+		}}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

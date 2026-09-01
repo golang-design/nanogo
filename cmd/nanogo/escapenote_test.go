@@ -63,6 +63,15 @@ import (
 // them, so a package with two of them cannot be read back without decoding the
 // stream; with one there is nothing to tell apart.
 //
+// "One" counts every declaration the archive carries a note for and not only
+// the ones this file writes. A package that imports one whose functions carry
+// notes re-exports those notes into its own stream, and the string section is
+// deduplicated, so a callee whose note happens to equal F's leaves one entry
+// that reads back as F's. A case needing a callee therefore cannot be written
+// here at all, in this package or in another: [escape_test.TestParamNotes]'s
+// "a parameter passed to a call leaks" is where that shape is checked, and
+// [TestProvedNoteUnblocksTheRuntimeRule] is where a note gc acts on is.
+//
 // gc is the column that makes this a soundness check rather than a record of
 // what nanogo happens to do. nanogo's note must be gc's own note or the empty
 // one, and nothing else, for every case here and every case added later.
@@ -100,15 +109,6 @@ var escapeNoteCases = []struct {
 	gc:     "",
 	nanogo: "",
 }, {
-	name: "a pointer that is returned",
-	decl: "func F(p *int) *int { return p }",
-	// A flow to result 0 at zero dereferences. nanogo has no encoding for
-	// it: stage 1 says "flows nowhere" or nothing at all
-	// (specs/023-escape-analysis.md), so it takes the conservative note and
-	// costs the caller an allocation.
-	gc:     "esc:\x00\x00\x00\x01",
-	nanogo: "",
-}, {
 	name: "a slice that is written through",
 	decl: "func F(b []byte) { b[0] = 1 }",
 	// gc's mutator flow. It says the parameter does not reach the heap and
@@ -118,15 +118,253 @@ var escapeNoteCases = []struct {
 	// instead of weakening the claim.
 	gc:     "esc:\x00\x01",
 	nanogo: "",
-}, {
-	name: "a pointer passed on to another function",
-	decl: "//go:noinline\nfunc g(p *int) *int { return p }\n\nfunc F(p *int) *int { return g(p) }",
-	// gc follows g's own note. nanogo has no callee summary in stage 1, so
-	// an argument that carries a reference is refused whatever the callee
-	// does with it.
-	gc:     "esc:\x00\x00\x00\x01",
-	nanogo: "",
-}}
+},
+
+	// The flows to a result, which specs/023-escape-analysis.md's stage 3
+	// describes rather than refuses. Every one of them is at zero
+	// dereferences, because that is the only depth the walk measures exactly.
+	{
+		name:   "a pointer that is returned",
+		decl:   "func F(p *int) *int { return p }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "a pointer assigned to a named result",
+		decl:   "func F(p *int) (r *int) { r = p; return }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "a pointer returned in the second position",
+		decl:   "func F(p *int) (int, *int) { return 1, p }",
+		gc:     "esc:\x00\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x00\x01",
+	}, {
+		name:   "a pointer returned twice",
+		decl:   "func F(p *int) (*int, *int) { return p, p }",
+		gc:     "esc:\x00\x00\x00\x01\x01",
+		nanogo: "esc:\x00\x00\x00\x01\x01",
+	}, {
+		name:   "a pointer at the last result a note can name",
+		decl:   "func F(p *int) (a, b, c, d, e *int) { e = p; return }",
+		gc:     "esc:\x00\x00\x00\x00\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x00\x00\x00\x00\x01",
+	}, {
+		name: "a pointer at a result past the note",
+		decl: "func F(p *int) (a, b, c, d, e, f *int) { f = p; return }",
+		// gc takes the heap flow for a result its note cannot name, and
+		// nanogo refuses, which reaches gc as the same claim.
+		gc:     "",
+		nanogo: "",
+	}, {
+		name: "a pointer that reaches a result and the heap",
+		decl: "var g *int\n\nfunc F(p *int) *int { g = p; return p }",
+		// The heap flow swallows the result flow in gc's own encoding.
+		gc:     "",
+		nanogo: "",
+	}, {
+		name:   "a pointer that reaches a result and an interface",
+		decl:   "var g any\n\nfunc F(p *int) *int { g = p; return p }",
+		gc:     "",
+		nanogo: "",
+	}, {
+		name:   "a slice of a slice parameter that is returned",
+		decl:   "func F(b []byte) []byte { return b[1:] }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "a slice of a string parameter that is returned",
+		decl:   "func F(s string) string { return s[1:] }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "the address of an element of a slice parameter",
+		decl:   "func F(b []byte) *byte { return &b[0] }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "a field of a struct parameter passed by value",
+		decl:   "type T struct{ P *int }\n\nfunc F(t T) *int { return t.P }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name: "a field read through a pointer parameter",
+		decl: "type T struct{ P *int }\n\nfunc F(t *T) *int { return t.P }",
+		// One dereference down. The walk counts it and refuses, because it
+		// writes a flow only at the depth it measures exactly.
+		gc:     "esc:\x00\x00\x00\x02",
+		nanogo: "",
+	}, {
+		name:   "an element of an array parameter",
+		decl:   "func F(a [2]*int) *int { return a[0] }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "an element of a slice parameter",
+		decl:   "func F(s []*int) *int { return s[0] }",
+		gc:     "esc:\x00\x00\x00\x02",
+		nanogo: "",
+	}, {
+		name: "a value read out of a map parameter",
+		decl: "func F(m map[int]*int) *int { return m[0] }",
+		// gc records no flow at all: what comes out of a map comes out of
+		// the heap and not out of the map's own header.
+		gc:     "esc:",
+		nanogo: "",
+	}, {
+		name:   "a dereference of a parameter that is returned",
+		decl:   "func F(q **int) *int { return *q }",
+		gc:     "esc:\x00\x00\x00\x02",
+		nanogo: "",
+	}, {
+		name:   "a converted parameter that is returned",
+		decl:   "import \"unsafe\"\n\nfunc F(p *int) unsafe.Pointer { return unsafe.Pointer(p) }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name: "a string converted to bytes",
+		decl: "func F(s string) []byte { return []byte(s) }",
+		// The conversion copies into an allocation of its own, so nothing
+		// of the operand reaches the result and neither toolchain records a
+		// flow.
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name:   "a byte slice converted to a string",
+		decl:   "func F(b []byte) string { return string(b) }",
+		gc:     "esc:",
+		nanogo: "esc:",
+	},
+	// A conversion from a slice to an array or to an array pointer has no
+	// case here: nanogo's SSA builder has no row for either, so there is no
+	// archive to read. escape_test.go's table covers what the walk answers
+	// for them, because it stops at ir.Build.
+
+	// The operations stage 2 added to the allowlist.
+	{
+		name:   "a range that only reads its operand",
+		decl:   "func F(s []*int) int {\n\tn := 0\n\tfor _, v := range s {\n\t\tif v != nil {\n\t\t\tn++\n\t\t}\n\t}\n\treturn n\n}",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name: "a range element stored in a global",
+		decl: "var g *int\n\nfunc F(s []*int) {\n\tfor _, v := range s {\n\t\tg = v\n\t}\n}",
+		// gc's "leaking param content": a heap flow one dereference down.
+		// The walk has no encoding for a heap flow at any depth, so it
+		// refuses.
+		gc:     "esc:\x02",
+		nanogo: "",
+	}, {
+		name:   "a range over a map",
+		decl:   "func F(m map[string]int) int {\n\tn := 0\n\tfor range m {\n\t\tn++\n\t}\n\treturn n\n}",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name:   "a range over a string",
+		decl:   "func F(s string) int {\n\tn := 0\n\tfor _, c := range s {\n\t\tn += int(c)\n\t}\n\treturn n\n}",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name:   "a type switch that only reads",
+		decl:   "type T struct{ A int }\n\nfunc F(i any) int {\n\tswitch v := i.(type) {\n\tcase *T:\n\t\treturn v.A\n\t}\n\treturn 0\n}",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name:   "a type switch variable that is returned",
+		decl:   "func F(i any) *int {\n\tswitch v := i.(type) {\n\tcase *int:\n\t\treturn v\n\t}\n\treturn nil\n}",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "a type switch variable stored in a global",
+		decl:   "var g *int\n\nfunc F(i any) {\n\tswitch v := i.(type) {\n\tcase *int:\n\t\tg = v\n\t}\n}",
+		gc:     "",
+		nanogo: "",
+	}, {
+		name:   "a type assertion that only reads",
+		decl:   "type T struct{ A int }\n\nfunc F(i any) int { return i.(*T).A }",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name:   "a type assertion that is returned",
+		decl:   "func F(i any) *int { return i.(*int) }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name: "a type assertion to a value type that is returned",
+		decl: "type T struct {\n\tP *int\n\tA int\n}\n\nfunc F(i any) T { return i.(T) }",
+		// A value that is not pointer-shaped sits in an allocation of its
+		// own and the interface's second word points at it, so reading it
+		// out is a dereference and the walk refuses the depth.
+		gc:     "esc:\x00\x00\x00\x02",
+		nanogo: "",
+	}, {
+		name:   "a struct literal built in the frame",
+		decl:   "type T struct{ P *int }\n\nfunc F(p *int) int {\n\tt := T{P: p}\n\treturn *t.P\n}",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name:   "a struct literal that is returned",
+		decl:   "type T struct{ P *int }\n\nfunc F(p *int) T { return T{P: p} }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "an array literal built in the frame",
+		decl:   "func F(p *int) int {\n\ta := [2]*int{p, nil}\n\treturn *a[0]\n}",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name:   "a keyed array literal built in the frame",
+		decl:   "func F(p *int) int {\n\ta := [4]*int{2: p}\n\treturn *a[2]\n}",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name: "a slice literal",
+		decl: "func F(p *int) int {\n\ts := []*int{p}\n\treturn *s[0]\n}",
+		// gc keeps the backing store in the frame. nanogo allocates every
+		// literal that is not a struct or an array, so the parameter is in
+		// the heap whatever this pass decides.
+		gc:     "esc:",
+		nanogo: "",
+	}, {
+		name:   "the address of a struct literal",
+		decl:   "type T struct{ P *int }\n\nfunc F(p *int) int {\n\tt := &T{P: p}\n\treturn *t.P\n}",
+		gc:     "esc:",
+		nanogo: "",
+	},
+
+	// The round trip through a word the collector does not trace. unsafe's
+	// rule (3) is what ends the flow at a variable, and internal/abi.NoEscape
+	// is the declaration that turns on it.
+	{
+		name:   "a uintptr held in a variable, which is internal/abi.NoEscape's own shape",
+		decl:   "import \"unsafe\"\n\nfunc F(p unsafe.Pointer) unsafe.Pointer {\n\tx := uintptr(p)\n\treturn unsafe.Pointer(x ^ 0)\n}",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name:   "a round trip inside one expression, which unsafe allows",
+		decl:   "import \"unsafe\"\n\nfunc F(p unsafe.Pointer) unsafe.Pointer { return unsafe.Pointer(uintptr(p) ^ 0) }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "an offset inside one expression, which unsafe allows",
+		decl:   "import \"unsafe\"\n\nfunc F(p *int) unsafe.Pointer { return unsafe.Pointer(uintptr(unsafe.Pointer(p)) + 8) }",
+		gc:     "esc:\x00\x00\x00\x01",
+		nanogo: "esc:\x00\x00\x00\x01",
+	}, {
+		name:   "a round trip inside one expression into a global",
+		decl:   "import \"unsafe\"\n\nvar g unsafe.Pointer\n\nfunc F(p *int) { g = unsafe.Pointer(uintptr(unsafe.Pointer(p))) }",
+		gc:     "",
+		nanogo: "",
+	}, {
+		name:   "a round trip through a variable into a global, which unsafe calls invalid",
+		decl:   "import \"unsafe\"\n\nvar g unsafe.Pointer\n\nfunc F(p *int) {\n\tu := uintptr(unsafe.Pointer(p))\n\tg = unsafe.Pointer(u)\n}",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}, {
+		name:   "a parameter converted to a uintptr result",
+		decl:   "import \"unsafe\"\n\nfunc F(p *int) uintptr { return uintptr(unsafe.Pointer(p)) }",
+		gc:     "esc:",
+		nanogo: "esc:",
+	}}
 
 // TestEscapeNoteMatchesGC reads both toolchains' archives for the same source.
 //
@@ -444,4 +682,129 @@ func escapeNoteEnv(t *testing.T, dir, tag, list, logFile string) []string {
 		env = append(env, "NANOGO_LOG="+logFile)
 	}
 	return env
+}
+
+// noEscapeModule is internal/abi.NoEscape's own shape, end to end.
+//
+// lib.NoEscape is the body in go1.27.0's internal/abi/escape.go, character for
+// character. lib.Read is the callee the address reaches, and //go:noinline is
+// what makes the note the only evidence gc has: gc re-analyses a body it
+// inlined and never reads the note for it.
+//
+// user is compiled with -+, the flag cmd/go sets for every package of
+// cmd/internal/objabi.runtimePkgs, and it hands the address of its own local
+// through NoEscape to Read. gc may leave that local in user's frame only
+// because of the two notes lib's archive carries, so the number the program
+// prints is the answer those notes authorised. main runs it twice with a
+// collection in between, because a pointer into a frame that is gone reads
+// correctly until something overwrites that memory.
+var noEscapeModule = map[string]string{
+	"go.mod": "module nanogo.example/noescape\n\ngo 1.21\n",
+	"lib/lib.go": `package lib
+
+import "unsafe"
+
+//go:nosplit
+//go:nocheckptr
+func NoEscape(p unsafe.Pointer) unsafe.Pointer {
+	x := uintptr(p)
+	return unsafe.Pointer(x ^ 0)
+}
+
+//go:noinline
+func Read(p unsafe.Pointer) int {
+	return *(*int)(p)
+}
+`,
+	"user/user.go": `package user
+
+import (
+	"unsafe"
+
+	"nanogo.example/noescape/lib"
+)
+
+func Run() int {
+	total := 0
+	for i := 0; i < 100; i++ {
+		key := i * 7
+		total += lib.Read(lib.NoEscape(unsafe.Pointer(&key)))
+	}
+	return total
+}
+`,
+	"main.go": `package main
+
+import (
+	"runtime"
+
+	"nanogo.example/noescape/user"
+)
+
+func main() {
+	n := user.Run()
+	runtime.GC()
+	m := user.Run()
+	println("run1", n)
+	println("run2", m)
+}
+`,
+	"allowlist.txt": "nanogo.example/noescape/lib\n",
+}
+
+// TestTheNoEscapeShapeBuildsAndRuns is the measured blocker, and it reads the
+// program and not only the archive.
+//
+// specs/023-escape-analysis.md's three internal/runtime/maps sites are all of
+// the form m.Delete(typ, abi.NoEscape(unsafe.Pointer(&key))). Before the round
+// trip through a uintptr was in the allowlist, nanogo wrote the empty note for
+// NoEscape's parameter and gc stopped this build with the runtime rule's own
+// words. The assertions below are both halves: gc compiles it now, and the
+// binary agrees with an all-gc build of the same source.
+func TestTheNoEscapeShapeBuildsAndRuns(t *testing.T) {
+	goBin := needGo(t)
+	if runtime.GOARCH != driver.TargetArch {
+		t.Skipf("nanogo emits %s machine code and GOARCH is %s, so it refuses every package here",
+			driver.TargetArch, runtime.GOARCH)
+	}
+	dir := t.TempDir()
+	bin := buildNanogo(t, goBin, dir)
+
+	mod := filepath.Join(dir, "mod")
+	writeFiles(t, mod, noEscapeModule)
+	list := filepath.Join(mod, "allowlist.txt")
+
+	want := runProgram(t, goBin, dir, mod, "run-gc", nil, list, "")
+	if !strings.Contains(want, "34650") {
+		t.Fatalf("the all-gc build printed %q, so the fixture is not computing what this test reads", want)
+	}
+
+	logFile := filepath.Join(dir, "nanogo.log")
+	got := runProgram(t, goBin, dir, mod, "run-nanogo", []string{"-toolexec=" + bin}, list, logFile)
+	requireCompiled(t, logFile, "nanogo.example/noescape/lib")
+	if got != want {
+		t.Errorf("the program built against nanogo's archive printed\n%s\nand the all-gc build printed\n%s", got, want)
+	}
+}
+
+// runProgram builds the fixture's main package with the runtime rule on for
+// user, runs it, and returns what it printed.
+func runProgram(t *testing.T, goBin, dir, mod, tag string, extra []string, list, logFile string) string {
+	t.Helper()
+	out := filepath.Join(dir, tag+".bin")
+	args := append([]string{"build"}, extra...)
+	args = append(args, "-gcflags=nanogo.example/noescape/user=-+", "-o", out, ".")
+	build := exec.Command(goBin, args...)
+	build.Dir = mod
+	build.Env = escapeNoteEnv(t, dir, tag, list, logFile)
+	if b, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building the %s binary: %v\n%s", tag, err, b)
+	}
+	run := exec.Command(out)
+	run.Env = escapeNoteEnv(t, dir, tag, list, "")
+	b, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the %s binary: %v\n%s", tag, err, b)
+	}
+	return string(b)
 }
